@@ -165,7 +165,7 @@ jobs:
           sandbox: read-only
           safety-strategy: drop-sudo
           # Recommended by OpenAI for review quality/consistency:
-          model: gpt-5.4
+          model: gpt-5.5
           effort: xhigh
 
       - name: Post PR comment (new on /ai-review, update on opened)

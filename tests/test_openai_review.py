@@ -221,6 +221,34 @@ class TestAdaptReviewCriteria:
         captured = capsys.readouterr()
         assert "Warning: prompt substitution did not match" not in captured.err
 
+    def test_local_prompt_strips_ci_mandate_audit_instructions(self, review_mod):
+        """Local mode must not instruct the model to run shell greps or load
+        files outside the prompt — those are CI-Codex-only capabilities."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        prompt_path = repo_root / ".github" / "codex" / "prompts" / "pr_review.md"
+        if not prompt_path.exists():
+            pytest.skip("pr_review.md not found")
+        source = prompt_path.read_text()
+        adapted = review_mod._adapt_review_criteria(source)
+        assert "use `grep`\n   on `diff_diff/**.py`" not in adapted
+        assert "Transitive workflow deps" not in adapted
+        assert "Scope override (with carve-outs)" not in adapted
+
+    def test_local_prompt_has_local_audit_note(self, review_mod):
+        """Local mode adds an explicit no-tool-access note in place of the
+        CI Mandate, so the model does not claim audits it cannot perform."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        prompt_path = repo_root / ".github" / "codex" / "prompts" / "pr_review.md"
+        if not prompt_path.exists():
+            pytest.skip("pr_review.md not found")
+        source = prompt_path.read_text()
+        adapted = review_mod._adapt_review_criteria(source)
+        assert "Single-Pass Completeness Audit (Local Review)" in adapted
+        assert "static-prompt API call" in adapted
+        assert "Do NOT claim to have run shell greps" in adapted
+
 
 # ---------------------------------------------------------------------------
 # compile_prompt
@@ -1546,14 +1574,47 @@ class TestIsReasoningModel:
     def test_pro_snapshot_is_reasoning(self, review_mod):
         assert review_mod._is_reasoning_model("gpt-5.4-pro-2026-03-05") is True
 
-    def test_gpt54_is_not_reasoning(self, review_mod):
-        assert review_mod._is_reasoning_model("gpt-5.4") is False
+    def test_gpt54_is_reasoning(self, review_mod):
+        assert review_mod._is_reasoning_model("gpt-5.4") is True
+
+    def test_gpt55_is_reasoning(self, review_mod):
+        assert review_mod._is_reasoning_model("gpt-5.5") is True
+
+    def test_gpt55_pro_is_reasoning(self, review_mod):
+        assert review_mod._is_reasoning_model("gpt-5.5-pro") is True
 
     def test_gpt41_is_not_reasoning(self, review_mod):
         assert review_mod._is_reasoning_model("gpt-4.1") is False
 
     def test_gpt41_mini_is_not_reasoning(self, review_mod):
         assert review_mod._is_reasoning_model("gpt-4.1-mini") is False
+
+
+class TestResolveTimeout:
+    """The script must auto-select a 900s timeout for reasoning models when
+    --timeout is omitted; the old 300s default would time out reasoning runs."""
+
+    def test_omitted_reasoning_defaults_to_900(self, review_mod):
+        assert review_mod._resolve_timeout(None, "gpt-5.5") == review_mod.REASONING_TIMEOUT
+        assert review_mod._resolve_timeout(None, "gpt-5.5") == 900
+
+    def test_omitted_non_reasoning_defaults_to_300(self, review_mod):
+        assert review_mod._resolve_timeout(None, "gpt-4.1") == review_mod.DEFAULT_TIMEOUT
+        assert review_mod._resolve_timeout(None, "gpt-4.1") == 300
+
+    def test_explicit_timeout_preserved_for_reasoning(self, review_mod):
+        assert review_mod._resolve_timeout(1200, "gpt-5.5") == 1200
+
+    def test_explicit_timeout_preserved_for_non_reasoning(self, review_mod):
+        assert review_mod._resolve_timeout(60, "gpt-4.1") == 60
+
+    def test_explicit_zero_preserved(self, review_mod):
+        """Zero is a valid explicit value (not the same as None)."""
+        assert review_mod._resolve_timeout(0, "gpt-5.5") == 0
+
+    def test_gpt54_routes_to_reasoning_default(self, review_mod):
+        """gpt-5.4 is also reasoning-classified post-fix; should get 900s."""
+        assert review_mod._resolve_timeout(None, "gpt-5.4") == 900
 
 
 class TestProModelPricing:
@@ -1570,6 +1631,54 @@ class TestProModelPricing:
         snapshot = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.4-pro-2026-03-05")
         base = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.4-pro")
         assert snapshot == base
+
+    def test_gpt55_has_own_pricing(self, review_mod):
+        """gpt-5.5 should not fall back to gpt-5.4 pricing via prefix."""
+        gpt55_cost = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.5")
+        gpt54_cost = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.4")
+        assert gpt55_cost is not None
+        assert gpt54_cost is not None
+        assert gpt55_cost != gpt54_cost
+
+    def test_gpt55_pro_has_own_pricing(self, review_mod):
+        """gpt-5.5-pro should not fall back to gpt-5.5 pricing via prefix."""
+        pro_cost = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.5-pro")
+        base_cost = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.5")
+        assert pro_cost is not None
+        assert base_cost is not None
+        assert pro_cost != base_cost
+
+    def test_gpt55_exact_rates(self, review_mod):
+        """gpt-5.5 PRICING entry must match published OpenAI rates."""
+        assert review_mod.PRICING["gpt-5.5"] == (5.00, 30.00)
+
+    def test_gpt55_pro_exact_rates(self, review_mod):
+        """gpt-5.5-pro PRICING entry must match published OpenAI rates."""
+        assert review_mod.PRICING["gpt-5.5-pro"] == (30.00, 180.00)
+
+    def test_gpt55_pro_snapshot_matches_pro(self, review_mod):
+        """gpt-5.5-pro-2026-04-23 should match gpt-5.5-pro via prefix."""
+        snapshot = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.5-pro-2026-04-23")
+        base = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.5-pro")
+        assert snapshot == base
+
+
+class TestSkillDocAPIConsistency:
+    """Catch doc drift between the script's API endpoint and the skill doc's
+    user-facing data-transmission note."""
+
+    def test_skill_doc_does_not_reference_chat_completions(self):
+        """Skill doc must not say "Chat Completions API" — script uses Responses API."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc_path = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc_path.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc_path.read_text()
+        assert "Chat Completions API" not in text, (
+            "Skill doc references stale Chat Completions API; "
+            "script uses Responses API at openai_review.py:ENDPOINT"
+        )
 
 
 class TestExtractResponseText:
@@ -1656,8 +1765,8 @@ class TestCallOpenAIPayload:
         return captured
 
     def test_standard_model_payload(self, review_mod, mock_urlopen):
-        """Standard model sends input, max_output_tokens, and temperature=0."""
-        content, usage = review_mod.call_openai("test prompt", "gpt-5.4", "fake-key")
+        """Standard (non-reasoning) model sends input, max_output_tokens, and temperature=0."""
+        content, usage = review_mod.call_openai("test prompt", "gpt-4.1", "fake-key")
         payload = mock_urlopen["payload"]
         assert payload["input"] == "test prompt"
         assert payload["max_output_tokens"] == review_mod.DEFAULT_MAX_TOKENS
@@ -1669,7 +1778,7 @@ class TestCallOpenAIPayload:
 
     def test_reasoning_model_payload(self, review_mod, mock_urlopen):
         """Reasoning model omits temperature and uses REASONING_MAX_TOKENS."""
-        content, _ = review_mod.call_openai("test prompt", "gpt-5.4-pro", "fake-key")
+        content, _ = review_mod.call_openai("test prompt", "gpt-5.5", "fake-key")
         payload = mock_urlopen["payload"]
         assert payload["max_output_tokens"] == review_mod.REASONING_MAX_TOKENS
         assert "temperature" not in payload
@@ -1682,6 +1791,17 @@ class TestCallOpenAIPayload:
     def test_timeout_passed_through(self, review_mod, mock_urlopen):
         review_mod.call_openai("test", "gpt-5.4", "fake-key", timeout=900)
         assert mock_urlopen["timeout"] == 900
+
+    def test_omitted_timeout_resolves_for_reasoning_model(self, review_mod, mock_urlopen):
+        """Direct callers of call_openai() that omit timeout get the
+        model-aware default (900s for reasoning) — not the legacy 300s."""
+        review_mod.call_openai("test", "gpt-5.5", "fake-key")
+        assert mock_urlopen["timeout"] == 900
+
+    def test_omitted_timeout_resolves_for_non_reasoning_model(self, review_mod, mock_urlopen):
+        """Direct callers omitting timeout on non-reasoning models still get 300s."""
+        review_mod.call_openai("test", "gpt-4.1", "fake-key")
+        assert mock_urlopen["timeout"] == 300
 
     def test_missing_status_with_valid_output_succeeds(self, review_mod, mock_urlopen):
         """Valid content should be accepted even when status field is absent."""
