@@ -31,6 +31,7 @@ StackedDiD
 Main estimator class for Stacked Difference-in-Differences.
 
 .. autoclass:: diff_diff.StackedDiD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -50,6 +51,7 @@ StackedDiDResults
 Results container for Stacked DiD estimation.
 
 .. autoclass:: diff_diff.stacked_did.StackedDiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

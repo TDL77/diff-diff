@@ -37,6 +37,7 @@ WooldridgeDiD
 Main estimator class for Wooldridge ETWFE.
 
 .. autoclass:: diff_diff.WooldridgeDiD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -55,6 +56,7 @@ WooldridgeDiDResults
 Results container returned by ``WooldridgeDiD.fit()``.
 
 .. autoclass:: diff_diff.wooldridge_results.WooldridgeDiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

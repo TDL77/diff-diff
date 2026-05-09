@@ -19,6 +19,7 @@ CallawaySantAnna
 Callaway & Sant'Anna (2021) estimator for heterogeneous treatment timing.
 
 .. autoclass:: diff_diff.CallawaySantAnna
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -38,6 +39,7 @@ CallawaySantAnnaResults
 Results container for Callaway-Sant'Anna estimation.
 
 .. autoclass:: diff_diff.CallawaySantAnnaResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -56,6 +58,7 @@ GroupTimeEffect
 Container for individual group-time ATT(g,t) effects.
 
 .. autoclass:: diff_diff.GroupTimeEffect
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -82,6 +85,7 @@ aggregate cohort-specific effects into event study estimates.
 in event studies with heterogeneous treatment effects. *Journal of Econometrics*, 225(2), 175-199.
 
 .. autoclass:: diff_diff.SunAbraham
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -103,6 +107,7 @@ SunAbrahamResults
 Results container for Sun-Abraham estimation.
 
 .. autoclass:: diff_diff.SunAbrahamResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -121,6 +126,7 @@ SABootstrapResults
 Bootstrap inference results for Sun-Abraham estimation.
 
 .. autoclass:: diff_diff.SABootstrapResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -132,6 +138,7 @@ Ortiz-Villavicencio & Sant'Anna (2025) staggered triple-difference (DDD) estimat
 with group-time ATT identification under heterogeneous treatment timing.
 
 .. autoclass:: diff_diff.StaggeredTripleDifference
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -142,6 +149,7 @@ StaggeredTripleDiffResults
 Results container for ``StaggeredTripleDifference`` estimation.
 
 .. autoclass:: diff_diff.StaggeredTripleDiffResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

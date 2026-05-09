@@ -28,6 +28,7 @@ PreTrendsPower
 Main class for pre-trends power analysis.
 
 .. autoclass:: diff_diff.PreTrendsPower
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -66,6 +67,7 @@ PreTrendsPowerResults
 Results from pre-trends power analysis.
 
 .. autoclass:: diff_diff.PreTrendsPowerResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -76,6 +78,7 @@ PreTrendsPowerCurve
 Power curve across violation magnitudes.
 
 .. autoclass:: diff_diff.PreTrendsPowerCurve
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

@@ -61,6 +61,7 @@ Kernel-weighted OLS estimator of the conditional mean
 .. autofunction:: diff_diff.local_linear_fit
 
 .. autoclass:: diff_diff.LocalLinearFit
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -76,6 +77,7 @@ selector against the R ``nprobust`` reference.
 .. autofunction:: diff_diff.mse_optimal_bandwidth
 
 .. autoclass:: diff_diff.BandwidthResult
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -91,6 +93,7 @@ and 95% confidence interval.
 .. autofunction:: diff_diff.bias_corrected_local_linear
 
 .. autoclass:: diff_diff.BiasCorrectedFit
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

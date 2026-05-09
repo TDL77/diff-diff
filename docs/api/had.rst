@@ -120,6 +120,7 @@ HeterogeneousAdoptionDiD
 ------------------------
 
 .. autoclass:: diff_diff.HeterogeneousAdoptionDiD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -130,6 +131,7 @@ HeterogeneousAdoptionDiDResults
 Single-period results container for ``HeterogeneousAdoptionDiD`` estimation.
 
 .. autoclass:: diff_diff.HeterogeneousAdoptionDiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -140,6 +142,7 @@ HeterogeneousAdoptionDiDEventStudyResults
 Multi-period event-study results container for the Appendix B.2 extension.
 
 .. autoclass:: diff_diff.HeterogeneousAdoptionDiDEventStudyResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -162,6 +165,7 @@ unified :class:`~diff_diff.HADPretestReport`.
 .. autofunction:: diff_diff.did_had_pretest_workflow
 
 .. autoclass:: diff_diff.HADPretestReport
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -176,16 +180,19 @@ Single-period tests (``aggregate="overall"``)
 .. autofunction:: diff_diff.yatchew_hr_test
 
 .. autoclass:: diff_diff.QUGTestResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
 
 .. autoclass:: diff_diff.StuteTestResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
 
 .. autoclass:: diff_diff.YatchewTestResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -200,6 +207,7 @@ Joint multi-period tests (``aggregate="event_study"``)
 .. autofunction:: diff_diff.joint_homogeneity_test
 
 .. autoclass:: diff_diff.StuteJointResult
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

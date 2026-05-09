@@ -73,10 +73,12 @@ API
 ---
 
 .. autoclass:: diff_diff.DiagnosticReport
+   :no-index:
    :members:
    :show-inheritance:
 
 .. autoclass:: diff_diff.DiagnosticReportResults
+   :no-index:
    :members:
    :show-inheritance:
 

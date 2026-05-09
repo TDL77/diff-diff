@@ -30,6 +30,7 @@ TripleDifference
 Main estimator class for Triple Difference designs.
 
 .. autoclass:: diff_diff.TripleDifference
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -49,6 +50,7 @@ TripleDifferenceResults
 Results container for Triple Difference estimation.
 
 .. autoclass:: diff_diff.TripleDifferenceResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

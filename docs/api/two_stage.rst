@@ -39,6 +39,7 @@ TwoStageDiD
 Main estimator class for two-stage DiD estimation.
 
 .. autoclass:: diff_diff.TwoStageDiD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -58,6 +59,7 @@ TwoStageDiDResults
 Results container for two-stage DiD estimation.
 
 .. autoclass:: diff_diff.TwoStageDiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -76,6 +78,7 @@ TwoStageBootstrapResults
 Bootstrap inference results.
 
 .. autoclass:: diff_diff.TwoStageBootstrapResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

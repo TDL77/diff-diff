@@ -11,6 +11,7 @@ DiDResults
 Results from basic DifferenceInDifferences estimation.
 
 .. autoclass:: diff_diff.DiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -42,6 +43,7 @@ MultiPeriodDiDResults
 Results from MultiPeriodDiD event study estimation.
 
 .. autoclass:: diff_diff.MultiPeriodDiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -65,6 +67,7 @@ PeriodEffect
 Container for a single period's treatment effect in event studies.
 
 .. autoclass:: diff_diff.PeriodEffect
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -75,6 +78,7 @@ SyntheticDiDResults
 Results from SyntheticDiD estimation.
 
 .. autoclass:: diff_diff.SyntheticDiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

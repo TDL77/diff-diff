@@ -49,6 +49,7 @@ EfficientDiD
 Main estimator class for Efficient Difference-in-Differences.
 
 .. autoclass:: diff_diff.EfficientDiD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -68,6 +69,7 @@ EfficientDiDResults
 Results container for Efficient DiD estimation.
 
 .. autoclass:: diff_diff.efficient_did_results.EfficientDiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -86,6 +88,7 @@ EDiDBootstrapResults
 Bootstrap inference results for Efficient DiD.
 
 .. autoclass:: diff_diff.efficient_did_bootstrap.EDiDBootstrapResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
