@@ -394,10 +394,15 @@ class ChaisemartinDHaultfoeuilleResults:
     path_effects : dict, optional
         Per-path event-study effects keyed by observed treatment
         trajectory (tuple of int). Populated when ``by_path`` is a
-        positive int at estimator construction. Each entry holds
+        positive int OR ``paths_of_interest`` is a list of int tuples
+        at estimator construction. Each entry holds
         ``{"n_groups": int, "frequency_rank": int,
         "horizons": {l: {"effect", "se", "t_stat", "p_value",
-        "conf_int", "n_obs"}}}`` for ``l = 1..L_max``.
+        "conf_int", "n_obs"}}}`` for ``l = 1..L_max``. Under
+        ``paths_of_interest``, dict-insertion order matches the user-
+        specified path order; ``frequency_rank`` is the within-
+        selected-paths rank by descending observed-group count
+        (decoupled from iteration order).
     path_placebo_event_study : dict, optional
         Per-path backward-horizon placebos ``DID^{pl}_{path, l}`` for
         ``l = 1..L_max``, keyed by observed treatment trajectory (tuple
@@ -407,11 +412,12 @@ class ChaisemartinDHaultfoeuilleResults:
         **path_placebo_event_study[p]}`` view is well-formed across
         forward and backward horizons. Each inner entry holds
         ``{"effect", "se", "t_stat", "p_value", "conf_int", "n_obs"}``.
-        Populated when ``by_path`` is a positive int AND
-        ``placebo=True`` AND ``L_max >= 1``. Empty-state contract
-        mirrors ``path_effects``: ``None`` when ``by_path + placebo``
-        was not requested; ``{}`` when requested but no observed path
-        has a complete window ``[F_g-1, F_g-1+L_max]`` within the
+        Populated when (``by_path`` is a positive int OR
+        ``paths_of_interest`` is set) AND ``placebo=True`` AND
+        ``L_max >= 1``. Empty-state contract mirrors ``path_effects``:
+        ``None`` when ``by_path / paths_of_interest + placebo`` was
+        not requested; ``{}`` when requested but no observed path has
+        a complete window ``[F_g-1, F_g-1+L_max]`` within the
         panel (the same regime where ``path_effects`` returns ``{}``,
         with the same ``UserWarning`` at fit-time). Downstream callers
         should distinguish the two states. Inherits the cross-path
@@ -424,9 +430,9 @@ class ChaisemartinDHaultfoeuilleResults:
         keyed by observed treatment trajectory (tuple of int). Inner
         dict is keyed by horizon directly (no ``"horizons"`` wrapper);
         each entry holds ``{"effect", "se", "t_stat", "p_value",
-        "conf_int", "n_obs"}``. Populated when ``by_path`` is a
-        positive int AND ``trends_linear=True`` AND ``L_max >= 1``;
-        ``None`` otherwise. Mirrors the global ``linear_trends_effects``
+        "conf_int", "n_obs"}``. Populated when (``by_path`` is a
+        positive int OR ``paths_of_interest`` is set) AND
+        ``trends_linear=True`` AND ``L_max >= 1``; ``None`` otherwise. Mirrors the global ``linear_trends_effects``
         cumulation: SE on the cumulated layer is the conservative
         upper bound (sum of per-horizon component SEs from
         ``path_effects[path]["horizons"][l]["se"]``, NaN-consistent).
@@ -443,7 +449,8 @@ class ChaisemartinDHaultfoeuilleResults:
         observed treatment trajectory (tuple of int). Each entry holds
         ``{"crit_value": float, "alpha": float, "n_bootstrap": int,
         "method": str, "n_valid_horizons": int}``. Populated when
-        ``by_path`` is a positive int AND ``n_bootstrap > 0``. The
+        (``by_path`` is a positive int OR ``paths_of_interest`` is
+        set) AND ``n_bootstrap > 0``. The
         band itself is applied per-horizon as ``cband_conf_int`` on
         ``path_effects[path]["horizons"][l]`` and rendered as
         ``cband_lower`` / ``cband_upper`` columns on
@@ -585,9 +592,9 @@ class ChaisemartinDHaultfoeuilleResults:
     # conservative upper bound (sum of per-horizon component SEs,
     # NaN-consistent), matching the global `linear_trends_effects`
     # convention.
-    path_cumulated_event_study: Optional[
-        Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]
-    ] = field(default=None, repr=False)
+    path_cumulated_event_study: Optional[Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]] = field(
+        default=None, repr=False
+    )
     # Per-path joint sup-t simultaneous-band metadata. Keyed by path
     # tuple; each entry holds `{"crit_value", "alpha", "n_bootstrap",
     # "method", "n_valid_horizons"}`. Populated when `by_path` is a
@@ -1337,9 +1344,7 @@ class ChaisemartinDHaultfoeuilleResults:
             ):
                 cum_horizons = self.path_cumulated_event_study[path]
                 if cum_horizons:
-                    lines.append(
-                        "  Cumulated Level Effects (DID^{fd}, trends_linear):"
-                    )
+                    lines.append("  Cumulated Level Effects (DID^{fd}, trends_linear):")
                     for l_h in sorted(cum_horizons.keys()):
                         ce = cum_horizons[l_h]
                         lines.append(

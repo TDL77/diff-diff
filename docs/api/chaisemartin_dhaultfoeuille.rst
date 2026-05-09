@@ -19,7 +19,10 @@ integration on placebos; survey support via Taylor-series linearization
 ``by_path=k`` (mirrors R ``did_multiplegt_dyn(..., by_path=k)``,
 including per-path backward placebos and per-path joint sup-t
 simultaneous bands when ``n_bootstrap > 0`` — Python-only extension
-beyond R, which provides no joint bands at any surface).
+beyond R, which provides no joint bands at any surface) or via
+``paths_of_interest=[(...), ...]`` for an explicit user-specified
+path subset (Python-only API; mutex with ``by_path``). ``by_path``
+supports binary or integer-coded discrete (D in Z) treatment.
 
 The estimator:
 

@@ -366,8 +366,10 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
       HonestDiD sensitivity integration on placebos via ``honest_did=True``
     - Per-path event-study disaggregation via ``by_path=k`` (top-k most
       common observed treatment paths within the window
-      ``[F_g-1, F_g-1+L_max]``; requires ``drop_larger_lower=False`` and
-      binary treatment)
+      ``[F_g-1, F_g-1+L_max]``; requires ``drop_larger_lower=False``;
+      supports binary or integer-coded discrete treatment) or via
+      ``paths_of_interest=[(...), ...]`` for an explicit user-specified
+      path subset (Python-only API; mutex with ``by_path=k``)
     - Survey support via ``survey_design=``: pweight with strata/PSU/FPC
       via Taylor Series Linearization (analytical) or replicate-weight
       variance (BRR/Fay/JK1/JKn/SDR)
@@ -5842,7 +5844,20 @@ def _compute_path_effects(
 
     path_effects: Dict[Tuple[int, ...], Dict[str, Any]] = {}
 
-    for rank, path in enumerate(selected_paths, start=1):
+    # `frequency_rank` is the within-selected-paths rank by descending
+    # group count (lex tiebreak on the path tuple). Decoupled from the
+    # iteration order over `selected_paths` so that under
+    # `paths_of_interest` (user-specified order) the rank still
+    # reflects true frequency. Under `by_path=k`, `selected_paths` is
+    # already sorted by descending frequency so ranks coincide with
+    # iteration order.
+    rank_sorted_paths = sorted(
+        selected_paths,
+        key=lambda p: (-path_to_count[p], p),
+    )
+    path_to_freq_rank = {p: i + 1 for i, p in enumerate(rank_sorted_paths)}
+
+    for path in selected_paths:
         switcher_mask = path_to_group_mask[path]
         n_path_groups = int(switcher_mask.sum())
 
@@ -5931,7 +5946,7 @@ def _compute_path_effects(
 
         path_effects[path] = {
             "n_groups": n_path_groups,
-            "frequency_rank": rank,
+            "frequency_rank": path_to_freq_rank[path],
             "horizons": horizons,
         }
 
@@ -8136,17 +8151,12 @@ def chaisemartin_dhaultfoeuille(
     -------
     ChaisemartinDHaultfoeuilleResults
     """
+    import inspect
+
     init_keys = {
-        "alpha",
-        "cluster",
-        "n_bootstrap",
-        "bootstrap_weights",
-        "seed",
-        "placebo",
-        "twfe_diagnostic",
-        "drop_larger_lower",
-        "by_path",
-        "rank_deficient_action",
+        name
+        for name, p in inspect.signature(ChaisemartinDHaultfoeuille.__init__).parameters.items()
+        if p.kind not in (p.VAR_POSITIONAL, p.VAR_KEYWORD) and name != "self"
     }
     init_kwargs = {k: v for k, v in kwargs.items() if k in init_keys}
     fit_kwargs = {k: v for k, v in kwargs.items() if k not in init_keys}

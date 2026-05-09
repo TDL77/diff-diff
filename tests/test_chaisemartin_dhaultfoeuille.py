@@ -222,6 +222,48 @@ class TestChaisemartinDHaultfoeuilleBasicAPI:
         assert results_class.overall_att == pytest.approx(results_fn.overall_att)
         assert results_class.overall_se == pytest.approx(results_fn.overall_se)
 
+    def test_convenience_function_routes_paths_of_interest_to_init(self):
+        """`paths_of_interest` is an __init__ kwarg; the convenience helper
+        must split it out of `**kwargs` rather than letting it fall through
+        to fit() (which would raise TypeError). Regression for the
+        signature-derived split."""
+        df = _by_path_three_path_data()
+        results_class = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            r_class = results_class.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+            )
+            r_fn = chaisemartin_dhaultfoeuille(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                drop_larger_lower=False,
+                paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+                twfe_diagnostic=False,
+                seed=42,
+                L_max=3,
+            )
+        # Both surfaces produce identical per-path effects.
+        assert list(r_fn.path_effects.keys()) == list(r_class.path_effects.keys())
+        for path in r_fn.path_effects:
+            for l_h, vals in r_fn.path_effects[path]["horizons"].items():
+                assert vals["effect"] == pytest.approx(
+                    r_class.path_effects[path]["horizons"][l_h]["effect"]
+                )
+
     def test_minimal_computation_path(self):
         # Disable everything optional; verify still works
         data = generate_reversible_did_data(n_groups=30, n_periods=4, seed=1)
@@ -8605,6 +8647,32 @@ class TestPathsOfInterest:
             )
         # Insertion order preserved.
         assert list(res.path_effects.keys()) == user_order
+
+    def test_paths_of_interest_frequency_rank_is_true_frequency(self):
+        """`frequency_rank` must reflect descending count, NOT user-list
+        order. Regression for the R0 P2 finding: previously the rank
+        field was assigned from `enumerate(selected_paths)` which gave
+        user-selection order under `paths_of_interest`."""
+        df = _by_path_three_path_data()
+        # _by_path_three_path_data: (0,1,1,1) has 3 groups, (0,1,0,0) has 2,
+        # (0,1,1,0) has 1. User passes the lowest-frequency path first.
+        user_order = [(0, 1, 0, 0), (0, 1, 1, 1)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_order,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        # (0,1,1,1) has higher frequency → rank 1
+        # (0,1,0,0) has lower frequency → rank 2
+        assert res.path_effects[(0, 1, 1, 1)]["frequency_rank"] == 1
+        assert res.path_effects[(0, 1, 0, 0)]["frequency_rank"] == 2
 
     def test_unobserved_path_warns_and_omits(self):
         df = _by_path_three_path_data()
