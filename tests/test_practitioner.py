@@ -568,13 +568,54 @@ class TestHADDispatch:
     def test_had_step_4_estimator_selection_present(
         self, mock_had_results, mock_had_event_study_results
     ):
+        # Step-4 must surface the WAS-vs-ATT(d) estimand difference (not
+        # a blanket "if untreated → not HAD" rule which would contradict
+        # REGISTRY § HeterogeneousAdoptionDiD edge cases lines ~2403/2408).
         for fixture in (mock_had_results, mock_had_event_study_results):
             output = practitioner_next_steps(fixture, verbose=False)
             step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
             assert len(step_4_steps) >= 1
-            all_text = " ".join((s.get("code", "") + " " + s.get("why", "")) for s in step_4_steps)
+            all_text = " ".join(
+                (s.get("code", "") + " " + s.get("why", "") + " " + s.get("label", ""))
+                for s in step_4_steps
+            )
+            # Routing nudge must name ContinuousDiD as the estimand
+            # alternative; framing must center on WAS vs ATT(d) (the
+            # actual estimand differentiator), NOT on whether untreated
+            # units exist.
             assert "ContinuousDiD" in all_text
-            assert "CallawaySantAnna" in all_text
+            assert "WAS" in all_text
+            assert "ATT(d)" in all_text
+
+    def test_had_step_4_does_not_misframe_untreated_unit_routing(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Per REGISTRY: HAD is compatible with a small share of
+        # never-treated units (paper edge case), and on staggered
+        # event-study panels never-treated units are explicitly RETAINED
+        # (Appendix B.2 / had.py:1325). The Step-4 routing must NOT
+        # carry the wrong "if untreated → not HAD" framing.
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+            all_text = " ".join(
+                (s.get("code", "") + " " + s.get("why", "") + " " + s.get("label", ""))
+                for s in step_4_steps
+            ).lower()
+            forbidden_phrases = (
+                "switch away from had",
+                "had's was divisor under-weights",
+                "drop untreated",
+                "must drop never-treated",
+            )
+            for phrase in forbidden_phrases:
+                assert phrase not in all_text, (
+                    f"HAD Step-4 must not carry the phrase {phrase!r}: "
+                    f"per REGISTRY § HeterogeneousAdoptionDiD edge cases, "
+                    f"HAD is compatible with a small share of never-treated "
+                    f"units and explicitly retains them on staggered "
+                    f"event-study panels."
+                )
 
     def test_handle_continuous_step_4_routes_to_had(self, mock_continuous_results):
         # Symmetric pair: ContinuousDiD users with no untreated units
@@ -611,3 +652,40 @@ class TestHADDispatch:
             output = practitioner_next_steps(fixture, verbose=False)
             assert isinstance(output, dict)
             assert "next_steps" in output
+
+    def test_had_handler_snippets_are_valid_python_syntax(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Snippet smoke test: every code block emitted by the HAD
+        # handlers must parse as valid Python. Catches the failure mode
+        # where snippets reference undefined names with placeholder
+        # syntax that doesn't compile (e.g. `survey_design=design` with
+        # no `design` defined in scope, or attribute typos that break
+        # copy/paste).
+        import ast
+
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            for step in output["next_steps"]:
+                code = step.get("code", "")
+                if not code.strip():
+                    continue
+                try:
+                    ast.parse(code)
+                except SyntaxError as e:
+                    pytest.fail(
+                        f"Step {step['baker_step']} ({step['label']!r}) "
+                        f"emits a code snippet that does not parse as "
+                        f"valid Python: {e}\n\nSnippet:\n{code}"
+                    )
+
+    def test_handle_continuous_step_4_snippet_is_valid_python(self, mock_continuous_results):
+        # Same syntax check on the symmetric Step-4 in _handle_continuous.
+        import ast
+
+        output = practitioner_next_steps(mock_continuous_results, verbose=False)
+        step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+        for step in step_4_steps:
+            code = step.get("code", "")
+            if code.strip():
+                ast.parse(code)  # raises SyntaxError on failure

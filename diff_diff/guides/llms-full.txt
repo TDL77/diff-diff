@@ -592,17 +592,19 @@ results.print_summary()
 
 ### HeterogeneousAdoptionDiD
 
-HeterogeneousAdoption DiD estimator (de Chaisemartin, Ciccia, D'Haultfœuille & Knau 2026). Targets a Weighted Average Slope (WAS) on **Heterogeneous Adoption Designs where no unit remains untreated** — every unit receives the treatment at some positive dose level, so the comparison structure comes from dose variation across units rather than from an untreated holdout. Treatment varies in intensity, not in status. Uses a bias-corrected local-linear estimator at the dose support boundary on continuous-dose designs (Design 1' / Design 1) and a 2SLS Wald-IV estimator on the mass-point design.
+HeterogeneousAdoption DiD estimator (de Chaisemartin, Ciccia, D'Haultfœuille & Knau 2026). Targets a Weighted Average Slope (WAS) at the dose support boundary on **Heterogeneous Adoption Designs** — designs where treatment varies in dose intensity across units. Comparison comes from dose variation across units. The estimator does NOT require dropping never-treated units: a small share of never-treated units is fully compatible (paper edge case — Garrett et al. 2020 retained 12 untreated counties out of 2,954), and on staggered event-study panels never-treated units are explicitly retained as the untreated-group comparison (paper Appendix B.2). Uses a bias-corrected local-linear estimator at the dose support boundary on continuous-dose designs (Design 1' / Design 1) and a 2SLS Wald-IV estimator on the mass-point design.
 
 ```python
 HeterogeneousAdoptionDiD(
-    design: str = "auto",                     # "auto" / "continuous_at_zero" / "continuous_near_d_lower" / "mass_point"
+    design: str = "auto",              # "auto" / "continuous_at_zero" / "continuous_near_d_lower" / "mass_point"
+    d_lower: float | None = None,      # Support infimum; auto-detected when None
+    kernel: str = "epanechnikov",      # Local-linear kernel
     alpha: float = 0.05,
-    n_bootstrap: int = 999,                   # Multiplier-bootstrap iterations for sup-t bands
+    vcov_type: str | None = None,      # Mass-point only: "classical" (default) or "hc1"
+    robust: bool = False,              # Mass-point only: HC1 robust SE shorthand
+    cluster: str | None = None,        # Mass-point only: cluster column for CR1 cluster-robust SE
+    n_bootstrap: int = 999,            # Multiplier-bootstrap iterations for sup-t bands (event-study + weighted)
     seed: int | None = None,
-    h: float | None = None,                   # Bias-corrected local-linear bandwidth (auto-selected if None)
-    b: float | None = None,                   # Pilot bandwidth (auto-selected if None)
-    rcond: float | None = None,
 )
 ```
 
@@ -614,14 +616,17 @@ HeterogeneousAdoptionDiD(
 had.fit(
     data: pd.DataFrame,
     outcome_col: str,
-    unit_col: str,
-    time_col: str,
     dose_col: str,
+    time_col: str,
+    unit_col: str,
     first_treat_col: str | None = None,        # Required on staggered panels (last-cohort auto-filter trigger)
-    aggregate: str | None = None,              # None (single scalar WAS) or "event_study" (per-horizon WAS)
+    aggregate: str = "overall",                # "overall" (single scalar WAS) or "event_study" (per-horizon WAS)
+    survey: SurveyDesign | None = None,        # DEPRECATED alias of survey_design=
+    weights: np.ndarray | None = None,         # DEPRECATED pweight shortcut alias
     cband: bool = True,                        # Simultaneous (sup-t) confidence bands on weighted event-study fits
-    survey_design: SurveyDesign | None = None, # Survey weights, strata, PSU, FPC
-    weights: np.ndarray | None = None,         # pweight shortcut (mutually exclusive with survey_design)
+    *,
+    survey_design: SurveyDesign | None = None, # Canonical survey-design kwarg (weights, strata, PSU, FPC)
+    trends_lin: bool = False,                  # Eq 17 linear-trend detrending (event-study; mutually exclusive with survey_design)
 ) -> HeterogeneousAdoptionDiDResults | HeterogeneousAdoptionDiDEventStudyResults
 ```
 
@@ -636,7 +641,7 @@ report = did_had_pretest_workflow(
     dose_col='d', first_treat_col='first_treat')
 print(report.summary())
 
-# Single-period scalar WAS:
+# Single-period scalar WAS (aggregate="overall" default):
 est = HeterogeneousAdoptionDiD()
 results = est.fit(data, outcome_col='y', unit_col='unit',
                   time_col='t', dose_col='d',
@@ -1887,8 +1892,8 @@ DIFF_DIFF_BACKEND=rust pytest     # Force Rust (fail if unavailable)
 | Staggered treatment timing | `CallawaySantAnna`, `ImputationDiD`, or `SunAbraham` |
 | Few treated units / synthetic control | `SyntheticDiD` |
 | Interactive fixed effects / factor confounding | `TROP` |
-| Continuous treatment intensity (some units untreated) | `ContinuousDiD` |
-| No untreated unit / universal rollout (every unit treated at different doses) | `HeterogeneousAdoptionDiD` |
+| Continuous treatment intensity, per-dose ATT(d) / ACRT(d) (requires never-treated controls) | `ContinuousDiD` |
+| Continuous treatment intensity, WAS at dose support boundary (compatible with universal rollout or small never-treated share) | `HeterogeneousAdoptionDiD` |
 | Two-criterion treatment, simultaneous (2x2x2 DDD) | `TripleDifference` |
 | Two-criterion treatment, staggered timing + eligibility | `StaggeredTripleDifference` |
 | Nonlinear outcome (binary/count) with staggered timing | `WooldridgeDiD` |

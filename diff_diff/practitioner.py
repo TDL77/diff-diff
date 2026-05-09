@@ -876,28 +876,31 @@ def _handle_had(results: Any):
         ),
         _step(
             baker_step=4,
-            label="Switch to ContinuousDiD or CallawaySantAnna if untreated units exist",
+            label="Confirm WAS is the target estimand (vs ATT(d) for ContinuousDiD)",
             why=(
-                "HAD targets the no-untreated-unit case where every unit "
-                "is treated at some positive dose. If your panel actually "
-                "contains units with D = 0 (genuinely untreated), HAD's "
-                "WAS divisor under-weights the never-treated subset and a "
-                "different estimator is correct: ContinuousDiD for "
-                "dose-response on data with untreated controls, or "
-                "CallawaySantAnna for binary-staggered timing."
+                "HAD targets WAS (Weighted Average Slope) at the dose "
+                "support boundary. If you specifically want per-dose "
+                "ATT(d) / ACRT(d) dose-response curves AND your panel "
+                "has never-treated controls (units with first_treat == 0), "
+                "ContinuousDiD is the alternative — different estimand, "
+                "and ContinuousDiD's identification requires never-treated "
+                "controls. HAD itself remains valid even with a small "
+                "share of never-treated units (paper compatibility; see "
+                "REGISTRY § HeterogeneousAdoptionDiD edge cases — "
+                "Garrett et al. 2020 retained 12 untreated counties out "
+                "of 2,954). The choice is about estimand, not about "
+                "whether untreated units exist."
             ),
             code=(
-                "# Check for untreated units:\n"
-                "if (data['first_treat'] == 0).any():\n"
-                "    # Untreated units exist - switch to ContinuousDiD:\n"
-                "    from diff_diff import ContinuousDiD\n"
-                "    cdid = ContinuousDiD()\n"
-                "    cdid_results = cdid.fit(\n"
-                "        data, outcome='y', unit='unit', time='t',\n"
-                "        first_treat='first_treat', dose='d')\n"
-                "    # Or CallawaySantAnna for binary-staggered timing:\n"
-                "    # from diff_diff import CallawaySantAnna\n"
-                "    # cs = CallawaySantAnna(control_group='never_treated')"
+                "# HAD reports WAS at the dose support boundary.\n"
+                "# If you instead want per-dose ATT(d)/ACRT(d) dose-response\n"
+                "# curves AND the panel has never-treated controls:\n"
+                "from diff_diff import ContinuousDiD\n"
+                "cdid = ContinuousDiD()\n"
+                "cdid_results = cdid.fit(\n"
+                "    data, outcome='y', unit='unit', time='t',\n"
+                "    first_treat='first_treat', dose='d',\n"
+                "    aggregate='dose')"
             ),
             step_name="estimator_selection",
         ),
@@ -910,13 +913,12 @@ def _handle_had(results: Any):
                 "for the bias-corrected local-linear estimator. Bandwidth "
                 "choice affects WAS - verify the selector landed on a "
                 "viable bandwidth (not boundary-clipped or near-degenerate). "
-                "result.bandwidth_diagnostics is None on the mass_point "
+                "results.bandwidth_diagnostics is None on the mass_point "
                 "design (parametric, no bandwidth)."
             ),
             code=(
                 "# Inspect the auto-selected bandwidths:\n"
-                "result.bandwidth_diagnostics  # None on mass_point\n"
-                "# Re-fit with explicit h= / b= to test sensitivity"
+                "results.bandwidth_diagnostics  # None on mass_point"
             ),
             priority="medium",
             step_name="sensitivity",
@@ -1005,23 +1007,29 @@ def _handle_had_event_study(results: Any):
         ),
         _step(
             baker_step=4,
-            label="Switch to ContinuousDiD or CallawaySantAnna if untreated units exist",
+            label="Confirm WAS is the target estimand (vs ATT(d) for ContinuousDiD)",
             why=(
-                "HAD targets the no-untreated-unit case. If your panel "
-                "contains units with D = 0, switch to "
-                "ContinuousDiD(aggregate='eventstudy') for dose-response "
-                "event study with untreated controls, or CallawaySantAnna "
-                "with aggregate='event_study' for binary-staggered timing."
+                "HAD targets per-event-time WAS at the dose support "
+                "boundary. If you instead want per-dose ATT(d) / ACRT(d) "
+                "dose-response curves AND your panel has never-treated "
+                "controls, ContinuousDiD(aggregate='eventstudy') is the "
+                "alternative — different estimand, requires never-treated. "
+                "HAD itself remains valid even with a small share of "
+                "never-treated units (paper compatibility); on staggered "
+                "panels HAD's last-cohort filter explicitly RETAINS "
+                "never-treated units as the untreated-group comparison "
+                "(paper Appendix B.2). The choice is about estimand."
             ),
             code=(
-                "# Check for untreated units:\n"
-                "if (data['first_treat'] == 0).any():\n"
-                "    from diff_diff import ContinuousDiD\n"
-                "    cdid = ContinuousDiD()\n"
-                "    es = cdid.fit(\n"
-                "        data, outcome='y', unit='unit', time='t',\n"
-                "        first_treat='first_treat', dose='d',\n"
-                "        aggregate='eventstudy')"
+                "# HAD reports per-event-time WAS at the dose boundary.\n"
+                "# If you instead want per-dose ATT(d)/ACRT(d) event-study\n"
+                "# curves AND the panel has never-treated controls:\n"
+                "from diff_diff import ContinuousDiD\n"
+                "cdid = ContinuousDiD()\n"
+                "cdid_es = cdid.fit(\n"
+                "    data, outcome='y', unit='unit', time='t',\n"
+                "    first_treat='first_treat', dose='d',\n"
+                "    aggregate='eventstudy')"
             ),
             step_name="estimator_selection",
         ),
@@ -1033,18 +1041,21 @@ def _handle_had_event_study(results: Any):
                 "as a joint pattern. On weighted fits (survey_design= or "
                 "weights=), fit(cband=True) constructs simultaneous (sup-t) "
                 "bands across horizons via multiplier bootstrap. "
-                "result.cband_low / cband_high give the band endpoints; "
-                "cband_crit_value reports the sup-t critical value used."
+                "results.cband_low / results.cband_high give the band "
+                "endpoints; results.cband_crit_value reports the sup-t "
+                "critical value used."
             ),
             code=(
-                "from diff_diff import HeterogeneousAdoptionDiD\n"
+                "from diff_diff import HeterogeneousAdoptionDiD, SurveyDesign\n"
+                "# Construct your survey design (adapt to your data):\n"
+                "sd = SurveyDesign(weights='weight_col')\n"
                 "est = HeterogeneousAdoptionDiD(n_bootstrap=999, seed=42)\n"
                 "es = est.fit(\n"
                 "    data, outcome_col='y', unit_col='unit',\n"
                 "    time_col='t', dose_col='d',\n"
                 "    first_treat_col='first_treat',\n"
                 "    aggregate='event_study',\n"
-                "    survey_design=design, cband=True)\n"
+                "    survey_design=sd, cband=True)\n"
                 "es.cband_low, es.cband_high  # simultaneous band endpoints"
             ),
             priority="medium",

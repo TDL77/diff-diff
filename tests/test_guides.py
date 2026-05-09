@@ -308,30 +308,101 @@ class TestLLMsFullHADCoverage:
     def test_llms_full_had_choosing_row(self):
         text = get_llm_guide("full")
         # The Choosing-an-Estimator table must list HAD with a row that
-        # names either "no untreated" or "universal rollout" framing.
-        # Find the Choosing section and check within it.
+        # accurately reflects the contract: HAD targets WAS at the dose
+        # support boundary and is compatible with universal-rollout
+        # panels (and panels with a small never-treated share — paper
+        # edge case at REGISTRY § HeterogeneousAdoptionDiD edge cases).
         idx = text.index("## Choosing an Estimator")
         choosing = text[idx:]
         assert "HeterogeneousAdoptionDiD" in choosing
-        assert ("no untreated" in choosing.lower()) or ("universal rollout" in choosing.lower())
+        # Row must mention WAS as the estimand differentiator (not a
+        # blanket "if untreated → not HAD" rule which would be wrong
+        # per registry).
+        assert "WAS" in choosing
 
-    def test_llms_full_had_framing_no_comparison_group(self):
-        # Per feedback_had_framing_precision: HAD's design absence is
-        # "no untreated unit" — comparison comes from dose variation
-        # across units. The phrases "no comparison group" and
-        # "missing comparison" must NOT appear in the HAD section.
+    def test_llms_full_had_section_methodology_compatible_with_untreated(self):
+        # Per docs/methodology/REGISTRY.md HeterogeneousAdoptionDiD edge
+        # cases (line ~2403): "Authors do NOT require untreated units
+        # to be dropped" and (line ~2408) the staggered event-study path
+        # explicitly RETAINS never-treated units. The HAD section must
+        # NOT carry framing that says HAD is incompatible with
+        # never-treated / untreated units.
         text = get_llm_guide("full")
         had_start = text.index("### HeterogeneousAdoptionDiD")
-        # Find the next top-level or H3 boundary that is NOT another HAD
-        # section to scope the assertion to HAD-specific content. The
-        # HAD estimator section is followed by ### StackedDiD; the
-        # results-class section ends at ### TROPResults. We check the
-        # estimator section text only (most likely place for framing
-        # drift).
         had_end = text.index("### StackedDiD", had_start)
         had_text = text[had_start:had_end].lower()
+        # Negative assertions on framing that contradicts the registry.
         assert "no comparison group" not in had_text
         assert "missing comparison" not in had_text
+        forbidden_phrases = (
+            "no never-treated units",
+            "requires no untreated",
+            "drop untreated",
+            "must not contain untreated",
+            "not compatible with untreated",
+        )
+        for phrase in forbidden_phrases:
+            assert phrase not in had_text, (
+                f"HAD section must not carry the phrase {phrase!r}: "
+                f"per REGISTRY § HeterogeneousAdoptionDiD edge cases, "
+                f"HAD is compatible with a small share of never-treated "
+                f"units and explicitly retains them on staggered "
+                f"event-study panels (Appendix B.2)."
+            )
+
+    def test_llms_full_had_constructor_signature_matches_real_api(self):
+        # Documented constructor parameter list must align with the
+        # actual HeterogeneousAdoptionDiD.__init__ signature. Catches
+        # the failure mode where the guide invents kwargs that don't
+        # exist (h, b, rcond) or omits real ones (d_lower, kernel,
+        # vcov_type, robust, cluster).
+        import inspect
+
+        from diff_diff import HeterogeneousAdoptionDiD
+
+        sig_params = set(inspect.signature(HeterogeneousAdoptionDiD.__init__).parameters)
+        sig_params.discard("self")
+        text = get_llm_guide("full")
+        had_start = text.index("### HeterogeneousAdoptionDiD")
+        had_end = text.index("### StackedDiD", had_start)
+        had_text = text[had_start:had_end]
+        block_start = had_text.index("HeterogeneousAdoptionDiD(")
+        # Multi-line signature ends with "\n)" — close-paren on its own
+        # line. Searching for ")" alone would hit close-parens inside
+        # parameter comments (e.g. "(default)").
+        block_end = had_text.index("\n)", block_start)
+        ctor_block = had_text[block_start:block_end]
+        for param in sig_params:
+            assert f"{param}:" in ctor_block or f"{param} " in ctor_block, (
+                f"Constructor block in the HAD guide section is missing "
+                f"the real public parameter {param!r}. The guide must "
+                f"document the actual HeterogeneousAdoptionDiD.__init__ "
+                f"signature."
+            )
+
+    def test_llms_full_had_fit_signature_matches_real_api(self):
+        # Documented fit() parameter list must align with the actual
+        # HeterogeneousAdoptionDiD.fit signature.
+        import inspect
+
+        from diff_diff import HeterogeneousAdoptionDiD
+
+        sig_params = set(inspect.signature(HeterogeneousAdoptionDiD.fit).parameters)
+        sig_params.discard("self")
+        text = get_llm_guide("full")
+        had_start = text.index("### HeterogeneousAdoptionDiD")
+        had_end = text.index("### StackedDiD", had_start)
+        had_text = text[had_start:had_end]
+        block_start = had_text.index("had.fit(")
+        block_end = had_text.index(") -> ", block_start)
+        fit_block = had_text[block_start:block_end]
+        for param in sig_params:
+            assert f"{param}:" in fit_block or f"{param} " in fit_block, (
+                f"fit() block in the HAD guide section is missing the "
+                f"real public parameter {param!r}. The guide must "
+                f"document the actual HeterogeneousAdoptionDiD.fit "
+                f"signature."
+            )
 
     def test_llms_full_paper_citation(self):
         # Lead-author "D'Haultfœuille" appears in the HAD section.
