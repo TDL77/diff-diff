@@ -1648,6 +1648,20 @@ class TestProModelPricing:
         assert base_cost is not None
         assert pro_cost != base_cost
 
+    def test_gpt55_exact_rates(self, review_mod):
+        """gpt-5.5 PRICING entry must match published OpenAI rates."""
+        assert review_mod.PRICING["gpt-5.5"] == (5.00, 30.00)
+
+    def test_gpt55_pro_exact_rates(self, review_mod):
+        """gpt-5.5-pro PRICING entry must match published OpenAI rates."""
+        assert review_mod.PRICING["gpt-5.5-pro"] == (30.00, 180.00)
+
+    def test_gpt55_pro_snapshot_matches_pro(self, review_mod):
+        """gpt-5.5-pro-2026-04-23 should match gpt-5.5-pro via prefix."""
+        snapshot = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.5-pro-2026-04-23")
+        base = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.5-pro")
+        assert snapshot == base
+
 
 class TestExtractResponseText:
     def test_prefers_output_text_field(self, review_mod):

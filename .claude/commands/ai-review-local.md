@@ -334,9 +334,15 @@ python3 .claude/scripts/openai_review.py \
 Note: `--force-fresh` is a skill-only flag — it controls whether delta diffs are
 generated in Step 4 and is NOT passed to the script.
 
-**Reasoning model handling:** If the model contains `-pro`, starts with `o1`/`o3`/`o4`, or starts with `gpt-5.4`/`gpt-5.5`
-(e.g., `gpt-5.5`, `gpt-5.5-pro`, `o3`, `o4-mini`):
-- Pass `--timeout 900` to the script (unless the user explicitly specified `--timeout`)
+**Reasoning model handling:** Resolve the effective model first — `effective_model` is
+the value of `--model` if the user provided one, otherwise the script default `gpt-5.5`.
+The `--model`, `--timeout`, and `--dry-run` flags pass through to the script when provided.
+
+If `effective_model` contains `-pro`, starts with `o1`/`o3`/`o4`, or starts with
+`gpt-5.4`/`gpt-5.5` (e.g., `gpt-5.5`, `gpt-5.5-pro`, `o3`, `o4-mini`):
+- The script's `_resolve_timeout()` already auto-selects 900s for these models when
+  `--timeout` is omitted, so no wrapper timeout pass-through is required. (Passing
+  `--timeout 900` explicitly remains harmless and is fine for backward compatibility.)
 - Run the Bash command with `run_in_background: true` (bypasses the 600s Bash tool timeout cap)
 - After the background command completes, continue to Step 6
 
