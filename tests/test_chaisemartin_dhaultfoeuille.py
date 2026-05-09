@@ -8208,7 +8208,12 @@ class TestByPathNonBinary:
     def test_non_integer_D_raises(self):
         """D values containing 1.5 raise ValueError."""
         df = _by_path_data_with_non_binary_treatment()
-        # Inject a non-integer D for one cell
+        # Cast `treatment` to float BEFORE assigning 1.5: on pandas >= 2.x
+        # `df.loc[mask, "treatment"] = 1.5` raises `TypeError: Invalid
+        # value '1.5' for dtype 'int64'` outright instead of silently
+        # coercing. We want to inject a continuous value to test the
+        # estimator's D-integer guard, not exercise pandas dtype coercion.
+        df["treatment"] = df["treatment"].astype(float)
         mask = (df["group"] == 0) & (df["period"] == 4)
         df.loc[mask, "treatment"] = 1.5
         est = ChaisemartinDHaultfoeuille(
