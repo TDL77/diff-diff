@@ -105,7 +105,7 @@ class SunAbrahamResults:
 
     @property
     def coef_var(self) -> float:
-        """Coefficient of variation: SE / |overall ATT|. NaN when ATT is 0 or SE non-finite."""
+        """Coefficient of variation: SE / abs(overall ATT). NaN when ATT is 0 or SE non-finite."""
         if not (np.isfinite(self.overall_se) and self.overall_se >= 0):
             return np.nan
         if not np.isfinite(self.overall_att) or self.overall_att == 0:

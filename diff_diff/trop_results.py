@@ -162,7 +162,7 @@ class TROPResults:
 
     @property
     def coef_var(self) -> float:
-        """Coefficient of variation: SE / |ATT|. NaN when ATT is 0 or SE non-finite."""
+        """Coefficient of variation: SE / abs(ATT). NaN when ATT is 0 or SE non-finite."""
         if not (np.isfinite(self.se) and self.se >= 0):
             return np.nan
         if not np.isfinite(self.att) or self.att == 0:

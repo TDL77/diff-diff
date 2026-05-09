@@ -365,6 +365,7 @@ class TripleDifference:
     ----------
     estimation_method : str, default="dr"
         Estimation method to use:
+
         - "dr": Doubly robust (recommended). Consistent if either the outcome
           model or propensity score model is correctly specified.
         - "reg": Regression adjustment (outcome regression).
@@ -385,6 +386,7 @@ class TripleDifference:
         or above (1 - pscore_trim) are clipped to avoid extreme weights.
     rank_deficient_action : str, default="warn"
         Action when design matrix is rank-deficient (linearly dependent columns):
+
         - "warn": Issue warning and drop linearly dependent columns (default)
         - "error": Raise ValueError
         - "silent": Drop columns silently without warning
@@ -397,11 +399,13 @@ class TripleDifference:
         (1996). Only applies to IPW and DR estimation methods.
     pscore_fallback : str, default="error"
         Action when propensity score estimation fails:
+
         - "error": Raise the exception (default)
         - "unconditional": Fall back to unconditional propensity with
           a warning. For IPW, drops all covariates. For DR, the
           propensity model becomes unconditional but outcome regression
           still uses covariates.
+
         When ``rank_deficient_action="error"``, errors are always
         re-raised regardless of this setting.
 

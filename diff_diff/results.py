@@ -141,7 +141,7 @@ class DiDResults:
 
     @property
     def coef_var(self) -> float:
-        """Coefficient of variation: SE / |ATT|. NaN when ATT is 0 or SE non-finite."""
+        """Coefficient of variation: SE / abs(ATT). NaN when ATT is 0 or SE non-finite."""
         if not (np.isfinite(self.se) and self.se >= 0):
             return np.nan
         if not np.isfinite(self.att) or self.att == 0:
@@ -468,7 +468,7 @@ class MultiPeriodDiDResults:
 
     @property
     def coef_var(self) -> float:
-        """Coefficient of variation: SE / |overall ATT|. NaN when ATT is 0 or SE non-finite."""
+        """Coefficient of variation: SE / abs(overall ATT). NaN when ATT is 0 or SE non-finite."""
         if not (np.isfinite(self.avg_se) and self.avg_se >= 0):
             return np.nan
         if not np.isfinite(self.avg_att) or self.avg_att == 0:
@@ -919,7 +919,7 @@ class SyntheticDiDResults:
 
     @property
     def coef_var(self) -> float:
-        """Coefficient of variation: SE / |ATT|. NaN when ATT is 0 or SE non-finite."""
+        """Coefficient of variation: SE / abs(ATT). NaN when ATT is 0 or SE non-finite."""
         if not (np.isfinite(self.se) and self.se >= 0):
             return np.nan
         if not np.isfinite(self.att) or self.att == 0:
@@ -1114,14 +1114,16 @@ class SyntheticDiDResults:
         full-design survey jackknife path, which uses PSU-level LOO).
 
         Available on:
+
         * non-survey jackknife fits (classical Arkhangelsky Algorithm 3).
         * pweight-only survey jackknife fits (Algorithm 3 with post-hoc
           ω_eff composition; PSU labels in ``survey_metadata`` come from
           implicit-PSU metadata but the LOO remains unit-level).
 
         Blocked on:
+
         * full-design survey jackknife fits (strata / PSU / FPC set in
-          ``SurveyDesign``) — the underlying replicates are PSU-level
+          ``SurveyDesign``) - the underlying replicates are PSU-level
           ``τ̂_{(h,j)}`` (Rust & Rao 1996), not unit-level. See
           ``result.placebo_effects`` for the raw PSU-level replicate
           array and REGISTRY §SyntheticDiD "Note (survey + jackknife
@@ -1142,10 +1144,12 @@ class SyntheticDiDResults:
         -------
         pd.DataFrame
             Columns:
-                - ``unit`` — user's unit ID
-                - ``role`` — ``'control'`` or ``'treated'``
-                - ``att_loo`` — ATT with this unit dropped
-                - ``delta_from_full`` — ``att_loo - self.att``
+
+            - ``unit`` - user's unit ID
+            - ``role`` - ``'control'`` or ``'treated'``
+            - ``att_loo`` - ATT with this unit dropped
+            - ``delta_from_full`` - ``att_loo - self.att``
+
             Sorted by ``|delta_from_full|`` descending, NaN rows at the end.
         """
         if self.variance_method != "jackknife":

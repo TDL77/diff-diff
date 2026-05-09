@@ -104,9 +104,9 @@ class ImputationDiDResults:
     n_obs : int
         Total number of observations.
     n_treated_obs : int
-        Number of treated observations (|Omega_1|).
+        Number of treated observations (:math:`|\\Omega_1|`).
     n_untreated_obs : int
-        Number of untreated observations (|Omega_0|).
+        Number of untreated observations (:math:`|\\Omega_0|`).
     n_treated_units : int
         Number of ever-treated units.
     n_control_units : int
@@ -155,7 +155,7 @@ class ImputationDiDResults:
 
     @property
     def coef_var(self) -> float:
-        """Coefficient of variation: SE / |overall ATT|. NaN when ATT is 0 or SE non-finite."""
+        """Coefficient of variation: SE / abs(overall ATT). NaN when ATT is 0 or SE non-finite."""
         if not (np.isfinite(self.overall_se) and self.overall_se >= 0):
             return np.nan
         if not np.isfinite(self.overall_att) or self.overall_att == 0:

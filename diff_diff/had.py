@@ -233,6 +233,7 @@ class HeterogeneousAdoptionDiDResults:
           ``(Ybar_{Z=1} - Ybar_{Z=0}) / (Dbar_{Z=1} - Dbar_{Z=0})``.
     se : float
         Standard error on the beta-scale. For continuous designs:
+
         - Unweighted or ``weights=<array>``: CCT-2014 weighted-robust SE
           from Phase 1c divided by ``|den|`` (``den`` = raw or weighted
           denominator depending on fit path).
@@ -241,6 +242,7 @@ class HeterogeneousAdoptionDiDResults:
           aligned with ``tau_bc``) routed through
           :func:`compute_survey_if_variance` for PSU-aggregated,
           FPC/strata-adjusted variance, divided by ``|den|``.
+
         In both cases the higher-order variance from ``mean(ΔY)`` is
         dominated by the nonparametric boundary estimate in large
         samples and is not included in the leading-order formula. For

@@ -256,10 +256,9 @@ class DiagnosticReport:
         Column names identifying the panel structure.
     pre_periods, post_periods : list, optional
         Explicit pre- and post-treatment period labels.
-    run_parallel_trends, run_sensitivity, run_placebo, run_bacon,
-    run_design_effect, run_heterogeneity, run_epv, run_pretrends_power : bool
+    run_parallel_trends, run_sensitivity, run_placebo, run_bacon, run_design_effect, run_heterogeneity, run_epv, run_pretrends_power : bool
         Per-check opt-in flags. ``run_placebo`` defaults to ``False`` (opt-in,
-        expensive, currently not implemented — placebo key remains reserved
+        expensive, currently not implemented - placebo key remains reserved
         as ``skipped`` in the schema). All other checks default to ``True``
         and are further gated by estimator-type and instance-level
         applicability (see ``docs/methodology/REPORTING.md``).

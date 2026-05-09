@@ -75,7 +75,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         - "silent": Drop columns silently
     horizon_max : int, optional
         Maximum event-study horizon. If set, event study effects are only
-        computed for |h| <= horizon_max.
+        computed for abs(h) <= horizon_max.
     aux_partition : str, default="cohort_horizon"
         Controls the auxiliary model partition for Theorem 3 variance:
         - "cohort_horizon": Groups by cohort x relative time (tightest SEs)
