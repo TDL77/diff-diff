@@ -690,6 +690,55 @@ class TestHADDispatch:
             if code.strip():
                 ast.parse(code)  # raises SyntaxError on failure
 
+    def test_had_results_dataclass_docstrings_match_weighted_mass_point_contract(self):
+        # PR #402 R3 fixed the llms-full.txt field descriptions to
+        # acknowledge that weighted mass-point fits populate
+        # variance_formula in {"pweight_2sls", "survey_binder_tsl_2sls"}
+        # and effective_dose_mean as the weighted Wald-IV dose gap (per
+        # had.py:3585-3660). PR #402 R5 P3 caught that the dataclass
+        # field docstrings still said those fields were continuous-only
+        # / None on mass-point - leaving two source-of-truth surfaces
+        # disagreeing about the same public result object. Lock the
+        # dataclass docstrings against drift back to the continuous-only
+        # framing.
+        import inspect
+
+        from diff_diff.had import HeterogeneousAdoptionDiDResults
+
+        # Field docstrings live as raw __doc__ on the FieldDescriptor /
+        # in __dataclass_fields__'s metadata; read them via the type's
+        # source-level docstring attached to the class via the field's
+        # `__doc__` after assignment in the class body.
+        # Easier: read the class source via inspect.getsource() and check
+        # the field-docstring blocks we care about.
+        src = inspect.getsource(HeterogeneousAdoptionDiDResults)
+        # variance_formula docstring must enumerate all 4 labels.
+        assert "pweight_2sls" in src, (
+            "HeterogeneousAdoptionDiDResults.variance_formula docstring "
+            "must mention `pweight_2sls` (weighted mass-point HC1/CR1 "
+            "label per had.py:3585-3629). Otherwise the dataclass "
+            "docstring contradicts llms-full.txt and the actual "
+            "implementation."
+        )
+        assert "survey_binder_tsl_2sls" in src, (
+            "HeterogeneousAdoptionDiDResults.variance_formula docstring "
+            "must mention `survey_binder_tsl_2sls` (weighted mass-point "
+            "Binder-TSL label)."
+        )
+        # effective_dose_mean docstring must mention mass-point Wald-IV.
+        assert "mass_point" in src or "mass-point" in src, (
+            "HeterogeneousAdoptionDiDResults.effective_dose_mean "
+            "docstring must mention mass-point semantics; weighted "
+            "mass-point fits populate it as the weighted Wald-IV dose "
+            "gap per had.py:3642-3660."
+        )
+        assert "Wald-IV" in src or "Z=1" in src, (
+            "HeterogeneousAdoptionDiDResults.effective_dose_mean "
+            "docstring must describe the weighted Wald-IV dose gap "
+            "semantics (or the underlying Z=1/Z=0 subgroup-mean form) "
+            "for mass-point fits."
+        )
+
     def test_had_step_3_flags_qug_under_survey_deferral(
         self, mock_had_results, mock_had_event_study_results
     ):
