@@ -1,11 +1,14 @@
 """Tests for the practitioner guidance module."""
 
+import numpy as np
 import pytest
 
 from diff_diff import (
     BaconDecomposition,
     CallawaySantAnna,
     DifferenceInDifferences,
+    HeterogeneousAdoptionDiDEventStudyResults,
+    HeterogeneousAdoptionDiDResults,
     MultiPeriodDiD,
     generate_did_data,
     generate_staggered_data,
@@ -32,9 +35,7 @@ def did_data():
 
 @pytest.fixture(scope="session")
 def staggered_data():
-    return generate_staggered_data(
-        n_units=60, n_periods=8, treatment_effect=2.0, seed=42
-    )
+    return generate_staggered_data(n_units=60, n_periods=8, treatment_effect=2.0, seed=42)
 
 
 @pytest.fixture(scope="session")
@@ -46,9 +47,7 @@ def did_results(did_data):
 @pytest.fixture(scope="session")
 def multi_period_results(did_data):
     es = MultiPeriodDiD()
-    return es.fit(
-        did_data, outcome="outcome", unit="unit", time="period", treatment="treated"
-    )
+    return es.fit(did_data, outcome="outcome", unit="unit", time="period", treatment="treated")
 
 
 @pytest.fixture(scope="session")
@@ -168,6 +167,43 @@ def mock_stacked_results():
     r = StackedDiDResults.__new__(StackedDiDResults)
     r.overall_att = 0.5
     r.overall_se = 0.1
+    return r
+
+
+@pytest.fixture
+def mock_had_results():
+    r = HeterogeneousAdoptionDiDResults.__new__(HeterogeneousAdoptionDiDResults)
+    r.att = 0.5
+    return r
+
+
+@pytest.fixture
+def mock_had_event_study_results():
+    r = HeterogeneousAdoptionDiDEventStudyResults.__new__(HeterogeneousAdoptionDiDEventStudyResults)
+    # 5 horizons: e in {-3, -2, 0, 1, 2}
+    r.att = np.array([0.01, -0.02, 0.30, 0.45, 0.50])
+    r.event_times = np.array([-3, -2, 0, 1, 2])
+    return r
+
+
+@pytest.fixture
+def mock_had_results_nan_att():
+    r = HeterogeneousAdoptionDiDResults.__new__(HeterogeneousAdoptionDiDResults)
+    r.att = float("nan")
+    return r
+
+
+@pytest.fixture
+def mock_had_event_study_results_all_nan():
+    r = HeterogeneousAdoptionDiDEventStudyResults.__new__(HeterogeneousAdoptionDiDEventStudyResults)
+    r.att = np.full(5, np.nan)
+    return r
+
+
+@pytest.fixture
+def mock_had_event_study_results_partial_nan():
+    r = HeterogeneousAdoptionDiDEventStudyResults.__new__(HeterogeneousAdoptionDiDEventStudyResults)
+    r.att = np.array([0.5, np.nan, 0.3])
     return r
 
 
@@ -345,16 +381,12 @@ class TestCompletedSteps:
         assert len(filtered["next_steps"]) < len(full["next_steps"])
 
     def test_filter_all_steps(self, cs_results):
-        output = practitioner_next_steps(
-            cs_results, completed_steps=list(STEPS), verbose=False
-        )
+        output = practitioner_next_steps(cs_results, completed_steps=list(STEPS), verbose=False)
         assert len(output["next_steps"]) == 0
 
     def test_invalid_step_name_raises(self, did_results):
         with pytest.raises(ValueError, match="Unknown step names"):
-            practitioner_next_steps(
-                did_results, completed_steps=["invalid_step"], verbose=False
-            )
+            practitioner_next_steps(did_results, completed_steps=["invalid_step"], verbose=False)
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +471,8 @@ class TestEfficientDiDHandler:
     def test_hausman_snippet_uses_classmethod(self, mock_efficient_results):
         output = practitioner_next_steps(mock_efficient_results, verbose=False)
         hausman_steps = [
-            s for s in output["next_steps"]
+            s
+            for s in output["next_steps"]
             if "hausman" in s["label"].lower() or "Hausman" in s["label"]
         ]
         assert len(hausman_steps) > 0
@@ -458,3 +491,123 @@ class TestFallback:
         output = practitioner_next_steps(FakeResults(), verbose=False)
         assert len(output["next_steps"]) > 0
         assert output["estimator"] == "FakeResults"
+
+
+# ---------------------------------------------------------------------------
+# Tests: HeterogeneousAdoptionDiD (HAD) handler dispatch
+# ---------------------------------------------------------------------------
+class TestHADDispatch:
+    def test_had_results_dispatch(self, mock_had_results):
+        output = practitioner_next_steps(mock_had_results, verbose=False)
+        assert len(output["next_steps"]) > 0
+        assert output["estimator"] == "HeterogeneousAdoptionDiD (HAD)"
+
+    def test_had_event_study_dispatch(self, mock_had_event_study_results):
+        output = practitioner_next_steps(mock_had_event_study_results, verbose=False)
+        assert len(output["next_steps"]) > 0
+        assert output["estimator"] == "HeterogeneousAdoptionDiD (Event Study)"
+
+    def test_had_pretest_workflow_referenced(self, mock_had_results):
+        output = practitioner_next_steps(mock_had_results, verbose=False)
+        all_code = " ".join(s.get("code", "") for s in output["next_steps"])
+        assert "did_had_pretest_workflow" in all_code
+
+    def test_had_event_study_pretest_workflow_referenced(self, mock_had_event_study_results):
+        output = practitioner_next_steps(mock_had_event_study_results, verbose=False)
+        all_code = " ".join(s.get("code", "") for s in output["next_steps"])
+        assert "did_had_pretest_workflow" in all_code
+        assert "aggregate='event_study'" in all_code
+
+    def test_had_bandwidth_diagnostics_referenced(self, mock_had_results):
+        output = practitioner_next_steps(mock_had_results, verbose=False)
+        all_text = " ".join(
+            (s.get("code", "") + " " + s.get("why", "")) for s in output["next_steps"]
+        )
+        assert "bandwidth_diagnostics" in all_text
+
+    def test_had_event_study_simultaneous_bands_referenced(self, mock_had_event_study_results):
+        output = practitioner_next_steps(mock_had_event_study_results, verbose=False)
+        all_text = " ".join(
+            (s.get("code", "") + " " + s.get("why", "")) for s in output["next_steps"]
+        )
+        assert "cband" in all_text
+        # Either "sup-t" wording or "simultaneous" wording is acceptable.
+        assert ("sup-t" in all_text) or ("simultaneous" in all_text)
+
+    def test_had_no_comparison_group_framing(self, mock_had_results, mock_had_event_study_results):
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            all_text = " ".join(
+                (s.get("code", "") + " " + s.get("why", "") + " " + s.get("label", ""))
+                for s in output["next_steps"]
+            )
+            all_text += " ".join(output["warnings"])
+            assert "no comparison group" not in all_text.lower()
+            assert "missing comparison" not in all_text.lower()
+
+    def test_had_nan_warning_scalar(self, mock_had_results_nan_att):
+        output = practitioner_next_steps(mock_had_results_nan_att, verbose=False)
+        warnings = " ".join(output["warnings"])
+        assert "NaN" in warnings or "nan" in warnings.lower()
+
+    def test_had_event_study_nan_warning_array(self, mock_had_event_study_results_all_nan):
+        output = practitioner_next_steps(mock_had_event_study_results_all_nan, verbose=False)
+        warnings = " ".join(output["warnings"])
+        assert "per-horizon" in warnings or "All" in warnings
+
+    def test_had_partial_nan_array_no_warning(self, mock_had_event_study_results_partial_nan):
+        # Partial-NaN arrays are legitimate event-study output (some
+        # horizons may collapse on degenerate-design grounds while others
+        # remain finite). The all-NaN warning must NOT fire here.
+        output = practitioner_next_steps(mock_had_event_study_results_partial_nan, verbose=False)
+        # No "per-horizon" or "All ... NaN" warning string should appear.
+        warnings = " ".join(output["warnings"])
+        assert "per-horizon" not in warnings
+        assert "All " not in warnings
+
+    def test_had_step_4_estimator_selection_present(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+            assert len(step_4_steps) >= 1
+            all_text = " ".join((s.get("code", "") + " " + s.get("why", "")) for s in step_4_steps)
+            assert "ContinuousDiD" in all_text
+            assert "CallawaySantAnna" in all_text
+
+    def test_handle_continuous_step_4_routes_to_had(self, mock_continuous_results):
+        # Symmetric pair: ContinuousDiD users with no untreated units
+        # should be routed to HeterogeneousAdoptionDiD.
+        output = practitioner_next_steps(mock_continuous_results, verbose=False)
+        step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+        assert len(step_4_steps) >= 1
+        all_text = " ".join((s.get("code", "") + " " + s.get("why", "")) for s in step_4_steps)
+        assert "HeterogeneousAdoptionDiD" in all_text
+
+    def test_handle_generic_ndarray_att_triggers_warning(self):
+        # Cross-handler regression: a future estimator that returns
+        # ndarray att and falls through to _handle_generic must produce
+        # the same all-NaN warning as the dedicated HAD event-study path.
+        class FutureNdarrayAttResults:
+            att: np.ndarray
+
+        r = FutureNdarrayAttResults()
+        r.att = np.full(3, np.nan)
+        output = practitioner_next_steps(r, verbose=False)
+        warnings = " ".join(output["warnings"])
+        assert "per-horizon" in warnings or "All" in warnings
+
+    def test_had_handlers_string_only_no_attribute_reads(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Stability invariant #7: handlers are STRING-ONLY at runtime.
+        # The fixtures construct results with ONLY .att (and event_times
+        # on the event-study fixture); confirm no AttributeError is
+        # raised when the handlers run. Protects against a future
+        # refactor that starts reading result.<some_field> inside a
+        # handler and silently breaks the minimal-fixture contract.
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            assert isinstance(output, dict)
+            assert "next_steps" in output

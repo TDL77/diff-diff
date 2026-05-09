@@ -272,3 +272,73 @@ def test_module_docstring_mentions_helper():
     import diff_diff
 
     assert "get_llm_guide" in diff_diff.__doc__
+
+
+# ---------------------------------------------------------------------------
+# llms-full.txt — HeterogeneousAdoptionDiD coverage (Phase 5)
+# ---------------------------------------------------------------------------
+class TestLLMsFullHADCoverage:
+    """Lock the HAD section additions to llms-full.txt against deletion
+    or framing drift. Phase 5 surfaces the agent-facing API contract for
+    HeterogeneousAdoptionDiD on the bundled-in-wheel guide."""
+
+    def test_llms_full_has_had_section(self):
+        text = get_llm_guide("full")
+        assert "### HeterogeneousAdoptionDiD" in text
+
+    def test_llms_full_had_results_classes(self):
+        text = get_llm_guide("full")
+        assert "### HeterogeneousAdoptionDiDResults" in text
+        assert "### HeterogeneousAdoptionDiDEventStudyResults" in text
+
+    def test_llms_full_had_pretests_section(self):
+        text = get_llm_guide("full")
+        assert "## HAD Pretests" in text
+        for fn in (
+            "did_had_pretest_workflow",
+            "qug_test",
+            "stute_test",
+            "yatchew_hr_test",
+            "stute_joint_pretest",
+            "joint_pretrends_test",
+            "joint_homogeneity_test",
+        ):
+            assert fn in text, f"HAD Pretests section missing reference to {fn}"
+
+    def test_llms_full_had_choosing_row(self):
+        text = get_llm_guide("full")
+        # The Choosing-an-Estimator table must list HAD with a row that
+        # names either "no untreated" or "universal rollout" framing.
+        # Find the Choosing section and check within it.
+        idx = text.index("## Choosing an Estimator")
+        choosing = text[idx:]
+        assert "HeterogeneousAdoptionDiD" in choosing
+        assert ("no untreated" in choosing.lower()) or ("universal rollout" in choosing.lower())
+
+    def test_llms_full_had_framing_no_comparison_group(self):
+        # Per feedback_had_framing_precision: HAD's design absence is
+        # "no untreated unit" — comparison comes from dose variation
+        # across units. The phrases "no comparison group" and
+        # "missing comparison" must NOT appear in the HAD section.
+        text = get_llm_guide("full")
+        had_start = text.index("### HeterogeneousAdoptionDiD")
+        # Find the next top-level or H3 boundary that is NOT another HAD
+        # section to scope the assertion to HAD-specific content. The
+        # HAD estimator section is followed by ### StackedDiD; the
+        # results-class section ends at ### TROPResults. We check the
+        # estimator section text only (most likely place for framing
+        # drift).
+        had_end = text.index("### StackedDiD", had_start)
+        had_text = text[had_start:had_end].lower()
+        assert "no comparison group" not in had_text
+        assert "missing comparison" not in had_text
+
+    def test_llms_full_paper_citation(self):
+        # Lead-author "D'Haultfœuille" appears in the HAD section.
+        # Naturally preserves the UTF-8 'œ' fingerprint asserted by
+        # test_utf8_encoding_preserved without a synthetic mark.
+        text = get_llm_guide("full")
+        had_start = text.index("### HeterogeneousAdoptionDiD")
+        had_end = text.index("### StackedDiD", had_start)
+        had_text = text[had_start:had_end]
+        assert "D'Haultfœuille" in had_text

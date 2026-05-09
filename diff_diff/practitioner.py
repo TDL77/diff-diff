@@ -41,7 +41,10 @@ _ESTIMATOR_NAMES: Dict[str, str] = {
     "ContinuousDiDResults": "ContinuousDiD",
     "TripleDifferenceResults": "TripleDifference (DDD)",
     "BaconDecompositionResults": "BaconDecomposition",
+    "HeterogeneousAdoptionDiDResults": "HeterogeneousAdoptionDiD (HAD)",
+    "HeterogeneousAdoptionDiDEventStudyResults": "HeterogeneousAdoptionDiD (Event Study)",
 }
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -83,9 +86,7 @@ def practitioner_next_steps(
     completed = set(completed_steps or [])
     unknown = completed - STEPS
     if unknown:
-        raise ValueError(
-            f"Unknown step names: {unknown}. Valid names: {sorted(STEPS)}"
-        )
+        raise ValueError(f"Unknown step names: {unknown}. Valid names: {sorted(STEPS)}")
 
     # Estimation is always complete if we have a results object
     completed.add("estimation")
@@ -543,10 +544,7 @@ def _handle_synthetic(results: Any):
                 "ATTs — departures signal that something is being picked "
                 "up pre-treatment, weakening the causal interpretation."
             ),
-            code=(
-                "placebo_df = results.in_time_placebo()\n"
-                "print(placebo_df)"
-            ),
+            code=("placebo_df = results.in_time_placebo()\n" "print(placebo_df)"),
             priority="medium",
             step_name="sensitivity",
         ),
@@ -589,10 +587,7 @@ def _handle_synthetic(results: Any):
                 "data. Show whether the ATT moves materially across a "
                 "grid of values to gauge robustness to this choice."
             ),
-            code=(
-                "sens_df = results.sensitivity_to_zeta_omega()\n"
-                "print(sens_df)"
-            ),
+            code=("sens_df = results.sensitivity_to_zeta_omega()\n" "print(sens_df)"),
             priority="low",
             step_name="sensitivity",
         ),
@@ -732,6 +727,28 @@ def _handle_continuous(results: Any):
             step_name="parallel_trends",
         ),
         _step(
+            baker_step=4,
+            label="Switch to HeterogeneousAdoptionDiD if no untreated units",
+            why=(
+                "ContinuousDiD's identification assumes a never-treated "
+                "comparison group exists (units with dose = 0). When every "
+                "unit is treated at some positive dose level — a universal "
+                "rollout where treatment varies in intensity, not status — "
+                "use HeterogeneousAdoptionDiD instead. HAD identifies a "
+                "Weighted Average Slope (WAS) at the dose support boundary "
+                "by leveraging dose variation across units."
+            ),
+            code=(
+                "# If your panel has no units with first_treat == 0, switch:\n"
+                "from diff_diff import HeterogeneousAdoptionDiD\n"
+                "had = HeterogeneousAdoptionDiD()\n"
+                "had_results = had.fit(\n"
+                "    data, outcome_col='y', unit_col='unit',\n"
+                "    time_col='t', dose_col='d', first_treat_col='first_treat')"
+            ),
+            step_name="estimator_selection",
+        ),
+        _step(
             baker_step=7,
             label="Plot dose-response curve",
             why=(
@@ -739,10 +756,7 @@ def _handle_continuous(results: Any):
                 "level. The dose-response curve reveals the functional form "
                 "of the treatment-dose relationship."
             ),
-            code=(
-                "from diff_diff import plot_dose_response\n"
-                "plot_dose_response(results)"
-            ),
+            code=("from diff_diff import plot_dose_response\n" "plot_dose_response(results)"),
             step_name="heterogeneity",
         ),
         _step(
@@ -830,6 +844,257 @@ def _handle_bacon(results: Any):
     return steps, warnings
 
 
+def _handle_had(results: Any):
+    """HeterogeneousAdoptionDiD single-period guidance.
+
+    Five Baker et al. steps (3, 4, 6, 7, 8). HAD's design absence is
+    "no untreated unit" - comparison comes from dose variation across
+    units, not from an untreated holdout. Treatment varies in intensity,
+    not in status.
+    """
+    steps = [
+        _step(
+            baker_step=3,
+            label="Run the HAD pretest battery",
+            why=(
+                "did_had_pretest_workflow bundles the paper's three "
+                "testable identifying assumptions: QUG (Assumption 5 "
+                "support condition), Stute (Assumption 7 mean-independence "
+                "of trends), and Yatchew-HR (Assumption 8 linearity of "
+                "E[ΔY|D]). Assumption 5/6 boundary continuity is not "
+                "testable - the workflow vets what can be vetted."
+            ),
+            code=(
+                "from diff_diff import did_had_pretest_workflow\n"
+                "report = did_had_pretest_workflow(\n"
+                "    data, outcome_col='y', unit_col='unit',\n"
+                "    time_col='t', dose_col='d',\n"
+                "    first_treat_col='first_treat')\n"
+                "print(report.summary())"
+            ),
+            step_name="parallel_trends",
+        ),
+        _step(
+            baker_step=4,
+            label="Switch to ContinuousDiD or CallawaySantAnna if untreated units exist",
+            why=(
+                "HAD targets the no-untreated-unit case where every unit "
+                "is treated at some positive dose. If your panel actually "
+                "contains units with D = 0 (genuinely untreated), HAD's "
+                "WAS divisor under-weights the never-treated subset and a "
+                "different estimator is correct: ContinuousDiD for "
+                "dose-response on data with untreated controls, or "
+                "CallawaySantAnna for binary-staggered timing."
+            ),
+            code=(
+                "# Check for untreated units:\n"
+                "if (data['first_treat'] == 0).any():\n"
+                "    # Untreated units exist - switch to ContinuousDiD:\n"
+                "    from diff_diff import ContinuousDiD\n"
+                "    cdid = ContinuousDiD()\n"
+                "    cdid_results = cdid.fit(\n"
+                "        data, outcome='y', unit='unit', time='t',\n"
+                "        first_treat='first_treat', dose='d')\n"
+                "    # Or CallawaySantAnna for binary-staggered timing:\n"
+                "    # from diff_diff import CallawaySantAnna\n"
+                "    # cs = CallawaySantAnna(control_group='never_treated')"
+            ),
+            step_name="estimator_selection",
+        ),
+        _step(
+            baker_step=6,
+            label="Inspect bandwidth diagnostics (continuous designs)",
+            why=(
+                "Continuous-dose designs (continuous_at_zero / "
+                "continuous_near_d_lower) use an MSE-DPI bandwidth selector "
+                "for the bias-corrected local-linear estimator. Bandwidth "
+                "choice affects WAS - verify the selector landed on a "
+                "viable bandwidth (not boundary-clipped or near-degenerate). "
+                "result.bandwidth_diagnostics is None on the mass_point "
+                "design (parametric, no bandwidth)."
+            ),
+            code=(
+                "# Inspect the auto-selected bandwidths:\n"
+                "result.bandwidth_diagnostics  # None on mass_point\n"
+                "# Re-fit with explicit h= / b= to test sensitivity"
+            ),
+            priority="medium",
+            step_name="sensitivity",
+        ),
+        _step(
+            baker_step=7,
+            label="Re-fit with aggregate='event_study' for per-horizon WAS",
+            why=(
+                "On multi-period panels, the event-study aggregate returns "
+                "per-event-time WAS estimates instead of a single scalar. "
+                "Reveals whether dose response grows, decays, or stabilizes "
+                "across post-treatment horizons. Pre-period placebos serve "
+                "as a parallel-trends sanity check."
+            ),
+            code=(
+                "from diff_diff import HeterogeneousAdoptionDiD\n"
+                "est = HeterogeneousAdoptionDiD()\n"
+                "es = est.fit(\n"
+                "    data, outcome_col='y', unit_col='unit',\n"
+                "    time_col='t', dose_col='d',\n"
+                "    first_treat_col='first_treat',\n"
+                "    aggregate='event_study')"
+            ),
+            priority="medium",
+            step_name="heterogeneity",
+        ),
+        _step(
+            baker_step=8,
+            label="Verify design auto-detection with explicit design=",
+            why=(
+                "design='auto' picks one of {continuous_at_zero, "
+                "continuous_near_d_lower, mass_point} from the dose "
+                "support. Re-fit with an explicit design= to verify the "
+                "auto-detection matched your panel structure - WAS vs "
+                "WAS_d_lower target parameters, and the bias-corrected "
+                "local-linear vs 2SLS estimation paths, differ in "
+                "interpretation."
+            ),
+            code=(
+                "# Refit with each candidate design and compare:\n"
+                "from diff_diff import HeterogeneousAdoptionDiD\n"
+                "for d in ['continuous_at_zero', 'continuous_near_d_lower',\n"
+                "          'mass_point']:\n"
+                "    try:\n"
+                "        alt = HeterogeneousAdoptionDiD(design=d).fit(...)\n"
+                "        print(d, alt.att, alt.target_parameter)\n"
+                "    except Exception as e:\n"
+                "        print(d, 'not applicable:', e)"
+            ),
+            priority="medium",
+            step_name="robustness",
+        ),
+    ]
+    warnings = _check_nan_att(results)
+    return steps, warnings
+
+
+def _handle_had_event_study(results: Any):
+    """HeterogeneousAdoptionDiD event-study guidance.
+
+    Five Baker et al. steps (3, 4, 6, 7, 8). Same framing convention as
+    _handle_had: "no untreated unit", dose variation, treatment varies
+    in intensity not status.
+    """
+    steps = [
+        _step(
+            baker_step=3,
+            label="Run the HAD pretest battery (event-study mode)",
+            why=(
+                "On multi-period panels, did_had_pretest_workflow with "
+                "aggregate='event_study' runs QUG plus joint Stute "
+                "pre-trends plus joint homogeneity-linearity Stute. The "
+                "joint Stute variants close the paper Section 4.2 step-2 "
+                "gap that the overall path explicitly flags as deferred."
+            ),
+            code=(
+                "from diff_diff import did_had_pretest_workflow\n"
+                "report = did_had_pretest_workflow(\n"
+                "    data, outcome_col='y', unit_col='unit',\n"
+                "    time_col='t', dose_col='d',\n"
+                "    first_treat_col='first_treat',\n"
+                "    aggregate='event_study')\n"
+                "print(report.summary())"
+            ),
+            step_name="parallel_trends",
+        ),
+        _step(
+            baker_step=4,
+            label="Switch to ContinuousDiD or CallawaySantAnna if untreated units exist",
+            why=(
+                "HAD targets the no-untreated-unit case. If your panel "
+                "contains units with D = 0, switch to "
+                "ContinuousDiD(aggregate='eventstudy') for dose-response "
+                "event study with untreated controls, or CallawaySantAnna "
+                "with aggregate='event_study' for binary-staggered timing."
+            ),
+            code=(
+                "# Check for untreated units:\n"
+                "if (data['first_treat'] == 0).any():\n"
+                "    from diff_diff import ContinuousDiD\n"
+                "    cdid = ContinuousDiD()\n"
+                "    es = cdid.fit(\n"
+                "        data, outcome='y', unit='unit', time='t',\n"
+                "        first_treat='first_treat', dose='d',\n"
+                "        aggregate='eventstudy')"
+            ),
+            step_name="estimator_selection",
+        ),
+        _step(
+            baker_step=6,
+            label="Use simultaneous (sup-t) confidence bands when reading multiple horizons",
+            why=(
+                "Pointwise CIs over-reject when you read multiple horizons "
+                "as a joint pattern. On weighted fits (survey_design= or "
+                "weights=), fit(cband=True) constructs simultaneous (sup-t) "
+                "bands across horizons via multiplier bootstrap. "
+                "result.cband_low / cband_high give the band endpoints; "
+                "cband_crit_value reports the sup-t critical value used."
+            ),
+            code=(
+                "from diff_diff import HeterogeneousAdoptionDiD\n"
+                "est = HeterogeneousAdoptionDiD(n_bootstrap=999, seed=42)\n"
+                "es = est.fit(\n"
+                "    data, outcome_col='y', unit_col='unit',\n"
+                "    time_col='t', dose_col='d',\n"
+                "    first_treat_col='first_treat',\n"
+                "    aggregate='event_study',\n"
+                "    survey_design=design, cband=True)\n"
+                "es.cband_low, es.cband_high  # simultaneous band endpoints"
+            ),
+            priority="medium",
+            step_name="sensitivity",
+        ),
+        _step(
+            baker_step=7,
+            label="Inspect per-horizon WAS arrays + pre-period placebos",
+            why=(
+                "Per-horizon WAS reveals adoption-effect dynamics. "
+                "Pre-period placebo horizons (event_times <= -2) should be "
+                "near zero - large pre-period coefficients flag a "
+                "parallel-trends or anticipation problem. The anchor "
+                "horizon e = -1 is excluded by construction."
+            ),
+            code=(
+                "import numpy as np\n"
+                "es.event_times, es.att, es.se  # per-horizon arrays\n"
+                "# Pre-period placebos (should be near zero):\n"
+                "pre_mask = es.event_times <= -2\n"
+                "es.att[pre_mask], es.se[pre_mask]"
+            ),
+            step_name="heterogeneity",
+        ),
+        _step(
+            baker_step=8,
+            label="Report the last-cohort-only WAS framing on staggered panels",
+            why=(
+                "On staggered panels (multiple treatment cohorts), fit() "
+                "auto-filters to the last treatment cohort plus "
+                "never-treated units and emits a UserWarning naming "
+                "kept/dropped counts (paper Appendix B.2). The resulting "
+                "estimand is a last-cohort-only WAS, NOT a multi-cohort "
+                "average - report it as such, and consider "
+                "ChaisemartinDHaultfoeuille for full staggered support."
+            ),
+            code=(
+                "# Inspect the kept/dropped cohort counts in the\n"
+                "# UserWarning emitted at fit time.\n"
+                "# For full multi-cohort support, see:\n"
+                "# from diff_diff import ChaisemartinDHaultfoeuille"
+            ),
+            priority="medium",
+            step_name="robustness",
+        ),
+    ]
+    warnings = _check_nan_att(results)
+    return steps, warnings
+
+
 def _handle_generic(results: Any):
     """Fallback for unknown result types."""
     steps = [
@@ -880,6 +1145,8 @@ _HANDLERS = {
     "ContinuousDiDResults": _handle_continuous,
     "TripleDifferenceResults": _handle_triple,
     "BaconDecompositionResults": _handle_bacon,
+    "HeterogeneousAdoptionDiDResults": _handle_had,
+    "HeterogeneousAdoptionDiDEventStudyResults": _handle_had_event_study,
 }
 
 
@@ -887,19 +1154,45 @@ _HANDLERS = {
 # Internal helpers
 # ---------------------------------------------------------------------------
 def _check_nan_att(results: Any) -> List[str]:
-    """Return warnings if ATT is NaN."""
+    """Return warnings if ATT is NaN.
+
+    Scalar path executes byte-identically to the pre-Phase-5 helper for
+    backcompat with the existing 12 untouched handlers. The ndarray
+    branch is reached only when ``float(att)`` raises TypeError on a
+    numpy array (HAD's event-study ``att`` field) and fires only when
+    every horizon is NaN - partial-NaN arrays are legitimate event-study
+    output (single-cluster collapse, degenerate horizon-specific design)
+    and would over-fire if flagged. Falls through to ``_handle_generic``
+    too: any future estimator returning ndarray ``att`` without a
+    dedicated handler gets the same all-NaN warning shape.
+    """
     # Check .att (DiDResults), .overall_att (staggered), .avg_att (MultiPeriod)
     att = getattr(results, "att", None)
     if att is None:
         att = getattr(results, "overall_att", None)
     if att is None:
         att = getattr(results, "avg_att", None)
-    if att is not None:
+    if att is None:
+        return []
+    try:
+        scalar = float(att)
+    except (TypeError, ValueError):
+        # Ndarray path (HAD event-study, future ndarray-att estimators).
+        # Use np.all (not np.any): partial-NaN arrays are legitimate.
         try:
-            att = float(att)
+            import numpy as np
+
+            arr = np.asarray(att, dtype=float)
         except (TypeError, ValueError):
             return []
-    if att is not None and math.isnan(att):
+        if arr.size and bool(np.all(np.isnan(arr))):
+            return [
+                "All per-horizon estimates are NaN — check data "
+                "preparation and model specification before proceeding "
+                "with diagnostics."
+            ]
+        return []
+    if math.isnan(scalar):
         return [
             "Estimation produced NaN ATT — check data preparation and "
             "model specification before proceeding with diagnostics."
@@ -907,9 +1200,7 @@ def _check_nan_att(results: Any) -> List[str]:
     return []
 
 
-def _filter_steps(
-    steps: List[Dict[str, Any]], completed: Set[str]
-) -> List[Dict[str, Any]]:
+def _filter_steps(steps: List[Dict[str, Any]], completed: Set[str]) -> List[Dict[str, Any]]:
     """Remove steps whose _step_name is in the completed set."""
     filtered = []
     for s in steps:
@@ -938,8 +1229,9 @@ def _print_output(output: Dict[str, Any]) -> None:
         for step in output["next_steps"]:
             priority = step.get("priority", "high")
             marker = "*" if priority == "high" else "-"
-            print(f"\n  {marker} [{priority.upper()}] Step {step['baker_step']}: "
-                  f"{step['label']}")
+            print(
+                f"\n  {marker} [{priority.upper()}] Step {step['baker_step']}: " f"{step['label']}"
+            )
             print(f"    Why: {step['why']}")
             if step.get("code"):
                 for line in step["code"].split("\n"):

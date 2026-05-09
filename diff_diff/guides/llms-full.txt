@@ -590,6 +590,68 @@ results = est.fit(data, outcome='outcome', unit='unit', time='period',
 results.print_summary()
 ```
 
+### HeterogeneousAdoptionDiD
+
+HeterogeneousAdoption DiD estimator (de Chaisemartin, Ciccia, D'Haultfœuille & Knau 2026). Targets a Weighted Average Slope (WAS) on **Heterogeneous Adoption Designs where no unit remains untreated** — every unit receives the treatment at some positive dose level, so the comparison structure comes from dose variation across units rather than from an untreated holdout. Treatment varies in intensity, not in status. Uses a bias-corrected local-linear estimator at the dose support boundary on continuous-dose designs (Design 1' / Design 1) and a 2SLS Wald-IV estimator on the mass-point design.
+
+```python
+HeterogeneousAdoptionDiD(
+    design: str = "auto",                     # "auto" / "continuous_at_zero" / "continuous_near_d_lower" / "mass_point"
+    alpha: float = 0.05,
+    n_bootstrap: int = 999,                   # Multiplier-bootstrap iterations for sup-t bands
+    seed: int | None = None,
+    h: float | None = None,                   # Bias-corrected local-linear bandwidth (auto-selected if None)
+    b: float | None = None,                   # Pilot bandwidth (auto-selected if None)
+    rcond: float | None = None,
+)
+```
+
+**Alias:** `HAD`
+
+**fit() parameters:**
+
+```python
+had.fit(
+    data: pd.DataFrame,
+    outcome_col: str,
+    unit_col: str,
+    time_col: str,
+    dose_col: str,
+    first_treat_col: str | None = None,        # Required on staggered panels (last-cohort auto-filter trigger)
+    aggregate: str | None = None,              # None (single scalar WAS) or "event_study" (per-horizon WAS)
+    cband: bool = True,                        # Simultaneous (sup-t) confidence bands on weighted event-study fits
+    survey_design: SurveyDesign | None = None, # Survey weights, strata, PSU, FPC
+    weights: np.ndarray | None = None,         # pweight shortcut (mutually exclusive with survey_design)
+) -> HeterogeneousAdoptionDiDResults | HeterogeneousAdoptionDiDEventStudyResults
+```
+
+**Usage:**
+
+```python
+from diff_diff import HeterogeneousAdoptionDiD, did_had_pretest_workflow
+
+# Vet the testable identifying assumptions first:
+report = did_had_pretest_workflow(
+    data, outcome_col='y', unit_col='unit', time_col='t',
+    dose_col='d', first_treat_col='first_treat')
+print(report.summary())
+
+# Single-period scalar WAS:
+est = HeterogeneousAdoptionDiD()
+results = est.fit(data, outcome_col='y', unit_col='unit',
+                  time_col='t', dose_col='d',
+                  first_treat_col='first_treat')
+print(results.summary())
+
+# Multi-period per-horizon WAS:
+es = est.fit(data, outcome_col='y', unit_col='unit',
+             time_col='t', dose_col='d',
+             first_treat_col='first_treat',
+             aggregate='event_study')
+```
+
+**Staggered panels.** On multi-cohort panels with `aggregate="event_study"`, `fit()` auto-filters to the last treatment cohort plus never-treated units (paper Appendix B.2) and emits a `UserWarning` naming kept/dropped counts. The estimand is then a **last-cohort-only WAS**, not a multi-cohort average. For full multi-cohort staggered support, see `ChaisemartinDHaultfoeuille`.
+
 ### StackedDiD
 
 Stacked DiD estimator (Wing, Freedman & Hollingsworth 2024). Addresses TWFE bias with corrective Q-weights.
@@ -1157,6 +1219,65 @@ Each event study effect dict contains: `effect`, `se`, `t_stat`, `p_value`, `con
 
 **Methods:** `summary()`, `print_summary()`, `to_dataframe()`
 
+### HeterogeneousAdoptionDiDResults
+
+Single-period results container for `HeterogeneousAdoptionDiD`.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `att` | `float` | Point estimate of the WAS parameter on the β-scale |
+| `se` | `float` | Standard error on the β-scale |
+| `t_stat` | `float` | T-statistic |
+| `p_value` | `float` | P-value |
+| `conf_int` | `tuple[float, float]` | Confidence interval |
+| `alpha` | `float` | CI level used at fit time |
+| `design` | `str` | Resolved design: `"continuous_at_zero"`, `"continuous_near_d_lower"`, or `"mass_point"` |
+| `target_parameter` | `str` | `"WAS"` (Design 1') or `"WAS_d_lower"` (Design 1 / mass-point) |
+| `d_lower` | `float` | Support infimum (`0.0` on Design 1', `min(d)` otherwise) |
+| `dose_mean` | `float` | `D_bar = (1/G) * sum(D_{g,2})` |
+| `n_obs` | `int` | Units contributing to estimation |
+| `n_treated` | `int` | Units with `D > d_lower` |
+| `n_control` | `int` | Units at or below `d_lower` |
+| `inference_method` | `str` | `"analytical_nonparametric"` or `"analytical_2sls"` |
+| `vcov_type` | `str | None` | Mass-point only: `"classical"`, `"hc1"`, or `"cr1"` |
+| `bandwidth_diagnostics` | `BandwidthResult | None` | MSE-DPI selector output (continuous designs); `None` on `mass_point` |
+| `survey_metadata` | `SurveyMetadata | None` | Repo-standard survey metadata when `survey_design=` / `weights=` is supplied |
+
+**Methods:** `summary()`, `print_summary()`, `to_dict()`, `to_dataframe()`
+
+### HeterogeneousAdoptionDiDEventStudyResults
+
+Per-horizon event-study results container for `HeterogeneousAdoptionDiD` with `aggregate="event_study"`. The anchor horizon `e = -1` is excluded by construction.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `event_times` | `np.ndarray` | Integer event-time labels `e = t - F`, sorted ascending |
+| `att` | `np.ndarray` | Per-horizon WAS point estimates |
+| `se` | `np.ndarray` | Per-horizon standard errors |
+| `t_stat` | `np.ndarray` | Per-horizon t-statistics |
+| `p_value` | `np.ndarray` | Per-horizon p-values |
+| `conf_int_low` | `np.ndarray` | Pointwise CI lower bounds |
+| `conf_int_high` | `np.ndarray` | Pointwise CI upper bounds |
+| `cband_low` | `np.ndarray | None` | Simultaneous (sup-t) band lower bounds; `None` on unweighted fits or when `cband=False` |
+| `cband_high` | `np.ndarray | None` | Simultaneous (sup-t) band upper bounds |
+| `cband_crit_value` | `float | None` | Sup-t critical value used for the simultaneous band |
+| `cband_method` | `str | None` | `"multiplier_bootstrap"` when populated |
+| `cband_n_bootstrap` | `int | None` | Bootstrap iterations used for the band |
+| `n_obs_per_horizon` | `np.ndarray` | Per-horizon contributing-unit counts |
+| `alpha` | `float` | CI level used at fit time |
+| `design` | `str` | Shared across horizons (paper Appendix B.2 invariant) |
+| `target_parameter` | `str` | Same convention as the single-period result |
+| `d_lower` | `float` | Support infimum, shared across horizons |
+| `dose_mean` | `float` | `D_bar` on the fit sample |
+| `F` | `object` | First-treatment period label |
+| `n_units` | `int` | Unique units contributing to the fit (post last-cohort filter) |
+| `inference_method` | `str` | `"analytical_nonparametric"` or `"analytical_2sls"` |
+| `survey_metadata` | `SurveyMetadata | None` | Populated on weighted fits |
+| `variance_formula` | `str | None` | Per-horizon variance family label |
+| `effective_dose_mean` | `float | None` | Weighted denominator |
+
+**Methods:** `summary()`, `print_summary()`, `to_dict()`, `to_dataframe()`
+
 ### TROPResults
 
 | Attribute | Type | Description |
@@ -1264,6 +1385,38 @@ did = DifferenceInDifferences(inference="wild_bootstrap", n_bootstrap=999,
                               bootstrap_weights="webb", cluster="state")
 results = did.fit(data, outcome='y', treatment='treated', time='post')
 ```
+
+## HAD Pretests
+
+Diagnostic pretests for the `HeterogeneousAdoptionDiD` identifying assumptions (de Chaisemartin, Ciccia, D'Haultfœuille & Knau 2026). The composite workflow `did_had_pretest_workflow` is the recommended entry point — call it before reporting WAS as causal.
+
+```python
+from diff_diff import (
+    did_had_pretest_workflow,
+    qug_test, stute_test, yatchew_hr_test,
+    stute_joint_pretest, joint_pretrends_test, joint_homogeneity_test,
+)
+
+# Composite workflow — bundles QUG + Stute + Yatchew per the paper's three-step battery
+report = did_had_pretest_workflow(
+    data, outcome_col='y', unit_col='unit', time_col='t',
+    dose_col='d', first_treat_col='first_treat',
+    aggregate='overall',  # or 'event_study' for joint Stute on multi-period panels
+    survey_design=None)   # SurveyDesign for survey-aware pretests (Phase 4.5 C)
+print(report.summary())
+print(report.all_pass, report.verdict)
+```
+
+Individual tests:
+
+- `qug_test(d)` — Assumption 5 support condition. Extreme order statistics, Exp(1)/Exp(1) limit law. **Permanently rejects** non-`None` `survey_design=` / `weights=` (`NotImplementedError`) per Phase 4.5 C0 deferral — extreme-value functionals are not smooth in the empirical CDF, so standard survey machinery does not yield a calibrated test.
+- `stute_test(d, dy)` — Assumption 7 mean-independence of trends via Cramér-von Mises functional with Mammen wild bootstrap. Survey-aware via PSU-level Mammen multiplier bootstrap.
+- `yatchew_hr_test(d, dy, *, null="linearity")` — Assumption 8 linearity of `E[ΔY|D]` via Yatchew (1997) heteroskedasticity-robust variance-ratio test. The `null="mean_independence"` mode (R `YatchewTest::yatchew_test(order=0)`) is also exposed for placebo-style mean-independence testing. Survey-aware via closed-form weighted variance components (no bootstrap).
+- `stute_joint_pretest(residuals_dict, d)` — joint Cramér-von Mises across K horizons with shared-η Mammen wild bootstrap (Delgado-Manteiga 2001 / Hlávka-Hušková 2020). Residuals-in core; the two data-in wrappers below construct residuals for the two paper-spelled nulls.
+- `joint_pretrends_test(...)` — joint pre-trends on K pre-periods (paper Section 4.2 step 2 closure on the event-study path).
+- `joint_homogeneity_test(...)` — joint linearity-and-homogeneity on K post-periods.
+
+The QUG-under-survey deferral is permanent; the linearity-family pretests support `survey_design=` (pweight, PSU, FPC) per Phase 4.5 C. Stratified designs and replicate-weight designs are deferred to follow-up PRs.
 
 ## Honest DiD Sensitivity Analysis
 
@@ -1734,7 +1887,8 @@ DIFF_DIFF_BACKEND=rust pytest     # Force Rust (fail if unavailable)
 | Staggered treatment timing | `CallawaySantAnna`, `ImputationDiD`, or `SunAbraham` |
 | Few treated units / synthetic control | `SyntheticDiD` |
 | Interactive fixed effects / factor confounding | `TROP` |
-| Continuous treatment intensity | `ContinuousDiD` |
+| Continuous treatment intensity (some units untreated) | `ContinuousDiD` |
+| No untreated unit / universal rollout (every unit treated at different doses) | `HeterogeneousAdoptionDiD` |
 | Two-criterion treatment, simultaneous (2x2x2 DDD) | `TripleDifference` |
 | Two-criterion treatment, staggered timing + eligibility | `StaggeredTripleDifference` |
 | Nonlinear outcome (binary/count) with staggered timing | `WooldridgeDiD` |

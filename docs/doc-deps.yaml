@@ -385,9 +385,9 @@ sources:
         section: "Universal Rollout (No Untreated Markets)"
         type: user_guide
         note: "Tip cross-link to T20 in the no-untreated section"
-      # Note: llms-full.txt does not yet have a HeterogeneousAdoptionDiD section
-      # (deferred to TODO.md Phase 5 follow-up); the dependency mapping will be
-      # added when that section lands.
+      - path: diff_diff/guides/llms-full.txt
+        section: "HeterogeneousAdoptionDiD"
+        type: user_guide
 
   diff_diff/had_pretests.py:
     drift_risk: medium
@@ -400,6 +400,9 @@ sources:
         type: api_reference
       - path: diff_diff/guides/llms.txt
         section: "Estimators"
+        type: user_guide
+      - path: diff_diff/guides/llms-full.txt
+        section: "HAD Pretests"
         type: user_guide
 
   diff_diff/local_linear.py:
@@ -799,6 +802,10 @@ sources:
     docs:
       - path: diff_diff/guides/llms-practitioner.txt
         type: user_guide
+      - path: diff_diff/guides/llms-full.txt
+        section: "Practitioner Workflow"
+        type: user_guide
+        note: "HAD handlers (_handle_had / _handle_had_event_study) emit did_had_pretest_workflow + bandwidth_diagnostics references; symmetric Step-4 routing in _handle_continuous"
 
   # ── Visualization (visualization group) ────────────────────────────
 
