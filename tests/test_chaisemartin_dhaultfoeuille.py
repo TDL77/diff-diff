@@ -9468,6 +9468,131 @@ class TestByPathSurveyDesignAnalytical:
         assert any_finite
 
     @pytest.mark.slow
+    def test_per_path_inference_refreshes_to_lower_final_df(self):
+        """Deterministic stale-vs-final df regression.
+
+        Forces a later IF site to return a smaller ``n_valid`` than the
+        per-path snapshot via monkeypatch on ``_compute_se``: a flag is
+        set after ``_compute_path_effects`` returns, and any subsequent
+        ``_compute_se`` call (global placebo / overall / joiners /
+        leavers) returns a hardcoded low ``n_valid``. Per-path effects
+        therefore snapshot a HIGH df at their call site, while the
+        final ``_replicate_n_valid_list`` is bounded by the lowered
+        post-per-path appends, producing a strictly smaller final df.
+
+        Without ``_refresh_path_inference()`` running from the final
+        block, per-path effect inference would retain the stale high
+        df. This test asserts every populated per-path entry's
+        ``t_stat`` / ``p_value`` / ``conf_int`` matches
+        ``safe_inference(effect, se, df=results.survey_metadata.df_survey)``
+        (the LOW final df), proving the refresh moved the values to
+        the post-append df.
+
+        Regression for PR #408 R1 P1 / R3 P2 (deterministic version).
+        """
+        import importlib
+        import unittest.mock as _mock
+
+        from diff_diff.survey import SurveyDesign
+        from diff_diff.utils import safe_inference
+
+        _cd_mod = importlib.import_module("diff_diff.chaisemartin_dhaultfoeuille")
+
+        df = _by_path_survey_data()
+        n_obs = len(df)
+        rng = np.random.default_rng(7)
+        # Use enough replicate columns so the natural n_valid is large
+        # and our forced low n_valid is detectably smaller.
+        rep_cols = [f"rep_{i}" for i in range(20)]
+        for col in rep_cols:
+            df[col] = df["survey_weights"] * (1.0 + 0.05 * rng.standard_normal(n_obs))
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        est = ChaisemartinDHaultfoeuille(by_path=2, drop_larger_lower=False)
+
+        real_compute_se = _cd_mod._compute_se
+        real_path_effects = _cd_mod._compute_path_effects
+        post_path_flag = [False]
+        forced_low_n_valid = 5
+
+        def wrapped_path_effects(*args, **kwargs):
+            result = real_path_effects(*args, **kwargs)
+            post_path_flag[0] = True
+            return result
+
+        def wrapped_compute_se(*args, **kwargs):
+            se, n_valid = real_compute_se(*args, **kwargs)
+            if post_path_flag[0] and n_valid is not None and n_valid > forced_low_n_valid:
+                return se, forced_low_n_valid
+            return se, n_valid
+
+        with _mock.patch.object(
+            _cd_mod, "_compute_path_effects",
+            side_effect=wrapped_path_effects,
+        ), _mock.patch.object(
+            _cd_mod, "_compute_se",
+            side_effect=wrapped_compute_se,
+        ):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                res = est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3, survey_design=sd,
+                )
+
+        # The forced low n_valid (5) at later IF sites bounds the final
+        # effective df at 5 - 1 = 4. JK1 / replicate convention:
+        # df_survey = min(n_valid) - 1.
+        expected_low_df = forced_low_n_valid - 1
+        assert res.survey_metadata is not None
+        assert res.survey_metadata.df_survey == expected_low_df, (
+            f"Expected forced final df={expected_low_df}, got "
+            f"{res.survey_metadata.df_survey}. The monkeypatch did not "
+            f"force a divergence — adjust forced_low_n_valid or fixture."
+        )
+
+        # Per-path effects entries snapshot df at fit-time BEFORE the
+        # forced lowering kicked in (so their snapshot df > final df).
+        # If `_refresh_path_inference` runs from the final block, every
+        # entry's t_stat / p_value / conf_int is recomputed at the low
+        # final df. If the helper is called from an earlier block (the
+        # bug), per-path effects keep the stale high-df inference.
+        assert res.path_effects is not None
+        any_compared = False
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                if vals["n_obs"] == 0 or not np.isfinite(vals["se"]):
+                    continue
+                t_final, p_final, ci_final = safe_inference(
+                    vals["effect"], vals["se"],
+                    alpha=est.alpha, df=expected_low_df,
+                )
+                np.testing.assert_allclose(
+                    vals["t_stat"], t_final, atol=1e-12,
+                    err_msg=(
+                        f"path={path} l={l_h}: t_stat reflects stale "
+                        f"snapshot df, not final df={expected_low_df}"
+                    ),
+                )
+                np.testing.assert_allclose(
+                    vals["p_value"], p_final, atol=1e-12,
+                    err_msg=f"path={path} l={l_h}: p_value stale",
+                )
+                np.testing.assert_allclose(
+                    vals["conf_int"], ci_final, atol=1e-12,
+                    err_msg=f"path={path} l={l_h}: conf_int stale",
+                )
+                any_compared = True
+        assert any_compared, (
+            "No per-path effects entry had finite SE — forcing function "
+            "did not exercise the refresh path."
+        )
+
+    @pytest.mark.slow
     def test_refresh_path_inference_called_from_final_block(self):
         """Pin the helper's call site to the final R2 P1b block.
 
