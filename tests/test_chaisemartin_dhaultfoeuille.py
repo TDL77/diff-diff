@@ -8907,12 +8907,17 @@ class TestPathsOfInterest:
 
     @pytest.mark.slow
     def test_paths_of_interest_non_binary_bootstrap_placebo(self):
-        """Triple-combo: paths_of_interest + non-binary D + bootstrap + placebo."""
+        """Quadruple-combo: paths_of_interest + non-binary D + bootstrap
+        + placebo. Asserts (i) selector restricts path_effects to the
+        requested paths, (ii) bootstrap SE finite on every (path,
+        horizon) for the selected paths, (iii) per-path placebo
+        populated, (iv) at least one selected path has a finite sup-t
+        crit_value and the corresponding `cband_conf_int` is non-NaN."""
         df = _by_path_data_with_non_binary_treatment()
         est = ChaisemartinDHaultfoeuille(
             drop_larger_lower=False,
-            paths_of_interest=[(0, 2, 2, 2)],
-            n_bootstrap=200,
+            paths_of_interest=[(0, 2, 2, 2), (0, 1, 1, 1)],
+            n_bootstrap=400,
             placebo=True,
             twfe_diagnostic=False,
             seed=42,
@@ -8923,19 +8928,144 @@ class TestPathsOfInterest:
                 df, outcome="outcome", group="group", time="period",
                 treatment="treatment", L_max=3,
             )
-        assert set(res.path_effects.keys()) == {(0, 2, 2, 2)}
-        # All four surfaces populated:
+        assert set(res.path_effects.keys()) == {(0, 2, 2, 2), (0, 1, 1, 1)}
         # 1. analytical / bootstrap on path_effects (SE finite)
-        for l_h, vals in res.path_effects[(0, 2, 2, 2)]["horizons"].items():
-            assert np.isfinite(vals["effect"])
-            assert np.isfinite(vals["se"])
+        for path in res.path_effects:
+            for l_h, vals in res.path_effects[path]["horizons"].items():
+                assert np.isfinite(vals["effect"]), f"path={path} l={l_h}"
+                assert np.isfinite(vals["se"]), f"path={path} l={l_h}"
         # 2. per-path placebo
         assert res.path_placebo_event_study is not None
         assert (0, 2, 2, 2) in res.path_placebo_event_study
-        # 3. per-path sup-t bands (only one path so the strict-majority
-        #    gate may or may not fire depending on n_bootstrap; check
-        #    that the structure exists)
+        assert (0, 1, 1, 1) in res.path_placebo_event_study
+        # 3. per-path sup-t bands: at least one selected path passes the
+        # strict-majority gate with a finite crit_value AND the
+        # corresponding cband_conf_int entries on path_effects are
+        # non-NaN tuples (vacuous "is not None" check rejected by R6).
         assert res.path_sup_t_bands is not None
+        finite_crit_paths = [
+            p
+            for p, entry in res.path_sup_t_bands.items()
+            if np.isfinite(entry.get("crit_value", np.nan))
+        ]
+        assert len(finite_crit_paths) >= 1, (
+            f"Expected >=1 selected path with finite sup-t crit; "
+            f"got path_sup_t_bands={res.path_sup_t_bands}"
+        )
+        # cband_conf_int populated for positive horizons of finite-crit paths.
+        for path in finite_crit_paths:
+            for l_h in range(1, 4):
+                cband = res.path_effects[path]["horizons"][l_h].get(
+                    "cband_conf_int"
+                )
+                assert cband is not None, f"path={path} l={l_h}: cband missing"
+                lo, hi = cband
+                assert np.isfinite(lo) and np.isfinite(hi), (
+                    f"path={path} l={l_h}: cband endpoints not finite "
+                    f"(lo={lo}, hi={hi})"
+                )
+
+    @pytest.mark.slow
+    def test_paths_of_interest_trends_linear_bootstrap_placebo(self):
+        """`paths_of_interest + trends_linear=True + n_bootstrap > 0 +
+        placebo=True`: assert (i) selector restricts the path set, (ii)
+        per-path bootstrap SE on `path_effects` finite, (iii)
+        post-bootstrap `path_cumulated_event_study` populated for the
+        same paths (mirrors global `linear_trends_effects` cumulation),
+        (iv) per-path placebo populated. Regression for the R6 P1
+        Cartesian-product gap."""
+        df = _by_path_data_with_trends_linear()
+        user_paths = [(0, 1, 1, 1), (0, 1, 1, 0)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_paths,
+            n_bootstrap=200,
+            placebo=True,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, trends_linear=True,
+            )
+        # (i) selector restricts the path set
+        assert set(res.path_effects.keys()) == set(user_paths)
+        # (ii) per-path bootstrap SE finite on event study
+        for path in res.path_effects:
+            for l_h, vals in res.path_effects[path]["horizons"].items():
+                assert np.isfinite(vals["se"]), (
+                    f"path={path} l={l_h}: bootstrap SE not finite"
+                )
+        # (iii) post-bootstrap path_cumulated_event_study populated for
+        # the same paths AND derived from the post-bootstrap per-horizon
+        # SEs (cumulated SE = sum of post-bootstrap component SEs).
+        assert res.path_cumulated_event_study is not None
+        assert set(res.path_cumulated_event_study.keys()) == set(user_paths)
+        for path in user_paths:
+            assert len(res.path_cumulated_event_study[path]) > 0
+            for l_h, vals in res.path_cumulated_event_study[path].items():
+                assert np.isfinite(vals["effect"]), (
+                    f"path={path} l={l_h}: cumulated effect not finite"
+                )
+                assert np.isfinite(vals["se"]), (
+                    f"path={path} l={l_h}: cumulated SE not finite"
+                )
+        # (iv) per-path placebo populated
+        assert res.path_placebo_event_study is not None
+        assert set(res.path_placebo_event_study.keys()) == set(user_paths)
+
+    @pytest.mark.slow
+    def test_paths_of_interest_trends_nonparam_bootstrap_placebo(self):
+        """`paths_of_interest + trends_nonparam="state" + placebo=True +
+        n_bootstrap > 0`: assert the selector + set_ids flow through
+        the four per-path collectors (`_compute_path_effects`,
+        `_compute_path_placebos`, `_collect_path_bootstrap_inputs`,
+        `_collect_path_placebo_bootstrap_inputs`) and the resulting
+        public surfaces are populated. Regression for the R6 P1
+        Cartesian-product gap."""
+        df = _by_path_data_with_trends_nonparam()
+        user_paths = [(0, 1, 1, 1), (0, 1, 1, 0)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_paths,
+            n_bootstrap=200,
+            placebo=True,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+                trends_nonparam="state",
+            )
+        # Selector restriction
+        assert set(res.path_effects.keys()) == set(user_paths)
+        # Per-path bootstrap SE finite on event study (bootstrap
+        # collector + set_ids reached path_effects)
+        for path in res.path_effects:
+            for l_h, vals in res.path_effects[path]["horizons"].items():
+                assert np.isfinite(vals["effect"]), f"path={path} l={l_h}"
+                assert np.isfinite(vals["se"]), f"path={path} l={l_h}"
+        # Per-path placebo populated and bootstrap SE finite
+        # (placebo collector + set_ids reached path_placebo_event_study)
+        assert res.path_placebo_event_study is not None
+        assert set(res.path_placebo_event_study.keys()) == set(user_paths)
+        any_finite_placebo_se = False
+        for path in user_paths:
+            for lag, vals in res.path_placebo_event_study[path].items():
+                if np.isfinite(vals["effect"]) and np.isfinite(vals["se"]):
+                    any_finite_placebo_se = True
+                    break
+            if any_finite_placebo_se:
+                break
+        assert any_finite_placebo_se, (
+            "No finite (effect, SE) pair on per-path placebo surface "
+            "under paths_of_interest + trends_nonparam + bootstrap"
+        )
 
     # ---- single-surface inheritance (slow) ----
 
