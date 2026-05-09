@@ -14,10 +14,13 @@ tolerance band, this test fails and a maintainer is forced to either
 update the prose or investigate the methodology shift before merge.
 
 T21 DGP differs from T20: dose distribution is `Uniform[$0.01K, $50K]`
-(was `[$5K, $50K]` in T20) so this is a Design 1 (`continuous_at_zero`)
-panel where the QUG step fails-to-reject and the verdict text fires the
-load-bearing "Assumption 7 deferred" pivot for the upgrade-arc narrative.
-DGP and seed locked at `_scratch/t21_pretests/10_panel.py`.
+(was `[$5K, $50K]` in T20). The true support is strictly positive but very
+near zero, chosen so the QUG step fails-to-reject `H0: d_lower = 0` in this
+finite sample. That QUG outcome lets the workflow's `design="auto"` rule
+land on `continuous_at_zero` (a workflow decision based on the test, not a
+property of the true DGP), which in turn populates the verdict text with
+the load-bearing "Assumption 7 deferred" substring used for the upgrade-arc
+narrative. DGP and seed locked at `_scratch/t21_pretests/10_panel.py`.
 Quoted numbers derived from `_scratch/t21_pretests/50_compose_narrative.py`.
 
 Bootstrap p-value pins use **abs tolerance bands >= 0.15** per
@@ -41,7 +44,7 @@ N_PERIODS = 8
 COHORT_PERIOD = 5
 TRUE_SLOPE = 100.0
 BASELINE_VISITS = 5000.0
-DOSE_LOW = 0.01  # T21 change vs T20 (was 5.0): supports continuous_at_zero design.
+DOSE_LOW = 0.01  # T21 change vs T20 (was 5.0): near-zero lower bound chosen so QUG fails-to-reject H0: d_lower = 0.
 DOSE_HIGH = 50.0
 WORKFLOW_SEED = 21
 
@@ -122,10 +125,30 @@ def event_study_report(panel):
     )
 
 
+@pytest.fixture(scope="module")
+def yatchew_side_panel_inputs(panel):
+    """Section 5's Yatchew side panel: post-period dose paired with the
+    within-pre-period first-difference dy = Y[w4] - Y[w3]. Shared
+    construction between the linearity-mode and mean_independence-mode
+    tests below."""
+    panel_sorted = panel.sort_values(["dma_id", "week"]).reset_index(drop=True)
+    pre = panel_sorted[panel_sorted["week"].isin([3, 4])]
+    pre_pivot = pre.pivot(index="dma_id", columns="week", values="weekly_visits")
+    dy = (pre_pivot[4] - pre_pivot[3]).to_numpy(dtype=np.float64)
+    post_dose = (
+        panel_sorted[panel_sorted["week"] == 5]
+        .set_index("dma_id")
+        .sort_index()["regional_spend_k"]
+        .to_numpy(dtype=np.float64)
+    )
+    return post_dose, dy
+
+
 def test_panel_matches_t21_locked_dgp(panel):
     """Section 2 narrative claims 60 DMAs over 8 weeks, regional spend
-    spanning roughly $10 to $50K (the T21 Design 1 variant). If the
-    DGP drifts, this surfaces."""
+    drawn from Uniform[$0.01K, $50K] - true support strictly positive
+    but very near zero (so QUG can fail-to-reject in this finite
+    sample). If the DGP drifts, this surfaces."""
     assert panel["dma_id"].nunique() == N_UNITS
     assert panel["week"].nunique() == N_PERIODS
     post_doses = (
@@ -163,9 +186,10 @@ def test_overall_path_structural_anchors(overall_report):
 
 
 def test_overall_qug_fails_to_reject(overall_report):
-    """Section 3 narrative claims QUG fails to reject (consistent with
-    Design 1, `continuous_at_zero`). QUG is fully deterministic; pin
-    exact rounded values."""
+    """Section 3 narrative claims QUG fails-to-reject H0: d_lower = 0
+    (data are statistically consistent with continuous_at_zero design;
+    HAD's design="auto" rule selects that path on this QUG outcome).
+    QUG is fully deterministic; pin exact rounded values."""
     assert overall_report.qug.reject is False
     # T statistic = D_(1) / (D_(2) - D_(1)) is fully deterministic.
     assert round(overall_report.qug.t_stat, 2) == 3.86, overall_report.qug.t_stat
@@ -267,21 +291,12 @@ def test_event_study_homogeneity_fails_to_reject(event_study_report):
     assert hj.p_value > 0.50, hj.p_value
 
 
-def test_yatchew_side_panel_linearity_passes(panel):
+def test_yatchew_side_panel_linearity_passes(yatchew_side_panel_inputs):
     """Section 5 (Yatchew side panel) narrative claims `null="linearity"`
-    fails to reject on the within-pre-period first-difference paired
+    does not reject on the within-pre-period first-difference paired
     with post-period dose. Pin the T_hr statistic (deterministic);
     Yatchew has no bootstrap component."""
-    panel_sorted = panel.sort_values(["dma_id", "week"]).reset_index(drop=True)
-    pre = panel_sorted[panel_sorted["week"].isin([3, 4])]
-    pre_pivot = pre.pivot(index="dma_id", columns="week", values="weekly_visits")
-    dy = (pre_pivot[4] - pre_pivot[3]).to_numpy(dtype=np.float64)
-    post_dose = (
-        panel_sorted[panel_sorted["week"] == 5]
-        .set_index("dma_id")
-        .sort_index()["regional_spend_k"]
-        .to_numpy(dtype=np.float64)
-    )
+    post_dose, dy = yatchew_side_panel_inputs
     res = yatchew_hr_test(d=post_dose, dy=dy, alpha=0.05, null="linearity")
     assert res.reject is False
     assert res.null_form == "linearity"
@@ -289,20 +304,11 @@ def test_yatchew_side_panel_linearity_passes(panel):
     assert round(res.sigma2_lin, 2) == 6.53, res.sigma2_lin
 
 
-def test_yatchew_side_panel_mean_independence_passes(panel):
-    """Section 5 narrative claims `null="mean_independence"` fails to
+def test_yatchew_side_panel_mean_independence_passes(yatchew_side_panel_inputs):
+    """Section 5 narrative claims `null="mean_independence"` does not
     reject on the same input but with larger sigma2_lin (the stricter
     null has more residual variance to explain)."""
-    panel_sorted = panel.sort_values(["dma_id", "week"]).reset_index(drop=True)
-    pre = panel_sorted[panel_sorted["week"].isin([3, 4])]
-    pre_pivot = pre.pivot(index="dma_id", columns="week", values="weekly_visits")
-    dy = (pre_pivot[4] - pre_pivot[3]).to_numpy(dtype=np.float64)
-    post_dose = (
-        panel_sorted[panel_sorted["week"] == 5]
-        .set_index("dma_id")
-        .sort_index()["regional_spend_k"]
-        .to_numpy(dtype=np.float64)
-    )
+    post_dose, dy = yatchew_side_panel_inputs
     res_mi = yatchew_hr_test(d=post_dose, dy=dy, alpha=0.05, null="mean_independence")
     res_lin = yatchew_hr_test(d=post_dose, dy=dy, alpha=0.05, null="linearity")
     assert res_mi.reject is False
