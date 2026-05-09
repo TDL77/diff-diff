@@ -222,6 +222,48 @@ class TestChaisemartinDHaultfoeuilleBasicAPI:
         assert results_class.overall_att == pytest.approx(results_fn.overall_att)
         assert results_class.overall_se == pytest.approx(results_fn.overall_se)
 
+    def test_convenience_function_routes_paths_of_interest_to_init(self):
+        """`paths_of_interest` is an __init__ kwarg; the convenience helper
+        must split it out of `**kwargs` rather than letting it fall through
+        to fit() (which would raise TypeError). Regression for the
+        signature-derived split."""
+        df = _by_path_three_path_data()
+        results_class = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            r_class = results_class.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+            )
+            r_fn = chaisemartin_dhaultfoeuille(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                drop_larger_lower=False,
+                paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+                twfe_diagnostic=False,
+                seed=42,
+                L_max=3,
+            )
+        # Both surfaces produce identical per-path effects.
+        assert list(r_fn.path_effects.keys()) == list(r_class.path_effects.keys())
+        for path in r_fn.path_effects:
+            for l_h, vals in r_fn.path_effects[path]["horizons"].items():
+                assert vals["effect"] == pytest.approx(
+                    r_class.path_effects[path]["horizons"][l_h]["effect"]
+                )
+
     def test_minimal_computation_path(self):
         # Disable everything optional; verify still works
         data = generate_reversible_did_data(n_groups=30, n_periods=4, seed=1)
@@ -3819,31 +3861,6 @@ class TestByPathGates:
                     **fit_kwargs,
                 )
 
-    def test_forbids_non_binary_treatment(self):
-        # Continuous-dose treatment — detected inside the cell aggregator.
-        rng = np.random.default_rng(0)
-        rows = []
-        for g in range(1, 7):
-            for t in range(4):
-                d = float(g % 3) if (g <= 3 and t >= 1) else 0.0
-                y = d + rng.normal()
-                rows.append({"group": g, "period": t, "treatment": d, "outcome": y})
-        data = pd.DataFrame(rows)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            est = ChaisemartinDHaultfoeuille(
-                drop_larger_lower=False, by_path=3, twfe_diagnostic=False
-            )
-            with pytest.raises(NotImplementedError, match="non-binary"):
-                est.fit(
-                    data,
-                    outcome="outcome",
-                    group="group",
-                    time="period",
-                    treatment="treatment",
-                    L_max=2,
-                )
-
 
 class TestByPathBehavior:
     """Path enumeration, ranking, and result dict shape."""
@@ -6621,7 +6638,7 @@ class TestByPathControls:
             str(w.message)
             for w in caught
             if issubclass(w.category, UserWarning)
-            and "by_path + controls" in str(w.message)
+            and "+ controls" in str(w.message)
             and "multi-baseline" not in str(w.message).lower()
             or (
                 issubclass(w.category, UserWarning)
@@ -7562,7 +7579,7 @@ class TestByPathTrendsLinear:
             str(w.message)
             for w in caught
             if issubclass(w.category, UserWarning)
-            and "by_path + trends_linear" in str(w.message)
+            and "+ trends_linear" in str(w.message)
             and "switcher baselines" in str(w.message)
         ]
         assert deviation_msgs, (
@@ -7592,7 +7609,7 @@ class TestByPathTrendsLinear:
             str(w.message)
             for w in caught
             if issubclass(w.category, UserWarning)
-            and "by_path + trends_linear" in str(w.message)
+            and "+ trends_linear" in str(w.message)
             and "switcher baselines" in str(w.message)
         ]
         assert not deviation_msgs, (
@@ -7650,7 +7667,7 @@ class TestByPathTrendsLinear:
             str(w.message)
             for w in caught
             if issubclass(w.category, UserWarning)
-            and "by_path + trends_linear" in str(w.message)
+            and "+ trends_linear" in str(w.message)
             and "F_g=3" in str(w.message)
         ]
         assert boundary_msgs, (
@@ -7701,7 +7718,7 @@ class TestByPathTrendsLinear:
             str(w.message)
             for w in caught
             if issubclass(w.category, UserWarning)
-            and "by_path + trends_linear" in str(w.message)
+            and "+ trends_linear" in str(w.message)
             and "switcher baselines" in str(w.message)
         ]
         assert not deviation_msgs, (
@@ -8100,3 +8117,998 @@ class TestByPathTrendsNonparam:
             "trends_nonparam restriction; set_ids may not be reaching "
             "the per-path placebo bootstrap collector."
         )
+
+
+# ---------------------------------------------------------------------------
+# Wave 3 #8: by_path + non-binary integer treatment
+# ---------------------------------------------------------------------------
+
+
+def _by_path_data_with_non_binary_treatment(seed: int = 44) -> pd.DataFrame:
+    """Multi-path single-baseline panel with integer-coded D in {0, 1, 2}.
+
+    13-period panel, 78 switchers across 3 non-binary paths
+    (`(0, 1, 1, 1)`, `(0, 2, 2, 2)`, `(0, 1, 2, 2)`), F_g spread
+    starting at 4 to keep clear of any pre-window F_g boundary cases,
+    plus 20 never-treated (D=0) and 20 always-treated (D=2) controls.
+    Outcome shifts proportionally to D so per-path effects are
+    distinguishable.
+    """
+    rng = np.random.default_rng(seed)
+    n_periods = 13
+    target_paths = [
+        (0, 1, 1, 1),  # path 1, low-dose sustained
+        (0, 2, 2, 2),  # path 2, high-dose sustained
+        (0, 1, 2, 2),  # path 3, ramp-up
+    ]
+    fg_path_counts = [
+        (4, 0, 18), (5, 0, 14),  # path 1 = 32
+        (6, 1, 14), (7, 1, 12),  # path 2 = 26
+        (8, 2, 12), (9, 2, 8),   # path 3 = 20
+    ]
+    rows = []
+    g_id = 0
+    for F_g, path_idx, count in fg_path_counts:
+        target = target_paths[path_idx]
+        L_max = 3
+        for _ in range(count):
+            D_row = [0] * n_periods
+            for j in range(L_max + 1):
+                D_row[F_g - 1 + j] = target[j]
+            for t in range(F_g + L_max, n_periods):
+                D_row[t] = target[L_max]
+            for t, d in enumerate(D_row):
+                rows.append({"group": g_id, "period": t, "treatment": d})
+            g_id += 1
+    for _ in range(20):
+        for t in range(n_periods):
+            rows.append({"group": g_id, "period": t, "treatment": 0})
+        g_id += 1
+    for _ in range(20):
+        for t in range(n_periods):
+            rows.append({"group": g_id, "period": t, "treatment": 2})
+        g_id += 1
+    df = pd.DataFrame(rows)
+    n_groups = df["group"].nunique()
+    group_fe = rng.normal(0, 2.0, size=n_groups)
+    df["outcome"] = (
+        10.0
+        + group_fe[df["group"].values]
+        + 0.1 * df["period"].values
+        + 1.5 * df["treatment"].values
+        + rng.normal(0, 0.5, size=len(df))
+    )
+    return df
+
+
+class TestByPathNonBinary:
+    """Wave 3 #8: ``by_path`` + non-binary integer treatment.
+
+    The previous gate at ``chaisemartin_dhaultfoeuille.py:1870`` rejected
+    non-binary treatment + by_path. After PR Wave 3 #8+#9 it is replaced
+    by a D-integer validation: integer-coded D (D in Z) is supported
+    and continuous D (D=1.5 etc.) raises ValueError.
+    """
+
+    def test_no_longer_raises_on_non_binary(self):
+        """by_path=2 + D in {0,1,2} fits without raising."""
+        df = _by_path_data_with_non_binary_treatment()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=2, twfe_diagnostic=False, seed=42
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert res.path_effects is not None
+        assert len(res.path_effects) == 2
+
+    def test_non_integer_D_raises(self):
+        """D values containing 1.5 raise ValueError."""
+        df = _by_path_data_with_non_binary_treatment()
+        # Cast `treatment` to float BEFORE assigning 1.5: on pandas >= 2.x
+        # `df.loc[mask, "treatment"] = 1.5` raises `TypeError: Invalid
+        # value '1.5' for dtype 'int64'` outright instead of silently
+        # coercing. We want to inject a continuous value to test the
+        # estimator's D-integer guard, not exercise pandas dtype coercion.
+        df["treatment"] = df["treatment"].astype(float)
+        mask = (df["group"] == 0) & (df["period"] == 4)
+        df.loc[mask, "treatment"] = 1.5
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=2, twfe_diagnostic=False, seed=42
+        )
+        with pytest.raises(ValueError, match="integer-coded"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3,
+                )
+
+    def test_negative_integer_D_supported(self):
+        """D in {-1, 0, 1} fits and produces correct path tuples."""
+        rng = np.random.default_rng(45)
+        rows = []
+        n_periods = 8
+        # 30 switchers on path (0, -1, -1, -1), F_g=4
+        for g in range(30):
+            for t in range(n_periods):
+                d = -1 if t >= 3 else 0
+                rows.append({"group": g, "period": t, "treatment": d})
+        # 30 switchers on path (0, 1, 1, 1), F_g=4
+        for g in range(30, 60):
+            for t in range(n_periods):
+                d = 1 if t >= 3 else 0
+                rows.append({"group": g, "period": t, "treatment": d})
+        # 20 never-treated controls
+        for g in range(60, 80):
+            for t in range(n_periods):
+                rows.append({"group": g, "period": t, "treatment": 0})
+        df = pd.DataFrame(rows)
+        df["outcome"] = (
+            10.0
+            + df["group"].values * 0.1
+            + 0.1 * df["period"].values
+            + 2.0 * df["treatment"].values
+            + rng.normal(0, 0.5, size=len(df))
+        )
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=2, twfe_diagnostic=False, seed=42
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert res.path_effects is not None
+        path_keys = set(res.path_effects.keys())
+        # Both paths should appear; the negative-D path must contain -1
+        assert (0, -1, -1, -1) in path_keys
+        assert (0, 1, 1, 1) in path_keys
+
+    def test_path_effects_present_under_non_binary(self):
+        """path_effects populated; tuple keys are non-binary."""
+        df = _by_path_data_with_non_binary_treatment()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, twfe_diagnostic=False, seed=42
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert res.path_effects is not None
+        assert len(res.path_effects) == 3
+        # At least one path key should contain a 2 (non-binary marker).
+        any_non_binary = any(2 in p for p in res.path_effects.keys())
+        assert any_non_binary, (
+            f"Expected at least one non-binary integer in path keys, "
+            f"got {list(res.path_effects.keys())}"
+        )
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                assert np.isfinite(vals["effect"]), (
+                    f"path={path} l={l_h}: effect not finite"
+                )
+
+    def test_per_period_effects_unaffected_by_non_binary_by_path(self):
+        """per_period_effects is unchanged by the by_path lift."""
+        df = _by_path_data_with_non_binary_treatment()
+        est_no = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=None, twfe_diagnostic=False, seed=42
+        )
+        est_bp = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, twfe_diagnostic=False, seed=42
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_no = est_no.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+            res_bp = est_bp.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        # per_period_effects is computed before path enumeration; bit-identical.
+        for t in res_no.per_period_effects.keys():
+            for k in ("did_plus_t", "did_minus_t"):
+                v_no = res_no.per_period_effects[t].get(k)
+                v_bp = res_bp.per_period_effects[t].get(k)
+                if v_no is None or not np.isfinite(v_no):
+                    continue
+                assert np.isclose(v_no, v_bp, atol=1e-14, rtol=1e-14), (
+                    f"per_period_effects[{t}][{k}]: {v_no} != {v_bp}"
+                )
+
+    def test_to_dataframe_by_path_with_non_binary(self):
+        """level='by_path' DataFrame includes non-binary path-tuple labels."""
+        df = _by_path_data_with_non_binary_treatment()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, twfe_diagnostic=False, seed=42
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        out = res.to_dataframe(level="by_path")
+        assert len(out) > 0
+        # path column should contain non-binary integer tuples
+        any_non_binary = any(2 in p for p in out["path"].unique())
+        assert any_non_binary
+
+    def test_continuous_D_without_by_path_unaffected(self):
+        """Continuous D + by_path=None / paths_of_interest=None: no new gate fires."""
+        rng = np.random.default_rng(46)
+        rows = []
+        # 30 switchers with continuous D in {0, 1.5}
+        for g in range(30):
+            for t in range(8):
+                d = 1.5 if t >= 3 else 0.0
+                rows.append({"group": g, "period": t, "treatment": d})
+        for g in range(30, 50):
+            for t in range(8):
+                rows.append({"group": g, "period": t, "treatment": 0.0})
+        df = pd.DataFrame(rows)
+        df["outcome"] = (
+            10.0
+            + df["group"].values * 0.1
+            + 0.1 * df["period"].values
+            + 2.0 * df["treatment"].values
+            + rng.normal(0, 0.5, size=len(df))
+        )
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, twfe_diagnostic=False, seed=42
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            # No by_path; the new D-integer validation does not fire.
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=2,
+            )
+        assert np.isfinite(res.overall_att)
+
+    @pytest.mark.slow
+    def test_bootstrap_with_non_binary_finite_se(self):
+        """Bootstrap SE finite on every path under non-binary D."""
+        df = _by_path_data_with_non_binary_treatment()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, n_bootstrap=200,
+            twfe_diagnostic=False, seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                assert np.isfinite(vals["se"]), (
+                    f"path={path} l={l_h}: bootstrap SE not finite"
+                )
+
+    @pytest.mark.slow
+    def test_per_path_placebos_with_non_binary_present(self):
+        """path_placebo_event_study populated under non-binary + placebo."""
+        df = _by_path_data_with_non_binary_treatment()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, placebo=True,
+            twfe_diagnostic=False, seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert res.path_placebo_event_study is not None
+        assert len(res.path_placebo_event_study) > 0
+        # At least one (path, -l) entry has a finite point estimate.
+        any_finite = False
+        for path, lags in res.path_placebo_event_study.items():
+            for lag, vals in lags.items():
+                if np.isfinite(vals["effect"]):
+                    any_finite = True
+                    break
+            if any_finite:
+                break
+        assert any_finite
+
+    @pytest.mark.slow
+    def test_sup_t_bands_with_non_binary_finite_crit(self):
+        """Per-path sup-t crit_value finite under non-binary D."""
+        df = _by_path_data_with_non_binary_treatment()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, n_bootstrap=400,
+            twfe_diagnostic=False, seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert res.path_sup_t_bands is not None
+        # At least one path passed the strict-majority gate.
+        finite_crits = [
+            entry["crit_value"]
+            for entry in res.path_sup_t_bands.values()
+            if np.isfinite(entry["crit_value"])
+        ]
+        assert len(finite_crits) > 0, (
+            "Expected at least one finite crit_value under non-binary D + bootstrap"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Wave 3 #9: paths_of_interest (Python-only API, mutex with by_path)
+# ---------------------------------------------------------------------------
+
+
+class TestPathsOfInterest:
+    """``paths_of_interest`` user-specified path subset.
+
+    Validation, mutex with ``by_path``, behavior, and cross-feature
+    composition. No R parity (R has no list-based path selection).
+    """
+
+    # ---- __init__ validation ----
+
+    def test_invalid_type_raises(self):
+        with pytest.raises(ValueError, match="paths_of_interest must be"):
+            ChaisemartinDHaultfoeuille(paths_of_interest="not a list")
+
+    def test_empty_list_raises(self):
+        with pytest.raises(ValueError, match="must be non-empty"):
+            ChaisemartinDHaultfoeuille(paths_of_interest=[])
+
+    def test_non_tuple_path_raises(self):
+        with pytest.raises(ValueError, match=r"paths_of_interest\[0\]"):
+            ChaisemartinDHaultfoeuille(paths_of_interest=[{0, 1, 1, 1}])
+
+    def test_non_int_element_raises(self):
+        with pytest.raises(ValueError, match="must be an int"):
+            ChaisemartinDHaultfoeuille(
+                paths_of_interest=[(0, "a", 1, 1)]
+            )
+
+    def test_bool_element_raises(self):
+        with pytest.raises(ValueError, match="must be an int"):
+            ChaisemartinDHaultfoeuille(
+                paths_of_interest=[(False, True, True, True)]
+            )
+
+    def test_np_bool_element_raises(self):
+        with pytest.raises(ValueError, match="must be an int"):
+            ChaisemartinDHaultfoeuille(
+                paths_of_interest=[(np.bool_(True), 0, 0, 0)]
+            )
+
+    def test_np_integer_accepted_canonicalized(self):
+        est = ChaisemartinDHaultfoeuille(
+            paths_of_interest=[(np.int64(0), np.int32(1), 1, 1)]
+        )
+        # Canonicalized to Python int tuples.
+        assert est.paths_of_interest == [(0, 1, 1, 1)]
+        for v in est.paths_of_interest[0]:
+            assert type(v) is int
+
+    def test_mixed_lengths_raise(self):
+        with pytest.raises(ValueError, match="mixed lengths"):
+            ChaisemartinDHaultfoeuille(
+                paths_of_interest=[(0, 1), (0, 1, 1, 1)]
+            )
+
+    def test_mutex_with_by_path_raises(self):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            ChaisemartinDHaultfoeuille(
+                by_path=2, paths_of_interest=[(0, 1, 1, 1)]
+            )
+
+    def test_set_params_re_validates_mutex_by_path_added(self):
+        est = ChaisemartinDHaultfoeuille(paths_of_interest=[(0, 1, 1, 1)])
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            est.set_params(by_path=2)
+
+    def test_set_params_re_validates_mutex_poi_added(self):
+        """Reciprocal: construct with by_path, set_params(paths_of_interest=...)."""
+        est = ChaisemartinDHaultfoeuille(by_path=2)
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            est.set_params(paths_of_interest=[(0, 1, 1, 1)])
+
+    def test_set_params_failed_validation_is_transactional(self):
+        """A failed `set_params()` must leave estimator state unchanged
+        (regression for R5 P2 finding: prior implementation mutated
+        before validation, leaving both selectors populated when the
+        mutex check raised, which `fit()` then silently consumed)."""
+        est = ChaisemartinDHaultfoeuille(paths_of_interest=[(0, 1, 1, 1)])
+        # Capture pre-call state.
+        before = est.get_params()
+        # Mutex violation: by_path AND paths_of_interest both non-None.
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            est.set_params(by_path=2)
+        # Post-failure state is rolled back to pre-call.
+        after = est.get_params()
+        assert after == before, (
+            f"set_params() rollback failed: by_path={after['by_path']}, "
+            f"paths_of_interest={after['paths_of_interest']}"
+        )
+        # Subsequent valid set_params() succeeds against rolled-back state.
+        est.set_params(by_path=2, paths_of_interest=None)
+        params = est.get_params()
+        assert params["by_path"] == 2
+        assert params["paths_of_interest"] is None
+
+    def test_get_params_includes_paths_of_interest(self):
+        est = ChaisemartinDHaultfoeuille(
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)]
+        )
+        params = est.get_params()
+        assert "paths_of_interest" in params
+        assert params["paths_of_interest"] == [(0, 1, 1, 1), (0, 1, 0, 0)]
+
+    def test_canonicalized_duplicates_dedup_warn(self):
+        """Cross-numeric-type duplicates collapse and warn at fit-time."""
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[
+                (np.int64(0), 1, 1, 1),
+                (0, 1, 1, 1),
+            ],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        # Canonicalization at __init__ produces two identical Python int
+        # tuples; the dedup warning fires inside _enumerate_treatment_paths.
+        with pytest.warns(UserWarning, match="duplicate path"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("default", UserWarning)
+                est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3,
+                )
+
+    # ---- fit-time validation ----
+
+    def test_wrong_length_raises_at_fit(self):
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1)],  # length 3, expected L_max+1=4
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with pytest.raises(ValueError, match="length L_max"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3,
+                )
+
+    def test_paths_of_interest_requires_L_max(self):
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1)],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with pytest.raises(ValueError, match="requires L_max"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment",
+                )
+
+    def test_paths_of_interest_requires_drop_larger_lower_false(self):
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            paths_of_interest=[(0, 1, 1, 1)],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with pytest.raises(ValueError, match="drop_larger_lower=False"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3,
+                )
+
+    # ---- behavior ----
+
+    def test_paths_of_interest_selects_user_paths(self):
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert set(res.path_effects.keys()) == {(0, 1, 1, 1), (0, 1, 0, 0)}
+
+    def test_paths_of_interest_preserves_user_order(self):
+        df = _by_path_three_path_data()
+        # Order intentionally NOT frequency-ranked: lower-rank path first.
+        user_order = [(0, 1, 0, 0), (0, 1, 1, 1)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_order,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        # Insertion order preserved.
+        assert list(res.path_effects.keys()) == user_order
+
+    def test_paths_of_interest_order_preserved_in_to_dataframe(self):
+        """`to_dataframe(level="by_path")` must iterate in insertion
+        order so user-specified `paths_of_interest` order is preserved
+        across reporting surfaces (regression for R1 P3
+        maintainability finding)."""
+        df = _by_path_three_path_data()
+        # Order intentionally NOT frequency-ranked: lower-rank path first.
+        user_order = [(0, 1, 0, 0), (0, 1, 1, 1)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_order,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        out = res.to_dataframe(level="by_path")
+        # First-occurrence order of the path column matches user order.
+        first_seen = []
+        seen = set()
+        for p in out["path"]:
+            if p not in seen:
+                seen.add(p)
+                first_seen.append(p)
+        assert first_seen == user_order
+
+    def test_paths_of_interest_order_preserved_in_summary(self):
+        """`summary()` must render paths in insertion order so
+        user-specified `paths_of_interest` order is preserved
+        (regression for R1 P3 maintainability finding)."""
+        df = _by_path_three_path_data()
+        user_order = [(0, 1, 0, 0), (0, 1, 1, 1)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_order,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        text = res.summary()
+        # Find the ordering of the user paths as they appear in summary.
+        idx_first = text.index("Path (0, 1, 0, 0)")
+        idx_second = text.index("Path (0, 1, 1, 1)")
+        assert idx_first < idx_second, (
+            f"Summary did not preserve user-specified order. "
+            f"`(0, 1, 0, 0)` at idx={idx_first}, "
+            f"`(0, 1, 1, 1)` at idx={idx_second}"
+        )
+
+    def test_paths_of_interest_frequency_rank_is_true_frequency(self):
+        """`frequency_rank` must reflect descending count, NOT user-list
+        order. Regression for the R0 P2 finding: previously the rank
+        field was assigned from `enumerate(selected_paths)` which gave
+        user-selection order under `paths_of_interest`."""
+        df = _by_path_three_path_data()
+        # _by_path_three_path_data: (0,1,1,1) has 3 groups, (0,1,0,0) has 2,
+        # (0,1,1,0) has 1. User passes the lowest-frequency path first.
+        user_order = [(0, 1, 0, 0), (0, 1, 1, 1)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_order,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        # (0,1,1,1) has higher frequency → rank 1
+        # (0,1,0,0) has lower frequency → rank 2
+        assert res.path_effects[(0, 1, 1, 1)]["frequency_rank"] == 1
+        assert res.path_effects[(0, 1, 0, 0)]["frequency_rank"] == 2
+
+    def test_paths_of_interest_all_unobserved_summary_distinct_text(self):
+        """When every path in `paths_of_interest` is unobserved, the
+        empty-state `summary()` block must render the
+        paths_of_interest-specific text rather than the generic
+        "no observed paths have a complete window" text (regression
+        for R4 P3 maintainability finding)."""
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(1, 1, 1, 1), (1, 0, 1, 0)],  # both unobserved
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        text = res.summary()
+        assert "Every path in paths_of_interest was unobserved" in text, (
+            f"summary() did not render the paths_of_interest-specific "
+            f"empty-state text. Got:\n{text}"
+        )
+        # And the generic by_path-only wording must NOT appear in this case.
+        assert "No observed paths have a complete" not in text
+
+    def test_paths_of_interest_all_unobserved_emits_distinct_warning(self):
+        """When every path in `paths_of_interest` is unobserved,
+        the empty-state warning should mention `paths_of_interest`
+        explicitly rather than the generic `by_path={n}` text
+        (regression for R2 P3 maintainability finding)."""
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(1, 1, 1, 1), (1, 0, 1, 0)],  # both unobserved
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        # The summary empty-state warning mentions paths_of_interest, not by_path
+        empty_state_warnings = [
+            str(w.message)
+            for w in recorded
+            if "paths_of_interest was requested but every" in str(w.message)
+        ]
+        assert len(empty_state_warnings) >= 1, (
+            f"Expected paths_of_interest-specific empty-state warning, "
+            f"got: {[str(w.message) for w in recorded]}"
+        )
+        # And the result is empty dict, not None
+        assert res.path_effects == {}
+
+    def test_unobserved_path_warns_and_omits(self):
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[
+                (0, 1, 1, 1),
+                (1, 1, 1, 1),  # not observed (no group has D=1 at F_g-1)
+            ],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with pytest.warns(UserWarning, match="zero observed"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("default", UserWarning)
+                res = est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3,
+                )
+        assert (1, 1, 1, 1) not in res.path_effects
+        assert (0, 1, 1, 1) in res.path_effects
+
+    @pytest.mark.slow
+    def test_paths_of_interest_with_non_binary_D(self):
+        df = _by_path_data_with_non_binary_treatment()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 2, 2, 2)],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert set(res.path_effects.keys()) == {(0, 2, 2, 2)}
+        for l_h, vals in res.path_effects[(0, 2, 2, 2)]["horizons"].items():
+            assert np.isfinite(vals["effect"])
+
+    # ---- cross-feature composition (review MEDIUM #3) ----
+
+    @pytest.mark.slow
+    def test_paths_of_interest_with_controls(self):
+        df = _by_path_data_with_non_binary_treatment().copy()
+        # Inject a single-baseline control so multi-baseline warning doesn't fire
+        df["X1"] = np.random.default_rng(0).normal(size=len(df))
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (0, 2, 2, 2)],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, controls=["X1"],
+            )
+        assert len(res.path_effects) == 2
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                assert np.isfinite(vals["effect"]), f"path={path} l={l_h}"
+
+    @pytest.mark.slow
+    def test_paths_of_interest_with_trends_linear(self):
+        df = _by_path_data_with_trends_linear()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, trends_linear=True,
+            )
+        assert len(res.path_effects) == 2
+        # path_cumulated_event_study populated under trends_linear.
+        assert res.path_cumulated_event_study is not None
+        assert set(res.path_cumulated_event_study.keys()) == set(res.path_effects.keys())
+
+    @pytest.mark.slow
+    def test_paths_of_interest_with_trends_nonparam(self):
+        df = _by_path_data_with_trends_nonparam()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+                trends_nonparam="state",
+            )
+        assert len(res.path_effects) == 2
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                assert np.isfinite(vals["effect"]), f"path={path} l={l_h}"
+
+    @pytest.mark.slow
+    def test_paths_of_interest_non_binary_bootstrap_placebo(self):
+        """Quadruple-combo: paths_of_interest + non-binary D + bootstrap
+        + placebo. Asserts (i) selector restricts path_effects to the
+        requested paths, (ii) bootstrap SE finite on every (path,
+        horizon) for the selected paths, (iii) per-path placebo
+        populated, (iv) at least one selected path has a finite sup-t
+        crit_value and the corresponding `cband_conf_int` is non-NaN."""
+        df = _by_path_data_with_non_binary_treatment()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 2, 2, 2), (0, 1, 1, 1)],
+            n_bootstrap=400,
+            placebo=True,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert set(res.path_effects.keys()) == {(0, 2, 2, 2), (0, 1, 1, 1)}
+        # 1. analytical / bootstrap on path_effects (SE finite)
+        for path in res.path_effects:
+            for l_h, vals in res.path_effects[path]["horizons"].items():
+                assert np.isfinite(vals["effect"]), f"path={path} l={l_h}"
+                assert np.isfinite(vals["se"]), f"path={path} l={l_h}"
+        # 2. per-path placebo
+        assert res.path_placebo_event_study is not None
+        assert (0, 2, 2, 2) in res.path_placebo_event_study
+        assert (0, 1, 1, 1) in res.path_placebo_event_study
+        # 3. per-path sup-t bands: at least one selected path passes the
+        # strict-majority gate with a finite crit_value AND the
+        # corresponding cband_conf_int entries on path_effects are
+        # non-NaN tuples (vacuous "is not None" check rejected by R6).
+        assert res.path_sup_t_bands is not None
+        finite_crit_paths = [
+            p
+            for p, entry in res.path_sup_t_bands.items()
+            if np.isfinite(entry.get("crit_value", np.nan))
+        ]
+        assert len(finite_crit_paths) >= 1, (
+            f"Expected >=1 selected path with finite sup-t crit; "
+            f"got path_sup_t_bands={res.path_sup_t_bands}"
+        )
+        # cband_conf_int populated for positive horizons of finite-crit paths.
+        for path in finite_crit_paths:
+            for l_h in range(1, 4):
+                cband = res.path_effects[path]["horizons"][l_h].get(
+                    "cband_conf_int"
+                )
+                assert cband is not None, f"path={path} l={l_h}: cband missing"
+                lo, hi = cband
+                assert np.isfinite(lo) and np.isfinite(hi), (
+                    f"path={path} l={l_h}: cband endpoints not finite "
+                    f"(lo={lo}, hi={hi})"
+                )
+
+    @pytest.mark.slow
+    def test_paths_of_interest_trends_linear_bootstrap_placebo(self):
+        """`paths_of_interest + trends_linear=True + n_bootstrap > 0 +
+        placebo=True`: assert (i) selector restricts the path set, (ii)
+        per-path bootstrap SE on `path_effects` finite, (iii)
+        post-bootstrap `path_cumulated_event_study` populated for the
+        same paths (mirrors global `linear_trends_effects` cumulation),
+        (iv) per-path placebo populated. Regression for the R6 P1
+        Cartesian-product gap."""
+        df = _by_path_data_with_trends_linear()
+        user_paths = [(0, 1, 1, 1), (0, 1, 1, 0)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_paths,
+            n_bootstrap=200,
+            placebo=True,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, trends_linear=True,
+            )
+        # (i) selector restricts the path set
+        assert set(res.path_effects.keys()) == set(user_paths)
+        # (ii) per-path bootstrap SE finite on event study
+        for path in res.path_effects:
+            for l_h, vals in res.path_effects[path]["horizons"].items():
+                assert np.isfinite(vals["se"]), (
+                    f"path={path} l={l_h}: bootstrap SE not finite"
+                )
+        # (iii) post-bootstrap path_cumulated_event_study populated for
+        # the same paths AND derived from the post-bootstrap per-horizon
+        # SEs (cumulated SE = sum of post-bootstrap component SEs).
+        assert res.path_cumulated_event_study is not None
+        assert set(res.path_cumulated_event_study.keys()) == set(user_paths)
+        for path in user_paths:
+            assert len(res.path_cumulated_event_study[path]) > 0
+            for l_h, vals in res.path_cumulated_event_study[path].items():
+                assert np.isfinite(vals["effect"]), (
+                    f"path={path} l={l_h}: cumulated effect not finite"
+                )
+                assert np.isfinite(vals["se"]), (
+                    f"path={path} l={l_h}: cumulated SE not finite"
+                )
+        # (iv) per-path placebo populated
+        assert res.path_placebo_event_study is not None
+        assert set(res.path_placebo_event_study.keys()) == set(user_paths)
+
+    @pytest.mark.slow
+    def test_paths_of_interest_trends_nonparam_bootstrap_placebo(self):
+        """`paths_of_interest + trends_nonparam="state" + placebo=True +
+        n_bootstrap > 0`: assert the selector + set_ids flow through
+        the four per-path collectors (`_compute_path_effects`,
+        `_compute_path_placebos`, `_collect_path_bootstrap_inputs`,
+        `_collect_path_placebo_bootstrap_inputs`) and the resulting
+        public surfaces are populated. Regression for the R6 P1
+        Cartesian-product gap."""
+        df = _by_path_data_with_trends_nonparam()
+        user_paths = [(0, 1, 1, 1), (0, 1, 1, 0)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_paths,
+            n_bootstrap=200,
+            placebo=True,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+                trends_nonparam="state",
+            )
+        # Selector restriction
+        assert set(res.path_effects.keys()) == set(user_paths)
+        # Per-path bootstrap SE finite on event study (bootstrap
+        # collector + set_ids reached path_effects)
+        for path in res.path_effects:
+            for l_h, vals in res.path_effects[path]["horizons"].items():
+                assert np.isfinite(vals["effect"]), f"path={path} l={l_h}"
+                assert np.isfinite(vals["se"]), f"path={path} l={l_h}"
+        # Per-path placebo populated and bootstrap SE finite
+        # (placebo collector + set_ids reached path_placebo_event_study)
+        assert res.path_placebo_event_study is not None
+        assert set(res.path_placebo_event_study.keys()) == set(user_paths)
+        any_finite_placebo_se = False
+        for path in user_paths:
+            for lag, vals in res.path_placebo_event_study[path].items():
+                if np.isfinite(vals["effect"]) and np.isfinite(vals["se"]):
+                    any_finite_placebo_se = True
+                    break
+            if any_finite_placebo_se:
+                break
+        assert any_finite_placebo_se, (
+            "No finite (effect, SE) pair on per-path placebo surface "
+            "under paths_of_interest + trends_nonparam + bootstrap"
+        )
+
+    # ---- single-surface inheritance (slow) ----
+
+    @pytest.mark.slow
+    def test_bootstrap_with_paths_of_interest_finite_se(self):
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+            n_bootstrap=200,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                assert np.isfinite(vals["se"]), f"path={path} l={l_h}: bootstrap SE not finite"
+
+    @pytest.mark.slow
+    def test_per_path_placebos_with_paths_of_interest_present(self):
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+            placebo=True,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert res.path_placebo_event_study is not None
+        assert len(res.path_placebo_event_study) == 2

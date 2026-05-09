@@ -394,10 +394,15 @@ class ChaisemartinDHaultfoeuilleResults:
     path_effects : dict, optional
         Per-path event-study effects keyed by observed treatment
         trajectory (tuple of int). Populated when ``by_path`` is a
-        positive int at estimator construction. Each entry holds
+        positive int OR ``paths_of_interest`` is a list of int tuples
+        at estimator construction. Each entry holds
         ``{"n_groups": int, "frequency_rank": int,
         "horizons": {l: {"effect", "se", "t_stat", "p_value",
-        "conf_int", "n_obs"}}}`` for ``l = 1..L_max``.
+        "conf_int", "n_obs"}}}`` for ``l = 1..L_max``. Under
+        ``paths_of_interest``, dict-insertion order matches the user-
+        specified path order; ``frequency_rank`` is the within-
+        selected-paths rank by descending observed-group count
+        (decoupled from iteration order).
     path_placebo_event_study : dict, optional
         Per-path backward-horizon placebos ``DID^{pl}_{path, l}`` for
         ``l = 1..L_max``, keyed by observed treatment trajectory (tuple
@@ -407,11 +412,12 @@ class ChaisemartinDHaultfoeuilleResults:
         **path_placebo_event_study[p]}`` view is well-formed across
         forward and backward horizons. Each inner entry holds
         ``{"effect", "se", "t_stat", "p_value", "conf_int", "n_obs"}``.
-        Populated when ``by_path`` is a positive int AND
-        ``placebo=True`` AND ``L_max >= 1``. Empty-state contract
-        mirrors ``path_effects``: ``None`` when ``by_path + placebo``
-        was not requested; ``{}`` when requested but no observed path
-        has a complete window ``[F_g-1, F_g-1+L_max]`` within the
+        Populated when (``by_path`` is a positive int OR
+        ``paths_of_interest`` is set) AND ``placebo=True`` AND
+        ``L_max >= 1``. Empty-state contract mirrors ``path_effects``:
+        ``None`` when ``by_path / paths_of_interest + placebo`` was
+        not requested; ``{}`` when requested but no observed path has
+        a complete window ``[F_g-1, F_g-1+L_max]`` within the
         panel (the same regime where ``path_effects`` returns ``{}``,
         with the same ``UserWarning`` at fit-time). Downstream callers
         should distinguish the two states. Inherits the cross-path
@@ -424,9 +430,9 @@ class ChaisemartinDHaultfoeuilleResults:
         keyed by observed treatment trajectory (tuple of int). Inner
         dict is keyed by horizon directly (no ``"horizons"`` wrapper);
         each entry holds ``{"effect", "se", "t_stat", "p_value",
-        "conf_int", "n_obs"}``. Populated when ``by_path`` is a
-        positive int AND ``trends_linear=True`` AND ``L_max >= 1``;
-        ``None`` otherwise. Mirrors the global ``linear_trends_effects``
+        "conf_int", "n_obs"}``. Populated when (``by_path`` is a
+        positive int OR ``paths_of_interest`` is set) AND
+        ``trends_linear=True`` AND ``L_max >= 1``; ``None`` otherwise. Mirrors the global ``linear_trends_effects``
         cumulation: SE on the cumulated layer is the conservative
         upper bound (sum of per-horizon component SEs from
         ``path_effects[path]["horizons"][l]["se"]``, NaN-consistent).
@@ -443,13 +449,15 @@ class ChaisemartinDHaultfoeuilleResults:
         observed treatment trajectory (tuple of int). Each entry holds
         ``{"crit_value": float, "alpha": float, "n_bootstrap": int,
         "method": str, "n_valid_horizons": int}``. Populated when
-        ``by_path`` is a positive int AND ``n_bootstrap > 0``. The
+        (``by_path`` is a positive int OR ``paths_of_interest`` is
+        set) AND ``n_bootstrap > 0``. The
         band itself is applied per-horizon as ``cband_conf_int`` on
         ``path_effects[path]["horizons"][l]`` and rendered as
         ``cband_lower`` / ``cband_upper`` columns on
         ``to_dataframe(level="by_path")``. Empty-state contract:
-        ``None`` when not requested (no bootstrap or ``by_path is None``);
-        ``{}`` when requested but no path passed both gates (``>=2``
+        ``None`` when not requested (no bootstrap, or both ``by_path``
+        and ``paths_of_interest`` are ``None``); ``{}`` when requested
+        but no path passed both gates (``>=2``
         valid horizons with finite bootstrap SE ``> 0`` AND a strict
         majority — more than 50% — of finite sup-t draws). Bands
         cover joint inference WITHIN a
@@ -585,9 +593,9 @@ class ChaisemartinDHaultfoeuilleResults:
     # conservative upper bound (sum of per-horizon component SEs,
     # NaN-consistent), matching the global `linear_trends_effects`
     # convention.
-    path_cumulated_event_study: Optional[
-        Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]
-    ] = field(default=None, repr=False)
+    path_cumulated_event_study: Optional[Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]] = field(
+        default=None, repr=False
+    )
     # Per-path joint sup-t simultaneous-band metadata. Keyed by path
     # tuple; each entry holds `{"crit_value", "alpha", "n_bootstrap",
     # "method", "n_valid_horizons"}`. Populated when `by_path` is a
@@ -1259,13 +1267,26 @@ class ChaisemartinDHaultfoeuilleResults:
         if self.path_effects is None:
             return
         if not self.path_effects:
+            # Distinguish the two empty causes for paths_of_interest
+            # users (every requested path unobserved) from by_path=k
+            # users (no panel path has a complete window).
+            poi = getattr(self._estimator_ref, "paths_of_interest", None)
+            if poi is not None:
+                detail_lines = [
+                    "  Every path in paths_of_interest was unobserved or had a window outside L_max+1.",
+                    "  (See per-path 'zero observed groups' UserWarnings emitted at fit().)",
+                ]
+            else:
+                detail_lines = [
+                    "  No observed paths have a complete [F_g-1, F_g-1+L_max] window.",
+                    "  (See UserWarning emitted at fit(); by_path was a no-op on this panel.)",
+                ]
             lines.extend(
                 [
                     thin,
-                    "Treatment-Path Disaggregation (by_path)".center(width),
+                    "Treatment-Path Disaggregation".center(width),
                     thin,
-                    "  No observed paths have a complete [F_g-1, F_g-1+L_max] window.",
-                    "  (See UserWarning emitted at fit(); by_path was a no-op " "on this panel.)",
+                    *detail_lines,
                     thin,
                     "",
                 ]
@@ -1274,14 +1295,15 @@ class ChaisemartinDHaultfoeuilleResults:
         lines.extend(
             [
                 thin,
-                "Treatment-Path Disaggregation (by_path)".center(width),
+                "Treatment-Path Disaggregation".center(width),
                 thin,
             ]
         )
-        for path in sorted(
-            self.path_effects.keys(),
-            key=lambda p: self.path_effects[p]["frequency_rank"],
-        ):
+        # Iterate in path_effects insertion order so summary preserves
+        # the user-specified path order under `paths_of_interest`. Under
+        # `by_path=k`, insertion order matches descending frequency_rank
+        # (the enumeration sorts by count), so the rendering is identical.
+        for path in self.path_effects.keys():
             entry = self.path_effects[path]
             rank = entry["frequency_rank"]
             n_groups = entry["n_groups"]
@@ -1337,9 +1359,7 @@ class ChaisemartinDHaultfoeuilleResults:
             ):
                 cum_horizons = self.path_cumulated_event_study[path]
                 if cum_horizons:
-                    lines.append(
-                        "  Cumulated Level Effects (DID^{fd}, trends_linear):"
-                    )
+                    lines.append("  Cumulated Level Effects (DID^{fd}, trends_linear):")
                     for l_h in sorted(cum_horizons.keys()):
                         ce = cum_horizons[l_h]
                         lines.append(
@@ -1434,8 +1454,9 @@ class ChaisemartinDHaultfoeuilleResults:
               Available when ``trends_linear=True``.
             - ``"design2"``: Design-2 switch-in/switch-out descriptive
               summary. Available when ``design2=True``.
-            - ``"by_path"``: one row per (path, horizon) when
-              ``by_path=k`` was passed to the estimator. Columns:
+            - ``"by_path"``: one row per (path, horizon) when either
+              ``by_path=k`` or ``paths_of_interest=[(...), ...]`` was
+              passed to the estimator. Columns:
               ``path``, ``frequency_rank``, ``n_groups``, ``horizon``,
               ``effect``, ``se``, ``t_stat``, ``p_value``,
               ``conf_int_lower``, ``conf_int_upper``, ``n_obs``,
@@ -1693,9 +1714,11 @@ class ChaisemartinDHaultfoeuilleResults:
             # Mirrors the linear_trends pattern above.
             if self.path_effects is None:
                 raise ValueError(
-                    "Path effects not available. Pass by_path=k (positive int) "
+                    "Path effects not available. Pass by_path=k "
+                    "(positive int) or paths_of_interest=[(...), ...] "
                     "to ChaisemartinDHaultfoeuille(drop_larger_lower=False, "
-                    "by_path=k) and L_max >= 1 to fit()."
+                    "by_path=k) (or paths_of_interest=...) and L_max >= 1 "
+                    "to fit()."
                 )
             if not self.path_effects:
                 return pd.DataFrame(
@@ -1718,10 +1741,11 @@ class ChaisemartinDHaultfoeuilleResults:
                     ]
                 )
             rows = []
-            for path in sorted(
-                self.path_effects.keys(),
-                key=lambda p: self.path_effects[p]["frequency_rank"],
-            ):
+            # Iterate in path_effects insertion order so the long-format
+            # table preserves the user-specified path order under
+            # `paths_of_interest`. Under `by_path=k`, insertion order
+            # matches descending frequency_rank, so output is identical.
+            for path in self.path_effects.keys():
                 entry = self.path_effects[path]
                 rank = entry["frequency_rank"]
                 n_groups = entry["n_groups"]
