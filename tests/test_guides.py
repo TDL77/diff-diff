@@ -272,3 +272,370 @@ def test_module_docstring_mentions_helper():
     import diff_diff
 
     assert "get_llm_guide" in diff_diff.__doc__
+
+
+# ---------------------------------------------------------------------------
+# llms-full.txt — HeterogeneousAdoptionDiD coverage (Phase 5)
+# ---------------------------------------------------------------------------
+class TestLLMsFullHADCoverage:
+    """Lock the HAD section additions to llms-full.txt against deletion
+    or framing drift. Phase 5 surfaces the agent-facing API contract for
+    HeterogeneousAdoptionDiD on the bundled-in-wheel guide."""
+
+    def test_llms_full_has_had_section(self):
+        text = get_llm_guide("full")
+        assert "### HeterogeneousAdoptionDiD" in text
+
+    def test_llms_full_had_results_classes(self):
+        text = get_llm_guide("full")
+        assert "### HeterogeneousAdoptionDiDResults" in text
+        assert "### HeterogeneousAdoptionDiDEventStudyResults" in text
+
+    def test_llms_full_had_pretests_section(self):
+        text = get_llm_guide("full")
+        assert "## HAD Pretests" in text
+        for fn in (
+            "did_had_pretest_workflow",
+            "qug_test",
+            "stute_test",
+            "yatchew_hr_test",
+            "stute_joint_pretest",
+            "joint_pretrends_test",
+            "joint_homogeneity_test",
+        ):
+            assert fn in text, f"HAD Pretests section missing reference to {fn}"
+
+    def test_llms_full_had_choosing_row(self):
+        text = get_llm_guide("full")
+        # The Choosing-an-Estimator table must list HAD with a row that
+        # accurately reflects the contract: HAD targets WAS at the dose
+        # support boundary and is compatible with universal-rollout
+        # panels (and panels with a small never-treated share — paper
+        # edge case at REGISTRY § HeterogeneousAdoptionDiD edge cases).
+        idx = text.index("## Choosing an Estimator")
+        choosing = text[idx:]
+        assert "HeterogeneousAdoptionDiD" in choosing
+        # Row must mention WAS as the estimand differentiator (not a
+        # blanket "if untreated → not HAD" rule which would be wrong
+        # per registry).
+        assert "WAS" in choosing
+
+    def test_llms_full_had_section_methodology_compatible_with_untreated(self):
+        # Per docs/methodology/REGISTRY.md HeterogeneousAdoptionDiD edge
+        # cases (line ~2403): "Authors do NOT require untreated units
+        # to be dropped" and (line ~2408) the staggered event-study path
+        # explicitly RETAINS never-treated units. The HAD section must
+        # NOT carry framing that says HAD is incompatible with
+        # never-treated / untreated units.
+        text = get_llm_guide("full")
+        had_start = text.index("### HeterogeneousAdoptionDiD")
+        had_end = text.index("### StackedDiD", had_start)
+        had_text = text[had_start:had_end].lower()
+        # Negative assertions on framing that contradicts the registry.
+        assert "no comparison group" not in had_text
+        assert "missing comparison" not in had_text
+        forbidden_phrases = (
+            "no never-treated units",
+            "requires no untreated",
+            "drop untreated",
+            "must not contain untreated",
+            "not compatible with untreated",
+        )
+        for phrase in forbidden_phrases:
+            assert phrase not in had_text, (
+                f"HAD section must not carry the phrase {phrase!r}: "
+                f"per REGISTRY § HeterogeneousAdoptionDiD edge cases, "
+                f"HAD is compatible with a small share of never-treated "
+                f"units and explicitly retains them on staggered "
+                f"event-study panels (Appendix B.2)."
+            )
+
+    def test_llms_full_had_constructor_signature_matches_real_api(self):
+        # Documented constructor parameter list must align with the
+        # actual HeterogeneousAdoptionDiD.__init__ signature. Catches
+        # the failure mode where the guide invents kwargs that don't
+        # exist (h, b, rcond) or omits real ones (d_lower, kernel,
+        # vcov_type, robust, cluster).
+        import inspect
+
+        from diff_diff import HeterogeneousAdoptionDiD
+
+        sig_params = set(inspect.signature(HeterogeneousAdoptionDiD.__init__).parameters)
+        sig_params.discard("self")
+        text = get_llm_guide("full")
+        had_start = text.index("### HeterogeneousAdoptionDiD")
+        had_end = text.index("### StackedDiD", had_start)
+        had_text = text[had_start:had_end]
+        block_start = had_text.index("HeterogeneousAdoptionDiD(")
+        # Multi-line signature ends with "\n)" — close-paren on its own
+        # line. Searching for ")" alone would hit close-parens inside
+        # parameter comments (e.g. "(default)").
+        block_end = had_text.index("\n)", block_start)
+        ctor_block = had_text[block_start:block_end]
+        for param in sig_params:
+            assert f"{param}:" in ctor_block or f"{param} " in ctor_block, (
+                f"Constructor block in the HAD guide section is missing "
+                f"the real public parameter {param!r}. The guide must "
+                f"document the actual HeterogeneousAdoptionDiD.__init__ "
+                f"signature."
+            )
+
+    def test_llms_full_had_fit_signature_matches_real_api(self):
+        # Documented fit() parameter list must align with the actual
+        # HeterogeneousAdoptionDiD.fit signature.
+        import inspect
+
+        from diff_diff import HeterogeneousAdoptionDiD
+
+        sig_params = set(inspect.signature(HeterogeneousAdoptionDiD.fit).parameters)
+        sig_params.discard("self")
+        text = get_llm_guide("full")
+        had_start = text.index("### HeterogeneousAdoptionDiD")
+        had_end = text.index("### StackedDiD", had_start)
+        had_text = text[had_start:had_end]
+        block_start = had_text.index("had.fit(")
+        block_end = had_text.index(") -> ", block_start)
+        fit_block = had_text[block_start:block_end]
+        for param in sig_params:
+            assert f"{param}:" in fit_block or f"{param} " in fit_block, (
+                f"fit() block in the HAD guide section is missing the "
+                f"real public parameter {param!r}. The guide must "
+                f"document the actual HeterogeneousAdoptionDiD.fit "
+                f"signature."
+            )
+
+    def test_llms_full_paper_citation(self):
+        # Lead-author "D'Haultfœuille" appears in the HAD section.
+        # Naturally preserves the UTF-8 'œ' fingerprint asserted by
+        # test_utf8_encoding_preserved without a synthetic mark.
+        text = get_llm_guide("full")
+        had_start = text.index("### HeterogeneousAdoptionDiD")
+        had_end = text.index("### StackedDiD", had_start)
+        had_text = text[had_start:had_end]
+        assert "D'Haultfœuille" in had_text
+
+    def test_llms_full_had_results_class_field_lists_match_real_dataclass(self):
+        # Every public dataclass field on HeterogeneousAdoptionDiDResults
+        # and HeterogeneousAdoptionDiDEventStudyResults must appear in the
+        # documented field table. Catches the failure mode where new
+        # result fields land but the guide isn't updated, so agents
+        # treating llms-full.txt as the authoritative surface miss
+        # available diagnostics / metadata.
+        import dataclasses
+
+        from diff_diff import (
+            HeterogeneousAdoptionDiDEventStudyResults,
+            HeterogeneousAdoptionDiDResults,
+        )
+
+        text = get_llm_guide("full")
+
+        # Single-period result class
+        sp_start = text.index("### HeterogeneousAdoptionDiDResults")
+        sp_end = text.index("### HeterogeneousAdoptionDiDEventStudyResults", sp_start)
+        sp_block = text[sp_start:sp_end]
+        for field in dataclasses.fields(HeterogeneousAdoptionDiDResults):
+            assert f"`{field.name}`" in sp_block, (
+                f"HeterogeneousAdoptionDiDResults guide block is missing "
+                f"the public dataclass field {field.name!r}. The table "
+                f"must enumerate every field so agents see all available "
+                f"diagnostics / metadata."
+            )
+
+        # Event-study result class
+        es_start = text.index("### HeterogeneousAdoptionDiDEventStudyResults")
+        es_end = text.index("### TROPResults", es_start)
+        es_block = text[es_start:es_end]
+        for field in dataclasses.fields(HeterogeneousAdoptionDiDEventStudyResults):
+            assert f"`{field.name}`" in es_block, (
+                f"HeterogeneousAdoptionDiDEventStudyResults guide block "
+                f"is missing the public dataclass field {field.name!r}."
+            )
+
+    def test_llms_full_had_section_documents_mass_point_survey_vcov_requirement(self):
+        # Per had.py:3495-3507 the mass-point design rejects the default
+        # classical vcov family on the survey_design= path
+        # (NotImplementedError). The HAD section must surface this
+        # requirement so an agent reading llms-full.txt and writing a
+        # weighted mass-point fit knows to pass vcov_type='hc1'
+        # explicitly. Without this caveat the documented fit() example
+        # can fail at fit time on a mass-point panel.
+        text = get_llm_guide("full")
+        had_start = text.index("### HeterogeneousAdoptionDiD")
+        had_end = text.index("### StackedDiD", had_start)
+        had_text = text[had_start:had_end]
+        # Must mention the mass-point + survey vcov requirement.
+        # Accept either explicit "vcov_type" mention near "mass" wording
+        # or the explicit "hc1" / "robust=True" pairing with mass-point.
+        lower = had_text.lower()
+        assert "vcov_type" in lower and ("mass-point" in lower or "mass_point" in lower), (
+            "HAD section must document the mass-point + survey vcov "
+            "requirement: passing vcov_type='hc1' (or robust=True) is "
+            "required on design='mass_point' under survey_design= "
+            "(per had.py:3495-3507). Without this caveat the documented "
+            "weighted fit example can raise NotImplementedError."
+        )
+
+    def test_llms_full_had_variance_formula_describes_all_designs(self):
+        # Per diff_diff/had.py:3585-3629, weighted mass-point fits populate
+        # variance_formula in {"pweight_2sls", "survey_binder_tsl_2sls"} and
+        # weighted continuous fits in {"pweight", "survey_binder_tsl"}. The
+        # documented description must cover ALL four labels (not just the
+        # two continuous ones) so agents reading the guide on a weighted
+        # mass-point fit do not misread the available inference metadata.
+        text = get_llm_guide("full")
+        sp_start = text.index("### HeterogeneousAdoptionDiDResults")
+        sp_end = text.index("### HeterogeneousAdoptionDiDEventStudyResults", sp_start)
+        sp_block = text[sp_start:sp_end]
+        # Find the variance_formula row in the table.
+        for line in sp_block.splitlines():
+            if line.startswith("| `variance_formula`"):
+                for label in (
+                    "pweight",
+                    "survey_binder_tsl",
+                    "pweight_2sls",
+                    "survey_binder_tsl_2sls",
+                ):
+                    assert label in line, (
+                        f"variance_formula row must enumerate the {label!r} "
+                        f"label - weighted mass-point fits populate "
+                        f"pweight_2sls / survey_binder_tsl_2sls per "
+                        f"had.py:3585-3629. Line: {line!r}"
+                    )
+                break
+        else:
+            pytest.fail("variance_formula row not found in HAD results table")
+        # effective_dose_mean: must mention mass-point Wald-IV dose gap.
+        for line in sp_block.splitlines():
+            if line.startswith("| `effective_dose_mean`"):
+                assert "mass_point" in line or "Wald-IV" in line or "mass-point" in line, (
+                    f"effective_dose_mean row must mention mass-point "
+                    f"semantics - weighted mass-point fits populate the "
+                    f"weighted Wald-IV dose gap per had.py:3642-3660. "
+                    f"Line: {line!r}"
+                )
+                break
+        else:
+            pytest.fail("effective_dose_mean row not found in HAD results table")
+
+    def test_llms_practitioner_step_4_distinguishes_had_from_continuous(self):
+        # The official practitioner workflow guide (returned by
+        # get_llm_guide("practitioner")) routes continuous treatments. It
+        # must distinguish ContinuousDiD (per-dose ATT(d), requires
+        # never-treated controls) from HeterogeneousAdoptionDiD (WAS at
+        # dose boundary, compatible with universal rollout). Pre-PR the
+        # decision tree routed ALL continuous-intensity designs to
+        # ContinuousDiD - which is wrong for no-untreated panels.
+        text = get_llm_guide("practitioner")
+        # Locate the Step 4 decision tree.
+        s4_start = text.index("## Step 4: Choose Estimation Method")
+        # Step 5 is the next section header; cap the slice there.
+        s5_start = text.index("## Step ", s4_start + 1)
+        s4_block = text[s4_start:s5_start]
+        # Both HAD and ContinuousDiD must appear in the continuous branch.
+        assert "HeterogeneousAdoptionDiD" in s4_block, (
+            "practitioner guide Step 4 decision tree must mention "
+            "HeterogeneousAdoptionDiD as the alternative to ContinuousDiD "
+            "on no-untreated / universal-rollout panels."
+        )
+        assert "ContinuousDiD" in s4_block
+        # Universal-rollout / no-untreated framing should be present so
+        # readers know which branch routes where.
+        assert "never-treated" in s4_block.lower() or "untreated" in s4_block.lower(), (
+            "practitioner guide Step 4 must describe the never-treated / "
+            "universal-rollout distinction that drives the HAD vs "
+            "ContinuousDiD routing."
+        )
+
+    def test_llms_full_had_pretests_documents_earlier_pre_period_precondition(self):
+        # Same precondition as the practitioner test: per
+        # docs/methodology/REGISTRY.md HeterogeneousAdoptionDiD
+        # § "Assumption 7 / step 2 closure" + had_pretests.py:4738-4756 +
+        # 2769, aggregate="event_study" closes step 2 ONLY IF the
+        # panel carries at least one earlier placebo pre-period beyond
+        # the base F-1. The HAD Pretests section in llms-full.txt must
+        # document this precondition so agents do not assume any
+        # multi-period event-study fit closes step 2.
+        text = get_llm_guide("full")
+        pretests_start = text.index("## HAD Pretests")
+        pretests_end = text.index("## Honest DiD", pretests_start)
+        pretests_block = text[pretests_start:pretests_end]
+        lower = pretests_block.lower()
+        assert "earlier" in lower and ("pre-period" in lower or "placebo" in lower), (
+            "HAD Pretests section must document the 'earlier pre-period' "
+            "precondition for step-2 closure on the event-study path."
+        )
+        assert "skipped" in lower or "pretrends_joint=none" in lower, (
+            "HAD Pretests section must surface the "
+            "'joint pre-trends skipped' / pretrends_joint=None fallback "
+            "when no earlier pre-period exists."
+        )
+
+    def test_llms_full_had_pretests_assumption_labels_correct(self):
+        # Per docs/methodology/REGISTRY.md HeterogeneousAdoptionDiD
+        # § "Assumptions / Theorems / Estimators":
+        #   - Assumption 5 = Design 1 sign identification (NOT testable)
+        #   - Assumption 6 = Design 1 WAS_d_lower identification (NOT testable)
+        #   - Assumption 7 = pre-trends (paper Section 4.2 step 2)
+        #   - Assumption 8 = linearity (paper Section 4.2 step 3)
+        # The HAD Pretests section must NOT mislabel these:
+        #   - qug_test is the support-infimum test (H0: d_lower = 0),
+        #     NOT "Assumption 5" (which is non-testable per registry).
+        #   - stute_test is Assumption 8 (linearity), NOT Assumption 7.
+        text = get_llm_guide("full")
+        pretests_start = text.index("## HAD Pretests")
+        pretests_end = text.index("## Honest DiD", pretests_start)
+        pretests_block = text[pretests_start:pretests_end]
+        # qug_test bullet: must positively label QUG as a support-infimum
+        # test, NOT as a positive "Assumption 5 support condition" claim
+        # (a negative disclaimer "does NOT test Assumption 5" is fine).
+        forbidden_qug_positive_claims = (
+            "Assumption 5 support condition",
+            "QUG (Assumption 5",
+            "qug_test`) — Assumption 5",
+            "qug_test(d)` — Assumption 5",
+        )
+        # stute_test bullet: must positively label as Assumption 8
+        # linearity, NOT as Assumption 7 mean-independence.
+        forbidden_stute_positive_claims = (
+            "stute_test(d, dy)` — Assumption 7",
+            "Stute (Assumption 7",
+            "Assumption 7 mean-independence",
+        )
+        for line in pretests_block.splitlines():
+            if line.startswith("- `qug_test"):
+                # Positive claim of what QUG IS:
+                assert (
+                    "support-infimum" in line
+                    or "support infimum" in line
+                    or "Theorem 4" in line
+                    or "H_0: d_lower" in line
+                ), (
+                    f"qug_test bullet must positively label QUG as the "
+                    f"support-infimum / Theorem-4 test. Line: {line!r}"
+                )
+                for phrase in forbidden_qug_positive_claims:
+                    assert phrase not in line, (
+                        f"qug_test bullet must not positively claim QUG "
+                        f"is an 'Assumption 5' test ({phrase!r}). QUG "
+                        f"tests H_0: d_lower = 0; Assumption 5 is the "
+                        f"Design 1 sign-identification condition (NOT "
+                        f"testable per registry). A negative disclaimer "
+                        f"that QUG does NOT test Assumption 5 is fine. "
+                        f"Line: {line!r}"
+                    )
+            if line.startswith("- `stute_test"):
+                # Positive claim of what Stute IS:
+                assert "Assumption 8" in line or "linearity" in line.lower(), (
+                    f"stute_test bullet must positively label as "
+                    f"Assumption 8 / linearity test. Line: {line!r}"
+                )
+                for phrase in forbidden_stute_positive_claims:
+                    assert phrase not in line, (
+                        f"stute_test bullet must not positively claim "
+                        f"Stute is an Assumption 7 mean-independence "
+                        f"test ({phrase!r}). stute_test is Assumption 8 "
+                        f"linearity (paper Section 4.2 step 3); "
+                        f"Assumption 7 is pre-trends (step 2, only "
+                        f"covered on the event-study path). Line: {line!r}"
+                    )

@@ -1,11 +1,14 @@
 """Tests for the practitioner guidance module."""
 
+import numpy as np
 import pytest
 
 from diff_diff import (
     BaconDecomposition,
     CallawaySantAnna,
     DifferenceInDifferences,
+    HeterogeneousAdoptionDiDEventStudyResults,
+    HeterogeneousAdoptionDiDResults,
     MultiPeriodDiD,
     generate_did_data,
     generate_staggered_data,
@@ -32,9 +35,7 @@ def did_data():
 
 @pytest.fixture(scope="session")
 def staggered_data():
-    return generate_staggered_data(
-        n_units=60, n_periods=8, treatment_effect=2.0, seed=42
-    )
+    return generate_staggered_data(n_units=60, n_periods=8, treatment_effect=2.0, seed=42)
 
 
 @pytest.fixture(scope="session")
@@ -46,9 +47,7 @@ def did_results(did_data):
 @pytest.fixture(scope="session")
 def multi_period_results(did_data):
     es = MultiPeriodDiD()
-    return es.fit(
-        did_data, outcome="outcome", unit="unit", time="period", treatment="treated"
-    )
+    return es.fit(did_data, outcome="outcome", unit="unit", time="period", treatment="treated")
 
 
 @pytest.fixture(scope="session")
@@ -168,6 +167,43 @@ def mock_stacked_results():
     r = StackedDiDResults.__new__(StackedDiDResults)
     r.overall_att = 0.5
     r.overall_se = 0.1
+    return r
+
+
+@pytest.fixture
+def mock_had_results():
+    r = HeterogeneousAdoptionDiDResults.__new__(HeterogeneousAdoptionDiDResults)
+    r.att = 0.5
+    return r
+
+
+@pytest.fixture
+def mock_had_event_study_results():
+    r = HeterogeneousAdoptionDiDEventStudyResults.__new__(HeterogeneousAdoptionDiDEventStudyResults)
+    # 5 horizons: e in {-3, -2, 0, 1, 2}
+    r.att = np.array([0.01, -0.02, 0.30, 0.45, 0.50])
+    r.event_times = np.array([-3, -2, 0, 1, 2])
+    return r
+
+
+@pytest.fixture
+def mock_had_results_nan_att():
+    r = HeterogeneousAdoptionDiDResults.__new__(HeterogeneousAdoptionDiDResults)
+    r.att = float("nan")
+    return r
+
+
+@pytest.fixture
+def mock_had_event_study_results_all_nan():
+    r = HeterogeneousAdoptionDiDEventStudyResults.__new__(HeterogeneousAdoptionDiDEventStudyResults)
+    r.att = np.full(5, np.nan)
+    return r
+
+
+@pytest.fixture
+def mock_had_event_study_results_partial_nan():
+    r = HeterogeneousAdoptionDiDEventStudyResults.__new__(HeterogeneousAdoptionDiDEventStudyResults)
+    r.att = np.array([0.5, np.nan, 0.3])
     return r
 
 
@@ -345,16 +381,12 @@ class TestCompletedSteps:
         assert len(filtered["next_steps"]) < len(full["next_steps"])
 
     def test_filter_all_steps(self, cs_results):
-        output = practitioner_next_steps(
-            cs_results, completed_steps=list(STEPS), verbose=False
-        )
+        output = practitioner_next_steps(cs_results, completed_steps=list(STEPS), verbose=False)
         assert len(output["next_steps"]) == 0
 
     def test_invalid_step_name_raises(self, did_results):
         with pytest.raises(ValueError, match="Unknown step names"):
-            practitioner_next_steps(
-                did_results, completed_steps=["invalid_step"], verbose=False
-            )
+            practitioner_next_steps(did_results, completed_steps=["invalid_step"], verbose=False)
 
 
 # ---------------------------------------------------------------------------
@@ -439,7 +471,8 @@ class TestEfficientDiDHandler:
     def test_hausman_snippet_uses_classmethod(self, mock_efficient_results):
         output = practitioner_next_steps(mock_efficient_results, verbose=False)
         hausman_steps = [
-            s for s in output["next_steps"]
+            s
+            for s in output["next_steps"]
             if "hausman" in s["label"].lower() or "Hausman" in s["label"]
         ]
         assert len(hausman_steps) > 0
@@ -458,3 +491,448 @@ class TestFallback:
         output = practitioner_next_steps(FakeResults(), verbose=False)
         assert len(output["next_steps"]) > 0
         assert output["estimator"] == "FakeResults"
+
+
+# ---------------------------------------------------------------------------
+# Tests: HeterogeneousAdoptionDiD (HAD) handler dispatch
+# ---------------------------------------------------------------------------
+class TestHADDispatch:
+    def test_had_results_dispatch(self, mock_had_results):
+        output = practitioner_next_steps(mock_had_results, verbose=False)
+        assert len(output["next_steps"]) > 0
+        assert output["estimator"] == "HeterogeneousAdoptionDiD (HAD)"
+
+    def test_had_event_study_dispatch(self, mock_had_event_study_results):
+        output = practitioner_next_steps(mock_had_event_study_results, verbose=False)
+        assert len(output["next_steps"]) > 0
+        assert output["estimator"] == "HeterogeneousAdoptionDiD (Event Study)"
+
+    def test_had_pretest_workflow_referenced(self, mock_had_results):
+        output = practitioner_next_steps(mock_had_results, verbose=False)
+        all_code = " ".join(s.get("code", "") for s in output["next_steps"])
+        assert "did_had_pretest_workflow" in all_code
+
+    def test_had_event_study_pretest_workflow_referenced(self, mock_had_event_study_results):
+        output = practitioner_next_steps(mock_had_event_study_results, verbose=False)
+        all_code = " ".join(s.get("code", "") for s in output["next_steps"])
+        assert "did_had_pretest_workflow" in all_code
+        assert "aggregate='event_study'" in all_code
+
+    def test_had_bandwidth_diagnostics_referenced(self, mock_had_results):
+        output = practitioner_next_steps(mock_had_results, verbose=False)
+        all_text = " ".join(
+            (s.get("code", "") + " " + s.get("why", "")) for s in output["next_steps"]
+        )
+        assert "bandwidth_diagnostics" in all_text
+
+    def test_had_event_study_simultaneous_bands_referenced(self, mock_had_event_study_results):
+        output = practitioner_next_steps(mock_had_event_study_results, verbose=False)
+        all_text = " ".join(
+            (s.get("code", "") + " " + s.get("why", "")) for s in output["next_steps"]
+        )
+        assert "cband" in all_text
+        # Either "sup-t" wording or "simultaneous" wording is acceptable.
+        assert ("sup-t" in all_text) or ("simultaneous" in all_text)
+
+    def test_had_no_comparison_group_framing(self, mock_had_results, mock_had_event_study_results):
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            all_text = " ".join(
+                (s.get("code", "") + " " + s.get("why", "") + " " + s.get("label", ""))
+                for s in output["next_steps"]
+            )
+            all_text += " ".join(output["warnings"])
+            assert "no comparison group" not in all_text.lower()
+            assert "missing comparison" not in all_text.lower()
+
+    def test_had_nan_warning_scalar(self, mock_had_results_nan_att):
+        output = practitioner_next_steps(mock_had_results_nan_att, verbose=False)
+        warnings = " ".join(output["warnings"])
+        assert "NaN" in warnings or "nan" in warnings.lower()
+
+    def test_had_event_study_nan_warning_array(self, mock_had_event_study_results_all_nan):
+        output = practitioner_next_steps(mock_had_event_study_results_all_nan, verbose=False)
+        warnings = " ".join(output["warnings"])
+        assert "per-horizon" in warnings or "All" in warnings
+
+    def test_had_partial_nan_array_no_warning(self, mock_had_event_study_results_partial_nan):
+        # Partial-NaN arrays are legitimate event-study output (some
+        # horizons may collapse on degenerate-design grounds while others
+        # remain finite). The all-NaN warning must NOT fire here.
+        output = practitioner_next_steps(mock_had_event_study_results_partial_nan, verbose=False)
+        # No "per-horizon" or "All ... NaN" warning string should appear.
+        warnings = " ".join(output["warnings"])
+        assert "per-horizon" not in warnings
+        assert "All " not in warnings
+
+    def test_had_step_4_estimator_selection_present(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Step-4 must surface the WAS-vs-ATT(d) estimand difference (not
+        # a blanket "if untreated → not HAD" rule which would contradict
+        # REGISTRY § HeterogeneousAdoptionDiD edge cases lines ~2403/2408).
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+            assert len(step_4_steps) >= 1
+            all_text = " ".join(
+                (s.get("code", "") + " " + s.get("why", "") + " " + s.get("label", ""))
+                for s in step_4_steps
+            )
+            # Routing nudge must name ContinuousDiD as the estimand
+            # alternative; framing must center on WAS vs ATT(d) (the
+            # actual estimand differentiator), NOT on whether untreated
+            # units exist.
+            assert "ContinuousDiD" in all_text
+            assert "WAS" in all_text
+            assert "ATT(d)" in all_text
+
+    def test_had_step_4_does_not_misframe_untreated_unit_routing(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Per REGISTRY: HAD is compatible with a small share of
+        # never-treated units (paper edge case), and on staggered
+        # event-study panels never-treated units are explicitly RETAINED
+        # (Appendix B.2 / had.py:1325). The Step-4 routing must NOT
+        # carry the wrong "if untreated → not HAD" framing.
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+            all_text = " ".join(
+                (s.get("code", "") + " " + s.get("why", "") + " " + s.get("label", ""))
+                for s in step_4_steps
+            ).lower()
+            forbidden_phrases = (
+                "switch away from had",
+                "had's was divisor under-weights",
+                "drop untreated",
+                "must drop never-treated",
+            )
+            for phrase in forbidden_phrases:
+                assert phrase not in all_text, (
+                    f"HAD Step-4 must not carry the phrase {phrase!r}: "
+                    f"per REGISTRY § HeterogeneousAdoptionDiD edge cases, "
+                    f"HAD is compatible with a small share of never-treated "
+                    f"units and explicitly retains them on staggered "
+                    f"event-study panels."
+                )
+
+    def test_handle_continuous_step_4_routes_to_had(self, mock_continuous_results):
+        # Symmetric pair: ContinuousDiD users with no untreated units
+        # should be routed to HeterogeneousAdoptionDiD.
+        output = practitioner_next_steps(mock_continuous_results, verbose=False)
+        step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+        assert len(step_4_steps) >= 1
+        all_text = " ".join((s.get("code", "") + " " + s.get("why", "")) for s in step_4_steps)
+        assert "HeterogeneousAdoptionDiD" in all_text
+
+    def test_handle_generic_ndarray_att_triggers_warning(self):
+        # Cross-handler regression: a future estimator that returns
+        # ndarray att and falls through to _handle_generic must produce
+        # the same all-NaN warning as the dedicated HAD event-study path.
+        class FutureNdarrayAttResults:
+            att: np.ndarray
+
+        r = FutureNdarrayAttResults()
+        r.att = np.full(3, np.nan)
+        output = practitioner_next_steps(r, verbose=False)
+        warnings = " ".join(output["warnings"])
+        assert "per-horizon" in warnings or "All" in warnings
+
+    def test_had_handlers_string_only_no_attribute_reads(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Stability invariant #7: handlers are STRING-ONLY at runtime.
+        # The fixtures construct results with ONLY .att (and event_times
+        # on the event-study fixture); confirm no AttributeError is
+        # raised when the handlers run. Protects against a future
+        # refactor that starts reading result.<some_field> inside a
+        # handler and silently breaks the minimal-fixture contract.
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            assert isinstance(output, dict)
+            assert "next_steps" in output
+
+    def test_had_handler_snippets_are_valid_python_syntax(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Snippet smoke test: every code block emitted by the HAD
+        # handlers must parse as valid Python. Catches the failure mode
+        # where snippets reference undefined names with placeholder
+        # syntax that doesn't compile (e.g. `survey_design=design` with
+        # no `design` defined in scope, or attribute typos that break
+        # copy/paste).
+        import ast
+
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            for step in output["next_steps"]:
+                code = step.get("code", "")
+                if not code.strip():
+                    continue
+                try:
+                    ast.parse(code)
+                except SyntaxError as e:
+                    pytest.fail(
+                        f"Step {step['baker_step']} ({step['label']!r}) "
+                        f"emits a code snippet that does not parse as "
+                        f"valid Python: {e}\n\nSnippet:\n{code}"
+                    )
+
+    def test_handle_continuous_step_4_snippet_is_valid_python(self, mock_continuous_results):
+        # Same syntax check on the symmetric Step-4 in _handle_continuous.
+        import ast
+
+        output = practitioner_next_steps(mock_continuous_results, verbose=False)
+        step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+        for step in step_4_steps:
+            code = step.get("code", "")
+            if code.strip():
+                ast.parse(code)  # raises SyntaxError on failure
+
+    def test_had_event_study_sup_t_snippet_uses_hc1_for_mass_point_survey_compatibility(
+        self, mock_had_event_study_results
+    ):
+        # Per had.py:3495-3507 the mass-point design rejects the
+        # default classical vcov family on the survey_design= path
+        # (NotImplementedError). The Step-6 sup-t snippet shows a
+        # generic weighted event-study fit; if it uses the default
+        # vcov_type a copy/paste on a mass-point panel raises at
+        # fit time. Snippet must either use vcov_type='hc1' /
+        # robust=True OR explicitly note the requirement so agents
+        # can adapt.
+        output = practitioner_next_steps(mock_had_event_study_results, verbose=False)
+        step_6_steps = [s for s in output["next_steps"] if s["baker_step"] == 6]
+        assert len(step_6_steps) >= 1
+        # Find the sup-t / cband step (sensitivity step).
+        sup_t = next(
+            (s for s in step_6_steps if "cband" in s.get("code", "")),
+            None,
+        )
+        assert sup_t is not None, "sup-t / cband step not found at baker_step=6"
+        snippet = sup_t.get("code", "")
+        # Either the snippet itself uses vcov_type='hc1' / robust=True
+        # OR it documents the requirement inline (so agents adapting
+        # the snippet on a mass-point panel know to add it).
+        ok = (
+            "vcov_type='hc1'" in snippet
+            or 'vcov_type="hc1"' in snippet
+            or "robust=True" in snippet
+            or ("mass-point" in snippet and "vcov_type" in snippet)
+            or ("mass_point" in snippet and "vcov_type" in snippet)
+        )
+        assert ok, (
+            "Sup-t / cband snippet must either use vcov_type='hc1' / "
+            "robust=True or surface the mass-point + survey vcov "
+            "requirement inline. Per had.py:3495-3507 the default "
+            "classical sandwich raises NotImplementedError on the "
+            "mass-point + survey path; the example as written would "
+            "fail at fit time on a mass-point panel."
+        )
+
+    def test_had_results_to_dict_docstring_matches_weighted_mass_point_contract(self):
+        # Parallel to the dataclass-field-docstring regression below:
+        # PR #402 R8 P3 caught that HeterogeneousAdoptionDiDResults.to_dict()
+        # docstring still described variance_formula as continuous-only
+        # / "pweight" or "survey_binder_tsl", contradicting the field
+        # docstrings (fixed in R5) and llms-full.txt (fixed in R3).
+        # Lock the to_dict() docstring against drift back.
+        from diff_diff.had import HeterogeneousAdoptionDiDResults
+
+        doc = HeterogeneousAdoptionDiDResults.to_dict.__doc__ or ""
+        for label in (
+            "pweight",
+            "survey_binder_tsl",
+            "pweight_2sls",
+            "survey_binder_tsl_2sls",
+        ):
+            assert label in doc, (
+                f"HeterogeneousAdoptionDiDResults.to_dict() docstring "
+                f"must enumerate the {label!r} variance_formula label - "
+                f"weighted mass-point fits populate pweight_2sls / "
+                f"survey_binder_tsl_2sls per had.py:3585-3629. The "
+                f"to_dict() docstring is a public source-of-truth "
+                f"surface and must match the field docstrings + "
+                f"llms-full.txt HAD section."
+            )
+        # effective_dose_mean: must mention mass-point Wald-IV semantics.
+        assert "mass_point" in doc or "mass-point" in doc, (
+            "HeterogeneousAdoptionDiDResults.to_dict() docstring must "
+            "describe the mass-point effective_dose_mean semantics; "
+            "weighted mass-point fits populate it as the weighted "
+            "Wald-IV dose gap per had.py:3642-3660."
+        )
+        assert "Wald-IV" in doc or "Z=1" in doc, (
+            "HeterogeneousAdoptionDiDResults.to_dict() docstring must "
+            "describe the weighted Wald-IV dose gap semantics for "
+            "mass-point fits."
+        )
+
+    def test_had_results_dataclass_docstrings_match_weighted_mass_point_contract(self):
+        # PR #402 R3 fixed the llms-full.txt field descriptions to
+        # acknowledge that weighted mass-point fits populate
+        # variance_formula in {"pweight_2sls", "survey_binder_tsl_2sls"}
+        # and effective_dose_mean as the weighted Wald-IV dose gap (per
+        # had.py:3585-3660). PR #402 R5 P3 caught that the dataclass
+        # field docstrings still said those fields were continuous-only
+        # / None on mass-point - leaving two source-of-truth surfaces
+        # disagreeing about the same public result object. Lock the
+        # dataclass docstrings against drift back to the continuous-only
+        # framing.
+        import inspect
+
+        from diff_diff.had import HeterogeneousAdoptionDiDResults
+
+        # Field docstrings live as raw __doc__ on the FieldDescriptor /
+        # in __dataclass_fields__'s metadata; read them via the type's
+        # source-level docstring attached to the class via the field's
+        # `__doc__` after assignment in the class body.
+        # Easier: read the class source via inspect.getsource() and check
+        # the field-docstring blocks we care about.
+        src = inspect.getsource(HeterogeneousAdoptionDiDResults)
+        # variance_formula docstring must enumerate all 4 labels.
+        assert "pweight_2sls" in src, (
+            "HeterogeneousAdoptionDiDResults.variance_formula docstring "
+            "must mention `pweight_2sls` (weighted mass-point HC1/CR1 "
+            "label per had.py:3585-3629). Otherwise the dataclass "
+            "docstring contradicts llms-full.txt and the actual "
+            "implementation."
+        )
+        assert "survey_binder_tsl_2sls" in src, (
+            "HeterogeneousAdoptionDiDResults.variance_formula docstring "
+            "must mention `survey_binder_tsl_2sls` (weighted mass-point "
+            "Binder-TSL label)."
+        )
+        # effective_dose_mean docstring must mention mass-point Wald-IV.
+        assert "mass_point" in src or "mass-point" in src, (
+            "HeterogeneousAdoptionDiDResults.effective_dose_mean "
+            "docstring must mention mass-point semantics; weighted "
+            "mass-point fits populate it as the weighted Wald-IV dose "
+            "gap per had.py:3642-3660."
+        )
+        assert "Wald-IV" in src or "Z=1" in src, (
+            "HeterogeneousAdoptionDiDResults.effective_dose_mean "
+            "docstring must describe the weighted Wald-IV dose gap "
+            "semantics (or the underlying Z=1/Z=0 subgroup-mean form) "
+            "for mass-point fits."
+        )
+
+    def test_had_step_3_documents_earlier_pre_period_precondition_for_step_2(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Per docs/methodology/REGISTRY.md HeterogeneousAdoptionDiD
+        # § "Assumption 7 / step 2 closure" + had_pretests.py:4738-4756 +
+        # 2769: aggregate="event_study" closes step 2 ONLY IF the panel
+        # carries at least one earlier placebo pre-period beyond the
+        # base F-1. With only F-1 available the workflow sets
+        # pretrends_joint=None, all_pass=False, and the verdict carries
+        # 'joint pre-trends skipped (no earlier pre-period)'. Both HAD
+        # handler variants must surface this precondition - otherwise
+        # agents reading the guidance can think any multi-period
+        # event-study fit closes step 2 when it does not.
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            step_3_steps = [s for s in output["next_steps"] if s["baker_step"] == 3]
+            assert len(step_3_steps) == 1
+            text = (step_3_steps[0].get("why", "") + " " + step_3_steps[0].get("code", "")).lower()
+            # Must mention "earlier" pre-period / placebo precondition.
+            assert "earlier" in text and ("pre-period" in text or "placebo" in text), (
+                "Step-3 text must mention the 'earlier pre-period' "
+                "precondition for closing Assumption 7 / step 2 on the "
+                "event-study path. With only the base F-1 pre-period "
+                "the workflow returns pretrends_joint=None and the "
+                "verdict carries 'joint pre-trends skipped (no earlier "
+                "pre-period)' - step 2 stays uncovered."
+            )
+            # Must mention the skip-fallback verdict so agents know
+            # what to expect when the precondition fails.
+            assert "skipped" in text or "pretrends_joint=none" in text, (
+                "Step-3 text must surface the 'joint pre-trends skipped' "
+                "/ pretrends_joint=None fallback when no earlier "
+                "pre-period exists - otherwise agents cannot tell "
+                "whether step 2 was actually covered on a minimal "
+                "event-study fit."
+            )
+
+    def test_had_step_3_flags_qug_under_survey_deferral(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Per diff_diff/had_pretests.py:4488-4495 + REGISTRY § "QUG Null
+        # Test" Note (Phase 4.5 C0): when survey_design= / survey= /
+        # weights= is supplied, did_had_pretest_workflow skips the QUG
+        # step with a UserWarning and returns a linearity-conditional
+        # verdict only. Both HAD handler variants must surface this
+        # caveat so agents do not assume step 1 / Design 1' vs Design 1
+        # was checked on weighted fits when the library deliberately
+        # cannot check it there.
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            step_3_steps = [s for s in output["next_steps"] if s["baker_step"] == 3]
+            assert len(step_3_steps) == 1
+            text = (step_3_steps[0].get("why", "") + " " + step_3_steps[0].get("code", "")).lower()
+            # Must mention that survey-weighted fits skip QUG.
+            assert "skip" in text and "qug" in text, (
+                "Step-3 text must explicitly say survey-weighted fits "
+                "skip QUG (Phase 4.5 C0 deferral). Without this caveat "
+                "agents may assume step 1 / Design 1' vs Design 1 was "
+                "checked on weighted fits when the library deliberately "
+                "does not check it there."
+            )
+            # Must mention "linearity-conditional" verdict OR equivalent
+            # framing so agents know the weighted verdict is conditional
+            # on QUG holding by assumption.
+            assert (
+                "linearity-conditional" in text
+                or "linearity conditional" in text
+                or "qug holding by assumption" in text
+            ), (
+                "Step-3 text must describe the weighted verdict as "
+                "linearity-conditional / conditional on QUG holding by "
+                "assumption."
+            )
+
+    def test_had_step_3_pretest_assumption_labels_correct(self, mock_had_results):
+        # Per docs/methodology/REGISTRY.md and diff_diff/had_pretests.py
+        # docstrings:
+        #   - did_had_pretest_workflow(aggregate="overall") covers paper
+        #     Section 4.2 steps 1 + 3 ONLY; step 2 (Assumption 7
+        #     pre-trends) is explicitly NOT covered on the overall path.
+        #   - qug_test = support-infimum test (H0: d_lower = 0),
+        #     NOT "Assumption 5" (Design 1 sign identification, which is
+        #     not testable per registry).
+        #   - stute_test = Assumption 8 linearity, NOT Assumption 7
+        #     mean-independence.
+        # The single-period Step-3 guidance must not mislabel these.
+        output = practitioner_next_steps(mock_had_results, verbose=False)
+        step_3_steps = [s for s in output["next_steps"] if s["baker_step"] == 3]
+        assert len(step_3_steps) == 1
+        why = step_3_steps[0].get("why", "")
+        # Must NOT call QUG an "Assumption 5" test.
+        assert "QUG (Assumption 5" not in why, (
+            "Step-3 why-text must not call QUG an 'Assumption 5' test - "
+            "QUG tests H_0: d_lower = 0 (paper Theorem 4); Assumption 5 "
+            "is the Design 1 sign-identification condition and is NOT "
+            "testable per registry."
+        )
+        # Must NOT claim Stute is Assumption 7 mean-independence.
+        forbidden = (
+            "Stute (Assumption 7",
+            "Stute / Yatchew-HR Assumption 7",
+            "Assumption 7 mean-independence",
+        )
+        for phrase in forbidden:
+            assert phrase not in why, (
+                f"Step-3 why-text must not carry the phrase {phrase!r} - "
+                f"stute_test / yatchew_hr_test are Assumption 8 linearity "
+                f"tests (paper Section 4.2 step 3); Assumption 7 (pre-trends) "
+                f"is paper step 2 and is NOT covered on the overall workflow "
+                f"path - the workflow's verdict explicitly flags that gap."
+            )
+        # Must positively acknowledge the Assumption 7 / step 2 gap on
+        # the overall path (not silently imply it's covered).
+        assert "Assumption 7" in why or "step 2" in why, (
+            "Step-3 why-text must explicitly mention Assumption 7 / step 2 "
+            "to acknowledge the gap on the overall workflow path - "
+            "agents reading the guidance must not assume the workflow "
+            "covers what it does not cover."
+        )

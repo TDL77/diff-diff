@@ -345,25 +345,31 @@ class HeterogeneousAdoptionDiDResults:
 
     # Phase 4.5 weighted-path extras (optional so unweighted fits stay unchanged)
     variance_formula: Optional[str] = None
-    """HAD-specific label for the SE formula on the weighted continuous
-    path: ``"pweight"`` (weighted-robust CCT 2014) under ``weights=``,
-    ``"survey_binder_tsl"`` (Binder 1983 TSL with PSU/strata/FPC) under
-    ``survey=SurveyDesign(...)``, ``None`` on unweighted or mass-point
-    fits. Orthogonal to ``survey_metadata`` which is the repo-standard
-    :class:`diff_diff.survey.SurveyMetadata` shared with downstream
-    report/diagnostic consumers (no HAD-specific leakage)."""
+    """HAD-specific label for the SE formula on weighted fits, populated
+    on BOTH continuous and mass-point designs (Phase 4.5 A / B):
+    ``"pweight"`` (continuous, weighted-robust CCT 2014 under the
+    ``weights=`` shortcut), ``"survey_binder_tsl"`` (continuous, Binder
+    1983 TSL with PSU/strata/FPC under ``survey_design=SurveyDesign(...)``),
+    ``"pweight_2sls"`` (mass-point, weighted 2SLS HC1/CR1 sandwich
+    under the ``weights=`` shortcut), or ``"survey_binder_tsl_2sls"``
+    (mass-point, Binder 1983 TSL under ``survey_design=``). ``None`` on
+    unweighted fits. Orthogonal to ``survey_metadata`` which is the
+    repo-standard :class:`diff_diff.survey.SurveyMetadata` shared with
+    downstream report/diagnostic consumers (no HAD-specific leakage)."""
     effective_dose_mean: Optional[float] = None
-    """Weighted denominator used by the beta-scale rescaling on the
-    continuous path: ``sum(w_g · D_g) / sum(w_g)`` for
-    ``continuous_at_zero`` or ``sum(w_g · (D_g - d_lower)) / sum(w_g)``
-    for ``continuous_near_d_lower``. Reduces bit-exactly to
-    ``dose_mean`` / ``mean(D - d_lower)`` when weights are uniform or
-    absent. ``None`` when ``fit()`` was called without
-    ``survey=`` / ``weights=`` (use ``dose_mean`` there). Exists because
-    ``dose_mean`` is the raw sample mean of the dose column; under
-    weighted fits the estimator's actual denominator is the weighted
-    mean, and users reconstructing the β-scale value by hand need the
-    weighted one."""
+    """Weighted denominator used by the beta-scale rescaling, populated
+    on weighted fits across all designs: ``sum(w_g · D_g) / sum(w_g)``
+    on ``continuous_at_zero``, ``sum(w_g · (D_g - d_lower)) / sum(w_g)``
+    on ``continuous_near_d_lower``, and the weighted Wald-IV dose gap
+    ``mean(D | Z=1, w) - mean(D | Z=0, w)`` on ``mass_point`` (where
+    ``Z = 1{D > d_lower}``). On the continuous designs reduces
+    bit-exactly to ``dose_mean`` / ``mean(D - d_lower)`` when weights
+    are uniform or absent. ``None`` when ``fit()`` was called without
+    ``survey_design=`` / ``survey=`` / ``weights=`` (use ``dose_mean``
+    there). Exists because ``dose_mean`` is the raw sample mean of the
+    dose column; under weighted fits the estimator's actual denominator
+    is the weighted form above, and users reconstructing the β-scale
+    value by hand need the weighted one."""
 
     def __repr__(self) -> str:
         base = (
@@ -477,9 +483,20 @@ class HeterogeneousAdoptionDiDResults:
           ``design_effect`` / ``sum_weights`` / ``weight_range`` +
           ``n_strata`` / ``n_psu`` / ``df_survey`` (latter three
           ``None`` on the ``weights=`` shortcut).
-        - ``variance_formula``: ``"pweight"`` or ``"survey_binder_tsl"``.
+        - ``variance_formula``: HAD-specific SE label, populated on BOTH
+          continuous and mass-point designs (Phase 4.5 A / B):
+          ``"pweight"`` (continuous, weighted-robust CCT 2014 under
+          ``weights=``), ``"survey_binder_tsl"`` (continuous, Binder
+          1983 TSL under ``survey_design=``), ``"pweight_2sls"``
+          (mass-point, weighted 2SLS HC1/CR1 sandwich under ``weights=``),
+          or ``"survey_binder_tsl_2sls"`` (mass-point, Binder 1983 TSL
+          under ``survey_design=``). See the field docstring above for
+          the full contract.
         - ``effective_dose_mean``: weighted denominator used by the
-          beta-scale rescaling."""
+          beta-scale rescaling - weighted ``mean(D)`` on
+          ``continuous_at_zero``, weighted ``mean(D - d_lower)`` on
+          ``continuous_near_d_lower``, or the weighted Wald-IV dose gap
+          ``mean(D | Z=1, w) - mean(D | Z=0, w)`` on ``mass_point``."""
         return {
             "att": self.att,
             "se": self.se,
