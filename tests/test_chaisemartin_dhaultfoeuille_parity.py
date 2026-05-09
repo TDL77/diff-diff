@@ -1186,3 +1186,136 @@ class TestDCDHDynRParityByPathTrendsNonparam:
                         f"path={path_key} h={h} SE: "
                         f"py={py_se:.4f} vs r={r_se:.4f}"
                     )
+
+
+class TestDCDHDynRParityByPathNonBinary:
+    """
+    Parity tests for ``by_path`` + non-binary integer treatment against
+    R DIDmultiplegtDYN 2.3.3.
+
+    Wave 3 #8 lift. R's ``did_multiplegt_dyn(..., by_path=k)`` accepts
+    discrete non-binary treatment naturally; the per-path string
+    encoding (``"0,2,2,2"``) maps bit-for-bit to Python's tuple key
+    ``(0, 2, 2, 2)`` for D in {0..9}. R's
+    ``substr(path_index$path, 1, 1)`` baseline-derivation (in
+    ``did_multiplegt_by_path``) breaks for D >= 10 (it captures only
+    the first character of the comma-separated path string), but
+    Python's tuple-key matching is correct in that regime — the
+    parity scenario stays in {0, 1, 2} so the R bug does not
+    interfere.
+
+    The fixture mirrors Scenario 17's single-baseline custom DGP:
+    78 switchers across 3 non-binary paths, 20 never-treated and 20
+    always-treated controls, F_g >= 4. Per-path point estimates
+    match R bit-exactly. Per-path SE inherits the documented
+    cross-path cohort-sharing deviation (Phase 2 envelope, ~5% rtol
+    on this scenario; SE_RTOL=0.15 for headroom).
+    """
+
+    POINT_RTOL = 1e-9
+    # Near-zero placebo (e.g. -0.003) amplifies relative difference;
+    # use atol=1e-9 as a fallback so the cumulated relative+absolute
+    # `pytest.approx` envelope matches bit-exact event horizons and
+    # small-value placebo points consistently.
+    POINT_ATOL = 1e-9
+    SE_RTOL = 0.15
+
+    def _path_key_from_r_label(self, r_label: str):
+        return tuple(int(x) for x in r_label.split(","))
+
+    def test_parity_multi_path_reversible_by_path_non_binary(
+        self, golden_values
+    ):
+        """3-path case with D in {0, 1, 2}: by_path=3, placebo=1."""
+        import math
+        import warnings
+
+        scenario = golden_values.get(
+            "multi_path_reversible_by_path_non_binary"
+        )
+        if scenario is None:
+            pytest.skip(
+                "scenario 'multi_path_reversible_by_path_non_binary' "
+                "not in golden values"
+            )
+
+        df = _golden_to_df(scenario["data"])
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, placebo=True
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            results = est.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+            )
+
+        r_by_path = scenario["results"]["by_path"]
+        assert results.path_effects is not None
+
+        py_keys = set(results.path_effects.keys())
+        r_keys = {self._path_key_from_r_label(e["path"]) for e in r_by_path}
+        assert py_keys == r_keys, (
+            f"Path-set mismatch.\n"
+            f"  Python only: {py_keys - r_keys}\n"
+            f"  R only:      {r_keys - py_keys}"
+        )
+
+        for r_path_entry in r_by_path:
+            path_key = self._path_key_from_r_label(r_path_entry["path"])
+            py_path = results.path_effects[path_key]
+            py_placebos = (
+                results.path_placebo_event_study.get(path_key, {})
+                if results.path_placebo_event_study is not None
+                else {}
+            )
+
+            assert py_path["frequency_rank"] == r_path_entry["frequency_rank"], (
+                f"path={path_key}: frequency_rank mismatch "
+                f"py={py_path['frequency_rank']} vs r={r_path_entry['frequency_rank']}"
+            )
+
+            for h_str, r_h in r_path_entry["horizons"].items():
+                h = int(h_str)
+                if h > 0:
+                    assert h in py_path["horizons"], (
+                        f"path={path_key}: horizon {h} missing from "
+                        f"Python path_effects"
+                    )
+                    py_h = py_path["horizons"][h]
+                else:
+                    assert h in py_placebos, (
+                        f"path={path_key}: placebo {h} missing from "
+                        f"Python path_placebo_event_study"
+                    )
+                    py_h = py_placebos[h]
+
+                assert py_h["n_obs"] == int(r_h["n_switchers"]), (
+                    f"path={path_key} h={h}: switcher-count mismatch "
+                    f"py={py_h['n_obs']} vs r={int(r_h['n_switchers'])}"
+                )
+
+                assert py_h["effect"] == pytest.approx(
+                    r_h["effect"], rel=self.POINT_RTOL, abs=self.POINT_ATOL
+                ), (
+                    f"path={path_key} h={h}: "
+                    f"py={py_h['effect']:.6f} vs r={r_h['effect']:.6f}"
+                )
+
+                py_se = py_h["se"]
+                r_se = r_h["se"]
+                py_finite_positive = math.isfinite(py_se) and py_se > 0.0
+                r_finite_positive = math.isfinite(r_se) and r_se > 0.0
+                assert py_finite_positive == r_finite_positive, (
+                    f"path={path_key} h={h} SE state mismatch "
+                    f"(py_se={py_se}, r_se={r_se})"
+                )
+                if py_finite_positive and r_finite_positive:
+                    assert py_se == pytest.approx(r_se, rel=self.SE_RTOL), (
+                        f"path={path_key} h={h} SE: "
+                        f"py={py_se:.4f} vs r={r_se:.4f}"
+                    )

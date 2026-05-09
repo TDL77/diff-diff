@@ -927,6 +927,97 @@ scenarios$multi_path_reversible_by_path_trends_nonparam <- list(
   results = extract_dcdh_by_path(res18, n_effects = 3, n_placebos = 1)
 )
 
+# Scenario 19: by_path + non-binary integer treatment (D in {0, 1, 2}).
+# Phase 3 Wave 3 #8 lift. Custom inline DGP (mirror Scenario 17 structure)
+# with 3 single-baseline non-binary paths: low-dose sustained
+# (0, 1, 1, 1), high-dose sustained (0, 2, 2, 2), and ramp-up
+# (0, 1, 2, 2). All F_g >= 4 (defensive: avoids any pre-window boundary
+# edge cases under future trends_lin combinations and matches Scenario 17).
+# 78 switchers + 20 never-treated (D=0) + 20 always-treated (D=2) controls.
+# n_periods=13, L_max=3.
+#
+# R's substr(path, 1, 1) baseline-derivation in did_multiplegt_by_path
+# is correct for D in {0..9} (single-digit decimal); we stay in {0, 1, 2}
+# so no R bug interferes. Python's tuple-key matching is correct
+# regardless of D range.
+cat("  Scenario 19: multi_path_reversible_by_path_non_binary\n")
+{
+  set.seed(119)
+  n_periods19 <- 13
+  L_max19 <- 3
+  target_paths19 <- list(
+    c(0L, 1L, 1L, 1L),  # path 1, low-dose sustained (rank 1)
+    c(0L, 2L, 2L, 2L),  # path 2, high-dose sustained (rank 2)
+    c(0L, 1L, 2L, 2L)   # path 3, ramp-up            (rank 3)
+  )
+  fg_path_counts19 <- list(
+    list(F_g = 4L, path_idx = 1L, count = 18L),
+    list(F_g = 5L, path_idx = 1L, count = 14L),
+    list(F_g = 6L, path_idx = 2L, count = 14L),
+    list(F_g = 7L, path_idx = 2L, count = 12L),
+    list(F_g = 8L, path_idx = 3L, count = 12L),
+    list(F_g = 9L, path_idx = 3L, count = 8L)
+  )
+  n_switchers19 <- sum(sapply(fg_path_counts19, function(x) x$count))
+  stopifnot(n_switchers19 == 78L)
+  D19 <- matrix(0L, nrow = n_switchers19, ncol = n_periods19)
+  g19 <- 1L
+  for (entry in fg_path_counts19) {
+    F_g <- entry$F_g
+    target <- target_paths19[[entry$path_idx]]
+    n_here <- entry$count
+    for (k in seq_len(n_here)) {
+      if (F_g >= 3L) D19[g19, 1:(F_g - 2L)] <- 0L
+      for (j in 0:L_max19) D19[g19, F_g - 1L + j] <- target[j + 1L]
+      if (F_g + L_max19 <= n_periods19) {
+        D19[g19, (F_g + L_max19):n_periods19] <- target[L_max19 + 1L]
+      }
+      g19 <- g19 + 1L
+    }
+  }
+  # Append 20 never-treated (D=0) and 20 always-treated (D=2) controls
+  D19 <- rbind(
+    D19,
+    matrix(0L, nrow = 20L, ncol = n_periods19),
+    matrix(2L, nrow = 20L, ncol = n_periods19)
+  )
+  n_total19 <- nrow(D19)
+  set.seed(119L)
+  group_fe19 <- rnorm(n_total19, 0, 2.0)
+  noise19 <- matrix(rnorm(n_total19 * n_periods19, 0, 0.5),
+                    nrow = n_total19, ncol = n_periods19)
+  period_arr19 <- 0:(n_periods19 - 1L)
+  Y19 <- 10.0 +
+    matrix(group_fe19, nrow = n_total19, ncol = n_periods19) +
+    matrix(0.1 * period_arr19, nrow = n_total19, ncol = n_periods19, byrow = TRUE) +
+    1.5 * D19 +
+    noise19
+  d19 <- data.frame(
+    group = rep(seq_len(n_total19) - 1L, each = n_periods19),
+    period = rep(period_arr19, n_total19),
+    treatment = as.vector(t(D19)),
+    outcome = as.vector(t(Y19))
+  )
+  res19 <- did_multiplegt_dyn(
+    df = d19, outcome = "outcome", group = "group", time = "period",
+    treatment = "treatment", effects = 3, placebo = 1, by_path = 3,
+    ci_level = 95
+  )
+  scenarios$multi_path_reversible_by_path_non_binary <- list(
+    data = list(
+      group = as.numeric(d19$group),
+      period = as.numeric(d19$period),
+      treatment = as.numeric(d19$treatment),
+      outcome = as.numeric(d19$outcome)
+    ),
+    params = list(pattern = "single_baseline_multi_path_non_binary",
+                  n_switcher_groups = 78L, n_realized_groups = 118L,
+                  n_periods = 13L, seed = 119L, effects = 3, placebo = 1,
+                  by_path = 3, ci_level = 95),
+    results = extract_dcdh_by_path(res19, n_effects = 3, n_placebos = 1)
+  )
+}
+
 # ---------------------------------------------------------------------------
 # Write output
 # ---------------------------------------------------------------------------
