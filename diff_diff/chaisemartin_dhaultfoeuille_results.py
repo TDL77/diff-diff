@@ -1267,14 +1267,26 @@ class ChaisemartinDHaultfoeuilleResults:
         if self.path_effects is None:
             return
         if not self.path_effects:
+            # Distinguish the two empty causes for paths_of_interest
+            # users (every requested path unobserved) from by_path=k
+            # users (no panel path has a complete window).
+            poi = getattr(self._estimator_ref, "paths_of_interest", None)
+            if poi is not None:
+                detail_lines = [
+                    "  Every path in paths_of_interest was unobserved or had a window outside L_max+1.",
+                    "  (See per-path 'zero observed groups' UserWarnings emitted at fit().)",
+                ]
+            else:
+                detail_lines = [
+                    "  No observed paths have a complete [F_g-1, F_g-1+L_max] window.",
+                    "  (See UserWarning emitted at fit(); by_path was a no-op on this panel.)",
+                ]
             lines.extend(
                 [
                     thin,
                     "Treatment-Path Disaggregation".center(width),
                     thin,
-                    "  No observed paths have a complete [F_g-1, F_g-1+L_max] window.",
-                    "  (See UserWarning emitted at fit(); by_path / "
-                    "paths_of_interest was a no-op on this panel.)",
+                    *detail_lines,
                     thin,
                     "",
                 ]

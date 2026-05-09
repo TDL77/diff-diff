@@ -8732,6 +8732,33 @@ class TestPathsOfInterest:
         assert res.path_effects[(0, 1, 1, 1)]["frequency_rank"] == 1
         assert res.path_effects[(0, 1, 0, 0)]["frequency_rank"] == 2
 
+    def test_paths_of_interest_all_unobserved_summary_distinct_text(self):
+        """When every path in `paths_of_interest` is unobserved, the
+        empty-state `summary()` block must render the
+        paths_of_interest-specific text rather than the generic
+        "no observed paths have a complete window" text (regression
+        for R4 P3 maintainability finding)."""
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(1, 1, 1, 1), (1, 0, 1, 0)],  # both unobserved
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        text = res.summary()
+        assert "Every path in paths_of_interest was unobserved" in text, (
+            f"summary() did not render the paths_of_interest-specific "
+            f"empty-state text. Got:\n{text}"
+        )
+        # And the generic by_path-only wording must NOT appear in this case.
+        assert "No observed paths have a complete" not in text
+
     def test_paths_of_interest_all_unobserved_emits_distinct_warning(self):
         """When every path in `paths_of_interest` is unobserved,
         the empty-state warning should mention `paths_of_interest`
