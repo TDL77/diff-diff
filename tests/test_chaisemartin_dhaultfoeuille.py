@@ -9372,7 +9372,18 @@ class TestByPathSurveyDesignAnalytical:
             )
 
     def test_per_path_se_within_envelope_of_unweighted(self):
-        """Constant weights + single PSU per group: survey SE matches plug-in SE."""
+        """Constant weights + single PSU per group: survey SE within Bessel-
+        envelope of plug-in SE.
+
+        Under unit weights + single stratum + PSU=group, the survey path's
+        cell-period allocator reduces to a group-level allocator and Binder
+        TSL contributes a `n/(n-1)` Bessel factor relative to the plug-in
+        SE's plain `1/n` divisor. SE values therefore differ by O(1/n) but
+        track within a few percent on cohort-clean panels — the named
+        envelope. This test confirms (a) point estimates are bit-equal
+        (design-agnostic) and (b) survey SE is within a 10% rtol envelope
+        of plug-in SE on every (path, horizon) entry where both are finite.
+        """
         from diff_diff.survey import SurveyDesign
 
         df = _by_path_survey_data()
@@ -9393,7 +9404,7 @@ class TestByPathSurveyDesignAnalytical:
                 treatment="treatment", L_max=3,
             )
         assert res_survey.path_effects is not None and res_plain.path_effects is not None
-        # Effects must match exactly (point estimate is design-agnostic).
+        any_se_compared = False
         for path in res_survey.path_effects:
             if path not in res_plain.path_effects:
                 continue
@@ -9405,6 +9416,21 @@ class TestByPathSurveyDesignAnalytical:
                     res_plain.path_effects[path]["horizons"][l_h]["effect"],
                     atol=1e-12,
                 )
+                se_survey = res_survey.path_effects[path]["horizons"][l_h]["se"]
+                se_plain = res_plain.path_effects[path]["horizons"][l_h]["se"]
+                if np.isfinite(se_survey) and np.isfinite(se_plain):
+                    np.testing.assert_allclose(
+                        se_survey, se_plain, rtol=0.10,
+                        err_msg=(
+                            f"path={path} l={l_h}: survey SE outside 10% "
+                            f"rtol envelope of plug-in SE"
+                        ),
+                    )
+                    any_se_compared = True
+        assert any_se_compared, (
+            "No (path, horizon) entry had finite SE on both surfaces — "
+            "constant-weight SE envelope was not actually exercised."
+        )
 
     # ----- Replicate-weight SE correctness (slow) -----
 
