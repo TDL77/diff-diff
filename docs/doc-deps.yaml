@@ -404,6 +404,9 @@ sources:
       - path: diff_diff/guides/llms-full.txt
         section: "HAD Pretests"
         type: user_guide
+      - path: docs/tutorials/21_had_pretest_workflow.ipynb
+        type: tutorial
+        note: "Composite pre-test workflow walkthrough; drift-locked at tests/test_t21_had_pretest_workflow_drift.py"
 
   diff_diff/local_linear.py:
     drift_risk: low
