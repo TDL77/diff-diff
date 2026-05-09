@@ -410,6 +410,17 @@ sources:
         type: methodology
       - path: docs/api/had.rst
         type: api_reference
+      - path: docs/api/local_linear.rst
+        type: api_reference
+
+  diff_diff/profile.py:
+    drift_risk: low
+    docs:
+      - path: docs/api/profile.rst
+        type: api_reference
+      - path: diff_diff/guides/llms-autonomous.txt
+        section: "PanelProfile field reference"
+        type: user_guide
 
   # ── SyntheticDiD ───────────��───────────────────────────────────────
 

@@ -75,6 +75,7 @@ html_extra_path = [
     "../diff_diff/guides/llms.txt",
     "../diff_diff/guides/llms-full.txt",
     "../diff_diff/guides/llms-practitioner.txt",
+    "../diff_diff/guides/llms-autonomous.txt",
 ]
 sitemap_url_scheme = "{link}"
 

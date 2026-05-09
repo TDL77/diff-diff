@@ -101,6 +101,19 @@ Placebo tests and model diagnostics:
    diff_diff.run_all_placebo_tests
    diff_diff.PlaceboTestResults
 
+Panel Profiling
+---------------
+
+Pre-fit description of panel structure for estimator selection. The
+:class:`~diff_diff.PanelProfile` return type and its supporting dataclasses
+are documented in :doc:`profile`.
+
+.. autosummary::
+   :toctree: _autosummary
+   :nosignatures:
+
+   diff_diff.profile_panel
+
 Sensitivity Analysis
 --------------------
 
@@ -245,6 +258,22 @@ Estimators
    two_stage
    wooldridge_etwfe
    bacon
+
+Infrastructure
+~~~~~~~~~~~~~~
+
+.. toctree::
+   :maxdepth: 2
+
+   local_linear
+
+Pre-Fit Profiling
+~~~~~~~~~~~~~~~~~
+
+.. toctree::
+   :maxdepth: 2
+
+   profile
 
 Diagnostics & Inference
 ~~~~~~~~~~~~~~~~~~~~~~~
