@@ -455,8 +455,9 @@ class ChaisemartinDHaultfoeuilleResults:
         ``path_effects[path]["horizons"][l]`` and rendered as
         ``cband_lower`` / ``cband_upper`` columns on
         ``to_dataframe(level="by_path")``. Empty-state contract:
-        ``None`` when not requested (no bootstrap or ``by_path is None``);
-        ``{}`` when requested but no path passed both gates (``>=2``
+        ``None`` when not requested (no bootstrap, or both ``by_path``
+        and ``paths_of_interest`` are ``None``); ``{}`` when requested
+        but no path passed both gates (``>=2``
         valid horizons with finite bootstrap SE ``> 0`` AND a strict
         majority — more than 50% — of finite sup-t draws). Bands
         cover joint inference WITHIN a
@@ -1285,10 +1286,11 @@ class ChaisemartinDHaultfoeuilleResults:
                 thin,
             ]
         )
-        for path in sorted(
-            self.path_effects.keys(),
-            key=lambda p: self.path_effects[p]["frequency_rank"],
-        ):
+        # Iterate in path_effects insertion order so summary preserves
+        # the user-specified path order under `paths_of_interest`. Under
+        # `by_path=k`, insertion order matches descending frequency_rank
+        # (the enumeration sorts by count), so the rendering is identical.
+        for path in self.path_effects.keys():
             entry = self.path_effects[path]
             rank = entry["frequency_rank"]
             n_groups = entry["n_groups"]
@@ -1698,9 +1700,11 @@ class ChaisemartinDHaultfoeuilleResults:
             # Mirrors the linear_trends pattern above.
             if self.path_effects is None:
                 raise ValueError(
-                    "Path effects not available. Pass by_path=k (positive int) "
+                    "Path effects not available. Pass by_path=k "
+                    "(positive int) or paths_of_interest=[(...), ...] "
                     "to ChaisemartinDHaultfoeuille(drop_larger_lower=False, "
-                    "by_path=k) and L_max >= 1 to fit()."
+                    "by_path=k) (or paths_of_interest=...) and L_max >= 1 "
+                    "to fit()."
                 )
             if not self.path_effects:
                 return pd.DataFrame(
@@ -1723,10 +1727,11 @@ class ChaisemartinDHaultfoeuilleResults:
                     ]
                 )
             rows = []
-            for path in sorted(
-                self.path_effects.keys(),
-                key=lambda p: self.path_effects[p]["frequency_rank"],
-            ):
+            # Iterate in path_effects insertion order so the long-format
+            # table preserves the user-specified path order under
+            # `paths_of_interest`. Under `by_path=k`, insertion order
+            # matches descending frequency_rank, so output is identical.
+            for path in self.path_effects.keys():
                 entry = self.path_effects[path]
                 rank = entry["frequency_rank"]
                 n_groups = entry["n_groups"]

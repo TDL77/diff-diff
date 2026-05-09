@@ -8648,6 +8648,64 @@ class TestPathsOfInterest:
         # Insertion order preserved.
         assert list(res.path_effects.keys()) == user_order
 
+    def test_paths_of_interest_order_preserved_in_to_dataframe(self):
+        """`to_dataframe(level="by_path")` must iterate in insertion
+        order so user-specified `paths_of_interest` order is preserved
+        across reporting surfaces (regression for R1 P3
+        maintainability finding)."""
+        df = _by_path_three_path_data()
+        # Order intentionally NOT frequency-ranked: lower-rank path first.
+        user_order = [(0, 1, 0, 0), (0, 1, 1, 1)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_order,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        out = res.to_dataframe(level="by_path")
+        # First-occurrence order of the path column matches user order.
+        first_seen = []
+        seen = set()
+        for p in out["path"]:
+            if p not in seen:
+                seen.add(p)
+                first_seen.append(p)
+        assert first_seen == user_order
+
+    def test_paths_of_interest_order_preserved_in_summary(self):
+        """`summary()` must render paths in insertion order so
+        user-specified `paths_of_interest` order is preserved
+        (regression for R1 P3 maintainability finding)."""
+        df = _by_path_three_path_data()
+        user_order = [(0, 1, 0, 0), (0, 1, 1, 1)]
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=user_order,
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        text = res.summary()
+        # Find the ordering of the user paths as they appear in summary.
+        idx_first = text.index("Path (0, 1, 0, 0)")
+        idx_second = text.index("Path (0, 1, 1, 1)")
+        assert idx_first < idx_second, (
+            f"Summary did not preserve user-specified order. "
+            f"`(0, 1, 0, 0)` at idx={idx_first}, "
+            f"`(0, 1, 1, 1)` at idx={idx_second}"
+        )
+
     def test_paths_of_interest_frequency_rank_is_true_frequency(self):
         """`frequency_rank` must reflect descending count, NOT user-list
         order. Regression for the R0 P2 finding: previously the rank
