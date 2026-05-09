@@ -507,7 +507,7 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
 - **Data transmission**: In non-dry-run mode, this skill transmits the unified diff,
   changed-file metadata, full source file contents (in standard/deep mode),
   import-context files (in deep mode), selected methodology registry text, and
-  prior review context (if present) to OpenAI via the Chat Completions API.
+  prior review context (if present) to OpenAI via the Responses API.
   Use `--dry-run` to preview exactly what would be sent.
 - This skill pairs naturally with the iterative workflow:
   `/ai-review-local` -> address findings -> `/ai-review-local` -> `/submit-pr`
