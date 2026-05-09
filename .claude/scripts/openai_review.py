@@ -935,6 +935,62 @@ _SUBSTITUTIONS = [
         "Use the branch name only to understand which "
         "methods/papers are intended.",
     ),
+    # Replace the CI Single-Pass Completeness Mandate with a local-mode note.
+    # The CI Mandate instructs the reviewer to run shell greps, load sibling
+    # files, and sweep transitive paths — none of which the local raw API
+    # path can do. Leaving the CI wording in place would cause the model to
+    # claim audits it cannot perform.
+    (
+        """## Single-Pass Completeness Mandate (Initial Review Only)
+
+This is an INITIAL review. Treat this as the only chance to enumerate findings.
+Follow-up rounds are expensive — find ALL P0/P1/P2 issues in this pass.
+
+Before finalizing, confirm you have run each of these audits on the diff:
+
+1. **Sibling-surface mirror audit**: For every fix or change in a method, schema,
+   default-value path, or report block, identify the parallel surface in the same
+   codebase (BR ↔ DR, schema ↔ renderer, default ↔ precomputed, summary ↔ full)
+   and check whether the same change applies there. Flag the unmirrored side as P1.
+
+2. **Pattern-wide grep**: When you flag any anti-pattern or bug class, use `grep`
+   on `diff_diff/**.py` to identify sibling occurrences of the same pattern and
+   enumerate them in the SAME finding. Only LOAD a sibling file's full contents
+   if grep returns a hit and you need surrounding context to verify the issue.
+   Do not defer pattern-class findings to a follow-up round.
+
+3. **Reciprocal/symmetry check**: For dispatch code, validation, or guards in
+   one direction (A-on-B), explicitly enumerate the reciprocal direction (B-on-A)
+   and confirm coverage.
+
+4. **Transitive workflow deps**: For GH Actions workflow `paths:` or pytest
+   selection changes, sweep transitive auto-loaded files (conftest.py,
+   pyproject.toml, ancestor conftests) and confirm they are included.
+
+5. **Scope override (with carve-outs)**: The audits above explicitly authorize
+   loading files outside the diff to verify completeness. This overrides the
+   "minimum surrounding context" default in the Rules section below.
+
+   **DO NOT load these paths** (the workflow's diff-build deliberately excludes
+   them; they are noise or out-of-scope):
+   - `docs/tutorials/*.ipynb` (notebook outputs are large JSON blobs)
+   - `benchmarks/data/real/*.json`
+   - `benchmarks/data/real/*.csv`""",
+        """## Single-Pass Completeness Audit (Local Review)
+
+This is a local review running as a static-prompt API call. You do NOT have
+shell or file-loading access — only the prompt content below is available
+(diff + changed source files + first-level imports).
+
+Find ALL P0/P1/P2 issues within the loaded context. Audit sibling surfaces,
+parallel patterns, and reciprocal directions THAT ARE VISIBLE in the loaded
+files.
+
+Do NOT claim to have run shell greps, loaded sibling files outside the
+prompt, or audited paths not present here. If a relevant audit is impossible
+because the necessary context is not in the prompt, say so explicitly rather
+than asserting completeness.""",
+    ),
 ]
 
 
@@ -1098,7 +1154,8 @@ def compile_prompt(
 
 ENDPOINT = "https://api.openai.com/v1/responses"
 DEFAULT_MODEL = "gpt-5.5"
-DEFAULT_TIMEOUT = 300  # seconds
+DEFAULT_TIMEOUT = 300  # seconds — non-reasoning models
+REASONING_TIMEOUT = 900  # seconds — reasoning models can take 10-15 min
 DEFAULT_MAX_TOKENS = 16384
 REASONING_MAX_TOKENS = 32768
 
@@ -1106,6 +1163,20 @@ REASONING_MAX_TOKENS = 32768
 def _is_reasoning_model(model: str) -> bool:
     """Return True for models that use internal chain-of-thought reasoning."""
     return model.startswith(("o1", "o3", "o4", "gpt-5.4", "gpt-5.5")) or "-pro" in model
+
+
+def _resolve_timeout(timeout: "int | None", model: str) -> int:
+    """Resolve the effective HTTP timeout for an API call.
+
+    If --timeout was explicitly provided, use it. Otherwise pick
+    REASONING_TIMEOUT (900s) for reasoning models and DEFAULT_TIMEOUT
+    (300s) for standard models. This prevents reasoning-model reviews
+    from hitting a too-short default when the wrapper command does not
+    pass --timeout.
+    """
+    if timeout is not None:
+        return timeout
+    return REASONING_TIMEOUT if _is_reasoning_model(model) else DEFAULT_TIMEOUT
 
 
 def estimate_tokens(text: str) -> int:
@@ -1345,8 +1416,12 @@ def main() -> None:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=DEFAULT_TIMEOUT,
-        help=f"HTTP request timeout in seconds (default: {DEFAULT_TIMEOUT})",
+        default=None,
+        help=(
+            f"HTTP request timeout in seconds. If omitted, defaults to "
+            f"{REASONING_TIMEOUT} for reasoning models and {DEFAULT_TIMEOUT} for "
+            f"standard models."
+        ),
     )
     parser.add_argument(
         "--delta-diff",
@@ -1375,6 +1450,10 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+
+    # Resolve --timeout: reasoning models default to REASONING_TIMEOUT (900s),
+    # standard models to DEFAULT_TIMEOUT (300s). Explicit --timeout overrides.
+    args.timeout = _resolve_timeout(args.timeout, args.model)
 
     # Post-parse validation
     if args.context != "minimal" and not args.repo_root:
@@ -1616,13 +1695,7 @@ def main() -> None:
         sys.exit(0)
 
     # Call OpenAI API
-    if _is_reasoning_model(args.model) and args.timeout == DEFAULT_TIMEOUT:
-        print(
-            f"Note: {args.model} is a reasoning model. Consider --timeout 900 "
-            "for large reviews.",
-            file=sys.stderr,
-        )
-    print(f"Sending review to {args.model}...", file=sys.stderr)
+    print(f"Sending review to {args.model} (timeout: {args.timeout}s)...", file=sys.stderr)
     print(f"Estimated input tokens: ~{est_tokens:,}", file=sys.stderr)
     if cost_str:
         print(f"Estimated cost: {cost_str}", file=sys.stderr)

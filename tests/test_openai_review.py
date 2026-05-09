@@ -221,6 +221,34 @@ class TestAdaptReviewCriteria:
         captured = capsys.readouterr()
         assert "Warning: prompt substitution did not match" not in captured.err
 
+    def test_local_prompt_strips_ci_mandate_audit_instructions(self, review_mod):
+        """Local mode must not instruct the model to run shell greps or load
+        files outside the prompt — those are CI-Codex-only capabilities."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        prompt_path = repo_root / ".github" / "codex" / "prompts" / "pr_review.md"
+        if not prompt_path.exists():
+            pytest.skip("pr_review.md not found")
+        source = prompt_path.read_text()
+        adapted = review_mod._adapt_review_criteria(source)
+        assert "use `grep`\n   on `diff_diff/**.py`" not in adapted
+        assert "Transitive workflow deps" not in adapted
+        assert "Scope override (with carve-outs)" not in adapted
+
+    def test_local_prompt_has_local_audit_note(self, review_mod):
+        """Local mode adds an explicit no-tool-access note in place of the
+        CI Mandate, so the model does not claim audits it cannot perform."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        prompt_path = repo_root / ".github" / "codex" / "prompts" / "pr_review.md"
+        if not prompt_path.exists():
+            pytest.skip("pr_review.md not found")
+        source = prompt_path.read_text()
+        adapted = review_mod._adapt_review_criteria(source)
+        assert "Single-Pass Completeness Audit (Local Review)" in adapted
+        assert "static-prompt API call" in adapted
+        assert "Do NOT claim to have run shell greps" in adapted
+
 
 # ---------------------------------------------------------------------------
 # compile_prompt
@@ -1560,6 +1588,33 @@ class TestIsReasoningModel:
 
     def test_gpt41_mini_is_not_reasoning(self, review_mod):
         assert review_mod._is_reasoning_model("gpt-4.1-mini") is False
+
+
+class TestResolveTimeout:
+    """The script must auto-select a 900s timeout for reasoning models when
+    --timeout is omitted; the old 300s default would time out reasoning runs."""
+
+    def test_omitted_reasoning_defaults_to_900(self, review_mod):
+        assert review_mod._resolve_timeout(None, "gpt-5.5") == review_mod.REASONING_TIMEOUT
+        assert review_mod._resolve_timeout(None, "gpt-5.5") == 900
+
+    def test_omitted_non_reasoning_defaults_to_300(self, review_mod):
+        assert review_mod._resolve_timeout(None, "gpt-4.1") == review_mod.DEFAULT_TIMEOUT
+        assert review_mod._resolve_timeout(None, "gpt-4.1") == 300
+
+    def test_explicit_timeout_preserved_for_reasoning(self, review_mod):
+        assert review_mod._resolve_timeout(1200, "gpt-5.5") == 1200
+
+    def test_explicit_timeout_preserved_for_non_reasoning(self, review_mod):
+        assert review_mod._resolve_timeout(60, "gpt-4.1") == 60
+
+    def test_explicit_zero_preserved(self, review_mod):
+        """Zero is a valid explicit value (not the same as None)."""
+        assert review_mod._resolve_timeout(0, "gpt-5.5") == 0
+
+    def test_gpt54_routes_to_reasoning_default(self, review_mod):
+        """gpt-5.4 is also reasoning-classified post-fix; should get 900s."""
+        assert review_mod._resolve_timeout(None, "gpt-5.4") == 900
 
 
 class TestProModelPricing:
