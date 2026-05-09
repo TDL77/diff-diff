@@ -2,6 +2,8 @@
 
 This document provides the academic foundations and key implementation requirements for each estimator in diff-diff. It serves as a reference for contributors and users who want to understand the theoretical basis of the methods.
 
+**Result-class field naming.** Headline scalar inference fields appear under one of three native naming patterns: `att` / `se` / `conf_int` / `p_value` / `t_stat` (`DiDResults`, `MultiPeriodDiDResults` aliases, `SyntheticDiDResults`, `TROPResults`, `HeterogeneousAdoptionDiDResults`); `overall_*` (`CallawaySantAnnaResults` and the rest of the staggered family); `overall_att_*` (`ContinuousDiDResults`, where `att` and `acrt` are parallel response curves); and `avg_*` (the canonical fields on `MultiPeriodDiDResults`). Every result class additionally exposes the flat `att` / `se` / `conf_int` / `p_value` / `t_stat` names as read-only `@property` aliases for adapter / external-consumer compatibility (see PR for v3.3.3, motivated by `balance.interop.diff_diff`); `ContinuousDiDResults` further exposes `overall_*` aliases pointing at the ATT side. The native field is canonical for documentation, semantics, and computation — aliases are pure read-throughs and inherit the `safe_inference()` joint-NaN consistency contract automatically.
+
 ## Table of Contents
 
 1. [Core DiD Estimators](#core-did-estimators)

@@ -447,6 +447,27 @@ class MultiPeriodDiDResults:
     vcov_type: Optional[str] = field(default=None)
     cluster_name: Optional[str] = field(default=None)
 
+    # --- Inference-field aliases (balance/external-adapter compatibility) ---
+    @property
+    def att(self) -> float:
+        return self.avg_att
+
+    @property
+    def se(self) -> float:
+        return self.avg_se
+
+    @property
+    def conf_int(self) -> Tuple[float, float]:
+        return self.avg_conf_int
+
+    @property
+    def p_value(self) -> float:
+        return self.avg_p_value
+
+    @property
+    def t_stat(self) -> float:
+        return self.avg_t_stat
+
     def __repr__(self) -> str:
         """Concise string representation."""
         sig = _get_significance_stars(self.avg_p_value)
@@ -1180,7 +1201,7 @@ class SyntheticDiDResults:
                 "back to fit-time unit IDs is not well-defined. See "
                 "``result.placebo_effects`` for the raw PSU-level replicate "
                 "array and ``docs/methodology/REGISTRY.md`` §SyntheticDiD "
-                "\"Note (survey + jackknife composition)\" for the "
+                '"Note (survey + jackknife composition)" for the '
                 "aggregation formula."
             )
         if self._loo_unit_ids is None or self._loo_roles is None or self.placebo_effects is None:
@@ -1386,9 +1407,7 @@ class SyntheticDiDResults:
                 lambda_fake,
             )
             synthetic_pre_fake_n = Y_pre_c_n @ omega_eff_fake
-            pre_fit_n = float(
-                np.sqrt(np.mean((y_pre_t_mean_n - synthetic_pre_fake_n) ** 2))
-            )
+            pre_fit_n = float(np.sqrt(np.mean((y_pre_t_mean_n - synthetic_pre_fake_n) ** 2)))
             # ATT is scale-equivariant and shift-invariant in Y; RMSE is
             # scale-equivariant. Rescale back to original-Y units.
             row["att"] = float(att_fake_n * Y_scale)
@@ -1482,12 +1501,8 @@ class SyntheticDiDResults:
         Y_post_treated_n = (snap.Y_post_treated - Y_shift) / Y_scale
 
         if snap.w_treated is not None:
-            y_pre_t_mean_n = np.average(
-                Y_pre_treated_n, axis=1, weights=snap.w_treated
-            )
-            y_post_t_mean_n = np.average(
-                Y_post_treated_n, axis=1, weights=snap.w_treated
-            )
+            y_pre_t_mean_n = np.average(Y_pre_treated_n, axis=1, weights=snap.w_treated)
+            y_post_t_mean_n = np.average(Y_post_treated_n, axis=1, weights=snap.w_treated)
         else:
             y_pre_t_mean_n = np.mean(Y_pre_treated_n, axis=1)
             y_post_t_mean_n = np.mean(Y_post_treated_n, axis=1)
