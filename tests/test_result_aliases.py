@@ -259,6 +259,54 @@ def test_multi_period_did_aliases():
 
 
 # ============================================================================
+# Read-only semantics
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    ("cls", "ovr"),
+    [
+        (
+            CallawaySantAnnaResults,
+            {
+                "overall_att": _ATT,
+                "overall_se": _SE,
+                "overall_t_stat": _T,
+                "overall_p_value": _P,
+                "overall_conf_int": _CI,
+            },
+        ),
+        (ContinuousDiDResults, _continuous_did_overrides()),
+        (
+            MultiPeriodDiDResults,
+            {
+                "avg_att": _ATT,
+                "avg_se": _SE,
+                "avg_t_stat": _T,
+                "avg_p_value": _P,
+                "avg_conf_int": _CI,
+            },
+        ),
+    ],
+    ids=lambda v: v.__name__ if hasattr(v, "__name__") else "ovr",
+)
+def test_aliases_are_read_only(cls, ovr):
+    """Assigning to an alias must raise AttributeError (no setter installed).
+
+    Regression: a downstream test in tests/test_practitioner.py used
+    `r.overall_se = X` on a `ContinuousDiDResults.__new__()` mock — pre-alias
+    that silently created a junk attribute; post-alias the property correctly
+    rejects the assignment. Locking read-only here means future contributors
+    who write similar fixtures fail loudly via this test rather than via a
+    surprise `AttributeError: can't set attribute` deep in another suite.
+    """
+    res = cls(**_required_init_kwargs(cls, ovr))
+    for name in ("att", "se", "conf_int", "p_value", "t_stat"):
+        with pytest.raises(AttributeError):
+            setattr(res, name, object())
+
+
+# ============================================================================
 # Cross-cutting regression — balance.interop.diff_diff adapter pattern
 # ============================================================================
 
