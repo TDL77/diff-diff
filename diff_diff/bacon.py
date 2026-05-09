@@ -324,6 +324,7 @@ class BaconDecomposition:
     ----------
     weights : str, default="approximate"
         Weight calculation method:
+
         - "approximate": Fast simplified formula using group shares and
           treatment variance. Good for diagnostic purposes where relative
           weights are sufficient to identify problematic comparisons.
