@@ -1572,6 +1572,24 @@ class TestProModelPricing:
         assert snapshot == base
 
 
+class TestSkillDocAPIConsistency:
+    """Catch doc drift between the script's API endpoint and the skill doc's
+    user-facing data-transmission note."""
+
+    def test_skill_doc_does_not_reference_chat_completions(self):
+        """Skill doc must not say "Chat Completions API" — script uses Responses API."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc_path = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc_path.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc_path.read_text()
+        assert "Chat Completions API" not in text, (
+            "Skill doc references stale Chat Completions API; "
+            "script uses Responses API at openai_review.py:ENDPOINT"
+        )
+
+
 class TestExtractResponseText:
     def test_prefers_output_text_field(self, review_mod):
         result = {"output_text": "Direct text.", "output": []}
