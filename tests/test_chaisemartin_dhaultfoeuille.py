@@ -9468,6 +9468,86 @@ class TestByPathSurveyDesignAnalytical:
         assert any_finite
 
     @pytest.mark.slow
+    def test_refresh_path_inference_called_from_final_block(self):
+        """Pin the helper's call site to the final R2 P1b block.
+
+        Regression for PR #408 R1 P1: an earlier implementation
+        invoked ``_refresh_path_inference`` immediately after per-path
+        runs, BEFORE the global overall / joiners / leavers /
+        heterogeneity IF sites appended their ``n_valid`` contributions
+        — leaving per-path inference using a stale snapshot df that
+        could exceed the final ``survey_metadata.df_survey``.
+
+        Pure-fixture detection is unreliable: under uniform-valid
+        replicate weights, every IF site reports the same ``n_valid``,
+        so the snapshot df and the final df happen to coincide and a
+        match-against-final-df assertion would pass even with the bug
+        present. Instead we wrap the helper with ``mock.patch.object``
+        and assert the ``df_final`` it receives equals the final
+        ``survey_metadata.df_survey`` — a relationship that holds by
+        construction when invoked from the final block (which uses
+        ``_final_eff_df = _effective_df_survey(resolved_survey,
+        _replicate_n_valid_list)`` AFTER all appends), but can only
+        coincide by chance from an earlier block.
+        """
+        import importlib
+        import unittest.mock as _mock
+
+        from diff_diff.survey import SurveyDesign
+
+        # The top-level `diff_diff` package re-exports
+        # `chaisemartin_dhaultfoeuille` as the convenience function,
+        # shadowing the module of the same name. Use importlib to
+        # access the module object explicitly so mock.patch.object
+        # operates on the correct namespace.
+        _cd_mod = importlib.import_module("diff_diff.chaisemartin_dhaultfoeuille")
+
+        df = _by_path_survey_data()
+        n_obs = len(df)
+        rng = np.random.default_rng(3)
+        rep_cols = [f"rep_{i}" for i in range(10)]
+        for col in rep_cols:
+            df[col] = df["survey_weights"] * (1.0 + 0.05 * rng.standard_normal(n_obs))
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        est = ChaisemartinDHaultfoeuille(by_path=2, drop_larger_lower=False)
+
+        with _mock.patch.object(
+            _cd_mod,
+            "_refresh_path_inference",
+            wraps=_cd_mod._refresh_path_inference,
+        ) as m:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                res = est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3, survey_design=sd,
+                )
+
+        # Helper called exactly once from the final R2 P1b block.
+        assert m.call_count == 1, (
+            f"_refresh_path_inference should be called exactly once "
+            f"under replicate-weight + by_path; got {m.call_count}"
+        )
+        # Under replicate variance with defined effective df,
+        # _inference_df returns the effective df unchanged, and
+        # survey_metadata.df_survey persists the same value. Equality
+        # proves the helper received the FINAL df, not an earlier
+        # snapshot taken before the global IF sites appended.
+        df_final_passed = m.call_args.kwargs["df_final"]
+        assert res.survey_metadata is not None
+        assert df_final_passed == res.survey_metadata.df_survey, (
+            f"Helper invoked with df_final={df_final_passed!r}, but "
+            f"results.survey_metadata.df_survey={res.survey_metadata.df_survey!r}. "
+            f"This indicates the helper ran from a stale earlier "
+            f"call site instead of the final R2 P1b block."
+        )
+
+    @pytest.mark.slow
     def test_per_path_inference_uses_final_df_after_all_appends(self):
         """Per-path t/p/CI must use `results.survey_metadata.df_survey`.
 
@@ -9481,7 +9561,12 @@ class TestByPathSurveyDesignAnalytical:
         their ``t_stat`` / ``p_value`` / ``conf_int`` agree with
         ``results.survey_metadata.df_survey`` and the global event-
         study / placebo surfaces (which the same final block already
-        refreshes). Regression for PR #408 R1 P1.
+        refreshes). Companion test
+        ``test_refresh_path_inference_called_from_final_block`` pins
+        the helper's call site directly via mock.patch (the
+        match-against-final-df assertion below is satisfied vacuously
+        under uniform-valid replicates where snapshot df coincides
+        with final df). Regression for PR #408 R1 P1.
         """
         from diff_diff.survey import SurveyDesign
         from diff_diff.utils import safe_inference
