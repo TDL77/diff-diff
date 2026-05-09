@@ -1085,6 +1085,7 @@ def bacon_decompose(
         Use 0 (or np.inf) for never-treated units.
     weights : str, default="approximate"
         Weight calculation method:
+
         - "approximate": Fast simplified formula (default). Good for
           diagnostic purposes where relative weights are sufficient.
         - "exact": Variance-based weights from Goodman-Bacon (2021)
@@ -1094,6 +1095,7 @@ def bacon_decompose(
     -------
     BaconDecompositionResults
         Object containing decomposition results with:
+
         - twfe_estimate: The overall TWFE coefficient
         - comparisons: List of all 2x2 comparisons with estimates and weights
         - Weight totals by comparison type

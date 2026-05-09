@@ -45,14 +45,10 @@ to ``int_0^1 k(u) du = 1/2``; the uniform kernel uses
 
 .. autofunction:: diff_diff.uniform_kernel
 
-.. autodata:: diff_diff.KERNELS
-   :annotation: : dict[str, Callable[[np.ndarray], np.ndarray]]
-   :no-value:
+.. py:data:: diff_diff.KERNELS
+   :type: dict[str, Callable[[np.ndarray], np.ndarray]]
 
-   Mapping from kernel name (``"epanechnikov"`` / ``"triangular"`` /
-   ``"uniform"``) to its callable evaluator on ``[0, 1]``. Pass the name
-   string (not the callable) to ``local_linear_fit`` and
-   ``mse_optimal_bandwidth`` via their ``kernel=`` argument.
+   Mapping from kernel name (``"epanechnikov"`` / ``"triangular"`` / ``"uniform"``) to its callable evaluator on ``[0, 1]``. Pass the name string (not the callable) to ``local_linear_fit`` and ``mse_optimal_bandwidth`` via their ``kernel=`` argument.
 
 .. autofunction:: diff_diff.kernel_moments
 

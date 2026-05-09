@@ -40,7 +40,10 @@ class DeltaSD:
     Smoothness restriction on trend violations (Delta^{SD}).
 
     Restricts the second differences of the trend violations:
-        |delta_{t+1} - 2*delta_t + delta_{t-1}| <= M
+
+    .. math::
+
+        |\\delta_{t+1} - 2\\delta_t + \\delta_{t-1}| \\le M
 
     When M=0, this enforces that violations follow a linear trend
     (linear extrapolation of pre-trends). Larger M allows more
@@ -75,7 +78,10 @@ class DeltaRM:
 
     Post-treatment consecutive first differences are bounded by Mbar
     times the maximum pre-treatment first difference:
-        |delta_{t+1} - delta_t| <= Mbar * max_{s<0} |delta_{s+1} - delta_s|
+
+    .. math::
+
+        |\\delta_{t+1} - \\delta_t| \\le \\overline{M} \\cdot \\max_{s<0} |\\delta_{s+1} - \\delta_s|
 
     When Mbar=0, this enforces zero post-treatment first differences.
     Mbar=1 means post-period first differences can be as large as the
@@ -109,8 +115,9 @@ class DeltaSDRM:
     Combined smoothness and relative magnitudes restriction.
 
     Imposes both:
-    1. Smoothness: |delta_{t+1} - 2*delta_t + delta_{t-1}| <= M
-    2. Relative magnitudes: |delta_{t+1} - delta_t| <= Mbar * max_{s<0} |delta_{s+1} - delta_s|
+
+    1. Smoothness: :math:`|\\delta_{t+1} - 2\\delta_t + \\delta_{t-1}| \\le M`
+    2. Relative magnitudes: :math:`|\\delta_{t+1} - \\delta_t| \\le \\overline{M} \\cdot \\max_{s<0} |\\delta_{s+1} - \\delta_s|`
 
     This is more restrictive than either constraint alone.
 

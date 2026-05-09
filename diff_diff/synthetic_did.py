@@ -35,6 +35,7 @@ class SyntheticDiD(DifferenceInDifferences):
     pre-treatment trends.
 
     This method is particularly useful when:
+
     - You have few treated units (possibly just one)
     - Parallel trends assumption may be questionable
     - Control units are heterogeneous and need reweighting
@@ -52,6 +53,7 @@ class SyntheticDiD(DifferenceInDifferences):
         Significance level for confidence intervals.
     variance_method : str, default="placebo"
         Method for variance estimation:
+
         - "placebo": Placebo-based variance matching R's synthdid::vcov(method="placebo").
           Implements Algorithm 4 from Arkhangelsky et al. (2021). Library default
           (R's default is ``"bootstrap"``; we default to placebo because it is

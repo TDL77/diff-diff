@@ -175,16 +175,19 @@ class CallawaySantAnna(
         Random seed for reproducibility.
     rank_deficient_action : str, default="warn"
         Action when design matrix is rank-deficient (linearly dependent columns):
+
         - "warn": Issue warning and drop linearly dependent columns (default)
         - "error": Raise ValueError
         - "silent": Drop columns silently without warning
     base_period : str, default="varying"
         Method for selecting the base (reference) period for computing
         ATT(g,t). Options:
+
         - "varying": For pre-treatment periods (t < g - anticipation), use
           t-1 as base (consecutive comparisons). For post-treatment, use
           g-1-anticipation. Requires t-1 to exist in data.
         - "universal": Always use g-1-anticipation as base period.
+
         Both produce identical post-treatment effects. Matches R's
         did::att_gt() base_period parameter.
     cband : bool, default=True
@@ -217,12 +220,14 @@ class CallawaySantAnna(
     pscore_fallback : str, default="error"
         Action when propensity score estimation fails entirely
         (``LinAlgError`` or ``ValueError`` from IRLS):
+
         - "error": Raise the exception (default). Ensures the user is
           aware of estimation failures.
         - "unconditional": Fall back to unconditional propensity
           with a warning. For IPW, this drops all covariates. For DR,
           the propensity model becomes unconditional but outcome
           regression still uses covariates.
+
         When ``rank_deficient_action="error"``, errors are always
         re-raised regardless of this setting.
 

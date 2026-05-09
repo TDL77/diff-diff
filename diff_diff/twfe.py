@@ -602,6 +602,7 @@ class TwoWayFixedEffects(DifferenceInDifferences):
             Use 0 (or np.inf) for never-treated units.
         weights : str, default="approximate"
             Weight calculation method:
+
             - "approximate": Fast simplified formula (default). Good for
               diagnostic purposes where relative weights are sufficient.
             - "exact": Variance-based weights from Goodman-Bacon (2021)

@@ -12,7 +12,7 @@ which combines three robustness components:
 2. **Exponential distance-based unit weights**: ω_j = exp(-λ_unit × d(j,i))
    where d(j,i) is the pairwise RMSE between units over pre-treatment periods
 
-3. **Exponential time decay weights**: θ_s = exp(-λ_time × |t-s|)
+3. **Exponential time decay weights**: θ_s = exp(-λ_time × :math:`|t-s|`)
    weighting periods by proximity to the specific treatment period t
 
 **When to use TROP:**

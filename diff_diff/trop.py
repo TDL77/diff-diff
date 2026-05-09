@@ -53,7 +53,7 @@ class TROP(TROPLocalMixin, TROPGlobalMixin):
     2. **Exponential distance-based unit weights**: ω_j = exp(-λ_unit × d(j,i))
        where d(j,i) is the RMSE of outcome differences between units
 
-    3. **Exponential time decay weights**: θ_s = exp(-λ_time × |s-t|)
+    3. **Exponential time decay weights**: θ_s = exp(-λ_time × :math:`|s-t|`)
        weighting pre-treatment periods by proximity to treatment
 
     Tuning parameters (λ_time, λ_unit, λ_nn) are selected via leave-one-out

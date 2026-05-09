@@ -834,6 +834,7 @@ def rank_control_units(
     -------
     pd.DataFrame
         Ranked control units with columns:
+
         - unit: Unit identifier
         - quality_score: Combined quality score (0-1, higher is better)
         - outcome_trend_score: Pre-treatment outcome trend similarity
@@ -846,6 +847,7 @@ def rank_control_units(
         - is_required: Whether unit was in require_units
 
         If suggest_treatment_candidates=True (and no treated units):
+
         - unit: Unit identifier
         - treatment_candidate_score: Suitability as treatment unit
         - avg_outcome_level: Pre-treatment outcome mean

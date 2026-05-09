@@ -709,7 +709,7 @@ class ChaisemartinDHaultfoeuilleResults:
 
     @property
     def coef_var(self) -> float:
-        """SE / |DID_M|; NaN when DID_M is 0 or SE non-finite."""
+        """SE / abs(DID_M); NaN when DID_M is 0 or SE non-finite."""
         if not (np.isfinite(self.overall_se) and self.overall_se >= 0):
             return np.nan
         if not np.isfinite(self.overall_att) or self.overall_att == 0:
