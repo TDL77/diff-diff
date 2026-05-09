@@ -1251,8 +1251,8 @@ Single-period results container for `HeterogeneousAdoptionDiD`. The table below 
 | `survey_metadata` | `SurveyMetadata | None` | Repo-standard survey metadata when `survey_design=` / `weights=` is supplied |
 | `bandwidth_diagnostics` | `BandwidthResult | None` | MSE-DPI selector output (continuous designs); `None` on `mass_point` |
 | `bias_corrected_fit` | `BiasCorrectedFit | None` | Phase 1c bias-corrected local-linear fit object (continuous designs); `None` on `mass_point` |
-| `variance_formula` | `str | None` | HAD-specific SE label on the weighted continuous path: `"pweight"` (CCT 2014 weighted-robust) or `"survey_binder_tsl"` (Binder 1983); `None` on unweighted / mass-point fits |
-| `effective_dose_mean` | `float | None` | Weighted denominator used by the β̂-scale rescaling on the weighted continuous path; `None` on unweighted fits |
+| `variance_formula` | `str | None` | HAD-specific SE label on weighted fits, populated on BOTH continuous and mass-point designs: `"pweight"` (continuous, CCT 2014 weighted-robust on the `weights=` shortcut), `"survey_binder_tsl"` (continuous, Binder 1983 TSL on the `survey_design=` path), `"pweight_2sls"` (mass-point, weighted 2SLS HC1 / CR1 sandwich on the `weights=` shortcut), or `"survey_binder_tsl_2sls"` (mass-point, Binder 1983 TSL on the `survey_design=` path). `None` on unweighted fits |
+| `effective_dose_mean` | `float | None` | Weighted denominator used by the β̂-scale rescaling, populated on weighted fits across all designs: weighted `mean(d)` (`continuous_at_zero`), weighted `mean(d − d_lower)` (`continuous_near_d_lower`), or weighted Wald-IV dose gap `mean(d | Z=1, w) − mean(d | Z=0, w)` (`mass_point`). `None` on unweighted fits |
 
 **Methods:** `summary()`, `print_summary()`, `to_dict()`, `to_dataframe()`
 

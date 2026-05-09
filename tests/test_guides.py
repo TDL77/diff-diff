@@ -452,6 +452,77 @@ class TestLLMsFullHADCoverage:
                 f"is missing the public dataclass field {field.name!r}."
             )
 
+    def test_llms_full_had_variance_formula_describes_all_designs(self):
+        # Per diff_diff/had.py:3585-3629, weighted mass-point fits populate
+        # variance_formula in {"pweight_2sls", "survey_binder_tsl_2sls"} and
+        # weighted continuous fits in {"pweight", "survey_binder_tsl"}. The
+        # documented description must cover ALL four labels (not just the
+        # two continuous ones) so agents reading the guide on a weighted
+        # mass-point fit do not misread the available inference metadata.
+        text = get_llm_guide("full")
+        sp_start = text.index("### HeterogeneousAdoptionDiDResults")
+        sp_end = text.index("### HeterogeneousAdoptionDiDEventStudyResults", sp_start)
+        sp_block = text[sp_start:sp_end]
+        # Find the variance_formula row in the table.
+        for line in sp_block.splitlines():
+            if line.startswith("| `variance_formula`"):
+                for label in (
+                    "pweight",
+                    "survey_binder_tsl",
+                    "pweight_2sls",
+                    "survey_binder_tsl_2sls",
+                ):
+                    assert label in line, (
+                        f"variance_formula row must enumerate the {label!r} "
+                        f"label - weighted mass-point fits populate "
+                        f"pweight_2sls / survey_binder_tsl_2sls per "
+                        f"had.py:3585-3629. Line: {line!r}"
+                    )
+                break
+        else:
+            pytest.fail("variance_formula row not found in HAD results table")
+        # effective_dose_mean: must mention mass-point Wald-IV dose gap.
+        for line in sp_block.splitlines():
+            if line.startswith("| `effective_dose_mean`"):
+                assert "mass_point" in line or "Wald-IV" in line or "mass-point" in line, (
+                    f"effective_dose_mean row must mention mass-point "
+                    f"semantics - weighted mass-point fits populate the "
+                    f"weighted Wald-IV dose gap per had.py:3642-3660. "
+                    f"Line: {line!r}"
+                )
+                break
+        else:
+            pytest.fail("effective_dose_mean row not found in HAD results table")
+
+    def test_llms_practitioner_step_4_distinguishes_had_from_continuous(self):
+        # The official practitioner workflow guide (returned by
+        # get_llm_guide("practitioner")) routes continuous treatments. It
+        # must distinguish ContinuousDiD (per-dose ATT(d), requires
+        # never-treated controls) from HeterogeneousAdoptionDiD (WAS at
+        # dose boundary, compatible with universal rollout). Pre-PR the
+        # decision tree routed ALL continuous-intensity designs to
+        # ContinuousDiD - which is wrong for no-untreated panels.
+        text = get_llm_guide("practitioner")
+        # Locate the Step 4 decision tree.
+        s4_start = text.index("## Step 4: Choose Estimation Method")
+        # Step 5 is the next section header; cap the slice there.
+        s5_start = text.index("## Step ", s4_start + 1)
+        s4_block = text[s4_start:s5_start]
+        # Both HAD and ContinuousDiD must appear in the continuous branch.
+        assert "HeterogeneousAdoptionDiD" in s4_block, (
+            "practitioner guide Step 4 decision tree must mention "
+            "HeterogeneousAdoptionDiD as the alternative to ContinuousDiD "
+            "on no-untreated / universal-rollout panels."
+        )
+        assert "ContinuousDiD" in s4_block
+        # Universal-rollout / no-untreated framing should be present so
+        # readers know which branch routes where.
+        assert "never-treated" in s4_block.lower() or "untreated" in s4_block.lower(), (
+            "practitioner guide Step 4 must describe the never-treated / "
+            "universal-rollout distinction that drives the HAD vs "
+            "ContinuousDiD routing."
+        )
+
     def test_llms_full_had_pretests_assumption_labels_correct(self):
         # Per docs/methodology/REGISTRY.md HeterogeneousAdoptionDiD
         # § "Assumptions / Theorems / Estimators":

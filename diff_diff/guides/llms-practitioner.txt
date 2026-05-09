@@ -158,7 +158,14 @@ Is this a triple-difference (DDD) design? (Two criteria: e.g., policy + eligibil
 |-- YES, staggered timing:       StaggeredTripleDifference (SDDD)
 |
 Is treatment continuous (doses/intensities)?
-|-- YES: ContinuousDiD (CDiD)
+|-- YES, panel has never-treated units (some units with first_treat == 0,
+|        i.e. dose == 0 throughout): ContinuousDiD (CDiD) for per-dose
+|        ATT(d) / ACRT(d) dose-response curves
+|-- YES, no never-treated units (universal rollout — every unit treated
+|        at some positive dose): HeterogeneousAdoptionDiD (HAD) for
+|        Weighted Average Slope (WAS) at the dose support boundary.
+|        HAD is also compatible with a small never-treated share if
+|        the WAS estimand is what you want.
 |
 Is treatment adoption staggered (multiple cohorts, different timing)?
 |-- YES: Do NOT use plain TWFE. Use one of:
