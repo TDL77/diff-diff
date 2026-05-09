@@ -730,6 +730,44 @@ class TestHADDispatch:
             "fail at fit time on a mass-point panel."
         )
 
+    def test_had_results_to_dict_docstring_matches_weighted_mass_point_contract(self):
+        # Parallel to the dataclass-field-docstring regression below:
+        # PR #402 R8 P3 caught that HeterogeneousAdoptionDiDResults.to_dict()
+        # docstring still described variance_formula as continuous-only
+        # / "pweight" or "survey_binder_tsl", contradicting the field
+        # docstrings (fixed in R5) and llms-full.txt (fixed in R3).
+        # Lock the to_dict() docstring against drift back.
+        from diff_diff.had import HeterogeneousAdoptionDiDResults
+
+        doc = HeterogeneousAdoptionDiDResults.to_dict.__doc__ or ""
+        for label in (
+            "pweight",
+            "survey_binder_tsl",
+            "pweight_2sls",
+            "survey_binder_tsl_2sls",
+        ):
+            assert label in doc, (
+                f"HeterogeneousAdoptionDiDResults.to_dict() docstring "
+                f"must enumerate the {label!r} variance_formula label - "
+                f"weighted mass-point fits populate pweight_2sls / "
+                f"survey_binder_tsl_2sls per had.py:3585-3629. The "
+                f"to_dict() docstring is a public source-of-truth "
+                f"surface and must match the field docstrings + "
+                f"llms-full.txt HAD section."
+            )
+        # effective_dose_mean: must mention mass-point Wald-IV semantics.
+        assert "mass_point" in doc or "mass-point" in doc, (
+            "HeterogeneousAdoptionDiDResults.to_dict() docstring must "
+            "describe the mass-point effective_dose_mean semantics; "
+            "weighted mass-point fits populate it as the weighted "
+            "Wald-IV dose gap per had.py:3642-3660."
+        )
+        assert "Wald-IV" in doc or "Z=1" in doc, (
+            "HeterogeneousAdoptionDiDResults.to_dict() docstring must "
+            "describe the weighted Wald-IV dose gap semantics for "
+            "mass-point fits."
+        )
+
     def test_had_results_dataclass_docstrings_match_weighted_mass_point_contract(self):
         # PR #402 R3 fixed the llms-full.txt field descriptions to
         # acknowledge that weighted mass-point fits populate

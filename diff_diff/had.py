@@ -483,9 +483,20 @@ class HeterogeneousAdoptionDiDResults:
           ``design_effect`` / ``sum_weights`` / ``weight_range`` +
           ``n_strata`` / ``n_psu`` / ``df_survey`` (latter three
           ``None`` on the ``weights=`` shortcut).
-        - ``variance_formula``: ``"pweight"`` or ``"survey_binder_tsl"``.
+        - ``variance_formula``: HAD-specific SE label, populated on BOTH
+          continuous and mass-point designs (Phase 4.5 A / B):
+          ``"pweight"`` (continuous, weighted-robust CCT 2014 under
+          ``weights=``), ``"survey_binder_tsl"`` (continuous, Binder
+          1983 TSL under ``survey_design=``), ``"pweight_2sls"``
+          (mass-point, weighted 2SLS HC1/CR1 sandwich under ``weights=``),
+          or ``"survey_binder_tsl_2sls"`` (mass-point, Binder 1983 TSL
+          under ``survey_design=``). See the field docstring above for
+          the full contract.
         - ``effective_dose_mean``: weighted denominator used by the
-          beta-scale rescaling."""
+          beta-scale rescaling - weighted ``mean(D)`` on
+          ``continuous_at_zero``, weighted ``mean(D - d_lower)`` on
+          ``continuous_near_d_lower``, or the weighted Wald-IV dose gap
+          ``mean(D | Z=1, w) - mean(D | Z=0, w)`` on ``mass_point``."""
         return {
             "att": self.att,
             "se": self.se,
