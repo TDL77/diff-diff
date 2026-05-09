@@ -8732,6 +8732,37 @@ class TestPathsOfInterest:
         assert res.path_effects[(0, 1, 1, 1)]["frequency_rank"] == 1
         assert res.path_effects[(0, 1, 0, 0)]["frequency_rank"] == 2
 
+    def test_paths_of_interest_all_unobserved_emits_distinct_warning(self):
+        """When every path in `paths_of_interest` is unobserved,
+        the empty-state warning should mention `paths_of_interest`
+        explicitly rather than the generic `by_path={n}` text
+        (regression for R2 P3 maintainability finding)."""
+        df = _by_path_three_path_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(1, 1, 1, 1), (1, 0, 1, 0)],  # both unobserved
+            twfe_diagnostic=False,
+            seed=42,
+        )
+        with warnings.catch_warnings(record=True) as recorded:
+            warnings.simplefilter("always", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        # The summary empty-state warning mentions paths_of_interest, not by_path
+        empty_state_warnings = [
+            str(w.message)
+            for w in recorded
+            if "paths_of_interest was requested but every" in str(w.message)
+        ]
+        assert len(empty_state_warnings) >= 1, (
+            f"Expected paths_of_interest-specific empty-state warning, "
+            f"got: {[str(w.message) for w in recorded]}"
+        )
+        # And the result is empty dict, not None
+        assert res.path_effects == {}
+
     def test_unobserved_path_warns_and_omits(self):
         df = _by_path_three_path_data()
         est = ChaisemartinDHaultfoeuille(

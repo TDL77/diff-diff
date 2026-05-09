@@ -1270,10 +1270,11 @@ class ChaisemartinDHaultfoeuilleResults:
             lines.extend(
                 [
                     thin,
-                    "Treatment-Path Disaggregation (by_path)".center(width),
+                    "Treatment-Path Disaggregation".center(width),
                     thin,
                     "  No observed paths have a complete [F_g-1, F_g-1+L_max] window.",
-                    "  (See UserWarning emitted at fit(); by_path was a no-op " "on this panel.)",
+                    "  (See UserWarning emitted at fit(); by_path / "
+                    "paths_of_interest was a no-op on this panel.)",
                     thin,
                     "",
                 ]

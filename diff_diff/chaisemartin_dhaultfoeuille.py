@@ -5807,16 +5807,34 @@ def _compute_path_effects(
     )
 
     if not selected_paths:
-        warnings.warn(
-            f"by_path / paths_of_interest was requested but no observed treatment "
-            f"path has a complete window [F_g-1, F_g-1+L_max={L_max}] "
-            f"within the panel. results.path_effects is populated as an "
-            f"empty dict to signal 'requested but empty'. Extend the "
-            f"panel so switchers have L_max+1 consecutive observed cells "
-            f"starting at F_g-1, or reduce L_max.",
-            UserWarning,
-            stacklevel=2,
-        )
+        if paths_of_interest is not None:
+            # Every requested path was unobserved (each emitted its own
+            # per-path "zero observed groups" warning inside the
+            # enumerator). Distinguish from the by_path=k case where
+            # the panel itself has no complete-window path.
+            warnings.warn(
+                "paths_of_interest was requested but every "
+                "user-specified path was either unobserved in the "
+                "panel or had a window outside the L_max+1 "
+                "convention (per-path 'zero observed groups' "
+                "UserWarnings already issued). results.path_effects "
+                "is populated as an empty dict to signal 'requested "
+                "but empty'.",
+                UserWarning,
+                stacklevel=2,
+            )
+        else:
+            warnings.warn(
+                f"by_path={by_path} was requested but no observed "
+                f"treatment path has a complete window [F_g-1, "
+                f"F_g-1+L_max={L_max}] within the panel. "
+                f"results.path_effects is populated as an empty dict "
+                f"to signal 'requested but empty'. Extend the panel "
+                f"so switchers have L_max+1 consecutive observed "
+                f"cells starting at F_g-1, or reduce L_max.",
+                UserWarning,
+                stacklevel=2,
+            )
         return {}
 
     # Cohort ids for the variance-eligible set (same construction as the
