@@ -27,6 +27,7 @@ HonestDiD
 Main class for computing honest bounds and confidence intervals.
 
 .. autoclass:: diff_diff.HonestDiD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -65,6 +66,7 @@ HonestDiDResults
 Results from HonestDiD estimation.
 
 .. autoclass:: diff_diff.HonestDiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -75,6 +77,7 @@ SensitivityResults
 Results from sensitivity analysis over a grid of M values.
 
 .. autoclass:: diff_diff.SensitivityResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -88,6 +91,7 @@ DeltaSD
 Smoothness restriction class.
 
 .. autoclass:: diff_diff.DeltaSD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -98,6 +102,7 @@ DeltaRM
 Relative magnitudes restriction class.
 
 .. autoclass:: diff_diff.DeltaRM
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -108,6 +113,7 @@ DeltaSDRM
 Combined smoothness and relative magnitudes restriction.
 
 .. autoclass:: diff_diff.DeltaSDRM
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

@@ -36,6 +36,7 @@ ImputationDiD
 Main estimator class for imputation DiD estimation.
 
 .. autoclass:: diff_diff.ImputationDiD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -55,6 +56,7 @@ ImputationDiDResults
 Results container for imputation DiD estimation.
 
 .. autoclass:: diff_diff.ImputationDiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -74,6 +76,7 @@ ImputationBootstrapResults
 Bootstrap inference results.
 
 .. autoclass:: diff_diff.ImputationBootstrapResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

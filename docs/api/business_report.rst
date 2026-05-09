@@ -98,10 +98,12 @@ API
 ---
 
 .. autoclass:: diff_diff.BusinessReport
+   :no-index:
    :members:
    :show-inheritance:
 
 .. autoclass:: diff_diff.BusinessContext
+   :no-index:
    :members:
    :show-inheritance:
 

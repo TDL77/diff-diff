@@ -46,6 +46,7 @@ ContinuousDiD
 Main estimator class for Continuous Difference-in-Differences.
 
 .. autoclass:: diff_diff.ContinuousDiD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -65,6 +66,7 @@ ContinuousDiDResults
 Results container for Continuous DiD estimation.
 
 .. autoclass:: diff_diff.continuous_did_results.ContinuousDiDResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -83,6 +85,7 @@ DoseResponseCurve
 Dose-response curve container for ATT(d) or ACRT(d).
 
 .. autoclass:: diff_diff.continuous_did_results.DoseResponseCurve
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

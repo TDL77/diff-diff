@@ -31,6 +31,7 @@ PanelProfile
 ------------
 
 .. autoclass:: diff_diff.PanelProfile
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -39,6 +40,7 @@ OutcomeShape
 ------------
 
 .. autoclass:: diff_diff.OutcomeShape
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -47,6 +49,7 @@ TreatmentDoseShape
 ------------------
 
 .. autoclass:: diff_diff.TreatmentDoseShape
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -55,6 +58,7 @@ Alert
 -----
 
 .. autoclass:: diff_diff.Alert
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

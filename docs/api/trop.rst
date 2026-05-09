@@ -33,6 +33,7 @@ TROP
 Main estimator class for Triply Robust Panel estimation.
 
 .. autoclass:: diff_diff.TROP
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -52,6 +53,7 @@ TROPResults
 Results container for TROP estimation.
 
 .. autoclass:: diff_diff.trop.TROPResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

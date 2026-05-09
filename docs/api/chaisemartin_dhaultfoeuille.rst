@@ -109,6 +109,7 @@ Main estimator class for de Chaisemartin-D'Haultfœuille (dCDH) DiD estimation.
 The alias :class:`~diff_diff.DCDH` is also available.
 
 .. autoclass:: diff_diff.ChaisemartinDHaultfoeuille
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -128,6 +129,7 @@ ChaisemartinDHaultfoeuilleResults
 Results container for dCDH estimation.
 
 .. autoclass:: diff_diff.ChaisemartinDHaultfoeuilleResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -146,6 +148,7 @@ DCDHBootstrapResults
 Multiplier-bootstrap inference results, populated when ``n_bootstrap > 0``.
 
 .. autoclass:: diff_diff.DCDHBootstrapResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -168,6 +171,7 @@ treatment effects that could flip the sign of the plain TWFE coefficient.
 .. autofunction:: diff_diff.twowayfeweights
 
 .. autoclass:: diff_diff.chaisemartin_dhaultfoeuille.TWFEWeightsResult
+   :no-index:
    :members:
 
 Example Usage

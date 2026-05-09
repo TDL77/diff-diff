@@ -112,6 +112,7 @@ WildBootstrapResults
 Container for wild bootstrap results.
 
 .. autoclass:: diff_diff.WildBootstrapResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

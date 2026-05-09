@@ -130,6 +130,7 @@ PlaceboTestResults
 Container for placebo test results.
 
 .. autoclass:: diff_diff.PlaceboTestResults
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:

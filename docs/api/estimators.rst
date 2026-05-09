@@ -31,6 +31,7 @@ DifferenceInDifferences (alias: ``DiD``)
 Basic 2x2 DiD estimator.
 
 .. autoclass:: diff_diff.DifferenceInDifferences
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -50,6 +51,7 @@ MultiPeriodDiD (alias: ``EventStudy``)
 Event study estimator with period-specific treatment effects.
 
 .. autoclass:: diff_diff.MultiPeriodDiD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -63,6 +65,7 @@ Panel DiD with unit and time fixed effects.
 .. module:: diff_diff.twfe
 
 .. autoclass:: diff_diff.TwoWayFixedEffects
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
@@ -76,6 +79,7 @@ Synthetic control combined with DiD (Arkhangelsky et al. 2021).
 .. module:: diff_diff.synthetic_did
 
 .. autoclass:: diff_diff.SyntheticDiD
+   :no-index:
    :members:
    :undoc-members:
    :show-inheritance:
