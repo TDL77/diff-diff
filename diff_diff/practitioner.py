@@ -857,12 +857,18 @@ def _handle_had(results: Any):
             baker_step=3,
             label="Run the HAD pretest battery",
             why=(
-                "did_had_pretest_workflow bundles the paper's three "
-                "testable identifying assumptions: QUG (Assumption 5 "
-                "support condition), Stute (Assumption 7 mean-independence "
-                "of trends), and Yatchew-HR (Assumption 8 linearity of "
-                "E[ΔY|D]). Assumption 5/6 boundary continuity is not "
-                "testable - the workflow vets what can be vetted."
+                "On a two-period panel did_had_pretest_workflow runs "
+                "paper Section 4.2 step 1 (QUG support-infimum test - "
+                "decides Design 1' vs Design 1) and step 3 (Stute / "
+                "Yatchew-HR Assumption 8 linearity tests). Step 2 "
+                "(Assumption 7 pre-trends) is NOT covered on the overall "
+                "path - a single pre-period cannot support the joint "
+                "Stute variant - and the returned verdict explicitly "
+                "flags that gap. To close step 2, refit on a multi-period "
+                "panel with aggregate='event_study'. Assumptions 3 / 5 / 6 "
+                "(uniform continuity at the boundary, Design 1 sign / "
+                "WAS_d_lower identification) are NOT testable via "
+                "pre-trends - the workflow vets only what can be vetted."
             ),
             code=(
                 "from diff_diff import did_had_pretest_workflow\n"
@@ -870,7 +876,10 @@ def _handle_had(results: Any):
                 "    data, outcome_col='y', unit_col='unit',\n"
                 "    time_col='t', dose_col='d',\n"
                 "    first_treat_col='first_treat')\n"
-                "print(report.summary())"
+                "print(report.summary())\n"
+                "# verdict explicitly flags the Assumption 7 gap on the\n"
+                "# overall path; aggregate='event_study' on a multi-period\n"
+                "# panel adds joint Stute pre-trends + joint homogeneity-linearity."
             ),
             step_name="parallel_trends",
         ),

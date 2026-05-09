@@ -689,3 +689,49 @@ class TestHADDispatch:
             code = step.get("code", "")
             if code.strip():
                 ast.parse(code)  # raises SyntaxError on failure
+
+    def test_had_step_3_pretest_assumption_labels_correct(self, mock_had_results):
+        # Per docs/methodology/REGISTRY.md and diff_diff/had_pretests.py
+        # docstrings:
+        #   - did_had_pretest_workflow(aggregate="overall") covers paper
+        #     Section 4.2 steps 1 + 3 ONLY; step 2 (Assumption 7
+        #     pre-trends) is explicitly NOT covered on the overall path.
+        #   - qug_test = support-infimum test (H0: d_lower = 0),
+        #     NOT "Assumption 5" (Design 1 sign identification, which is
+        #     not testable per registry).
+        #   - stute_test = Assumption 8 linearity, NOT Assumption 7
+        #     mean-independence.
+        # The single-period Step-3 guidance must not mislabel these.
+        output = practitioner_next_steps(mock_had_results, verbose=False)
+        step_3_steps = [s for s in output["next_steps"] if s["baker_step"] == 3]
+        assert len(step_3_steps) == 1
+        why = step_3_steps[0].get("why", "")
+        # Must NOT call QUG an "Assumption 5" test.
+        assert "QUG (Assumption 5" not in why, (
+            "Step-3 why-text must not call QUG an 'Assumption 5' test - "
+            "QUG tests H_0: d_lower = 0 (paper Theorem 4); Assumption 5 "
+            "is the Design 1 sign-identification condition and is NOT "
+            "testable per registry."
+        )
+        # Must NOT claim Stute is Assumption 7 mean-independence.
+        forbidden = (
+            "Stute (Assumption 7",
+            "Stute / Yatchew-HR Assumption 7",
+            "Assumption 7 mean-independence",
+        )
+        for phrase in forbidden:
+            assert phrase not in why, (
+                f"Step-3 why-text must not carry the phrase {phrase!r} - "
+                f"stute_test / yatchew_hr_test are Assumption 8 linearity "
+                f"tests (paper Section 4.2 step 3); Assumption 7 (pre-trends) "
+                f"is paper step 2 and is NOT covered on the overall workflow "
+                f"path - the workflow's verdict explicitly flags that gap."
+            )
+        # Must positively acknowledge the Assumption 7 / step 2 gap on
+        # the overall path (not silently imply it's covered).
+        assert "Assumption 7" in why or "step 2" in why, (
+            "Step-3 why-text must explicitly mention Assumption 7 / step 2 "
+            "to acknowledge the gap on the overall workflow path - "
+            "agents reading the guidance must not assume the workflow "
+            "covers what it does not cover."
+        )

@@ -413,3 +413,110 @@ class TestLLMsFullHADCoverage:
         had_end = text.index("### StackedDiD", had_start)
         had_text = text[had_start:had_end]
         assert "D'Haultfœuille" in had_text
+
+    def test_llms_full_had_results_class_field_lists_match_real_dataclass(self):
+        # Every public dataclass field on HeterogeneousAdoptionDiDResults
+        # and HeterogeneousAdoptionDiDEventStudyResults must appear in the
+        # documented field table. Catches the failure mode where new
+        # result fields land but the guide isn't updated, so agents
+        # treating llms-full.txt as the authoritative surface miss
+        # available diagnostics / metadata.
+        import dataclasses
+
+        from diff_diff import (
+            HeterogeneousAdoptionDiDEventStudyResults,
+            HeterogeneousAdoptionDiDResults,
+        )
+
+        text = get_llm_guide("full")
+
+        # Single-period result class
+        sp_start = text.index("### HeterogeneousAdoptionDiDResults")
+        sp_end = text.index("### HeterogeneousAdoptionDiDEventStudyResults", sp_start)
+        sp_block = text[sp_start:sp_end]
+        for field in dataclasses.fields(HeterogeneousAdoptionDiDResults):
+            assert f"`{field.name}`" in sp_block, (
+                f"HeterogeneousAdoptionDiDResults guide block is missing "
+                f"the public dataclass field {field.name!r}. The table "
+                f"must enumerate every field so agents see all available "
+                f"diagnostics / metadata."
+            )
+
+        # Event-study result class
+        es_start = text.index("### HeterogeneousAdoptionDiDEventStudyResults")
+        es_end = text.index("### TROPResults", es_start)
+        es_block = text[es_start:es_end]
+        for field in dataclasses.fields(HeterogeneousAdoptionDiDEventStudyResults):
+            assert f"`{field.name}`" in es_block, (
+                f"HeterogeneousAdoptionDiDEventStudyResults guide block "
+                f"is missing the public dataclass field {field.name!r}."
+            )
+
+    def test_llms_full_had_pretests_assumption_labels_correct(self):
+        # Per docs/methodology/REGISTRY.md HeterogeneousAdoptionDiD
+        # § "Assumptions / Theorems / Estimators":
+        #   - Assumption 5 = Design 1 sign identification (NOT testable)
+        #   - Assumption 6 = Design 1 WAS_d_lower identification (NOT testable)
+        #   - Assumption 7 = pre-trends (paper Section 4.2 step 2)
+        #   - Assumption 8 = linearity (paper Section 4.2 step 3)
+        # The HAD Pretests section must NOT mislabel these:
+        #   - qug_test is the support-infimum test (H0: d_lower = 0),
+        #     NOT "Assumption 5" (which is non-testable per registry).
+        #   - stute_test is Assumption 8 (linearity), NOT Assumption 7.
+        text = get_llm_guide("full")
+        pretests_start = text.index("## HAD Pretests")
+        pretests_end = text.index("## Honest DiD", pretests_start)
+        pretests_block = text[pretests_start:pretests_end]
+        # qug_test bullet: must positively label QUG as a support-infimum
+        # test, NOT as a positive "Assumption 5 support condition" claim
+        # (a negative disclaimer "does NOT test Assumption 5" is fine).
+        forbidden_qug_positive_claims = (
+            "Assumption 5 support condition",
+            "QUG (Assumption 5",
+            "qug_test`) — Assumption 5",
+            "qug_test(d)` — Assumption 5",
+        )
+        # stute_test bullet: must positively label as Assumption 8
+        # linearity, NOT as Assumption 7 mean-independence.
+        forbidden_stute_positive_claims = (
+            "stute_test(d, dy)` — Assumption 7",
+            "Stute (Assumption 7",
+            "Assumption 7 mean-independence",
+        )
+        for line in pretests_block.splitlines():
+            if line.startswith("- `qug_test"):
+                # Positive claim of what QUG IS:
+                assert (
+                    "support-infimum" in line
+                    or "support infimum" in line
+                    or "Theorem 4" in line
+                    or "H_0: d_lower" in line
+                ), (
+                    f"qug_test bullet must positively label QUG as the "
+                    f"support-infimum / Theorem-4 test. Line: {line!r}"
+                )
+                for phrase in forbidden_qug_positive_claims:
+                    assert phrase not in line, (
+                        f"qug_test bullet must not positively claim QUG "
+                        f"is an 'Assumption 5' test ({phrase!r}). QUG "
+                        f"tests H_0: d_lower = 0; Assumption 5 is the "
+                        f"Design 1 sign-identification condition (NOT "
+                        f"testable per registry). A negative disclaimer "
+                        f"that QUG does NOT test Assumption 5 is fine. "
+                        f"Line: {line!r}"
+                    )
+            if line.startswith("- `stute_test"):
+                # Positive claim of what Stute IS:
+                assert "Assumption 8" in line or "linearity" in line.lower(), (
+                    f"stute_test bullet must positively label as "
+                    f"Assumption 8 / linearity test. Line: {line!r}"
+                )
+                for phrase in forbidden_stute_positive_claims:
+                    assert phrase not in line, (
+                        f"stute_test bullet must not positively claim "
+                        f"Stute is an Assumption 7 mean-independence "
+                        f"test ({phrase!r}). stute_test is Assumption 8 "
+                        f"linearity (paper Section 4.2 step 3); "
+                        f"Assumption 7 is pre-trends (step 2, only "
+                        f"covered on the event-study path). Line: {line!r}"
+                    )
