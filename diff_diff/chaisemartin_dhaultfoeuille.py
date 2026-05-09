@@ -2552,30 +2552,14 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                     replicate_n_valid_list=_replicate_n_valid_list,
                 )
 
-            # Post-per-path inference refresh under replicate-weight
-            # designs. Per-path effects/placebos snapshot df_inference
-            # BEFORE their own n_valid contributions append to the
-            # shared list, and the global per-horizon / placebo
-            # surfaces took their snapshots before per-path runs. After
-            # all per-path fits complete, recompute the final df and
-            # re-run safe_inference on every populated entry so all
-            # four surfaces (multi_horizon_inference,
-            # placebo_horizon_inference, path_effects, path_placebos)
-            # reflect the same df. No-op under TSL / non-survey fits.
-            if (
-                resolved_survey is not None
-                and getattr(resolved_survey, "uses_replicate_variance", False)
-                and (self.by_path is not None or self.paths_of_interest is not None)
-            ):
-                _df_s_final = _effective_df_survey(resolved_survey, _replicate_n_valid_list)
-                _refresh_path_inference(
-                    path_effects=path_effects,
-                    path_placebos=path_placebos,
-                    multi_horizon_inference=multi_horizon_inference,
-                    placebo_horizon_inference=placebo_horizon_inference,
-                    alpha=self.alpha,
-                    df_final=_inference_df(_df_s_final, resolved_survey),
-                )
+            # Per-path inference for replicate-weight designs is
+            # refreshed in the final R2 P1b block below (alongside
+            # global event-study / placebo / heterogeneity surfaces),
+            # so it reflects the FINAL `_replicate_n_valid_list` after
+            # heterogeneity / overall / joiners / leavers IF sites
+            # have appended their own `n_valid` values. Computing it
+            # here would only see per-path appends and miss any later
+            # df shrinkage from those subsequent IF sites.
 
             # Normalized effects DID^n_l (suppressed under trends_linear
             # because event_study_effects holds second-differences DID^{fd}_l,
@@ -4037,6 +4021,19 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                     _info_r2["t_stat"] = _t_r2
                     _info_r2["p_value"] = _p_r2
                     _info_r2["conf_int"] = _ci_r2
+            # Per-path event-study and placebo surfaces: their helpers
+            # snapshotted df_inference BEFORE appending their own n_valid
+            # contributions, and the global event-study / placebo /
+            # heterogeneity / overall / joiners / leavers IF sites
+            # appended their n_valid AFTER per-path runs. Refresh per-path
+            # inference with the final df so it agrees with the global
+            # surfaces and `survey_metadata.df_survey`.
+            _refresh_path_inference(
+                path_effects=path_effects,
+                path_placebos=path_placebos,
+                alpha=self.alpha,
+                df_final=_final_inf_df,
+            )
 
         # Persist the final effective df_survey into survey_metadata so
         # downstream consumers — HonestDiD bounds (honest_did.py:973
@@ -7685,23 +7682,21 @@ def _validate_cell_constant_strata_psu(
 def _refresh_path_inference(
     path_effects: Optional[Dict[Tuple[int, ...], Dict[str, Any]]],
     path_placebos: Optional[Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]],
-    multi_horizon_inference: Optional[Dict[int, Dict[str, Any]]],
-    placebo_horizon_inference: Optional[Dict[int, Dict[str, Any]]],
     alpha: float,
     df_final: Optional[int],
 ) -> None:
-    """Refresh inference fields (t_stat, p_value, conf_int) with the
-    final ``df_final`` after per-path replicate fits have appended to
-    the shared ``_replicate_n_valid_list``.
+    """Refresh per-path inference fields (t_stat, p_value, conf_int) with
+    the final ``df_final`` so they agree with the global surfaces and
+    ``results.survey_metadata.df_survey`` after all replicate-weight
+    ``n_valid`` appends complete.
 
-    Under replicate-weight designs, every IF site contributes an
-    ``n_valid`` count and the effective ``df_survey`` is
-    ``min(...) - 1``. Per-path fits run AFTER the global per-horizon
-    and global placebo loops snapshot their df from
-    ``_replicate_n_valid_list``; per-path entries themselves use a
-    snapshot taken BEFORE per-path replicate appends. This helper
-    re-runs ``safe_inference(effect, se, alpha, df=df_final)`` on every
-    populated entry so all four surfaces reflect the final df.
+    Per-path event-study and placebo helpers compute inference using a
+    snapshot of ``_replicate_n_valid_list`` taken at fit-time BEFORE
+    they append their own ``n_valid`` contributions. The final R2 P1b
+    block in ``fit()`` already refreshes the global surfaces (overall /
+    joiners / leavers / multi_horizon_inference / placebo_horizon_inference
+    / heterogeneity / normalized) with the final df; this helper is its
+    per-path counterpart, called from the same final block.
 
     No-op under TSL (analytical) or non-survey fits — they skip
     replicate-n_valid bookkeeping entirely. Mutates dicts in place.
@@ -7720,12 +7715,6 @@ def _refresh_path_inference(
         entry["p_value"] = p_new
         entry["conf_int"] = ci_new
 
-    if multi_horizon_inference is not None:
-        for entry in multi_horizon_inference.values():
-            _refresh_entry(entry)
-    if placebo_horizon_inference is not None:
-        for entry in placebo_horizon_inference.values():
-            _refresh_entry(entry)
     if path_effects is not None:
         for path_data in path_effects.values():
             horizons = path_data.get("horizons", {})

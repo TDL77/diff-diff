@@ -9468,6 +9468,91 @@ class TestByPathSurveyDesignAnalytical:
         assert any_finite
 
     @pytest.mark.slow
+    def test_per_path_inference_uses_final_df_after_all_appends(self):
+        """Per-path t/p/CI must use `results.survey_metadata.df_survey`.
+
+        Per-path event-study and placebo helpers snapshot
+        ``df_inference`` BEFORE appending their own ``n_valid``
+        contributions to ``_replicate_n_valid_list``; later in fit()
+        the global overall / joiners / leavers / heterogeneity sites
+        append more ``n_valid`` values that may further reduce the
+        effective df. After the final R2 P1b refresh block runs,
+        ``_refresh_path_inference`` must update per-path entries so
+        their ``t_stat`` / ``p_value`` / ``conf_int`` agree with
+        ``results.survey_metadata.df_survey`` and the global event-
+        study / placebo surfaces (which the same final block already
+        refreshes). Regression for PR #408 R1 P1.
+        """
+        from diff_diff.survey import SurveyDesign
+        from diff_diff.utils import safe_inference
+
+        df = _by_path_survey_data()
+        n_obs = len(df)
+        rng = np.random.default_rng(2)
+        rep_cols = [f"rep_{i}" for i in range(12)]
+        for i, col in enumerate(rep_cols):
+            df[col] = df["survey_weights"] * (1.0 + 0.05 * rng.standard_normal(n_obs))
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        est = ChaisemartinDHaultfoeuille(
+            by_path=2, drop_larger_lower=False, placebo=True
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert res.survey_metadata is not None
+        df_final = res.survey_metadata.df_survey
+        assert df_final is not None
+        # Per-path event-study: every populated finite-SE entry must
+        # reproduce safe_inference(effect, se, df=df_final).
+        assert res.path_effects is not None
+        any_checked = False
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                if vals["n_obs"] == 0 or not np.isfinite(vals["se"]):
+                    continue
+                t_exp, p_exp, ci_exp = safe_inference(
+                    vals["effect"], vals["se"], alpha=est.alpha, df=df_final,
+                )
+                np.testing.assert_allclose(
+                    vals["t_stat"], t_exp, atol=1e-12,
+                    err_msg=f"path={path} l={l_h} t_stat stale",
+                )
+                np.testing.assert_allclose(
+                    vals["p_value"], p_exp, atol=1e-12,
+                    err_msg=f"path={path} l={l_h} p_value stale",
+                )
+                np.testing.assert_allclose(
+                    vals["conf_int"], ci_exp, atol=1e-12,
+                    err_msg=f"path={path} l={l_h} conf_int stale",
+                )
+                any_checked = True
+        # Per-path placebo: same invariant on negative-keyed entries.
+        if res.path_placebo_event_study is not None:
+            for path, lags in res.path_placebo_event_study.items():
+                for lag_l, vals in lags.items():
+                    if vals["n_obs"] == 0 or not np.isfinite(vals["se"]):
+                        continue
+                    t_exp, p_exp, ci_exp = safe_inference(
+                        vals["effect"], vals["se"], alpha=est.alpha, df=df_final,
+                    )
+                    np.testing.assert_allclose(vals["t_stat"], t_exp, atol=1e-12)
+                    np.testing.assert_allclose(vals["p_value"], p_exp, atol=1e-12)
+                    np.testing.assert_allclose(vals["conf_int"], ci_exp, atol=1e-12)
+                    any_checked = True
+        assert any_checked, (
+            "No populated per-path entry was checked — replicate-df "
+            "invariant was not actually exercised."
+        )
+
+    @pytest.mark.slow
     def test_per_path_replicate_n_valid_propagates_to_df_survey(self):
         """`results.df_survey` reflects min(n_valid) across per-path replicate fits."""
         from diff_diff.survey import SurveyDesign
