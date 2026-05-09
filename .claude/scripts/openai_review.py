@@ -853,6 +853,8 @@ def apply_token_budget(
 # Source: https://platform.openai.com/docs/pricing
 # MAINTENANCE: Update when OpenAI changes pricing.
 PRICING = {
+    "gpt-5.5": (5.00, 30.00),
+    "gpt-5.5-pro": (30.00, 180.00),
     "gpt-5.4": (2.50, 15.00),
     "gpt-5.4-pro": (30.00, 180.00),
     "gpt-4.1": (2.00, 8.00),
@@ -900,8 +902,8 @@ _SUBSTITUTIONS = [
         "code changes that have not yet been submitted as a pull request.",
     ),
     (
-        "Review ONLY the changes introduced by this PR (diff)",
-        "Review ONLY the changes shown in the diff below",
+        "Review the changes introduced by this PR (diff)",
+        "Review the code changes shown in the diff below",
     ),
     (
         "If the PR changes an estimator",
@@ -1095,7 +1097,7 @@ def compile_prompt(
 # ---------------------------------------------------------------------------
 
 ENDPOINT = "https://api.openai.com/v1/responses"
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_TIMEOUT = 300  # seconds
 DEFAULT_MAX_TOKENS = 16384
 REASONING_MAX_TOKENS = 32768
@@ -1103,7 +1105,7 @@ REASONING_MAX_TOKENS = 32768
 
 def _is_reasoning_model(model: str) -> bool:
     """Return True for models that use internal chain-of-thought reasoning."""
-    return model.startswith(("o1", "o3", "o4")) or "-pro" in model
+    return model.startswith(("o1", "o3", "o4", "gpt-5.4", "gpt-5.5")) or "-pro" in model
 
 
 def estimate_tokens(text: str) -> int:

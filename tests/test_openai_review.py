@@ -1546,8 +1546,14 @@ class TestIsReasoningModel:
     def test_pro_snapshot_is_reasoning(self, review_mod):
         assert review_mod._is_reasoning_model("gpt-5.4-pro-2026-03-05") is True
 
-    def test_gpt54_is_not_reasoning(self, review_mod):
-        assert review_mod._is_reasoning_model("gpt-5.4") is False
+    def test_gpt54_is_reasoning(self, review_mod):
+        assert review_mod._is_reasoning_model("gpt-5.4") is True
+
+    def test_gpt55_is_reasoning(self, review_mod):
+        assert review_mod._is_reasoning_model("gpt-5.5") is True
+
+    def test_gpt55_pro_is_reasoning(self, review_mod):
+        assert review_mod._is_reasoning_model("gpt-5.5-pro") is True
 
     def test_gpt41_is_not_reasoning(self, review_mod):
         assert review_mod._is_reasoning_model("gpt-4.1") is False
@@ -1570,6 +1576,22 @@ class TestProModelPricing:
         snapshot = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.4-pro-2026-03-05")
         base = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.4-pro")
         assert snapshot == base
+
+    def test_gpt55_has_own_pricing(self, review_mod):
+        """gpt-5.5 should not fall back to gpt-5.4 pricing via prefix."""
+        gpt55_cost = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.5")
+        gpt54_cost = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.4")
+        assert gpt55_cost is not None
+        assert gpt54_cost is not None
+        assert gpt55_cost != gpt54_cost
+
+    def test_gpt55_pro_has_own_pricing(self, review_mod):
+        """gpt-5.5-pro should not fall back to gpt-5.5 pricing via prefix."""
+        pro_cost = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.5-pro")
+        base_cost = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.5")
+        assert pro_cost is not None
+        assert base_cost is not None
+        assert pro_cost != base_cost
 
 
 class TestExtractResponseText:
@@ -1656,8 +1678,8 @@ class TestCallOpenAIPayload:
         return captured
 
     def test_standard_model_payload(self, review_mod, mock_urlopen):
-        """Standard model sends input, max_output_tokens, and temperature=0."""
-        content, usage = review_mod.call_openai("test prompt", "gpt-5.4", "fake-key")
+        """Standard (non-reasoning) model sends input, max_output_tokens, and temperature=0."""
+        content, usage = review_mod.call_openai("test prompt", "gpt-4.1", "fake-key")
         payload = mock_urlopen["payload"]
         assert payload["input"] == "test prompt"
         assert payload["max_output_tokens"] == review_mod.DEFAULT_MAX_TOKENS
@@ -1669,7 +1691,7 @@ class TestCallOpenAIPayload:
 
     def test_reasoning_model_payload(self, review_mod, mock_urlopen):
         """Reasoning model omits temperature and uses REASONING_MAX_TOKENS."""
-        content, _ = review_mod.call_openai("test prompt", "gpt-5.4-pro", "fake-key")
+        content, _ = review_mod.call_openai("test prompt", "gpt-5.5", "fake-key")
         payload = mock_urlopen["payload"]
         assert payload["max_output_tokens"] == review_mod.REASONING_MAX_TOKENS
         assert "temperature" not in payload

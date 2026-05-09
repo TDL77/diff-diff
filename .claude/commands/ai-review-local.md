@@ -22,14 +22,14 @@ pre-PR use. Designed for iterative review/revision cycles before submitting a PR
   files (default: 200000). Changed source files are always included regardless of budget.
 - `--force-fresh`: Skip delta-diff mode, run a full fresh review even if previous state exists
 - `--full-registry`: Include the entire REGISTRY.md instead of selective sections
-- `--model <name>`: Override the OpenAI model (default: `gpt-5.4`)
+- `--model <name>`: Override the OpenAI model (default: `gpt-5.5`)
 - `--timeout <seconds>`: HTTP request timeout (default: 300). Use 900 for reasoning models.
 - `--dry-run`: Print the compiled prompt without calling the API
 
-**Reasoning models** (`gpt-5.4-pro`, `o3`, `o4-mini`, etc.): Reviews may take 10-15
+**Reasoning models** (`gpt-5.5`, `gpt-5.5-pro`, `o3`, `o4-mini`, etc.): Reviews may take 10-15
 minutes. For deep reviews with reasoning models, combine `--token-budget` with `--model`:
 ```
-/ai-review-local --model gpt-5.4-pro --token-budget 500000 --context deep
+/ai-review-local --model gpt-5.5-pro --token-budget 500000 --context deep
 ```
 
 ## Constraints
@@ -47,7 +47,7 @@ before any data is sent externally.
 ### Step 1: Parse Arguments
 
 Parse `$ARGUMENTS` for the optional flags listed above. All flags are optional —
-the default behavior (standard context, selective registry, gpt-5.4, live API call)
+the default behavior (standard context, selective registry, gpt-5.5, live API call)
 requires no arguments.
 
 ### Step 2: Validate Prerequisites
@@ -334,8 +334,8 @@ python3 .claude/scripts/openai_review.py \
 Note: `--force-fresh` is a skill-only flag — it controls whether delta diffs are
 generated in Step 4 and is NOT passed to the script.
 
-**Reasoning model handling:** If the model contains `-pro` or starts with `o1`/`o3`/`o4`
-(e.g., `gpt-5.4-pro`, `o3`, `o4-mini`):
+**Reasoning model handling:** If the model contains `-pro`, starts with `o1`/`o3`/`o4`, or starts with `gpt-5.4`/`gpt-5.5`
+(e.g., `gpt-5.5`, `gpt-5.5-pro`, `o3`, `o4-mini`):
 - Pass `--timeout 900` to the script (unless the user explicitly specified `--timeout`)
 - Run the Bash command with `run_in_background: true` (bypasses the 600s Bash tool timeout cap)
 - After the background command completes, continue to Step 6
@@ -466,7 +466,7 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
 /ai-review-local --model gpt-4.1 --full-registry
 
 # Deep review with reasoning model (may take 10-15 minutes)
-/ai-review-local --model gpt-5.4-pro --token-budget 500000 --context deep
+/ai-review-local --model gpt-5.5-pro --token-budget 500000 --context deep
 
 # Limit token budget for faster/cheaper reviews
 /ai-review-local --token-budget 100000

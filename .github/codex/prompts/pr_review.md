@@ -54,6 +54,42 @@ When reviewing new features or code paths, specifically check:
    - Command to check: `grep -n "pattern" diff_diff/*.py`
    - Flag as P1 if only partial fixes were made
 
+## Single-Pass Completeness Mandate (Initial Review Only)
+
+This is an INITIAL review. Treat this as the only chance to enumerate findings.
+Follow-up rounds are expensive — find ALL P0/P1/P2 issues in this pass.
+
+Before finalizing, confirm you have run each of these audits on the diff:
+
+1. **Sibling-surface mirror audit**: For every fix or change in a method, schema,
+   default-value path, or report block, identify the parallel surface in the same
+   codebase (BR ↔ DR, schema ↔ renderer, default ↔ precomputed, summary ↔ full)
+   and check whether the same change applies there. Flag the unmirrored side as P1.
+
+2. **Pattern-wide grep**: When you flag any anti-pattern or bug class, use `grep`
+   on `diff_diff/**.py` to identify sibling occurrences of the same pattern and
+   enumerate them in the SAME finding. Only LOAD a sibling file's full contents
+   if grep returns a hit and you need surrounding context to verify the issue.
+   Do not defer pattern-class findings to a follow-up round.
+
+3. **Reciprocal/symmetry check**: For dispatch code, validation, or guards in
+   one direction (A-on-B), explicitly enumerate the reciprocal direction (B-on-A)
+   and confirm coverage.
+
+4. **Transitive workflow deps**: For GH Actions workflow `paths:` or pytest
+   selection changes, sweep transitive auto-loaded files (conftest.py,
+   pyproject.toml, ancestor conftests) and confirm they are included.
+
+5. **Scope override (with carve-outs)**: The audits above explicitly authorize
+   loading files outside the diff to verify completeness. This overrides the
+   "minimum surrounding context" default in the Rules section below.
+
+   **DO NOT load these paths** (the workflow's diff-build deliberately excludes
+   them; they are noise or out-of-scope):
+   - `docs/tutorials/*.ipynb` (notebook outputs are large JSON blobs)
+   - `benchmarks/data/real/*.json`
+   - `benchmarks/data/real/*.csv`
+
 ## Deferred Work Acceptance
 
 This project tracks deferred technical debt in `TODO.md` under "Tech Debt from Code Reviews."
@@ -68,7 +104,9 @@ This project tracks deferred technical debt in `TODO.md` under "Tech Debt from C
   and incorrect statistical output are not.
 
 Rules:
-- Review ONLY the changes introduced by this PR (diff) and the minimum surrounding context needed.
+- Review the changes introduced by this PR (diff). The Single-Pass Completeness
+  Mandate above authorizes broader audits (sibling surfaces, pattern-wide greps,
+  reciprocal checks, transitive deps) — do those upfront rather than deferring.
 - Provide a single Markdown report with:
   - Overall assessment (see Assessment Criteria below)
   - Executive summary (3–6 bullets)
@@ -116,7 +154,11 @@ When this is a re-review (the PR has prior AI review comments):
 - New P1+ findings on unchanged code MAY be raised but must be marked "[Newly identified]"
   to distinguish from moving goalposts. Limit these to clear, concrete issues — not
   speculative concerns or stylistic preferences.
-- New code added since the last review IS in scope for new findings.
+- New code added since the last review IS in scope for new findings — apply the
+  Single-Pass Completeness Mandate's audits (sibling surfaces, pattern-wide greps,
+  reciprocal checks) to that new code in this re-review pass. For UNCHANGED code,
+  the existing [Newly identified] convention from the bullet above still applies:
+  new P1+ findings MAY be raised but must be marked "[Newly identified]".
 - If all previous P1+ findings are resolved, the assessment should be ✅ even if new
   P2/P3 items are noticed.
 
