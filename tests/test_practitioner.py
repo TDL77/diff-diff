@@ -690,6 +690,43 @@ class TestHADDispatch:
             if code.strip():
                 ast.parse(code)  # raises SyntaxError on failure
 
+    def test_had_step_3_flags_qug_under_survey_deferral(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Per diff_diff/had_pretests.py:4488-4495 + REGISTRY § "QUG Null
+        # Test" Note (Phase 4.5 C0): when survey_design= / survey= /
+        # weights= is supplied, did_had_pretest_workflow skips the QUG
+        # step with a UserWarning and returns a linearity-conditional
+        # verdict only. Both HAD handler variants must surface this
+        # caveat so agents do not assume step 1 / Design 1' vs Design 1
+        # was checked on weighted fits when the library deliberately
+        # cannot check it there.
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            step_3_steps = [s for s in output["next_steps"] if s["baker_step"] == 3]
+            assert len(step_3_steps) == 1
+            text = (step_3_steps[0].get("why", "") + " " + step_3_steps[0].get("code", "")).lower()
+            # Must mention that survey-weighted fits skip QUG.
+            assert "skip" in text and "qug" in text, (
+                "Step-3 text must explicitly say survey-weighted fits "
+                "skip QUG (Phase 4.5 C0 deferral). Without this caveat "
+                "agents may assume step 1 / Design 1' vs Design 1 was "
+                "checked on weighted fits when the library deliberately "
+                "does not check it there."
+            )
+            # Must mention "linearity-conditional" verdict OR equivalent
+            # framing so agents know the weighted verdict is conditional
+            # on QUG holding by assumption.
+            assert (
+                "linearity-conditional" in text
+                or "linearity conditional" in text
+                or "qug holding by assumption" in text
+            ), (
+                "Step-3 text must describe the weighted verdict as "
+                "linearity-conditional / conditional on QUG holding by "
+                "assumption."
+            )
+
     def test_had_step_3_pretest_assumption_labels_correct(self, mock_had_results):
         # Per docs/methodology/REGISTRY.md and diff_diff/had_pretests.py
         # docstrings:

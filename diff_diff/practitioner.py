@@ -857,18 +857,26 @@ def _handle_had(results: Any):
             baker_step=3,
             label="Run the HAD pretest battery",
             why=(
-                "On a two-period panel did_had_pretest_workflow runs "
-                "paper Section 4.2 step 1 (QUG support-infimum test - "
+                "On a two-period unweighted panel did_had_pretest_workflow "
+                "runs paper Section 4.2 step 1 (QUG support-infimum test - "
                 "decides Design 1' vs Design 1) and step 3 (Stute / "
                 "Yatchew-HR Assumption 8 linearity tests). Step 2 "
                 "(Assumption 7 pre-trends) is NOT covered on the overall "
                 "path - a single pre-period cannot support the joint "
                 "Stute variant - and the returned verdict explicitly "
                 "flags that gap. To close step 2, refit on a multi-period "
-                "panel with aggregate='event_study'. Assumptions 3 / 5 / 6 "
-                "(uniform continuity at the boundary, Design 1 sign / "
-                "WAS_d_lower identification) are NOT testable via "
-                "pre-trends - the workflow vets only what can be vetted."
+                "panel with aggregate='event_study'. On survey-weighted "
+                "fits (survey_design= / survey= / weights=) the workflow "
+                "skips QUG with a UserWarning (permanent Phase 4.5 C0 "
+                "deferral - extreme order statistics are not smooth "
+                "functionals of the empirical CDF) and returns a "
+                "linearity-conditional verdict only - so step 1 coverage "
+                "is unweighted-only and the reported verdict on weighted "
+                "fits is conditional on QUG holding by assumption. "
+                "Assumptions 3 / 5 / 6 (uniform continuity at the "
+                "boundary, Design 1 sign / WAS_d_lower identification) "
+                "are NOT testable via pre-trends - the workflow vets only "
+                "what can be vetted."
             ),
             code=(
                 "from diff_diff import did_had_pretest_workflow\n"
@@ -879,7 +887,9 @@ def _handle_had(results: Any):
                 "print(report.summary())\n"
                 "# verdict explicitly flags the Assumption 7 gap on the\n"
                 "# overall path; aggregate='event_study' on a multi-period\n"
-                "# panel adds joint Stute pre-trends + joint homogeneity-linearity."
+                "# panel adds joint Stute pre-trends + joint homogeneity-linearity.\n"
+                "# Passing survey_design= / weights= skips QUG (Phase 4.5 C0)\n"
+                "# and returns a linearity-conditional verdict only."
             ),
             step_name="parallel_trends",
         ),
@@ -997,11 +1007,21 @@ def _handle_had_event_study(results: Any):
             baker_step=3,
             label="Run the HAD pretest battery (event-study mode)",
             why=(
-                "On multi-period panels, did_had_pretest_workflow with "
-                "aggregate='event_study' runs QUG plus joint Stute "
+                "On multi-period unweighted panels, did_had_pretest_workflow "
+                "with aggregate='event_study' runs QUG plus joint Stute "
                 "pre-trends plus joint homogeneity-linearity Stute. The "
                 "joint Stute variants close the paper Section 4.2 step-2 "
-                "gap that the overall path explicitly flags as deferred."
+                "gap that the overall path explicitly flags as deferred. "
+                "On survey-weighted fits (survey_design= / survey= / "
+                "weights=) the workflow skips QUG with a UserWarning "
+                "(permanent Phase 4.5 C0 deferral) and returns a "
+                "linearity-conditional verdict only - so step 1 coverage "
+                "is unweighted-only on the event-study path too, and the "
+                "weighted verdict is conditional on QUG holding by "
+                "assumption. The joint Stute pre-trends and joint "
+                "homogeneity-linearity tests themselves remain available "
+                "under survey weighting via PSU-level Mammen multiplier "
+                "bootstrap."
             ),
             code=(
                 "from diff_diff import did_had_pretest_workflow\n"
