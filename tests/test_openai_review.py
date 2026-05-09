@@ -1760,6 +1760,17 @@ class TestCallOpenAIPayload:
         review_mod.call_openai("test", "gpt-5.4", "fake-key", timeout=900)
         assert mock_urlopen["timeout"] == 900
 
+    def test_omitted_timeout_resolves_for_reasoning_model(self, review_mod, mock_urlopen):
+        """Direct callers of call_openai() that omit timeout get the
+        model-aware default (900s for reasoning) — not the legacy 300s."""
+        review_mod.call_openai("test", "gpt-5.5", "fake-key")
+        assert mock_urlopen["timeout"] == 900
+
+    def test_omitted_timeout_resolves_for_non_reasoning_model(self, review_mod, mock_urlopen):
+        """Direct callers omitting timeout on non-reasoning models still get 300s."""
+        review_mod.call_openai("test", "gpt-4.1", "fake-key")
+        assert mock_urlopen["timeout"] == 300
+
     def test_missing_status_with_valid_output_succeeds(self, review_mod, mock_urlopen):
         """Valid content should be accepted even when status field is absent."""
         mock_urlopen["response_data"] = {

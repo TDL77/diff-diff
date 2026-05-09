@@ -23,7 +23,7 @@ pre-PR use. Designed for iterative review/revision cycles before submitting a PR
 - `--force-fresh`: Skip delta-diff mode, run a full fresh review even if previous state exists
 - `--full-registry`: Include the entire REGISTRY.md instead of selective sections
 - `--model <name>`: Override the OpenAI model (default: `gpt-5.5`)
-- `--timeout <seconds>`: HTTP request timeout (default: 300). Use 900 for reasoning models.
+- `--timeout <seconds>`: HTTP request timeout. If omitted, defaults to 900 for reasoning models (gpt-5.4, gpt-5.5, *-pro, o1/o3/o4) and 300 otherwise.
 - `--dry-run`: Print the compiled prompt without calling the API
 
 **Reasoning models** (`gpt-5.5`, `gpt-5.5-pro`, `o3`, `o4-mini`, etc.): Reviews may take 10-15

@@ -1207,13 +1207,19 @@ def call_openai(
     prompt: str,
     model: str,
     api_key: str,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: "int | None" = None,
 ) -> "tuple[str, dict]":
     """Call the OpenAI Responses API.
+
+    If ``timeout`` is None, resolves to REASONING_TIMEOUT (900s) for
+    reasoning models and DEFAULT_TIMEOUT (300s) otherwise — same logic
+    as the CLI ``--timeout`` flag. This guards future direct callers
+    against the old 300s-everywhere default.
 
     Returns (content, usage) where usage is the API response's usage dict
     containing input_tokens and output_tokens.
     """
+    timeout = _resolve_timeout(timeout, model)
     reasoning = _is_reasoning_model(model)
     max_tokens = REASONING_MAX_TOKENS if reasoning else DEFAULT_MAX_TOKENS
 
