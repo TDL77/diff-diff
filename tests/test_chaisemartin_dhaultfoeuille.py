@@ -6638,7 +6638,7 @@ class TestByPathControls:
             str(w.message)
             for w in caught
             if issubclass(w.category, UserWarning)
-            and "by_path + controls" in str(w.message)
+            and "+ controls" in str(w.message)
             and "multi-baseline" not in str(w.message).lower()
             or (
                 issubclass(w.category, UserWarning)
@@ -7579,7 +7579,7 @@ class TestByPathTrendsLinear:
             str(w.message)
             for w in caught
             if issubclass(w.category, UserWarning)
-            and "by_path + trends_linear" in str(w.message)
+            and "+ trends_linear" in str(w.message)
             and "switcher baselines" in str(w.message)
         ]
         assert deviation_msgs, (
@@ -7609,7 +7609,7 @@ class TestByPathTrendsLinear:
             str(w.message)
             for w in caught
             if issubclass(w.category, UserWarning)
-            and "by_path + trends_linear" in str(w.message)
+            and "+ trends_linear" in str(w.message)
             and "switcher baselines" in str(w.message)
         ]
         assert not deviation_msgs, (
@@ -7667,7 +7667,7 @@ class TestByPathTrendsLinear:
             str(w.message)
             for w in caught
             if issubclass(w.category, UserWarning)
-            and "by_path + trends_linear" in str(w.message)
+            and "+ trends_linear" in str(w.message)
             and "F_g=3" in str(w.message)
         ]
         assert boundary_msgs, (
@@ -7718,7 +7718,7 @@ class TestByPathTrendsLinear:
             str(w.message)
             for w in caught
             if issubclass(w.category, UserWarning)
-            and "by_path + trends_linear" in str(w.message)
+            and "+ trends_linear" in str(w.message)
             and "switcher baselines" in str(w.message)
         ]
         assert not deviation_msgs, (

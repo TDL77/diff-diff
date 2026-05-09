@@ -1722,12 +1722,13 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                     _switcher_baselines = baselines[_switcher_mask]
                     if np.unique(_switcher_baselines).size > 1:
                         warnings.warn(
-                            "by_path + controls: switcher baselines D_{g,1} "
-                            "take multiple values in this panel. Python "
-                            "residualizes once on the full panel before path "
-                            "enumeration; R `did_multiplegt_dyn(..., by_path, "
-                            "controls)` re-runs residualization per path on "
-                            "the path-restricted subsample, so per-path point "
+                            "by_path / paths_of_interest + controls: "
+                            "switcher baselines D_{g,1} take multiple values "
+                            "in this panel. Python residualizes once on the "
+                            "full panel before path enumeration; R "
+                            "`did_multiplegt_dyn(..., by_path, controls)` "
+                            "re-runs residualization per path on the "
+                            "path-restricted subsample, so per-path point "
                             "estimates can diverge between Python and R on "
                             "this panel. See `docs/methodology/REGISTRY.md` "
                             "(`Note (Phase 3 by_path ...)` -> Per-path "
@@ -1826,10 +1827,10 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                     _switcher_baselines_tl = baselines[_switcher_mask_tl]
                     if np.unique(_switcher_baselines_tl).size > 1:
                         warnings.warn(
-                            "by_path + trends_linear: switcher baselines "
-                            "D_{g,1} take multiple values in this panel. "
-                            "Python first-differences once on the full "
-                            "panel before path enumeration; R "
+                            "by_path / paths_of_interest + trends_linear: "
+                            "switcher baselines D_{g,1} take multiple values "
+                            "in this panel. Python first-differences once on "
+                            "the full panel before path enumeration; R "
                             "`did_multiplegt_dyn(..., by_path, trends_lin)` "
                             "re-runs the full pipeline (including "
                             "first-differencing) on each path's restricted "
@@ -1861,8 +1862,9 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                 _f_g_three_count = int((first_switch_idx_arr == 2).sum())
                 if _f_g_three_count > 0:
                     warnings.warn(
-                        f"by_path + trends_linear: {_f_g_three_count} "
-                        f"switching group(s) have F_g=3 (exactly 2 "
+                        f"by_path / paths_of_interest + trends_linear: "
+                        f"{_f_g_three_count} switching group(s) have "
+                        f"F_g=3 (exactly 2 "
                         f"pre-switch periods). After first-differencing "
                         f"and the time==1 filter, these groups have "
                         f"only 1 valid pre-window Z value, which "

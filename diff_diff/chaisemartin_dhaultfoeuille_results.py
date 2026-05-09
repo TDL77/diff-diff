@@ -1283,7 +1283,7 @@ class ChaisemartinDHaultfoeuilleResults:
         lines.extend(
             [
                 thin,
-                "Treatment-Path Disaggregation (by_path)".center(width),
+                "Treatment-Path Disaggregation".center(width),
                 thin,
             ]
         )
@@ -1442,8 +1442,9 @@ class ChaisemartinDHaultfoeuilleResults:
               Available when ``trends_linear=True``.
             - ``"design2"``: Design-2 switch-in/switch-out descriptive
               summary. Available when ``design2=True``.
-            - ``"by_path"``: one row per (path, horizon) when
-              ``by_path=k`` was passed to the estimator. Columns:
+            - ``"by_path"``: one row per (path, horizon) when either
+              ``by_path=k`` or ``paths_of_interest=[(...), ...]`` was
+              passed to the estimator. Columns:
               ``path``, ``frequency_rank``, ``n_groups``, ``horizon``,
               ``effect``, ``se``, ``t_stat``, ``p_value``,
               ``conf_int_lower``, ``conf_int_upper``, ``n_obs``,
