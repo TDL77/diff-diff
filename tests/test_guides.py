@@ -452,6 +452,30 @@ class TestLLMsFullHADCoverage:
                 f"is missing the public dataclass field {field.name!r}."
             )
 
+    def test_llms_full_had_section_documents_mass_point_survey_vcov_requirement(self):
+        # Per had.py:3495-3507 the mass-point design rejects the default
+        # classical vcov family on the survey_design= path
+        # (NotImplementedError). The HAD section must surface this
+        # requirement so an agent reading llms-full.txt and writing a
+        # weighted mass-point fit knows to pass vcov_type='hc1'
+        # explicitly. Without this caveat the documented fit() example
+        # can fail at fit time on a mass-point panel.
+        text = get_llm_guide("full")
+        had_start = text.index("### HeterogeneousAdoptionDiD")
+        had_end = text.index("### StackedDiD", had_start)
+        had_text = text[had_start:had_end]
+        # Must mention the mass-point + survey vcov requirement.
+        # Accept either explicit "vcov_type" mention near "mass" wording
+        # or the explicit "hc1" / "robust=True" pairing with mass-point.
+        lower = had_text.lower()
+        assert "vcov_type" in lower and ("mass-point" in lower or "mass_point" in lower), (
+            "HAD section must document the mass-point + survey vcov "
+            "requirement: passing vcov_type='hc1' (or robust=True) is "
+            "required on design='mass_point' under survey_design= "
+            "(per had.py:3495-3507). Without this caveat the documented "
+            "weighted fit example can raise NotImplementedError."
+        )
+
     def test_llms_full_had_variance_formula_describes_all_designs(self):
         # Per diff_diff/had.py:3585-3629, weighted mass-point fits populate
         # variance_formula in {"pweight_2sls", "survey_binder_tsl_2sls"} and

@@ -657,6 +657,8 @@ es = est.fit(data, outcome_col='y', unit_col='unit',
 
 **Staggered panels.** On multi-cohort panels with `aggregate="event_study"`, `fit()` auto-filters to the last treatment cohort plus never-treated units (paper Appendix B.2) and emits a `UserWarning` naming kept/dropped counts. The estimand is then a **last-cohort-only WAS**, not a multi-cohort average. For full multi-cohort staggered support, see `ChaisemartinDHaultfoeuille`.
 
+**Mass-point + survey constraint.** When fitting `design="mass_point"` with `survey_design=` (or the deprecated `survey=` alias), `vcov_type="hc1"` (or `robust=True`) is required: the survey path composes the standard error via Binder-TSL on the HC1-scale influence function, so the default classical sandwich path raises `NotImplementedError`. Passing `vcov_type="hc1"` is a safe default on weighted survey examples since `vcov_type` is unused on the continuous designs (CCT-2014 robust SE is the only formula there).
+
 ### StackedDiD
 
 Stacked DiD estimator (Wing, Freedman & Hollingsworth 2024). Addresses TWFE bias with corrective Q-weights.
