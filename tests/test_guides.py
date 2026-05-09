@@ -547,6 +547,30 @@ class TestLLMsFullHADCoverage:
             "ContinuousDiD routing."
         )
 
+    def test_llms_full_had_pretests_documents_earlier_pre_period_precondition(self):
+        # Same precondition as the practitioner test: per
+        # docs/methodology/REGISTRY.md HeterogeneousAdoptionDiD
+        # § "Assumption 7 / step 2 closure" + had_pretests.py:4738-4756 +
+        # 2769, aggregate="event_study" closes step 2 ONLY IF the
+        # panel carries at least one earlier placebo pre-period beyond
+        # the base F-1. The HAD Pretests section in llms-full.txt must
+        # document this precondition so agents do not assume any
+        # multi-period event-study fit closes step 2.
+        text = get_llm_guide("full")
+        pretests_start = text.index("## HAD Pretests")
+        pretests_end = text.index("## Honest DiD", pretests_start)
+        pretests_block = text[pretests_start:pretests_end]
+        lower = pretests_block.lower()
+        assert "earlier" in lower and ("pre-period" in lower or "placebo" in lower), (
+            "HAD Pretests section must document the 'earlier pre-period' "
+            "precondition for step-2 closure on the event-study path."
+        )
+        assert "skipped" in lower or "pretrends_joint=none" in lower, (
+            "HAD Pretests section must surface the "
+            "'joint pre-trends skipped' / pretrends_joint=None fallback "
+            "when no earlier pre-period exists."
+        )
+
     def test_llms_full_had_pretests_assumption_labels_correct(self):
         # Per docs/methodology/REGISTRY.md HeterogeneousAdoptionDiD
         # § "Assumptions / Theorems / Estimators":

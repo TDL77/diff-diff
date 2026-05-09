@@ -779,6 +779,43 @@ class TestHADDispatch:
             "for mass-point fits."
         )
 
+    def test_had_step_3_documents_earlier_pre_period_precondition_for_step_2(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Per docs/methodology/REGISTRY.md HeterogeneousAdoptionDiD
+        # § "Assumption 7 / step 2 closure" + had_pretests.py:4738-4756 +
+        # 2769: aggregate="event_study" closes step 2 ONLY IF the panel
+        # carries at least one earlier placebo pre-period beyond the
+        # base F-1. With only F-1 available the workflow sets
+        # pretrends_joint=None, all_pass=False, and the verdict carries
+        # 'joint pre-trends skipped (no earlier pre-period)'. Both HAD
+        # handler variants must surface this precondition - otherwise
+        # agents reading the guidance can think any multi-period
+        # event-study fit closes step 2 when it does not.
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            step_3_steps = [s for s in output["next_steps"] if s["baker_step"] == 3]
+            assert len(step_3_steps) == 1
+            text = (step_3_steps[0].get("why", "") + " " + step_3_steps[0].get("code", "")).lower()
+            # Must mention "earlier" pre-period / placebo precondition.
+            assert "earlier" in text and ("pre-period" in text or "placebo" in text), (
+                "Step-3 text must mention the 'earlier pre-period' "
+                "precondition for closing Assumption 7 / step 2 on the "
+                "event-study path. With only the base F-1 pre-period "
+                "the workflow returns pretrends_joint=None and the "
+                "verdict carries 'joint pre-trends skipped (no earlier "
+                "pre-period)' - step 2 stays uncovered."
+            )
+            # Must mention the skip-fallback verdict so agents know
+            # what to expect when the precondition fails.
+            assert "skipped" in text or "pretrends_joint=none" in text, (
+                "Step-3 text must surface the 'joint pre-trends skipped' "
+                "/ pretrends_joint=None fallback when no earlier "
+                "pre-period exists - otherwise agents cannot tell "
+                "whether step 2 was actually covered on a minimal "
+                "event-study fit."
+            )
+
     def test_had_step_3_flags_qug_under_survey_deferral(
         self, mock_had_results, mock_had_event_study_results
     ):
