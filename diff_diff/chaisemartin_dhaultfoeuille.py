@@ -779,14 +779,30 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
         """
         Set estimator parameters (sklearn-compatible).
 
-        Re-runs the same validation rules as ``__init__`` so invalid
-        parameter combinations cannot be introduced after construction.
+        **Transactional**: validation runs after the candidate mutations,
+        and if any rule fails the estimator state is rolled back to its
+        pre-call values before the exception is re-raised. Callers can
+        therefore retry with corrected params on the same instance
+        without repairing inconsistent intermediate state.
         """
-        for key, value in params.items():
+        # Snapshot current values for the keys we are about to set so
+        # we can roll back on validation failure (transactional semantics).
+        for key in params:
             if not hasattr(self, key):
                 raise ValueError(f"Unknown parameter: {key}")
-            setattr(self, key, value)
+        snapshot = {key: getattr(self, key) for key in params}
+        try:
+            for key, value in params.items():
+                setattr(self, key, value)
+            self._validate_invariants()
+        except Exception:
+            for key, value in snapshot.items():
+                setattr(self, key, value)
+            raise
+        return self
 
+    def _validate_invariants(self) -> None:
+        """Run the post-mutation validation rules. Mirrors `__init__`."""
         # Re-run __init__ validation rules so the post-set state is valid.
         if self.rank_deficient_action not in ("warn", "error", "silent"):
             raise ValueError(
@@ -834,7 +850,6 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                 f"clustering is reserved for a future phase. See REGISTRY.md "
                 f"ChaisemartinDHaultfoeuille section for the full contract."
             )
-        return self
 
     # ------------------------------------------------------------------
     # fit

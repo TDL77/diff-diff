@@ -8519,18 +8519,28 @@ class TestPathsOfInterest:
         with pytest.raises(ValueError, match="mutually exclusive"):
             est.set_params(paths_of_interest=[(0, 1, 1, 1)])
 
-    def test_set_params_partial_mutation_recoverable(self):
-        """After mutex set_params raises mid-mutation, recovery is possible."""
+    def test_set_params_failed_validation_is_transactional(self):
+        """A failed `set_params()` must leave estimator state unchanged
+        (regression for R5 P2 finding: prior implementation mutated
+        before validation, leaving both selectors populated when the
+        mutex check raised, which `fit()` then silently consumed)."""
         est = ChaisemartinDHaultfoeuille(paths_of_interest=[(0, 1, 1, 1)])
-        # set_params mutates self before validation; mutex raise leaves both set
+        # Capture pre-call state.
+        before = est.get_params()
+        # Mutex violation: by_path AND paths_of_interest both non-None.
         with pytest.raises(ValueError, match="mutually exclusive"):
             est.set_params(by_path=2)
-        # User can recover by clearing one of them.
-        est.set_params(by_path=None)
-        # Instance now valid; subsequent calls don't raise.
+        # Post-failure state is rolled back to pre-call.
+        after = est.get_params()
+        assert after == before, (
+            f"set_params() rollback failed: by_path={after['by_path']}, "
+            f"paths_of_interest={after['paths_of_interest']}"
+        )
+        # Subsequent valid set_params() succeeds against rolled-back state.
+        est.set_params(by_path=2, paths_of_interest=None)
         params = est.get_params()
-        assert params["by_path"] is None
-        assert params["paths_of_interest"] == [(0, 1, 1, 1)]
+        assert params["by_path"] == 2
+        assert params["paths_of_interest"] is None
 
     def test_get_params_includes_paths_of_interest(self):
         est = ChaisemartinDHaultfoeuille(
