@@ -96,7 +96,9 @@ class WooldridgeDiDResults:
             return float(np.sqrt(max(w_vec @ vcov @ w_vec, 0.0)))
 
         def _build_effect(att: float, se: float) -> Dict[str, Any]:
-            t_stat, p_value, conf_int = safe_inference(att, se, alpha=self.alpha, df=self._df_survey)
+            t_stat, p_value, conf_int = safe_inference(
+                att, se, alpha=self.alpha, df=self._df_survey
+            )
             return {
                 "att": att,
                 "se": se,
@@ -186,6 +188,7 @@ class WooldridgeDiDResults:
 
         if self.survey_metadata is not None:
             from diff_diff.results import _format_survey_block
+
             lines.extend(_format_survey_block(self.survey_metadata, 70))
             lines.append("-" * 70)
 
@@ -336,6 +339,27 @@ class WooldridgeDiDResults:
         effects = {k: v["att"] for k, v in (self.event_study_effects or {}).items()}
         se = {k: v["se"] for k, v in (self.event_study_effects or {}).items()}
         plot_event_study(effects=effects, se=se, alpha=self.alpha, **kwargs)
+
+    # --- Inference-field aliases (balance/external-adapter compatibility) ---
+    @property
+    def att(self) -> float:
+        return self.overall_att
+
+    @property
+    def se(self) -> float:
+        return self.overall_se
+
+    @property
+    def conf_int(self) -> Tuple[float, float]:
+        return self.overall_conf_int
+
+    @property
+    def p_value(self) -> float:
+        return self.overall_p_value
+
+    @property
+    def t_stat(self) -> float:
+        return self.overall_t_stat
 
     def __repr__(self) -> str:
         n_gt = len(self.group_time_effects)

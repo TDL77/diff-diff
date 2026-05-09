@@ -143,6 +143,45 @@ class ContinuousDiDResults:
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None)
 
+    # --- Inference-field aliases (balance/external-adapter compatibility) ---
+    # ATT-side is the headline contract; ACRT remains accessible via overall_acrt_*.
+    @property
+    def att(self) -> float:
+        return self.overall_att
+
+    @property
+    def se(self) -> float:
+        return self.overall_att_se
+
+    @property
+    def conf_int(self) -> Tuple[float, float]:
+        return self.overall_att_conf_int
+
+    @property
+    def p_value(self) -> float:
+        return self.overall_att_p_value
+
+    @property
+    def t_stat(self) -> float:
+        return self.overall_att_t_stat
+
+    # `overall_*` aliases for naming consistency with the rest of the staggered family.
+    @property
+    def overall_se(self) -> float:
+        return self.overall_att_se
+
+    @property
+    def overall_conf_int(self) -> Tuple[float, float]:
+        return self.overall_att_conf_int
+
+    @property
+    def overall_p_value(self) -> float:
+        return self.overall_att_p_value
+
+    @property
+    def overall_t_stat(self) -> float:
+        return self.overall_att_t_stat
+
     def __repr__(self) -> str:
         sig_att = _get_significance_stars(self.overall_att_p_value)
         sig_acrt = _get_significance_stars(self.overall_acrt_p_value)

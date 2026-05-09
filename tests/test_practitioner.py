@@ -126,7 +126,10 @@ def mock_efficient_results():
 def mock_continuous_results():
     r = ContinuousDiDResults.__new__(ContinuousDiDResults)
     r.overall_att = 0.4
-    r.overall_se = 0.1
+    # Canonical SE field on ContinuousDiDResults is overall_att_se (the ATT side).
+    # `overall_se` is a read-only property alias since the v3.3.3 inference-field
+    # alias surface; assigning to it raises AttributeError.
+    r.overall_att_se = 0.1
     return r
 
 
