@@ -8,9 +8,23 @@ local-linear fit.
 This module ships the nonparametric building blocks that
 :class:`~diff_diff.HeterogeneousAdoptionDiD` composes for its continuous-dose
 fit paths (``continuous_at_zero`` and ``continuous_near_d_lower``); see
-:doc:`had` for the estimator that consumes them. The components are also
-usable on their own for any one-sided boundary local-linear regression
-problem with a strictly nonnegative running variable.
+:doc:`had` for the estimator that consumes them.
+
+Two scope tiers are exposed:
+
+- **Generic helpers** (``local_linear_fit``, the three kernels,
+  ``kernel_moments``, ``KERNELS``) - usable on their own for any one-sided
+  boundary local-linear regression problem with a strictly nonnegative
+  running variable.
+- **HAD-scoped public wrappers** (``mse_optimal_bandwidth``,
+  ``bias_corrected_local_linear``) - the configuration is hard-coded to
+  HAD Phase 1b/1c (``p=1``, ``deriv=0``, ``interior=False``, ``vce="nn"``)
+  and only those settings are parity-tested against R ``nprobust``. Other
+  settings (``hc0``/``hc1``/``hc2``/``hc3`` variance, interior evaluation,
+  higher polynomial orders) require dropping to the private
+  ``diff_diff._nprobust_port`` module and accepting that parity has not
+  been verified outside the HAD configuration. See ``docs/methodology/REGISTRY.md``
+  ``HeterogeneousAdoptionDiD`` section for the full Phase 1b/1c contract.
 
 The selector and bias correction are ports of the Calonico-Cattaneo-Farrell
 (2018) plug-in bandwidth and Calonico-Cattaneo-Titiunik (2014) robust-bias
