@@ -3828,19 +3828,17 @@ class TestByPathGates:
     @pytest.mark.parametrize(
         "fit_kwargs, msg",
         [
-            # NB: prior `controls` (Wave 3 #5), `trends_linear`, and
-            # `trends_nonparam` (Wave 3 #6+#7) entries were removed
-            # when their gates were lifted. After gate removal, those
-            # combinations either fit successfully (controls passes
-            # column-validation; trends_linear/trends_nonparam route
-            # to their respective code paths) or raise a non-
-            # NotImplementedError specific to the parameter (e.g.,
-            # trends_nonparam=group raises a partition-coarseness
-            # ValueError because the set partition equals the group
-            # partition). Coverage for those combinations now lives
-            # in `TestByPathControls`, `TestByPathTrendsLinear`, and
-            # `TestByPathTrendsNonparam`.
-            ({"heterogeneity": "group"}, "heterogeneity"),
+            # NB: prior `controls` (Wave 3 #5), `trends_linear` /
+            # `trends_nonparam` (Wave 3 #6+#7), and `heterogeneity`
+            # (Wave 5 #11) entries were removed when their gates were
+            # lifted. After gate removal, those combinations either fit
+            # successfully (heterogeneity routes to
+            # path_heterogeneity_effects; controls passes column-
+            # validation; trends_linear/trends_nonparam route to their
+            # respective code paths) or raise a non-NotImplementedError
+            # specific to the parameter. Coverage for those combinations
+            # now lives in `TestByPathControls`, `TestByPathTrendsLinear`,
+            # `TestByPathTrendsNonparam`, and `TestByPathHeterogeneity`.
             ({"design2": True}, "design2"),
             ({"honest_did": True}, "honest_did"),
         ],
@@ -9924,3 +9922,437 @@ class TestByPathSurveyDesignTelescope:
                 res_g.event_study_effects[l_h]["se"],
                 atol=1e-12,
             )
+
+
+# ===========================================================================
+# Wave 5 #11: by_path / paths_of_interest + heterogeneity testing
+# ===========================================================================
+
+
+def _by_path_het_data(seed=44, n_switchers=90, n_controls=30, n_periods=10):
+    """Multi-path panel with binary `het_x` covariate.
+
+    Layered on `TestHeterogeneityTesting._make_panel_with_het` shape
+    (binary het_x, half each) plus multi-path structure (3 paths, F_g
+    independent of path so each path has multiple cohorts). Includes
+    never-treated controls so the heterogeneity regression has cohort
+    variation at every horizon under the reversal-path eligibility
+    filter (cf. PR #408 R parity preflight: without controls, R drops
+    reversal paths past horizon 1 leaving a single cohort and triggering
+    empty-cohort-dummy errors). Outcome: 0.5*t + (5 + 3*het_x) * D + N(0, 0.5).
+    """
+    rng = np.random.RandomState(seed)
+    rows = []
+    paths = [(0, 1, 1, 1), (0, 1, 0, 0), (0, 1, 1, 0)]
+    for g in range(n_switchers):
+        F_g = 3 + ((g // 3) % 3)  # F_g in {3,4,5}
+        path = paths[g % 3]
+        het_x = 1 if g < n_switchers // 2 else 0
+        effect = 5.0 + 3.0 * het_x
+        for t in range(n_periods):
+            if F_g - 1 <= t < F_g - 1 + len(path):
+                d = path[t - (F_g - 1)]
+            elif t >= F_g - 1 + len(path):
+                d = path[-1]
+            else:
+                d = 0
+            y = 0.5 * t + effect * d + rng.normal(0, 0.5)
+            rows.append({
+                "group": g, "period": t, "treatment": d,
+                "outcome": y, "het_x": het_x,
+            })
+    # Never-treated controls (D=0 throughout), het_x balanced
+    for k in range(n_controls):
+        het_x = 1 if k < n_controls // 2 else 0
+        g = n_switchers + k
+        for t in range(n_periods):
+            y = 0.5 * t + rng.normal(0, 0.5)
+            rows.append({
+                "group": g, "period": t, "treatment": 0,
+                "outcome": y, "het_x": het_x,
+            })
+    return pd.DataFrame(rows)
+
+
+class TestByPathHeterogeneity:
+    """Per-path heterogeneity (Wave 5 #11) — composes ``by_path`` /
+    ``paths_of_interest`` with ``heterogeneity="<col>"``.
+
+    R parity coverage in
+    ``tests/test_chaisemartin_dhaultfoeuille_parity.py::
+    TestDCDHDynRParityByPathHeterogeneity``.
+    """
+
+    # Gate dispatch: lifts no longer raise
+
+    def test_no_longer_raises_on_heterogeneity(self):
+        """``by_path=k`` + ``heterogeneity`` no longer raises."""
+        df = _by_path_het_data()
+        est = ChaisemartinDHaultfoeuille(drop_larger_lower=False, by_path=2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        assert res.path_heterogeneity_effects is not None
+
+    def test_paths_of_interest_with_heterogeneity_no_longer_raises(self):
+        """``paths_of_interest`` + ``heterogeneity`` no longer raises."""
+        df = _by_path_het_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        assert res.path_heterogeneity_effects is not None
+
+    def test_heterogeneity_still_rejects_controls_under_by_path(self):
+        """``heterogeneity + controls`` mutex still fires under by_path."""
+        df = _by_path_het_data()
+        df["X1"] = np.random.RandomState(42).normal(0, 1, len(df))
+        with pytest.raises(ValueError, match="cannot be combined with controls"):
+            ChaisemartinDHaultfoeuille(
+                drop_larger_lower=False, by_path=2
+            ).fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+                heterogeneity="het_x", controls=["X1"],
+            )
+
+    def test_heterogeneity_still_rejects_trends_linear_under_by_path(self):
+        """``heterogeneity + trends_linear`` mutex still fires under by_path."""
+        df = _by_path_het_data()
+        with pytest.raises(
+            ValueError, match="cannot be combined with trends_linear"
+        ):
+            ChaisemartinDHaultfoeuille(
+                drop_larger_lower=False, by_path=2
+            ).fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+                heterogeneity="het_x", trends_linear=True,
+            )
+
+    def test_heterogeneity_still_rejects_trends_nonparam_under_by_path(self):
+        """``heterogeneity + trends_nonparam`` mutex still fires under by_path."""
+        df = _by_path_het_data()
+        df["state"] = df["group"] % 3
+        with pytest.raises(
+            ValueError, match="cannot be combined with trends_nonparam"
+        ):
+            ChaisemartinDHaultfoeuille(
+                drop_larger_lower=False, by_path=2
+            ).fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+                heterogeneity="het_x", trends_nonparam="state",
+            )
+
+    # Behavior
+
+    def test_per_path_heterogeneity_finite_under_known_signal(self):
+        """Detects positive heterogeneity on the path that contains the
+        effect-varying switchers."""
+        df = _by_path_het_data()
+        est = ChaisemartinDHaultfoeuille(drop_larger_lower=False, by_path=3)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        assert res.path_heterogeneity_effects
+        # At horizon 1 every path has switchers; heterogeneity beta should
+        # be positive (DGP: effect = 5 + 3*het_x).
+        for path, horizons in res.path_heterogeneity_effects.items():
+            assert 1 in horizons
+            assert np.isfinite(horizons[1]["beta"])
+            assert np.isfinite(horizons[1]["se"])
+            assert horizons[1]["beta"] > 0, (
+                f"path={path} l=1: expected positive het beta "
+                f"(DGP: 5 + 3*het_x), got {horizons[1]['beta']}"
+            )
+
+    def test_per_path_heterogeneity_telescope_to_global_on_single_path(self):
+        """On a single-path panel, per-path == global heterogeneity.
+        Plain OLS path: bit-exact via path_groups identity."""
+        # Single-path DGP: all switchers follow (0,1,1,1)
+        rng = np.random.RandomState(44)
+        rows = []
+        n_switchers = 60
+        n_controls = 20
+        for g in range(n_switchers):
+            F_g = 3 + ((g // 3) % 3)
+            path = (0, 1, 1, 1)
+            het_x = 1 if g < n_switchers // 2 else 0
+            effect = 5.0 + 3.0 * het_x
+            for t in range(10):
+                if F_g - 1 <= t < F_g - 1 + len(path):
+                    d = path[t - (F_g - 1)]
+                elif t >= F_g - 1 + len(path):
+                    d = path[-1]
+                else:
+                    d = 0
+                rows.append({
+                    "group": g, "period": t, "treatment": d,
+                    "outcome": 0.5 * t + effect * d + rng.normal(0, 0.5),
+                    "het_x": het_x,
+                })
+        for k in range(n_controls):
+            het_x = 1 if k < n_controls // 2 else 0
+            for t in range(10):
+                rows.append({
+                    "group": n_switchers + k, "period": t, "treatment": 0,
+                    "outcome": 0.5 * t + rng.normal(0, 0.5),
+                    "het_x": het_x,
+                })
+        df = pd.DataFrame(rows)
+        # Run with by_path=1 (path is observed)
+        est_p = ChaisemartinDHaultfoeuille(drop_larger_lower=False, by_path=1)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_p = est_p.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        # Run global (no by_path)
+        est_g = ChaisemartinDHaultfoeuille(drop_larger_lower=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_g = est_g.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        assert res_p.path_heterogeneity_effects
+        path_key = (0, 1, 1, 1)
+        assert path_key in res_p.path_heterogeneity_effects
+        for l_h in range(1, 4):
+            py_path = res_p.path_heterogeneity_effects[path_key][l_h]
+            py_global = res_g.heterogeneity_effects[l_h]
+            if not np.isfinite(py_path["beta"]):
+                assert not np.isfinite(py_global["beta"])
+                continue
+            np.testing.assert_allclose(
+                py_path["beta"], py_global["beta"], atol=1e-14, rtol=1e-14,
+                err_msg=f"l={l_h}: per-path beta != global beta (telescope failed)",
+            )
+            np.testing.assert_allclose(
+                py_path["se"], py_global["se"], atol=1e-14, rtol=1e-14,
+                err_msg=f"l={l_h}: per-path se != global se (telescope failed)",
+            )
+
+    def test_per_path_heterogeneity_zero_signal_yields_small_beta(self):
+        """Uncorrelated covariate yields beta near zero per (path, l)."""
+        rng = np.random.RandomState(123)
+        rows = []
+        n_switchers = 90
+        n_controls = 30
+        paths = [(0, 1, 1, 1), (0, 1, 0, 0), (0, 1, 1, 0)]
+        for g in range(n_switchers):
+            F_g = 3 + ((g // 3) % 3)
+            path = paths[g % 3]
+            # het_x is random and uncorrelated with anything
+            het_x = rng.normal(0, 1)
+            for t in range(10):
+                if F_g - 1 <= t < F_g - 1 + len(path):
+                    d = path[t - (F_g - 1)]
+                elif t >= F_g - 1 + len(path):
+                    d = path[-1]
+                else:
+                    d = 0
+                # Effect is constant 5.0 — no heterogeneity by het_x
+                rows.append({
+                    "group": g, "period": t, "treatment": d,
+                    "outcome": 0.5 * t + 5.0 * d + rng.normal(0, 0.5),
+                    "het_x": het_x,
+                })
+        for k in range(n_controls):
+            # Draw het_x ONCE per group (must be time-invariant)
+            het_x = rng.normal(0, 1)
+            for t in range(10):
+                rows.append({
+                    "group": n_switchers + k, "period": t, "treatment": 0,
+                    "outcome": 0.5 * t + rng.normal(0, 0.5),
+                    "het_x": het_x,
+                })
+        df = pd.DataFrame(rows)
+        est = ChaisemartinDHaultfoeuille(drop_larger_lower=False, by_path=3)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        assert res.path_heterogeneity_effects
+        for path, horizons in res.path_heterogeneity_effects.items():
+            for l_h, vals in horizons.items():
+                if np.isfinite(vals["beta"]):
+                    # |beta| should be small (well within 3 standard
+                    # errors of zero) under the null
+                    assert abs(vals["beta"]) < 5.0, (
+                        f"path={path} l={l_h}: |beta|={abs(vals['beta']):.3f} "
+                        f"too large for zero-signal DGP"
+                    )
+
+    def test_path_with_too_few_eligible_yields_nan(self):
+        """A path with <3 eligible switchers per horizon emits NaN."""
+        # Construct a panel where one path has only 2 switchers — the
+        # n_obs >= 3 guard should fire. Use paths_of_interest to ensure
+        # the rare path is selected.
+        rng = np.random.RandomState(45)
+        rows = []
+        # 30 switchers on path (0,1,1,1), 2 switchers on (0,1,0,0)
+        for g in range(30):
+            F_g = 3 + (g % 3)
+            path = (0, 1, 1, 1)
+            het_x = 1 if g < 15 else 0
+            for t in range(10):
+                if F_g - 1 <= t < F_g - 1 + len(path):
+                    d = path[t - (F_g - 1)]
+                elif t >= F_g - 1 + len(path):
+                    d = path[-1]
+                else:
+                    d = 0
+                rows.append({
+                    "group": g, "period": t, "treatment": d,
+                    "outcome": 0.5 * t + 5.0 * d + rng.normal(0, 0.5),
+                    "het_x": het_x,
+                })
+        # 2 switchers on the rare path — under-eligible
+        for g in range(30, 32):
+            F_g = 3
+            path = (0, 1, 0, 0)
+            het_x = 1
+            for t in range(10):
+                if F_g - 1 <= t < F_g - 1 + len(path):
+                    d = path[t - (F_g - 1)]
+                elif t >= F_g - 1 + len(path):
+                    d = path[-1]
+                else:
+                    d = 0
+                rows.append({
+                    "group": g, "period": t, "treatment": d,
+                    "outcome": 0.5 * t + 5.0 * d + rng.normal(0, 0.5),
+                    "het_x": het_x,
+                })
+        # Controls
+        for k in range(15):
+            for t in range(10):
+                rows.append({
+                    "group": 32 + k, "period": t, "treatment": 0,
+                    "outcome": 0.5 * t + rng.normal(0, 0.5), "het_x": 0,
+                })
+        df = pd.DataFrame(rows)
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        assert res.path_heterogeneity_effects
+        rare = res.path_heterogeneity_effects[(0, 1, 0, 0)]
+        # All horizons for the rare path should have NaN inference (n_obs < 3)
+        for l_h, vals in rare.items():
+            assert vals["n_obs"] < 3, (
+                f"rare path l={l_h}: expected n_obs < 3, got {vals['n_obs']}"
+            )
+            assert not np.isfinite(vals["beta"])
+            assert not np.isfinite(vals["se"])
+            assert not np.isfinite(vals["t_stat"])
+            assert not np.isfinite(vals["p_value"])
+            assert not np.isfinite(vals["conf_int"][0])
+            assert not np.isfinite(vals["conf_int"][1])
+
+    def test_per_path_heterogeneity_no_multi_baseline_warning(self):
+        """Anti-regression: heterogeneity + by_path does NOT emit the
+        multi-baseline UserWarning that controls/trends_linear emit.
+        Cohort dummies absorb baseline by construction (REGISTRY)."""
+        df = _by_path_het_data()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = ChaisemartinDHaultfoeuille(
+                drop_larger_lower=False, by_path=3
+            ).fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        assert res.path_heterogeneity_effects
+        # Filter for any multi-baseline-style warning
+        multi_baseline = [
+            w for w in caught
+            if "baseline" in str(w.message).lower()
+            and "multi" in str(w.message).lower()
+        ]
+        assert not multi_baseline, (
+            f"Unexpected multi-baseline warning(s): "
+            f"{[str(w.message) for w in multi_baseline]}"
+        )
+
+    # DataFrame integration
+
+    def test_to_dataframe_by_path_includes_heterogeneity_columns(self):
+        """``to_dataframe(level='by_path')`` includes het_* columns;
+        populated for positive horizons and NaN for placebo rows."""
+        df = _by_path_het_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=2, placebo=True
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        out = res.to_dataframe(level="by_path")
+        assert "het_beta" in out.columns
+        assert "het_se" in out.columns
+        assert "het_t_stat" in out.columns
+        assert "het_p_value" in out.columns
+        assert "het_conf_int_lower" in out.columns
+        assert "het_conf_int_upper" in out.columns
+        # Placebo rows: het_* must be NaN
+        if (out.horizon < 0).any():
+            placebo_rows = out[out.horizon < 0]
+            assert placebo_rows["het_beta"].isna().all()
+        # Positive horizons: at least some entries are populated
+        positive_rows = out[out.horizon > 0]
+        assert positive_rows["het_beta"].notna().any()
+
+    # Edge cases
+
+    def test_path_unobserved_under_heterogeneity_warns_omits(self):
+        """POI with unobserved path emits unobserved-path warning and
+        omits the path from path_heterogeneity_effects."""
+        df = _by_path_het_data()
+        # (1, 1, 1, 0) is not in the DGP (all paths start with 0)
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1), (1, 1, 1, 0)],
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        # Unobserved path warning should have fired (at least once;
+        # may fire from path_effects + path_heterogeneity_effects)
+        unobs = [
+            w for w in caught
+            if "(1, 1, 1, 0)" in str(w.message)
+            and "zero observed groups" in str(w.message)
+        ]
+        assert unobs, "expected unobserved-path UserWarning"
+        assert res.path_heterogeneity_effects is not None
+        assert (1, 1, 1, 0) not in res.path_heterogeneity_effects
+        assert (0, 1, 1, 1) in res.path_heterogeneity_effects

@@ -1319,3 +1319,154 @@ class TestDCDHDynRParityByPathNonBinary:
                         f"path={path_key} h={h} SE: "
                         f"py={py_se:.4f} vs r={r_se:.4f}"
                     )
+
+
+class TestDCDHDynRParityHeterogeneity:
+    """Parity tests for global ``predict_het`` against R DIDmultiplegtDYN.
+
+    Wave 5 #11 introduces this as the FIRST ``predict_het`` parity
+    baseline in the repo. Anchors the per-path tolerance for
+    ``TestDCDHDynRParityByPathHeterogeneity`` since the per-path R call
+    is ``did_multiplegt_main(..., predict_het=...)`` per path-restricted
+    subsample with no additional numerical loss.
+
+    Fixture: scenario 20 (``multi_path_reversible_predict_het``) — 90
+    switchers across 3 reversal paths + 30 never-treated controls,
+    binary ``het_x`` with effect = 5.0 + 3.0 * het_x. R is invoked with
+    ``dont_drop_larger_lower=TRUE`` so the reversal-path eligibility
+    matches Python's ``drop_larger_lower=False`` requirement.
+    """
+
+    BETA_RTOL = 1e-6
+    BETA_ATOL = 1e-9
+    SE_RTOL = 1e-5
+
+    def test_parity_multi_path_reversible_predict_het(self, golden_values):
+        """Global heterogeneity coefficient parity per horizon."""
+        import warnings
+
+        scenario = golden_values.get("multi_path_reversible_predict_het")
+        if scenario is None:
+            pytest.skip(
+                "scenario 'multi_path_reversible_predict_het' not in "
+                "golden values"
+            )
+
+        df = _golden_to_df_with_extra(scenario["data"], extra_cols=["het_x"])
+        est = ChaisemartinDHaultfoeuille(drop_larger_lower=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            results = est.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+                heterogeneity="het_x",
+            )
+
+        assert results.heterogeneity_effects is not None
+        r_predict_het = scenario["results"]["predict_het"]
+
+        for h_str, r_h in r_predict_het.items():
+            h = int(h_str)
+            assert h in results.heterogeneity_effects, (
+                f"horizon {h} missing from Python heterogeneity_effects"
+            )
+            py_h = results.heterogeneity_effects[h]
+            assert py_h["beta"] == pytest.approx(
+                r_h["beta"], rel=self.BETA_RTOL, abs=self.BETA_ATOL
+            ), f"h={h} beta: py={py_h['beta']:.6f} vs r={r_h['beta']:.6f}"
+            assert py_h["se"] == pytest.approx(r_h["se"], rel=self.SE_RTOL), (
+                f"h={h} se: py={py_h['se']:.6f} vs r={r_h['se']:.6f}"
+            )
+
+
+class TestDCDHDynRParityByPathHeterogeneity:
+    """Parity tests for ``by_path`` + ``predict_het`` against R DIDmultiplegtDYN.
+
+    Wave 5 #11 lift. R's per-path dispatcher
+    (``did_multiplegt_dyn.R:226-257``) re-runs
+    ``did_multiplegt_main(..., predict_het=...)`` on each path-restricted
+    subsample. Python mirrors via ``_compute_path_heterogeneity_test``,
+    which loops ``_compute_heterogeneity_test`` over selected paths
+    with a ``path_groups`` filter restricting eligibility to the path's
+    switchers. Cohort dummies absorb baseline by construction, so
+    multi-baseline switcher panels do not produce R-divergence.
+
+    Fixture: scenario 21 (``multi_path_reversible_by_path_predict_het``)
+    — same DGP as scenario 20 so per-path tolerances inherit from
+    ``TestDCDHDynRParityHeterogeneity``.
+    """
+
+    BETA_RTOL = 1e-6
+    BETA_ATOL = 1e-9
+    SE_RTOL = 1e-5
+
+    def _path_key_from_r_label(self, r_label: str):
+        return tuple(int(x) for x in r_label.split(","))
+
+    def test_parity_multi_path_reversible_by_path_predict_het(
+        self, golden_values
+    ):
+        """Per-path heterogeneity coefficient parity per (path, horizon)."""
+        import warnings
+
+        scenario = golden_values.get(
+            "multi_path_reversible_by_path_predict_het"
+        )
+        if scenario is None:
+            pytest.skip(
+                "scenario 'multi_path_reversible_by_path_predict_het' "
+                "not in golden values"
+            )
+
+        df = _golden_to_df_with_extra(scenario["data"], extra_cols=["het_x"])
+        est = ChaisemartinDHaultfoeuille(drop_larger_lower=False, by_path=3)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            results = est.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+                heterogeneity="het_x",
+            )
+
+        assert results.path_heterogeneity_effects is not None
+        r_by_path = scenario["results"]["by_path_predict_het"]
+
+        py_keys = set(results.path_heterogeneity_effects.keys())
+        r_keys = {self._path_key_from_r_label(e["path"]) for e in r_by_path}
+        assert py_keys == r_keys, (
+            f"Path-set mismatch.\n"
+            f"  Python only: {py_keys - r_keys}\n"
+            f"  R only:      {r_keys - py_keys}"
+        )
+
+        for r_path_entry in r_by_path:
+            path_key = self._path_key_from_r_label(r_path_entry["path"])
+            py_horizons = results.path_heterogeneity_effects[path_key]
+
+            for h_str, r_h in r_path_entry["horizons"].items():
+                h = int(h_str)
+                assert h in py_horizons, (
+                    f"path={path_key}: horizon {h} missing from Python "
+                    f"path_heterogeneity_effects"
+                )
+                py_h = py_horizons[h]
+                assert py_h["beta"] == pytest.approx(
+                    r_h["beta"], rel=self.BETA_RTOL, abs=self.BETA_ATOL
+                ), (
+                    f"path={path_key} h={h} beta: "
+                    f"py={py_h['beta']:.6f} vs r={r_h['beta']:.6f}"
+                )
+                assert py_h["se"] == pytest.approx(
+                    r_h["se"], rel=self.SE_RTOL
+                ), (
+                    f"path={path_key} h={h} se: "
+                    f"py={py_h['se']:.6f} vs r={r_h['se']:.6f}"
+                )

@@ -424,6 +424,20 @@ class ChaisemartinDHaultfoeuilleResults:
         cohort-sharing SE deviation from R documented for
         ``path_effects``. See REGISTRY.md
         ``Note (Phase 3 by_path ...)`` → "Per-path placebos".
+    path_heterogeneity_effects : dict, optional
+        Per-path heterogeneity test results (Web Appendix Section 1.5,
+        Lemma 7) when ``heterogeneity`` is set AND (``by_path=k`` or
+        ``paths_of_interest=[(...), ...]``) is set. Inner dict keyed by
+        horizon directly (no ``"horizons"`` wrapper); each entry holds
+        ``{"beta", "se", "t_stat", "p_value", "conf_int", "n_obs"}``,
+        where ``beta`` is the WLS coefficient on the heterogeneity
+        covariate on the path-restricted switcher subsample. Cohort
+        dummies in the design matrix absorb baseline by construction.
+        Empty-state contract mirrors ``path_effects``: ``None`` when not
+        requested; ``{}`` when requested but no path has eligible
+        switchers. Mirrors R ``did_multiplegt_dyn(..., by_path,
+        predict_het)`` per-by_level dispatch. See REGISTRY.md
+        ``Note (Phase 3 by_path ...)`` → "Per-path heterogeneity testing".
     path_cumulated_event_study : dict, optional
         Per-path cumulated level effects ``delta_{path, l} =
         sum_{l'=1..l} DID^{fd}_{path, l'}`` for ``l = 1..L_max``,
@@ -578,6 +592,18 @@ class ChaisemartinDHaultfoeuilleResults:
     # **path_placebo_event_study[p]}` view is well-formed across both
     # forward and backward horizons within a single path.
     path_placebo_event_study: Optional[Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]] = field(
+        default=None, repr=False
+    )
+    # Per-path heterogeneity test (Web Appendix Section 1.5, Lemma 7)
+    # under `by_path` / `paths_of_interest`. Inner dict keyed by horizon
+    # directly: `{path: {l: {beta, se, t_stat, p_value, conf_int, n_obs}}}`.
+    # Mirrors the simpler `path_placebo_event_study` shape — no metadata
+    # wrapper because frequency_rank / n_groups already live on
+    # `path_effects[path]` for the same path. Empty-state contract
+    # mirrors `path_effects`: None when not requested (no `heterogeneity`
+    # kwarg or no `by_path` / `paths_of_interest` selector); `{}` when
+    # requested but no path is observed.
+    path_heterogeneity_effects: Optional[Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]] = field(
         default=None, repr=False
     )
     # Per-path cumulated event study (level effects under `trends_linear`
@@ -1759,6 +1785,12 @@ class ChaisemartinDHaultfoeuilleResults:
                         "cband_upper",
                         "cumulated_effect",
                         "cumulated_se",
+                        "het_beta",
+                        "het_se",
+                        "het_t_stat",
+                        "het_p_value",
+                        "het_conf_int_lower",
+                        "het_conf_int_upper",
                     ]
                 )
             rows = []
@@ -1786,6 +1818,14 @@ class ChaisemartinDHaultfoeuilleResults:
                 path_cumulated = (
                     self.path_cumulated_event_study.get(path, {})
                     if self.path_cumulated_event_study is not None
+                    else {}
+                )
+                # Per-path heterogeneity entries (under heterogeneity=col).
+                # Always-present het_* columns, NaN when not requested or
+                # when the path's per-horizon entry is missing.
+                path_het = (
+                    self.path_heterogeneity_effects.get(path, {})
+                    if self.path_heterogeneity_effects is not None
                     else {}
                 )
                 for lag_key in sorted(placebo_horizons.keys()):
@@ -1816,6 +1856,15 @@ class ChaisemartinDHaultfoeuilleResults:
                             "cband_upper": ph_cband[1] if ph_cband else np.nan,
                             "cumulated_effect": np.nan,
                             "cumulated_se": np.nan,
+                            # Heterogeneity is forward-only (R doesn't ship
+                            # per-path predict_het on placebos); placebo
+                            # rows always emit NaN here.
+                            "het_beta": np.nan,
+                            "het_se": np.nan,
+                            "het_t_stat": np.nan,
+                            "het_p_value": np.nan,
+                            "het_conf_int_lower": np.nan,
+                            "het_conf_int_upper": np.nan,
                         }
                     )
                 for l_h in sorted(horizons.keys()):
@@ -1826,6 +1875,8 @@ class ChaisemartinDHaultfoeuilleResults:
                     # `TestByPathSupTBands::test_path_sup_t_to_dataframe_emits_cband_columns`.
                     h_cband = h_entry.get("cband_conf_int", (np.nan, np.nan))
                     cum_entry = path_cumulated.get(l_h, {})
+                    het_entry = path_het.get(l_h, {}) if path_het else {}
+                    het_ci = het_entry.get("conf_int", (np.nan, np.nan))
                     rows.append(
                         {
                             "path": path,
@@ -1843,6 +1894,16 @@ class ChaisemartinDHaultfoeuilleResults:
                             "cband_upper": h_cband[1] if h_cband else np.nan,
                             "cumulated_effect": cum_entry.get("effect", np.nan),
                             "cumulated_se": cum_entry.get("se", np.nan),
+                            # Per-path heterogeneity (Wave 5 #11). Always-
+                            # present, NaN when not requested or when the
+                            # entry is missing (mirrors cband_*/cumulated_*
+                            # convention).
+                            "het_beta": het_entry.get("beta", np.nan),
+                            "het_se": het_entry.get("se", np.nan),
+                            "het_t_stat": het_entry.get("t_stat", np.nan),
+                            "het_p_value": het_entry.get("p_value", np.nan),
+                            "het_conf_int_lower": het_ci[0] if het_ci else np.nan,
+                            "het_conf_int_upper": het_ci[1] if het_ci else np.nan,
                         }
                     )
             return pd.DataFrame(rows)

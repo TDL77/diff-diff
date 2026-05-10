@@ -26,7 +26,7 @@ References
 """
 
 import warnings
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -468,10 +468,22 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
         ``NotImplementedError``. Top-k path ranking under
         ``survey_design`` remains group-cardinality-based (unweighted),
         not population-weight-based — survey weights do not affect
-        which paths are selected as "top-k". Incompatible with
-        ``heterogeneity``, ``design2``, and ``honest_did`` (each
-        combination raises ``NotImplementedError`` in the current
-        release).
+        which paths are selected as "top-k".
+
+        Compatible with ``heterogeneity="<col>"`` — per-path
+        heterogeneity coefficient is computed by re-running the
+        Lemma 7 regression on each path-restricted switcher
+        subsample. Cohort dummies absorb baseline (no R-divergence
+        warning needed). Surfaces on
+        ``results.path_heterogeneity_effects`` keyed
+        ``{path: {l: {beta, se, t_stat, p_value, conf_int, n_obs}}}``
+        and on ``to_dataframe(level="by_path")`` via ``het_*``
+        columns. Mirrors R ``did_multiplegt_dyn(..., by_path,
+        predict_het)`` per-by_level. Composes with ``survey_design``
+        (analytical Binder TSL + replicate-weight) via the existing
+        cell-period IF allocator path. Incompatible with
+        ``design2`` and ``honest_did`` (each combination raises
+        ``NotImplementedError`` in the current release).
 
         Mutually exclusive with ``paths_of_interest`` — use
         ``by_path=k`` for top-k automatic ranking by frequency, or
@@ -633,10 +645,12 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
         Compatible with all downstream surfaces inherited by
         ``by_path``: bootstrap, per-path placebos, per-path joint
         sup-t bands, ``controls``, ``trends_linear``,
-        ``trends_nonparam``, and ``survey_design`` (analytical Binder
+        ``trends_nonparam``, ``survey_design`` (analytical Binder
         TSL + replicate-weight; multiplier bootstrap under survey
-        remains gated, same as ``by_path=k``). Mechanical extension
-        to path enumeration; no methodology change.
+        remains gated, same as ``by_path=k``), and ``heterogeneity``
+        (per-path heterogeneity coefficient surfaces on
+        ``results.path_heterogeneity_effects``). Mechanical
+        extension to path enumeration; no methodology change.
 
         **Order semantics**: paths appear in
         ``results.path_effects`` in the user-specified order, modulo
@@ -952,7 +966,11 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
             Partial implementation: post-treatment regressions only
             (no placebo regressions or joint null test). Cannot be
             combined with ``controls``, ``trends_linear``, or
-            ``trends_nonparam``. Requires ``L_max >= 1``.
+            ``trends_nonparam``. Requires ``L_max >= 1``. Under
+            ``by_path`` / ``paths_of_interest``, per-path
+            heterogeneity coefficients also surface on
+            ``results.path_heterogeneity_effects`` and on
+            ``to_dataframe(level="by_path")`` via ``het_*`` columns.
         design2 : bool, default=False
             If ``True``, identify and report switch-in/switch-out
             (Design-2) groups. Convenience wrapper (descriptive summary,
@@ -1227,11 +1245,6 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                             f"[F_g-1, ..., F_g-1+L_max]); got path "
                             f"{p!r} of length {len(p)}."
                         )
-            if heterogeneity is not None:
-                raise NotImplementedError(
-                    "by_path / paths_of_interest combined with "
-                    "heterogeneity testing is deferred to a future release."
-                )
             if design2:
                 raise NotImplementedError(
                     "by_path / paths_of_interest combined with design2 "
@@ -3861,6 +3874,36 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                 replicate_n_valid_list=_replicate_n_valid_list,
             )
 
+        # Per-path heterogeneity (mirrors R `did_multiplegt_dyn(...,
+        # by_path, predict_het)` per-by_level dispatch). Empty-state
+        # contract: None when not requested (no `heterogeneity` kwarg
+        # or no `by_path`/`paths_of_interest` selector); `{}` when
+        # requested but no path is observed (mirrors `path_effects`).
+        path_heterogeneity_effects: Optional[Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]] = (
+            None
+        )
+        if heterogeneity is not None and (
+            self.by_path is not None or self.paths_of_interest is not None
+        ):
+            path_heterogeneity_effects = _compute_path_heterogeneity_test(
+                Y_mat=Y_het,
+                N_mat=N_het,
+                baselines=baselines,
+                first_switch_idx=first_switch_idx_arr,
+                switch_direction=switch_direction_arr,
+                T_g=T_g_arr,
+                X_het=X_het,
+                L_max=L_max,
+                by_path=self.by_path,
+                paths_of_interest=self.paths_of_interest,
+                D_mat=D_mat,
+                alpha=self.alpha,
+                rank_deficient_action=self.rank_deficient_action,
+                group_ids_order=np.array(all_groups),
+                obs_survey_info=_obs_survey_info,
+                replicate_n_valid_list=_replicate_n_valid_list,
+            )
+
         twfe_weights_df = None
         twfe_fraction_negative = None
         twfe_sigma_fe = None
@@ -4006,6 +4049,25 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                         _info_r2["t_stat"] = _t_r2
                         _info_r2["p_value"] = _p_r2
                         _info_r2["conf_int"] = _ci_r2
+            # Per-path heterogeneity (Wave 5 #11): per-(path, l) entries
+            # snapshot df_inference at compute-time. Refresh with final df
+            # so t/p/CI match `survey_metadata.df_survey`. Schema differs
+            # from per-path event-study (`{path: {l: ...}}` vs
+            # `{path: {"horizons": {l: ...}}}`), so inline loop here
+            # rather than reusing `_refresh_path_inference`.
+            if path_heterogeneity_effects:
+                for _path_r2, _horizons_r2 in list(path_heterogeneity_effects.items()):
+                    for _l_r2, _info_r2 in list(_horizons_r2.items()):
+                        if np.isfinite(_info_r2["se"]):
+                            _t_r2, _p_r2, _ci_r2 = safe_inference(
+                                _info_r2["beta"],
+                                _info_r2["se"],
+                                alpha=self.alpha,
+                                df=_final_inf_df,
+                            )
+                            _info_r2["t_stat"] = _t_r2
+                            _info_r2["p_value"] = _p_r2
+                            _info_r2["conf_int"] = _ci_r2
             # Normalized effects: another public surface built with the
             # pre-heterogeneity `_df_survey`. Recompute inference with
             # the final df so t/p/CI match the other surfaces (and the
@@ -4116,6 +4178,7 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
             linear_trends_effects=linear_trends_effects,
             trends_linear=_is_trends_linear,
             heterogeneity_effects=heterogeneity_effects,
+            path_heterogeneity_effects=path_heterogeneity_effects,
             design2_effects=(
                 _compute_design2_effects(
                     D_mat=D_mat,
@@ -4828,6 +4891,7 @@ def _compute_heterogeneity_test(
     group_ids_order: Optional[np.ndarray] = None,
     obs_survey_info: Optional[Dict[str, Any]] = None,
     replicate_n_valid_list: Optional[List[int]] = None,
+    path_groups: Optional[Set[int]] = None,
 ) -> Dict[int, Dict[str, Any]]:
     """Test for heterogeneous treatment effects (Web Appendix Section 1.5).
 
@@ -4959,6 +5023,8 @@ def _compute_heterogeneity_test(
         cohort_keys = []
 
         for g in range(n_groups):
+            if path_groups is not None and g not in path_groups:
+                continue
             f_g = first_switch_idx[g]
             if f_g < 0:
                 continue  # never-switcher
@@ -6388,6 +6454,85 @@ def _compute_path_placebos(
         path_placebos[path] = horizons
 
     return path_placebos
+
+
+def _compute_path_heterogeneity_test(
+    Y_mat: np.ndarray,
+    N_mat: np.ndarray,
+    baselines: np.ndarray,
+    first_switch_idx: np.ndarray,
+    switch_direction: np.ndarray,
+    T_g: np.ndarray,
+    X_het: np.ndarray,
+    L_max: int,
+    by_path: Optional[int],
+    paths_of_interest: Optional[List[Tuple[int, ...]]],
+    D_mat: np.ndarray,
+    alpha: float = 0.05,
+    rank_deficient_action: str = "warn",
+    group_ids_order: Optional[np.ndarray] = None,
+    obs_survey_info: Optional[Dict[str, Any]] = None,
+    replicate_n_valid_list: Optional[List[int]] = None,
+) -> Optional[Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]]:
+    """Per-path heterogeneity test (Web Appendix Section 1.5, Lemma 7).
+
+    For each selected path ``p``, runs ``_compute_heterogeneity_test`` on
+    the path-restricted switcher subsample. Cohort dummies absorb baseline
+    by construction, so the path-restricted regression is methodologically
+    well-posed even when path switchers span multiple baselines.
+
+    Mirrors R ``did_multiplegt_dyn(..., by_path, predict_het)`` semantics:
+    the R per-path dispatcher re-runs ``did_multiplegt_main(...,
+    predict_het=...)`` on each path-restricted subsample, which is exactly
+    what this helper does in Python.
+
+    The ``_enumerate_treatment_paths`` call here re-derives the path
+    enumeration (already computed elsewhere in fit() for ``path_effects``).
+    The call is wrapped in ``warnings.catch_warnings()`` to suppress
+    duplicate unobserved-path / by_path-exceeds-observed warnings; the
+    upstream ``_compute_path_effects`` call already surfaced them.
+
+    Returns
+    -------
+    Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]
+        ``{path: {l: {beta, se, t_stat, p_value, conf_int, n_obs}}}``.
+        Returns ``{}`` if ``selected_paths`` is empty. Return type is
+        ``Optional[...]`` for caller-contract symmetry; the helper itself
+        never produces ``None`` (the empty-state distinction
+        ``None`` not requested vs ``{}`` requested but empty lives at
+        the caller site in ``fit()``).
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        selected_paths, path_to_group_mask, _ = _enumerate_treatment_paths(
+            D_mat=D_mat,
+            first_switch_idx=first_switch_idx,
+            N_mat=N_mat,
+            L_max=L_max,
+            by_path=by_path,
+            paths_of_interest=paths_of_interest,
+        )
+    out: Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]] = {}
+    for path in selected_paths:
+        mask = path_to_group_mask[path]
+        path_groups: Set[int] = {int(g) for g in np.flatnonzero(mask)}
+        out[path] = _compute_heterogeneity_test(
+            Y_mat=Y_mat,
+            N_mat=N_mat,
+            baselines=baselines,
+            first_switch_idx=first_switch_idx,
+            switch_direction=switch_direction,
+            T_g=T_g,
+            X_het=X_het,
+            L_max=L_max,
+            alpha=alpha,
+            rank_deficient_action=rank_deficient_action,
+            group_ids_order=group_ids_order,
+            obs_survey_info=obs_survey_info,
+            replicate_n_valid_list=replicate_n_valid_list,
+            path_groups=path_groups,
+        )
+    return out
 
 
 def _collect_path_bootstrap_inputs(
