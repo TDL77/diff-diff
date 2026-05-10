@@ -1218,7 +1218,30 @@ def compute_robust_vcov(
     weight_type : str, default "pweight"
         Weight type: "pweight", "fweight", or "aweight".
     vcov_type : str, default "hc1"
-        One of ``"classical"``, ``"hc1"``, ``"hc2"``, ``"hc2_bm"``.
+        One of ``"classical"``, ``"hc1"``, ``"hc2"``, ``"hc2_bm"``,
+        ``"conley"`` (see top-level docstring above for the dispatch
+        contract).
+    conley_coords : ndarray of shape (n, 2), optional, keyword-only
+        Required when ``vcov_type="conley"``. Two-column array of
+        ``[lat, lon]`` (degrees, for ``conley_metric="haversine"``) or
+        projected coordinates (for ``conley_metric="euclidean"`` or a
+        callable metric). Raises ``ValueError`` when missing under Conley.
+    conley_cutoff_km : float, optional, keyword-only
+        Required when ``vcov_type="conley"``. Positive finite bandwidth in
+        km (haversine) or coord units (euclidean / callable). No default
+        per Conley 1999 Section 5's sensitivity-grid recommendation;
+        raises ``ValueError`` when missing under Conley.
+    conley_metric : str, default "haversine", keyword-only
+        Distance metric for Conley. ``"haversine"`` (lat/lon → km, Earth
+        radius 6371.01 matching R ``conleyreg``), ``"euclidean"`` (any
+        units), or a callable ``f(coords1, coords2) -> n×n``.
+    conley_kernel : str, default "bartlett", keyword-only
+        Conley kernel on pairwise distance ``d_ij/h``. ``"bartlett"`` is
+        the radial 1-D specialization (matching R ``conleyreg``);
+        ``"uniform"`` is the truncated indicator. Both kernels emit a
+        ``UserWarning`` if the resulting meat is materially indefinite —
+        neither is formally PSD-guaranteed in the radial form (see
+        ``docs/methodology/REGISTRY.md`` § ConleySpatialHAC for details).
     return_dof : bool, default False
         When True, returns ``(vcov, dof_vec)`` tuple. ``dof_vec`` is a length-k
         array of per-coefficient degrees of freedom. For ``classical``,
