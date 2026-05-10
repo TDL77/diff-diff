@@ -388,6 +388,9 @@ sources:
       - path: diff_diff/guides/llms-full.txt
         section: "HeterogeneousAdoptionDiD"
         type: user_guide
+      - path: docs/tutorials/21_had_pretest_workflow.ipynb
+        type: tutorial
+        note: "Drift-locks `HAD(design=\"auto\")` resolution to `continuous_at_zero` on T21's panel via `tests/test_t21_had_pretest_workflow_drift.py::test_had_design_auto_lands_on_continuous_at_zero`; changes to `_detect_design()` heuristic should re-validate T21"
 
   diff_diff/had_pretests.py:
     drift_risk: medium
