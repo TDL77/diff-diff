@@ -325,15 +325,6 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         # single source of truth.
         _fit_vcov_type = self._resolve_effective_vcov_type(survey_cluster_ids)
 
-        # Materialize Conley coords from data (validated above; this is just
-        # array extraction). NOTE: data passed to LinearRegression is the
-        # within-transformed matrix, but coords are still in the ORIGINAL
-        # row order — within-transformation preserves row ordering, so the
-        # coords align with the demeaned X 1:1.
-        _twfe_conley_coords = None
-        if _fit_vcov_type == "conley" and self.conley_coords is not None:
-            _twfe_conley_coords = data[list(self.conley_coords)].to_numpy(dtype=np.float64)
-
         if self.rank_deficient_action == "error":
             reg = LinearRegression(
                 include_intercept=False,
@@ -344,10 +335,6 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 weight_type=survey_weight_type,
                 survey_design=_lr_survey_twfe,
                 vcov_type=_fit_vcov_type,
-                conley_coords=_twfe_conley_coords,
-                conley_cutoff_km=self.conley_cutoff_km,
-                conley_metric=self.conley_metric,
-                conley_kernel=self.conley_kernel,
             ).fit(X, y, df_adjustment=df_adjustment)
         else:
             # Suppress generic warning, TWFE provides context-specific messages below
@@ -364,10 +351,6 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                     weight_type=survey_weight_type,
                     survey_design=_lr_survey_twfe,
                     vcov_type=_fit_vcov_type,
-                    conley_coords=_twfe_conley_coords,
-                    conley_cutoff_km=self.conley_cutoff_km,
-                    conley_metric=self.conley_metric,
-                    conley_kernel=self.conley_kernel,
                 ).fit(X, y, df_adjustment=df_adjustment)
 
         coefficients = reg.coefficients_

@@ -439,13 +439,6 @@ class DifferenceInDifferences:
         # For wild bootstrap, we don't need cluster SEs from the initial fit
         cluster_ids = data[self.cluster].values if self.cluster is not None else None
 
-        # Extract Conley coords array (n×2 float64) from the user's data.
-        # Validation of the column existence and the 2-tuple shape happened
-        # at the top of fit(); here we only need to materialize the array.
-        _conley_coords_array = None
-        if self.vcov_type == "conley" and self.conley_coords is not None:
-            _conley_coords_array = data[list(self.conley_coords)].to_numpy(dtype=np.float64)
-
         # When survey PSU is present, it overrides cluster for variance estimation
         effective_cluster_ids = _resolve_effective_cluster(
             resolved_survey, cluster_ids, self.cluster
@@ -487,10 +480,6 @@ class DifferenceInDifferences:
             weight_type=survey_weight_type,
             survey_design=_lr_survey,
             vcov_type=_fit_vcov_type,
-            conley_coords=_conley_coords_array,
-            conley_cutoff_km=self.conley_cutoff_km,
-            conley_metric=self.conley_metric,
-            conley_kernel=self.conley_kernel,
         ).fit(X, y, df_adjustment=n_absorbed_effects)
 
         coefficients = reg.coefficients_
@@ -1538,13 +1527,6 @@ class MultiPeriodDiD(DifferenceInDifferences):
         # Remap implicit "classical" + cluster to CR1 (legacy backward compat).
         _fit_vcov_type = self._resolve_effective_vcov_type(effective_cluster_ids)
 
-        # Extract Conley coords array (only when vcov_type='conley'; the
-        # estimator-level guards above already validated the column-name
-        # tuple against `data`).
-        _conley_coords_array_mp = None
-        if _fit_vcov_type == "conley" and self.conley_coords is not None:
-            _conley_coords_array_mp = data[list(self.conley_coords)].to_numpy(dtype=np.float64)
-
         # Note: Wild bootstrap for multi-period effects is complex (multiple coefficients)
         # For now, we use analytical inference even if inference="wild_bootstrap"
         coefficients, residuals, fitted, vcov = solve_ols(
@@ -1558,10 +1540,6 @@ class MultiPeriodDiD(DifferenceInDifferences):
             weights=survey_weights,
             weight_type=survey_weight_type,
             vcov_type=_fit_vcov_type,
-            conley_coords=_conley_coords_array_mp,
-            conley_cutoff_km=self.conley_cutoff_km,
-            conley_metric=self.conley_metric,
-            conley_kernel=self.conley_kernel,
         )
 
         # Compute survey vcov if applicable

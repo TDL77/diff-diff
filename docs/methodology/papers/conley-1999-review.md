@@ -214,10 +214,10 @@ The paper itself does NOT distribute code. Conley's Section 5 empirical example 
 - [ ] Coordinates supplied as two columns (lat, lon) or `(x, y)` projected.
 - [ ] Distance metric configured (haversine for lat/lon; euclidean for projected; callable for custom).
 - [ ] Cutoff `conley_cutoff_km > 0` (or unitless `conley_cutoff` for euclidean). Document that `h = 0` reduces to HC0.
-- [ ] Kernel choice `conley_kernel ∈ {"bartlett", "uniform"}`. Bartlett is PSD by construction; uniform is not in general (warn).
+- [ ] Kernel choice `conley_kernel ∈ {"bartlett", "uniform"}`. Conley's explicit PSD Bartlett (Eq 3.14) is the 2-D separable lattice product window; the radial 1-D pairwise Bartlett that diff-diff and R `conleyreg` implement is a practitioner specialization that is **not** formally PSD-guaranteed. Uniform is also not PSD in general. Apply the negative-eigenvalue warning to **both** kernels.
 - [ ] Score outer products `x_i ε̂_i` computed identically to HC0 path.
 - [ ] Robustness sweep: document that practitioners should report estimates at multiple cutoffs (Conley Section 5 standard).
-- [ ] If `conley_kernel="uniform"` and the resulting variance has any negative eigenvalues, warn or fall back to Bartlett.
+- [ ] If the resulting Conley meat / variance has any materially negative eigenvalues (under either Bartlett or uniform), warn the user (the implementation does this for both kernels).
 
 ---
 
@@ -242,7 +242,7 @@ The paper itself does NOT distribute code. Conley's Section 5 empirical example 
 | `vcov_method` | str | `"hc0"` | Set to `"conley"` to activate. |
 | `conley_coords` | tuple of 2 str | `None` | User specifies the two column names for lat/lon (or projected x/y). Required when `vcov_method="conley"`. |
 | `conley_cutoff_km` | float | `None` (no default) | User-supplied. Conley does not provide a plug-in selector. Recommend a robustness sweep (3-5 values spanning the relevant economic-distance range). For Phase 1, error if not supplied. |
-| `conley_kernel` | str | `"bartlett"` | `"bartlett"` is PSD by construction (Conley Eq 3.14 page 12) and is the practitioner default. `"uniform"` matches Conley's "truncated window" (page 11) but may fail PSD; emit warning. |
+| `conley_kernel` | str | `"bartlett"` | `"bartlett"` evaluated on pairwise distance `d_ij/h` is the practitioner default, matching R `conleyreg` and Stata `acreg`; this radial 1-D form is a specialization of Conley's explicit 2-D separable PSD-guaranteed Bartlett (Eq 3.14, page 12) and is not formally PSD-guaranteed itself. `"uniform"` matches Conley's "truncated window" (page 11) and is also not PSD in general (footnote 11). Emit a warning under either kernel when the resulting meat has a materially negative eigenvalue. |
 | `conley_metric` | str or callable | `"haversine"` | `"haversine"` for lat/lon (km); `"euclidean"` for projected coords (units = whatever the coord units are - so if coords are degrees, cutoff is in degrees); a callable `(coord_i, coord_j) -> float` for custom metrics (e.g., travel time, network distance). |
 
 ### Relation to Existing diff-diff Estimators
