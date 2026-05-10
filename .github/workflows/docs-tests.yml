@@ -13,6 +13,9 @@ on:
       # file itself.
       - 'tests/conftest.py'
       - 'pyproject.toml'
+      # sphinx-build job mirrors RTD setup; trigger when RTD config drifts
+      # (Python version, apt packages, post_install docs deps).
+      - '.readthedocs.yaml'
       - '.github/workflows/docs-tests.yml'
   pull_request:
     branches: [main]
@@ -23,6 +26,9 @@ on:
       - 'tests/test_doc_snippets.py'
       - 'tests/conftest.py'
       - 'pyproject.toml'
+      # sphinx-build job mirrors RTD setup; trigger when RTD config drifts
+      # (Python version, apt packages, post_install docs deps).
+      - '.readthedocs.yaml'
       - '.github/workflows/docs-tests.yml'
   schedule:
     # Weekly Sunday 6am UTC - smoke test that snippets still execute
