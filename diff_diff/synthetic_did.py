@@ -9,10 +9,10 @@ import numpy as np
 import pandas as pd
 from numpy.linalg import LinAlgError
 
+from diff_diff.bootstrap_utils import generate_rao_wu_weights
 from diff_diff.estimators import DifferenceInDifferences
 from diff_diff.linalg import solve_ols
 from diff_diff.results import SyntheticDiDResults, _SyntheticDiDFitSnapshot
-from diff_diff.bootstrap_utils import generate_rao_wu_weights
 from diff_diff.utils import (
     _compute_regularization,
     _sum_normalize,
@@ -164,7 +164,35 @@ class SyntheticDiD(DifferenceInDifferences):
         # Deprecated — accepted for backward compat, ignored with warning
         lambda_reg: Optional[float] = None,
         zeta: Optional[float] = None,
+        # Defensive guard against silently-ignored Conley kwargs. SyntheticDiD
+        # inherits __init__ from DifferenceInDifferences but overrides with
+        # literal `super().__init__(robust=True, cluster=None, alpha=alpha)`,
+        # so any user-passed `vcov_type=` or `conley_*=` would be silently
+        # dropped. Per `feedback_no_silent_failures`, raise loudly. Tracked
+        # in TODO.md for a follow-up that wires Conley to a non-bootstrap
+        # variance path on SyntheticDiD.
+        vcov_type: Optional[str] = None,
+        conley_coords: Optional[Tuple[str, str]] = None,
+        conley_cutoff_km: Optional[float] = None,
+        conley_metric: Optional[str] = None,
+        conley_kernel: Optional[str] = None,
     ):
+        if vcov_type == "conley" or any(
+            v is not None for v in (conley_coords, conley_cutoff_km, conley_metric, conley_kernel)
+        ):
+            raise TypeError(
+                "SyntheticDiD does not yet support vcov_type='conley' or any "
+                "conley_* kwargs. SyntheticDiD uses bootstrap/jackknife/placebo "
+                "variance (variance_method=...), not the analytical sandwich "
+                "routed through compute_robust_vcov. Tracked in TODO.md as "
+                "a follow-up."
+            )
+        if vcov_type is not None and vcov_type != "conley":
+            raise TypeError(
+                f"SyntheticDiD does not accept vcov_type={vcov_type!r}. "
+                f"SyntheticDiD's variance is bootstrap/jackknife/placebo "
+                f"based; configure via variance_method=..."
+            )
         if lambda_reg is not None:
             warnings.warn(
                 "lambda_reg is deprecated and ignored. Regularization is now "
@@ -357,10 +385,9 @@ class SyntheticDiD(DifferenceInDifferences):
             # surface even when the value is mathematically a no-op.
             fpc_col = survey_design.fpc
             if fpc_col not in data.columns:
-                raise ValueError(
-                    f"FPC column '{fpc_col}' not found in data"
-                )
+                raise ValueError(f"FPC column '{fpc_col}' not found in data")
             import dataclasses as _dc
+
             warnings.warn(
                 "SurveyDesign(fpc=...) is a no-op on "
                 "variance_method='placebo': permutation tests are "
@@ -498,9 +525,13 @@ class SyntheticDiD(DifferenceInDifferences):
             # covariate residualization doesn't shuffle row order, so the
             # collapse is invariant to which view we group on.
             from diff_diff.survey import collapse_survey_to_unit_level
+
             all_units_for_bootstrap = list(control_units) + list(treated_units)
             resolved_survey_unit = collapse_survey_to_unit_level(
-                resolved_survey, data, unit, all_units_for_bootstrap,
+                resolved_survey,
+                data,
+                unit,
+                all_units_for_bootstrap,
             )
             # Front-door FPC validation for implicit-PSU Rao-Wu (PR #355
             # R8 P1). When psu is None but fpc is set,
@@ -563,12 +594,8 @@ class SyntheticDiD(DifferenceInDifferences):
             # ω_eff normalization likewise), so switching to resolved weights
             # doesn't change their numerics.
             n_control_for_split = len(control_units)
-            w_control = resolved_survey_unit.weights[:n_control_for_split].astype(
-                np.float64
-            )
-            w_treated = resolved_survey_unit.weights[n_control_for_split:].astype(
-                np.float64
-            )
+            w_control = resolved_survey_unit.weights[:n_control_for_split].astype(np.float64)
+            w_treated = resolved_survey_unit.weights[n_control_for_split:].astype(np.float64)
             # Front-door positive-mass guard (PR #355 R7 P1). Survey weights
             # are non-negative post-resolve() (survey.py L171-L176 rejects
             # negatives), but all-zero mass on either arm is reachable — the
@@ -797,13 +824,10 @@ class SyntheticDiD(DifferenceInDifferences):
         # ``resolved_survey_unit`` carries the per-unit strata/psu/fpc
         # arrays ordered as [control..., treated...] to match the
         # downstream variance-method column layout.
-        _full_design_survey = (
-            resolved_survey_unit is not None
-            and (
-                resolved_survey_unit.strata is not None
-                or resolved_survey_unit.psu is not None
-                or resolved_survey_unit.fpc is not None
-            )
+        _full_design_survey = resolved_survey_unit is not None and (
+            resolved_survey_unit.strata is not None
+            or resolved_survey_unit.psu is not None
+            or resolved_survey_unit.fpc is not None
         )
         if _full_design_survey:
             _n_c = len(control_units)
@@ -818,24 +842,16 @@ class SyntheticDiD(DifferenceInDifferences):
                 else None
             )
             _psu_control = (
-                resolved_survey_unit.psu[:_n_c]
-                if resolved_survey_unit.psu is not None
-                else None
+                resolved_survey_unit.psu[:_n_c] if resolved_survey_unit.psu is not None else None
             )
             _psu_treated = (
-                resolved_survey_unit.psu[_n_c:]
-                if resolved_survey_unit.psu is not None
-                else None
+                resolved_survey_unit.psu[_n_c:] if resolved_survey_unit.psu is not None else None
             )
             _fpc_control = (
-                resolved_survey_unit.fpc[:_n_c]
-                if resolved_survey_unit.fpc is not None
-                else None
+                resolved_survey_unit.fpc[:_n_c] if resolved_survey_unit.fpc is not None else None
             )
             _fpc_treated = (
-                resolved_survey_unit.fpc[_n_c:]
-                if resolved_survey_unit.fpc is not None
-                else None
+                resolved_survey_unit.fpc[_n_c:] if resolved_survey_unit.fpc is not None else None
             )
         else:
             _strata_control = None
@@ -864,10 +880,7 @@ class SyntheticDiD(DifferenceInDifferences):
         _placebo_use_survey_path = (
             self.variance_method == "placebo"
             and resolved_survey_unit is not None
-            and (
-                resolved_survey_unit.strata is not None
-                or resolved_survey_unit.psu is not None
-            )
+            and (resolved_survey_unit.strata is not None or resolved_survey_unit.psu is not None)
         )
         # NOTE: the FPC no-op warning for placebo is emitted earlier
         # (before ``_resolve_survey_for_fit``); ``resolved_survey_unit.fpc``
@@ -879,9 +892,7 @@ class SyntheticDiD(DifferenceInDifferences):
         # strata is declared. PSU-without-strata is treated as a single
         # stratum (Rust & Rao 1996 JK1 form) inside
         # ``_jackknife_se_survey``.
-        _jackknife_use_survey_path = (
-            _full_design_survey and self.variance_method == "jackknife"
-        )
+        _jackknife_use_survey_path = _full_design_survey and self.variance_method == "jackknife"
 
         # Synthesize a single stratum for PSU/FPC-without-strata designs
         # so the placebo / jackknife survey paths can treat them as the
@@ -890,12 +901,8 @@ class SyntheticDiD(DifferenceInDifferences):
         # methods; the original `_strata_*` arrays stay None so other
         # code paths (REGISTRY, metadata) see the true design.
         if _full_design_survey and _strata_control is None:
-            _strata_control_eff: np.ndarray = np.zeros(
-                len(control_units), dtype=np.int64
-            )
-            _strata_treated_eff: np.ndarray = np.zeros(
-                len(treated_units), dtype=np.int64
-            )
+            _strata_control_eff: np.ndarray = np.zeros(len(control_units), dtype=np.int64)
+            _strata_treated_eff: np.ndarray = np.zeros(len(treated_units), dtype=np.int64)
         else:
             _strata_control_eff = _strata_control  # type: ignore[assignment]
             _strata_treated_eff = _strata_treated  # type: ignore[assignment]
@@ -1067,9 +1074,7 @@ class SyntheticDiD(DifferenceInDifferences):
                 # overall mean for singleton strata) is not implemented
                 # for SDID jackknife; reject upfront rather than silently
                 # treating it as ``"remove"``.
-                _lonely_psu_mode = getattr(
-                    resolved_survey_unit, "lonely_psu", "remove"
-                )
+                _lonely_psu_mode = getattr(resolved_survey_unit, "lonely_psu", "remove")
                 if _lonely_psu_mode not in ("remove", "certainty"):
                     raise NotImplementedError(
                         f"SurveyDesign(lonely_psu={_lonely_psu_mode!r}) is "
@@ -1263,9 +1268,7 @@ class SyntheticDiD(DifferenceInDifferences):
         # Unit-level positional join onto ``_loo_unit_ids`` is well-
         # defined only for the unit-level path.
         if inference_method == "jackknife":
-            self.results_._loo_granularity = (
-                "psu" if _jackknife_use_survey_path else "unit"
-            )
+            self.results_._loo_granularity = "psu" if _jackknife_use_survey_path else "unit"
         else:
             self.results_._loo_granularity = None
         # Only populate unit-level LOO bookkeeping when the granularity
@@ -1444,12 +1447,9 @@ class SyntheticDiD(DifferenceInDifferences):
         # same subset every draw). Returns NaN SE — same shape as PR #351's
         # n_successful=0 raise but caught upstream as NaN. Recovered from
         # 91082e5:diff_diff/synthetic_did.py.
-        if (
-            _use_rao_wu
-            and resolved_survey.psu is not None
-            and resolved_survey.strata is None
-        ):
+        if _use_rao_wu and resolved_survey.psu is not None and resolved_survey.strata is None:
             from numpy import unique as _unique
+
             n_psu = len(_unique(resolved_survey.psu))
             if n_psu < 2:
                 return np.nan, np.array([])
@@ -1512,8 +1512,10 @@ class SyntheticDiD(DifferenceInDifferences):
                 # mean would corrupt the bootstrap distribution because
                 # fit-time ATT uses the survey-weighted mean (PR #355
                 # R2 P0).
-                if (_use_rao_wu or _pweight_only) and rw_treated_draw is not None and (
-                    rw_control_draw.sum() == 0 or rw_treated_draw.sum() == 0
+                if (
+                    (_use_rao_wu or _pweight_only)
+                    and rw_treated_draw is not None
+                    and (rw_control_draw.sum() == 0 or rw_treated_draw.sum() == 0)
                 ):
                     continue
 
@@ -1528,10 +1530,14 @@ class SyntheticDiD(DifferenceInDifferences):
                 # set (PR #352), else unweighted.
                 if rw_treated_draw is not None and rw_treated_draw.sum() > 0:
                     Y_boot_pre_t_mean = np.average(
-                        Y_boot_pre_t, axis=1, weights=rw_treated_draw,
+                        Y_boot_pre_t,
+                        axis=1,
+                        weights=rw_treated_draw,
                     )
                     Y_boot_post_t_mean = np.average(
-                        Y_boot_post_t, axis=1, weights=rw_treated_draw,
+                        Y_boot_post_t,
+                        axis=1,
+                        weights=rw_treated_draw,
                     )
                 else:
                     Y_boot_pre_t_mean = np.mean(Y_boot_pre_t, axis=1)
@@ -1868,9 +1874,7 @@ class SyntheticDiD(DifferenceInDifferences):
                 # equivalent, but the warm-start matches R's exact iterates
                 # for bit-identical SE under the R-parity test.
                 if init_omega is not None:
-                    pseudo_omega_init = _sum_normalize(
-                        init_omega[pseudo_control_idx]
-                    )
+                    pseudo_omega_init = _sum_normalize(init_omega[pseudo_control_idx])
                 else:
                     pseudo_omega_init = None
                 pseudo_omega = compute_sdid_unit_weights(
@@ -2037,9 +2041,7 @@ class SyntheticDiD(DifferenceInDifferences):
         for _ in range(replications):
             try:
                 pseudo_treated_parts = []
-                for h, n_treated_h in zip(
-                    unique_treated_strata, treated_counts_per_stratum
-                ):
+                for h, n_treated_h in zip(unique_treated_strata, treated_counts_per_stratum):
                     controls_in_h = control_idx_per_stratum[h]
                     pseudo_treated_h = rng.choice(
                         controls_in_h, size=int(n_treated_h), replace=False
@@ -2140,9 +2142,7 @@ class SyntheticDiD(DifferenceInDifferences):
                 stacklevel=3,
             )
 
-        se = np.sqrt((n_successful - 1) / n_successful) * np.std(
-            placebo_estimates_arr, ddof=1
-        )
+        se = np.sqrt((n_successful - 1) / n_successful) * np.std(placebo_estimates_arr, ddof=1)
         return se, placebo_estimates_arr
 
     def _jackknife_se(
@@ -2450,9 +2450,7 @@ class SyntheticDiD(DifferenceInDifferences):
         # within strata by ``SurveyDesign.resolve`` (see survey.py
         # L308-L320 ``nest=False`` validation), so a (stratum, psu) pair
         # uniquely identifies a PSU.
-        unique_strata_all = np.unique(
-            np.concatenate([strata_control, strata_treated])
-        )
+        unique_strata_all = np.unique(np.concatenate([strata_control, strata_treated]))
 
         # Short-circuit: unstratified single-PSU design. ``strata_*`` arrays
         # are always populated after ``_resolve_survey_for_fit``, so a
@@ -2499,9 +2497,7 @@ class SyntheticDiD(DifferenceInDifferences):
             treated_in_h_mask = strata_treated == h
             psus_in_h_control = psu_control_eff[control_in_h_mask]
             psus_in_h_treated = psu_treated_eff[treated_in_h_mask]
-            psus_in_h = np.unique(
-                np.concatenate([psus_in_h_control, psus_in_h_treated])
-            )
+            psus_in_h = np.unique(np.concatenate([psus_in_h_control, psus_in_h_treated]))
             n_h = len(psus_in_h)
             if n_h < 2:
                 # Singleton-stratum handling. R12 P1 fix: distinguish
@@ -2564,9 +2560,7 @@ class SyntheticDiD(DifferenceInDifferences):
                     stratum_has_undefined_replicate = True
                     undefined_replicate_stratum = h
                     undefined_replicate_psu = j
-                    undefined_replicate_reason = (
-                        "PSU contains no units in either arm"
-                    )
+                    undefined_replicate_reason = "PSU contains no units in either arm"
                     break
 
                 # All treated removed → LOO yields an undefined SDID
@@ -2605,9 +2599,7 @@ class SyntheticDiD(DifferenceInDifferences):
                     stratum_has_undefined_replicate = True
                     undefined_replicate_stratum = h
                     undefined_replicate_psu = j
-                    undefined_replicate_reason = (
-                        "kept treated survey mass is zero"
-                    )
+                    undefined_replicate_reason = "kept treated survey mass is zero"
                     break
                 Y_pre_t_mean = np.average(
                     Y_pre_treated[:, treated_kept_mask],
@@ -2633,18 +2625,14 @@ class SyntheticDiD(DifferenceInDifferences):
                     stratum_has_undefined_replicate = True
                     undefined_replicate_stratum = h
                     undefined_replicate_psu = j
-                    undefined_replicate_reason = (
-                        "SDID estimator raised on the LOO panel"
-                    )
+                    undefined_replicate_reason = "SDID estimator raised on the LOO panel"
                     break
 
                 if not np.isfinite(tau_j):
                     stratum_has_undefined_replicate = True
                     undefined_replicate_stratum = h
                     undefined_replicate_psu = j
-                    undefined_replicate_reason = (
-                        "SDID estimator returned non-finite τ̂"
-                    )
+                    undefined_replicate_reason = "SDID estimator returned non-finite τ̂"
                     break
                 tau_loo_h.append(float(tau_j))
 
@@ -2658,9 +2646,7 @@ class SyntheticDiD(DifferenceInDifferences):
 
             if len(tau_loo_h) == n_h:
                 tau_bar_h = np.mean(tau_loo_h)
-                ss_h = float(
-                    np.sum((np.asarray(tau_loo_h) - tau_bar_h) ** 2)
-                )
+                ss_h = float(np.sum((np.asarray(tau_loo_h) - tau_bar_h) ** 2))
                 total_variance += (1.0 - f_h) * (n_h - 1) / n_h * ss_h
                 any_stratum_contributed = True
             tau_loo_all.extend(tau_loo_h)

@@ -2918,6 +2918,80 @@ should be a deliberate user choice.
 
 ---
 
+## ConleySpatialHAC
+
+**Primary source:** Conley, T. G. (1999). GMM Estimation with Cross-Sectional Dependence. *Journal of Econometrics* 92(1), 1-45. DOI: 10.1016/S0304-4076(98)00084-0
+
+**Secondary sources:**
+- Andrews, D. W. K. (1991). Heteroskedasticity and autocorrelation consistent covariance matrix estimation. *Econometrica* 59(3), 817-858.
+- Düsterhöft, C. (2021). conleyreg: Estimations using Conley Standard Errors. CRAN R package, https://github.com/cdueben/conleyreg. Our parity benchmark target.
+- Colella, F., Lalive, R., Sakalli, S. O., & Thoenig, M. (2019). Inference with Arbitrary Clustering. IZA DP No. 12584. Stata `acreg` reference implementation; cited as the parallel canonical implementation in the Stata ecosystem (not parity-tested here).
+
+**Scope:** Cross-sectional spatial heteroskedasticity-and-autocorrelation-consistent
+standard errors for OLS / TWFE when residuals are spatially correlated. Extends
+White (1980) HC0 by allowing pairwise correlation that decays with geographic
+distance. Available on `DifferenceInDifferences`, `TwoWayFixedEffects`,
+`MultiPeriodDiD` via `vcov_type="conley"` plus `conley_coords`,
+`conley_cutoff_km`, `conley_metric`, `conley_kernel`. `SyntheticDiD` is
+explicitly excluded (it uses bootstrap/jackknife/placebo variance, not the
+analytical sandwich); `SyntheticDiD(vcov_type="conley")` raises `TypeError`.
+Phase 1: cross-sectional only; Phase 2 will add the time dimension
+(Driscoll-Kraay) and a sparse k-d-tree fast path.
+
+**Variance estimator (Conley 1999 Eq 4.2 in pairwise-distance form, OLS specialization):**
+
+    Var̂(β) = (X'X)^{-1} · ( Σ_{i,j} K(d_ij / h) · X_i ε_i ε_j X_j' ) · (X'X)^{-1}
+
+where `d_ij` is the geographic distance, `h` is the user-supplied bandwidth
+(`conley_cutoff_km`), and `K(·)` is the kernel. The `i = j` diagonal contributes
+the standard White HC0 term `X_i ε_i² X_i'`.
+
+**Kernel functions:**
+- `conley_kernel="bartlett"` (default): `K(u) = max(0, 1 - |u|)`. Conley 1999 Eq 3.14, Andrews 1991. PSD-guaranteed (non-negative spectral window).
+- `conley_kernel="uniform"`: `K(u) = 1{|u| ≤ 1}`. Spectral window negative in regions (Conley 1999 footnote 11) — meat not guaranteed PSD; implementation emits `UserWarning` if any meat eigenvalue < `-1e-12`.
+
+**Distance metrics:**
+- `conley_metric="haversine"` (default): great-circle in km using Earth's mean radius (6371.01 km, matching R `conleyreg`). Validates `lat ∈ [-90, 90]`, `lon ∈ [-180, 180]`.
+- `conley_metric="euclidean"`: Euclidean from projected coords. Skips lat/lon range checks (user owns the projection's units).
+- `conley_metric=callable(coords1, coords2) -> n×n array`: custom distance for non-geographic networks.
+
+**Note:** No default bandwidth. Conley 1999 does not propose a plug-in selector;
+the empirical example (Section 5) uses a sensitivity grid. Implementation
+requires `conley_cutoff_km` to be supplied; `None` raises `ValueError` (per the
+project's no-silent-failures rule). Practitioners should rerun on a coarse cutoff
+grid (e.g., 50, 100, 200, 500 km) and report the SE range, mirroring Conley's
+Section 5 robustness check.
+
+**Note (FWL composability):** Unlike `vcov_type="hc2"` and `vcov_type="hc2_bm"`,
+which depend on the full hat matrix and therefore reject TWFE within-transformation,
+Conley's meat depends only on scores `X_i·ε_i`. FWL preserves both the residualized
+`X` and the residuals `ε`, so the spatial-HAC sandwich computed on the
+within-transformed design equals the sandwich on the full-dummy design.
+`TwoWayFixedEffects(vcov_type="conley", ...)` is therefore supported.
+
+**Note (R conleyreg parity):** diff-diff's Conley implementation matches R
+`conleyreg` (Düsterhöft 2021, CRAN v0.1.9) to ≤ 1e-6 on three benchmark
+fixtures (`benchmarks/data/r_conleyreg_conley_golden.json`). Earth radius
+constant is 6371.01 km (mean radius), matching
+`conleyreg::haversine_dist`. Regeneration:
+`cd benchmarks/R && Rscript generate_conley_golden.R`.
+
+**Edge cases / restrictions:**
+- `vcov_type="conley"` + `cluster=` → `NotImplementedError` (combined kernel deferred to Phase 2)
+- `vcov_type="conley"` + `weights=` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up)
+- `vcov_type="conley"` + `absorb=` → `NotImplementedError` (only TWFE's two-FE within is supported in Phase 1; arbitrary `absorb` dimensions are deferred)
+- `SyntheticDiD(vcov_type="conley")` → `TypeError` (SyntheticDiD uses bootstrap/jackknife/placebo variance, not the analytical sandwich; tracked in TODO.md)
+- `n > 20_000`: emits `UserWarning` about O(n²) distance-matrix memory
+- `conley_cutoff_km ≤ 0`, `nan`, or `inf`: rejected with `ValueError`. The HC0 reduction at h→0 is documented but not the sanctioned path; users should pass `vcov_type="hc1"`
+- Identical coordinates (`d_ij = 0` for `i ≠ j`): `K(0) = 1`, contributing the full HC0 weight per Conley 1999 page 19. Documented behavior; no warning
+
+**Reference implementations:**
+- R: `conleyreg::conleyreg(...)` (Düsterhöft 2021, CRAN v0.1.9) — **parity benchmark for diff-diff**
+- Stata: `acreg dep indeps, latitude(lat) longitude(lon) spatial dist(km) bartlett` (Colella et al. 2019) — academic spec source for the cluster-flexible variance, not parity-tested here
+- MATLAB: `ols_spatial_HAC.m` (Hsiang 2010)
+
+---
+
 ## Survey Data Support
 
 Survey-weighted estimation allows correct population-level inference from data

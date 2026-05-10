@@ -741,6 +741,15 @@ sources:
       - path: docs/api/utils.rst
         type: api_reference
 
+  diff_diff/conley.py:
+    drift_risk: medium
+    docs:
+      - path: docs/methodology/REGISTRY.md
+        section: "ConleySpatialHAC"
+        type: methodology
+      - path: benchmarks/R/README.md
+        type: methodology
+
   diff_diff/utils.py:
     drift_risk: medium
     docs:

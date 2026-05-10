@@ -147,6 +147,10 @@ class DifferenceInDifferences:
         bootstrap_weights: str = "rademacher",
         seed: Optional[int] = None,
         rank_deficient_action: str = "warn",
+        conley_coords: Optional[Tuple[str, str]] = None,
+        conley_cutoff_km: Optional[float] = None,
+        conley_metric: str = "haversine",
+        conley_kernel: str = "bartlett",
     ):
         # Resolve vcov_type from the legacy `robust` alias via the shared
         # helper so __init__ and set_params use identical validation logic.
@@ -169,6 +173,12 @@ class DifferenceInDifferences:
         self.bootstrap_weights = bootstrap_weights
         self.seed = seed
         self.rank_deficient_action = rank_deficient_action
+        # Conley spatial-HAC parameters; column names (NOT array values) for
+        # the coords. Validation happens at fit() when `data` is in scope.
+        self.conley_coords = conley_coords
+        self.conley_cutoff_km = conley_cutoff_km
+        self.conley_metric = conley_metric
+        self.conley_kernel = conley_kernel
 
         self.is_fitted_ = False
         self.results_ = None
@@ -327,6 +337,66 @@ class DifferenceInDifferences:
                 "HC2/CR2-BM are computed on the full projection."
             )
 
+        # Reject Conley + absorb in Phase 1. Conley's meat depends only on
+        # scores X*epsilon, both of which FWL preserves under within-
+        # transformation, so the math composes cleanly for TWFE's two-FE
+        # design. But arbitrary absorb dimensions have not been verified
+        # empirically yet; conservatively reject and tell the user to use
+        # fixed_effects= dummies for the same FE design.
+        if absorb and self.vcov_type == "conley":
+            raise NotImplementedError(
+                "DifferenceInDifferences(absorb=..., vcov_type='conley') "
+                "is deferred to a follow-up. Conley + within-transformation "
+                "for arbitrary absorbed FE dimensions has not been verified; "
+                "use fixed_effects= dummies for an equivalent FE design "
+                "with the full projection, or drop absorb= for "
+                "cross-sectional Conley."
+            )
+
+        # Reject Conley + cluster (combined product kernel is Phase 2+) and
+        # Conley + survey_design (Bertanha-Imbens 2014 territory) early at
+        # the estimator level so the error message references the user-facing
+        # kwarg names rather than the internal cluster_ids/weights array.
+        if self.vcov_type == "conley":
+            if self.cluster is not None:
+                raise NotImplementedError(
+                    f"DifferenceInDifferences(cluster={self.cluster!r}, "
+                    "vcov_type='conley') is deferred to Phase 2 (combined "
+                    "product kernel). Drop cluster= for cross-sectional "
+                    "Conley."
+                )
+            if survey_design is not None:
+                raise NotImplementedError(
+                    "DifferenceInDifferences(survey_design=..., "
+                    "vcov_type='conley') is deferred to Phase 2+ "
+                    "(Bertanha-Imbens 2014). Drop survey_design= for "
+                    "cross-sectional Conley."
+                )
+            if self.conley_coords is None:
+                raise ValueError(
+                    "vcov_type='conley' requires conley_coords=(<lat_col>, "
+                    "<lon_col>) tuple of column names in the data."
+                )
+            if self.conley_cutoff_km is None:
+                raise ValueError(
+                    "vcov_type='conley' requires conley_cutoff_km (positive "
+                    "finite bandwidth in km for haversine, or in coord units "
+                    "for euclidean)."
+                )
+            # Validate columns exist; the validator inside compute_robust_vcov
+            # will check NaN/range/etc on the array values themselves.
+            _coord_cols = list(self.conley_coords)
+            if len(_coord_cols) != 2:
+                raise ValueError(
+                    f"conley_coords must be a 2-tuple of column names; got "
+                    f"{self.conley_coords!r}."
+                )
+            for _col in _coord_cols:
+                if _col not in data.columns:
+                    raise ValueError(
+                        f"conley_coords references column {_col!r} which " f"is not in `data`."
+                    )
+
         if absorb:
             # FWL theorem: demean ALL regressors alongside outcome.
             # Regressors collinear with absorbed FE (e.g., treatment after
@@ -389,6 +459,13 @@ class DifferenceInDifferences:
         # For wild bootstrap, we don't need cluster SEs from the initial fit
         cluster_ids = data[self.cluster].values if self.cluster is not None else None
 
+        # Extract Conley coords array (n×2 float64) from the user's data.
+        # Validation of the column existence and the 2-tuple shape happened
+        # at the top of fit(); here we only need to materialize the array.
+        _conley_coords_array = None
+        if self.vcov_type == "conley" and self.conley_coords is not None:
+            _conley_coords_array = data[list(self.conley_coords)].to_numpy(dtype=np.float64)
+
         # When survey PSU is present, it overrides cluster for variance estimation
         effective_cluster_ids = _resolve_effective_cluster(
             resolved_survey, cluster_ids, self.cluster
@@ -430,6 +507,10 @@ class DifferenceInDifferences:
             weight_type=survey_weight_type,
             survey_design=_lr_survey,
             vcov_type=_fit_vcov_type,
+            conley_coords=_conley_coords_array,
+            conley_cutoff_km=self.conley_cutoff_km,
+            conley_metric=self.conley_metric,
+            conley_kernel=self.conley_kernel,
         ).fit(X, y, df_adjustment=n_absorbed_effects)
 
         coefficients = reg.coefficients_
@@ -552,6 +633,8 @@ class DifferenceInDifferences:
             # stored `self.vcov_type`.
             vcov_type=_fit_vcov_type,
             cluster_name=self.cluster,
+            conley_cutoff_km=self.conley_cutoff_km if _fit_vcov_type == "conley" else None,
+            conley_kernel=self.conley_kernel if _fit_vcov_type == "conley" else None,
         )
 
         self._coefficients = coefficients
@@ -819,6 +902,10 @@ class DifferenceInDifferences:
             "bootstrap_weights": self.bootstrap_weights,
             "seed": self.seed,
             "rank_deficient_action": self.rank_deficient_action,
+            "conley_coords": self.conley_coords,
+            "conley_cutoff_km": self.conley_cutoff_km,
+            "conley_metric": self.conley_metric,
+            "conley_kernel": self.conley_kernel,
         }
 
     def set_params(self, **params) -> "DifferenceInDifferences":
@@ -1307,6 +1394,50 @@ class MultiPeriodDiD(DifferenceInDifferences):
                 "switch to fixed_effects= dummies for a full-dummy design."
             )
 
+        # Reject Conley combinations early at the estimator level (see
+        # DifferenceInDifferences.fit for the matching block and rationale).
+        if absorb and self.vcov_type == "conley":
+            raise NotImplementedError(
+                "MultiPeriodDiD(absorb=..., vcov_type='conley') is deferred "
+                "to a follow-up. Use fixed_effects= dummies for an equivalent "
+                "FE design with the full projection, or drop absorb= for "
+                "cross-sectional Conley."
+            )
+        if self.vcov_type == "conley":
+            if self.cluster is not None:
+                raise NotImplementedError(
+                    f"MultiPeriodDiD(cluster={self.cluster!r}, "
+                    "vcov_type='conley') is deferred to Phase 2 (combined "
+                    "product kernel). Drop cluster= for cross-sectional "
+                    "Conley."
+                )
+            if survey_design is not None:
+                raise NotImplementedError(
+                    "MultiPeriodDiD(survey_design=..., vcov_type='conley') "
+                    "is deferred to Phase 2+ (Bertanha-Imbens 2014). Drop "
+                    "survey_design= for cross-sectional Conley."
+                )
+            if self.conley_coords is None:
+                raise ValueError(
+                    "vcov_type='conley' requires conley_coords=(<lat_col>, "
+                    "<lon_col>) tuple of column names in the data."
+                )
+            if self.conley_cutoff_km is None:
+                raise ValueError(
+                    "vcov_type='conley' requires conley_cutoff_km (positive " "finite bandwidth)."
+                )
+            _coord_cols_mp = list(self.conley_coords)
+            if len(_coord_cols_mp) != 2:
+                raise ValueError(
+                    f"conley_coords must be a 2-tuple of column names; got "
+                    f"{self.conley_coords!r}."
+                )
+            for _col in _coord_cols_mp:
+                if _col not in data.columns:
+                    raise ValueError(
+                        f"conley_coords references column {_col!r} which " f"is not in `data`."
+                    )
+
         # Pre-compute non_ref_periods (needed for absorb demeaning)
         non_ref_periods = [p for p in all_periods if p != reference_period]
 
@@ -1439,6 +1570,13 @@ class MultiPeriodDiD(DifferenceInDifferences):
         # Remap implicit "classical" + cluster to CR1 (legacy backward compat).
         _fit_vcov_type = self._resolve_effective_vcov_type(effective_cluster_ids)
 
+        # Extract Conley coords array (only when vcov_type='conley'; the
+        # estimator-level guards above already validated the column-name
+        # tuple against `data`).
+        _conley_coords_array_mp = None
+        if _fit_vcov_type == "conley" and self.conley_coords is not None:
+            _conley_coords_array_mp = data[list(self.conley_coords)].to_numpy(dtype=np.float64)
+
         # Note: Wild bootstrap for multi-period effects is complex (multiple coefficients)
         # For now, we use analytical inference even if inference="wild_bootstrap"
         coefficients, residuals, fitted, vcov = solve_ols(
@@ -1452,6 +1590,10 @@ class MultiPeriodDiD(DifferenceInDifferences):
             weights=survey_weights,
             weight_type=survey_weight_type,
             vcov_type=_fit_vcov_type,
+            conley_coords=_conley_coords_array_mp,
+            conley_cutoff_km=self.conley_cutoff_km,
+            conley_metric=self.conley_metric,
+            conley_kernel=self.conley_kernel,
         )
 
         # Compute survey vcov if applicable
@@ -1741,6 +1883,8 @@ class MultiPeriodDiD(DifferenceInDifferences):
             n_clusters=(
                 len(np.unique(effective_cluster_ids)) if effective_cluster_ids is not None else None
             ),
+            conley_cutoff_km=self.conley_cutoff_km if _fit_vcov_type == "conley" else None,
+            conley_kernel=self.conley_kernel if _fit_vcov_type == "conley" else None,
         )
 
         self._coefficients = coefficients

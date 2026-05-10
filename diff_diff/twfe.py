@@ -143,6 +143,54 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 "the full projection."
             )
 
+        # Conley + TWFE: Conley meat = S.T @ K @ S survives FWL because it
+        # depends only on scores X*epsilon. FWL preserves both the
+        # residualized X and the residuals epsilon, so spatial-HAC on the
+        # within-transformed design equals spatial-HAC on a full-dummy
+        # design — UNLIKE hc2/hc2_bm which need the hat matrix.
+        # However, TWFE auto-clusters at unit by default
+        # (twfe.py:205-216), and Conley + cluster is deferred to Phase 2
+        # (combined product kernel). When the user explicitly passes
+        # cluster=..., reject early here for a TWFE-specific message; the
+        # linalg validator's NotImplementedError fires later for non-TWFE
+        # call paths.
+        if self.vcov_type == "conley" and self.cluster is not None:
+            raise NotImplementedError(
+                f"TwoWayFixedEffects(cluster={self.cluster!r}, "
+                "vcov_type='conley') is deferred to Phase 2 (combined "
+                "product kernel). Drop cluster= for cross-sectional "
+                "Conley; the unit auto-cluster default is also disabled "
+                "when vcov_type='conley'."
+            )
+        if self.vcov_type == "conley":
+            if survey_design is not None:
+                raise NotImplementedError(
+                    "TwoWayFixedEffects(survey_design=..., "
+                    "vcov_type='conley') is deferred to Phase 2+ "
+                    "(Bertanha-Imbens 2014). Drop survey_design= for "
+                    "cross-sectional Conley."
+                )
+            if self.conley_coords is None:
+                raise ValueError(
+                    "vcov_type='conley' requires conley_coords=(<lat_col>, "
+                    "<lon_col>) tuple of column names in the data."
+                )
+            if self.conley_cutoff_km is None:
+                raise ValueError(
+                    "vcov_type='conley' requires conley_cutoff_km (positive " "finite bandwidth)."
+                )
+            _twfe_coord_cols = list(self.conley_coords)
+            if len(_twfe_coord_cols) != 2:
+                raise ValueError(
+                    f"conley_coords must be a 2-tuple of column names; got "
+                    f"{self.conley_coords!r}."
+                )
+            for _col in _twfe_coord_cols:
+                if _col not in data.columns:
+                    raise ValueError(
+                        f"conley_coords references column {_col!r} which " f"is not in `data`."
+                    )
+
         # Check for staggered treatment timing and warn if detected
         self._check_staggered_treatment(data, treatment, time, unit)
 
@@ -211,6 +259,13 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         ):
             # Explicit classical + analytical inference: drop the auto-cluster
             # so the validator doesn't reject ``cluster_ids + classical``.
+            cluster_var = None
+        elif self.vcov_type == "conley":
+            # Conley + TWFE: disable the auto-cluster default. Conley + cluster
+            # is deferred to Phase 2; the user wants spatial-HAC at the unit
+            # level via the kernel, not cluster-robust at the unit level. The
+            # explicit-cluster case is rejected upstream; reaching here means
+            # cluster=None.
             cluster_var = None
         else:
             cluster_var = unit
@@ -298,6 +353,16 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         # remapped vcov_type disagrees; the remapped `vcov_type` is the
         # single source of truth.
         _fit_vcov_type = self._resolve_effective_vcov_type(survey_cluster_ids)
+
+        # Materialize Conley coords from data (validated above; this is just
+        # array extraction). NOTE: data passed to LinearRegression is the
+        # within-transformed matrix, but coords are still in the ORIGINAL
+        # row order — within-transformation preserves row ordering, so the
+        # coords align with the demeaned X 1:1.
+        _twfe_conley_coords = None
+        if _fit_vcov_type == "conley" and self.conley_coords is not None:
+            _twfe_conley_coords = data[list(self.conley_coords)].to_numpy(dtype=np.float64)
+
         if self.rank_deficient_action == "error":
             reg = LinearRegression(
                 include_intercept=False,
@@ -308,6 +373,10 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 weight_type=survey_weight_type,
                 survey_design=_lr_survey_twfe,
                 vcov_type=_fit_vcov_type,
+                conley_coords=_twfe_conley_coords,
+                conley_cutoff_km=self.conley_cutoff_km,
+                conley_metric=self.conley_metric,
+                conley_kernel=self.conley_kernel,
             ).fit(X, y, df_adjustment=df_adjustment)
         else:
             # Suppress generic warning, TWFE provides context-specific messages below
@@ -324,6 +393,10 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                     weight_type=survey_weight_type,
                     survey_design=_lr_survey_twfe,
                     vcov_type=_fit_vcov_type,
+                    conley_coords=_twfe_conley_coords,
+                    conley_cutoff_km=self.conley_cutoff_km,
+                    conley_metric=self.conley_metric,
+                    conley_kernel=self.conley_kernel,
                 ).fit(X, y, df_adjustment=df_adjustment)
 
         coefficients = reg.coefficients_
@@ -492,6 +565,8 @@ class TwoWayFixedEffects(DifferenceInDifferences):
             # remapped hc1 under the legacy alias path, not self.vcov_type.
             vcov_type=_fit_vcov_type,
             cluster_name=_twfe_cluster_label,
+            conley_cutoff_km=self.conley_cutoff_km if _fit_vcov_type == "conley" else None,
+            conley_kernel=self.conley_kernel if _fit_vcov_type == "conley" else None,
         )
 
         self.is_fitted_ = True

@@ -89,8 +89,10 @@ launch-video/
 trop_avg_ref/
 
 # Academic papers (local only, not for distribution)
-papers/
-paper/
+# Anchored to repo root so that `docs/methodology/papers/` (tracked review markdown)
+# is not silently ignored.
+/papers/
+/paper/
 
 # Local analysis notebooks (not committed)
 analysis/
