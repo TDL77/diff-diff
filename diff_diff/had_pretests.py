@@ -4442,11 +4442,15 @@ def did_had_pretest_workflow(
 
     ``aggregate="event_study"`` (multi-period panel, >= 3 periods): runs
     QUG + joint pre-trends Stute + joint homogeneity-linearity Stute,
-    covering paper Section 4 steps 1-3 together. Step 4 (Yatchew-style
-    linearity as an alternative to Stute) is subsumed by the joint Stute
-    in this path - the paper does not derive a joint Yatchew variant, so
-    users who need Yatchew robustness under multi-period data should
-    call :func:`yatchew_hr_test` on each (base, post) pair manually.
+    covering paper Section 4 steps 1-3 together. The step-3 Yatchew-HR
+    alternative (a single-horizon swap-in for Stute) is subsumed by joint
+    Stute on this path - the paper does not derive a joint Yatchew
+    variant, so users who need Yatchew robustness under multi-period
+    data should call :func:`yatchew_hr_test` on each ``(base, post)``
+    pair manually. (Paper step 4 is the decision itself - "use TWFE if
+    none of the tests rejects" - not a separate test, so it has no code
+    path here. Mirrors the framing in the module-level docstring at
+    line 54 and ``_compose_verdict_event_study`` at line 2735.)
 
     Eq 17 / Eq 18 linear-trend detrending (paper Section 5.2 Pierce-
     Schott application) is now SHIPPED on the event-study path via
