@@ -6,25 +6,23 @@
 .. autoclass:: SunAbrahamResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~SunAbrahamResults.__init__
       ~SunAbrahamResults.print_summary
       ~SunAbrahamResults.summary
       ~SunAbrahamResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~SunAbrahamResults.alpha
       ~SunAbrahamResults.anticipation
       ~SunAbrahamResults.att
@@ -51,5 +49,4 @@
       ~SunAbrahamResults.n_obs
       ~SunAbrahamResults.n_treated_units
       ~SunAbrahamResults.n_control_units
-   
-   
+

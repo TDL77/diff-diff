@@ -6,12 +6,11 @@
 .. autoclass:: DifferenceInDifferences
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~DifferenceInDifferences.__init__
       ~DifferenceInDifferences.fit
       ~DifferenceInDifferences.get_params
@@ -19,9 +18,7 @@
       ~DifferenceInDifferences.print_summary
       ~DifferenceInDifferences.set_params
       ~DifferenceInDifferences.summary
-   
-   
 
-   
-   
-   
+
+
+

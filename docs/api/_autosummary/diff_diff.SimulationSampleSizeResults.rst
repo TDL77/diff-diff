@@ -6,25 +6,23 @@
 .. autoclass:: SimulationSampleSizeResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~SimulationSampleSizeResults.__init__
       ~SimulationSampleSizeResults.summary
       ~SimulationSampleSizeResults.to_dataframe
       ~SimulationSampleSizeResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~SimulationSampleSizeResults.effective_n_units
       ~SimulationSampleSizeResults.survey_config
       ~SimulationSampleSizeResults.required_n
@@ -36,5 +34,4 @@
       ~SimulationSampleSizeResults.n_steps
       ~SimulationSampleSizeResults.search_path
       ~SimulationSampleSizeResults.estimator_name
-   
-   
+

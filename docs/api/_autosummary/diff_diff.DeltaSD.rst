@@ -6,22 +6,19 @@
 .. autoclass:: DeltaSD
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
-      ~DeltaSD.__init__
-   
-   
 
-   
-   
+      ~DeltaSD.__init__
+
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~DeltaSD.M
-   
-   
+

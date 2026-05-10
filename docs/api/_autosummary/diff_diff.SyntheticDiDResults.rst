@@ -6,12 +6,11 @@
 .. autoclass:: SyntheticDiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~SyntheticDiDResults.__init__
       ~SyntheticDiDResults.get_loo_effects_df
       ~SyntheticDiDResults.get_time_weights_df
@@ -23,15 +22,14 @@
       ~SyntheticDiDResults.summary
       ~SyntheticDiDResults.to_dataframe
       ~SyntheticDiDResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~SyntheticDiDResults.alpha
       ~SyntheticDiDResults.coef_var
       ~SyntheticDiDResults.is_significant
@@ -61,5 +59,4 @@
       ~SyntheticDiDResults.time_weights
       ~SyntheticDiDResults.pre_periods
       ~SyntheticDiDResults.post_periods
-   
-   
+

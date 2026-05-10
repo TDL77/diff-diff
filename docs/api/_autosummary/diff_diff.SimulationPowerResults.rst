@@ -6,27 +6,25 @@
 .. autoclass:: SimulationPowerResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~SimulationPowerResults.__init__
       ~SimulationPowerResults.power_curve_df
       ~SimulationPowerResults.print_summary
       ~SimulationPowerResults.summary
       ~SimulationPowerResults.to_dataframe
       ~SimulationPowerResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~SimulationPowerResults.effective_n_units
       ~SimulationPowerResults.mean_deff
       ~SimulationPowerResults.mean_icc_realized
@@ -49,5 +47,4 @@
       ~SimulationPowerResults.estimator_name
       ~SimulationPowerResults.bias
       ~SimulationPowerResults.rmse
-   
-   
+

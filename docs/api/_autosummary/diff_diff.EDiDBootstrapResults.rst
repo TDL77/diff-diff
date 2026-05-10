@@ -6,22 +6,20 @@
 .. autoclass:: EDiDBootstrapResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
-      ~EDiDBootstrapResults.__init__
-   
-   
 
-   
-   
+      ~EDiDBootstrapResults.__init__
+
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~EDiDBootstrapResults.bootstrap_distribution
       ~EDiDBootstrapResults.event_study_cis
       ~EDiDBootstrapResults.event_study_p_values
@@ -38,5 +36,4 @@
       ~EDiDBootstrapResults.group_time_ses
       ~EDiDBootstrapResults.group_time_cis
       ~EDiDBootstrapResults.group_time_p_values
-   
-   
+

@@ -6,27 +6,25 @@
 .. autoclass:: TripleDifferenceResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~TripleDifferenceResults.__init__
       ~TripleDifferenceResults.epv_summary
       ~TripleDifferenceResults.print_summary
       ~TripleDifferenceResults.summary
       ~TripleDifferenceResults.to_dataframe
       ~TripleDifferenceResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~TripleDifferenceResults.alpha
       ~TripleDifferenceResults.covariate_balance
       ~TripleDifferenceResults.epv_diagnostics
@@ -52,5 +50,4 @@
       ~TripleDifferenceResults.n_control_eligible
       ~TripleDifferenceResults.n_control_ineligible
       ~TripleDifferenceResults.estimation_method
-   
-   
+

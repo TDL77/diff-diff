@@ -6,25 +6,23 @@
 .. autoclass:: StackedDiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~StackedDiDResults.__init__
       ~StackedDiDResults.print_summary
       ~StackedDiDResults.summary
       ~StackedDiDResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~StackedDiDResults.alpha
       ~StackedDiDResults.anticipation
       ~StackedDiDResults.att
@@ -56,5 +54,4 @@
       ~StackedDiDResults.groups
       ~StackedDiDResults.trimmed_groups
       ~StackedDiDResults.time_periods
-   
-   
+

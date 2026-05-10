@@ -6,25 +6,23 @@
 .. autoclass:: ContinuousDiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~ContinuousDiDResults.__init__
       ~ContinuousDiDResults.print_summary
       ~ContinuousDiDResults.summary
       ~ContinuousDiDResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~ContinuousDiDResults.alpha
       ~ContinuousDiDResults.anticipation
       ~ContinuousDiDResults.att
@@ -68,5 +66,4 @@
       ~ContinuousDiDResults.n_obs
       ~ContinuousDiDResults.n_treated_units
       ~ContinuousDiDResults.n_control_units
-   
-   
+

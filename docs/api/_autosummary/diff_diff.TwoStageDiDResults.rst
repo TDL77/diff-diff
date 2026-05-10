@@ -6,25 +6,23 @@
 .. autoclass:: TwoStageDiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~TwoStageDiDResults.__init__
       ~TwoStageDiDResults.print_summary
       ~TwoStageDiDResults.summary
       ~TwoStageDiDResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~TwoStageDiDResults.alpha
       ~TwoStageDiDResults.anticipation
       ~TwoStageDiDResults.att
@@ -52,5 +50,4 @@
       ~TwoStageDiDResults.n_untreated_obs
       ~TwoStageDiDResults.n_treated_units
       ~TwoStageDiDResults.n_control_units
-   
-   
+

@@ -6,26 +6,24 @@
 .. autoclass:: HeterogeneousAdoptionDiDEventStudyResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~HeterogeneousAdoptionDiDEventStudyResults.__init__
       ~HeterogeneousAdoptionDiDEventStudyResults.print_summary
       ~HeterogeneousAdoptionDiDEventStudyResults.summary
       ~HeterogeneousAdoptionDiDEventStudyResults.to_dataframe
       ~HeterogeneousAdoptionDiDEventStudyResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~HeterogeneousAdoptionDiDEventStudyResults.cband_crit_value
       ~HeterogeneousAdoptionDiDEventStudyResults.cband_high
       ~HeterogeneousAdoptionDiDEventStudyResults.cband_low
@@ -55,5 +53,4 @@
       ~HeterogeneousAdoptionDiDEventStudyResults.bandwidth_diagnostics
       ~HeterogeneousAdoptionDiDEventStudyResults.bias_corrected_fit
       ~HeterogeneousAdoptionDiDEventStudyResults.filter_info
-   
-   
+

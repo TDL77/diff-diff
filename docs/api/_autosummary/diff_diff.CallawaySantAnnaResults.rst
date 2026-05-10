@@ -6,26 +6,24 @@
 .. autoclass:: CallawaySantAnnaResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~CallawaySantAnnaResults.__init__
       ~CallawaySantAnnaResults.epv_summary
       ~CallawaySantAnnaResults.print_summary
       ~CallawaySantAnnaResults.summary
       ~CallawaySantAnnaResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~CallawaySantAnnaResults.alpha
       ~CallawaySantAnnaResults.anticipation
       ~CallawaySantAnnaResults.att
@@ -62,5 +60,4 @@
       ~CallawaySantAnnaResults.n_obs
       ~CallawaySantAnnaResults.n_treated_units
       ~CallawaySantAnnaResults.n_control_units
-   
-   
+

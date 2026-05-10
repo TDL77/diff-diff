@@ -6,26 +6,24 @@
 .. autoclass:: ImputationDiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~ImputationDiDResults.__init__
       ~ImputationDiDResults.pretrend_test
       ~ImputationDiDResults.print_summary
       ~ImputationDiDResults.summary
       ~ImputationDiDResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~ImputationDiDResults.alpha
       ~ImputationDiDResults.anticipation
       ~ImputationDiDResults.att
@@ -54,5 +52,4 @@
       ~ImputationDiDResults.n_untreated_obs
       ~ImputationDiDResults.n_treated_units
       ~ImputationDiDResults.n_control_units
-   
-   
+

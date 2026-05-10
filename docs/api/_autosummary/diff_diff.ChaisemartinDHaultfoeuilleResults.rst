@@ -6,25 +6,23 @@
 .. autoclass:: ChaisemartinDHaultfoeuilleResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~ChaisemartinDHaultfoeuilleResults.__init__
       ~ChaisemartinDHaultfoeuilleResults.print_summary
       ~ChaisemartinDHaultfoeuilleResults.summary
       ~ChaisemartinDHaultfoeuilleResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~ChaisemartinDHaultfoeuilleResults.L_max
       ~ChaisemartinDHaultfoeuilleResults.alpha
       ~ChaisemartinDHaultfoeuilleResults.att
@@ -93,5 +91,4 @@
       ~ChaisemartinDHaultfoeuilleResults.n_groups_dropped_crossers
       ~ChaisemartinDHaultfoeuilleResults.n_groups_dropped_singleton_baseline
       ~ChaisemartinDHaultfoeuilleResults.n_groups_dropped_never_switching
-   
-   
+

@@ -6,19 +6,16 @@
 .. autoclass:: ContinuousDiD
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~ContinuousDiD.__init__
       ~ContinuousDiD.fit
       ~ContinuousDiD.get_params
       ~ContinuousDiD.set_params
-   
-   
 
-   
-   
-   
+
+
+

@@ -6,27 +6,25 @@
 .. autoclass:: MultiPeriodDiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~MultiPeriodDiDResults.__init__
       ~MultiPeriodDiDResults.get_effect
       ~MultiPeriodDiDResults.print_summary
       ~MultiPeriodDiDResults.summary
       ~MultiPeriodDiDResults.to_dataframe
       ~MultiPeriodDiDResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~MultiPeriodDiDResults.alpha
       ~MultiPeriodDiDResults.att
       ~MultiPeriodDiDResults.cluster_name
@@ -62,5 +60,4 @@
       ~MultiPeriodDiDResults.n_control
       ~MultiPeriodDiDResults.pre_periods
       ~MultiPeriodDiDResults.post_periods
-   
-   
+

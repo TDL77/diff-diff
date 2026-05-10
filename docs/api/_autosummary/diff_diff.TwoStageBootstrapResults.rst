@@ -6,22 +6,20 @@
 .. autoclass:: TwoStageBootstrapResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
-      ~TwoStageBootstrapResults.__init__
-   
-   
 
-   
-   
+      ~TwoStageBootstrapResults.__init__
+
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~TwoStageBootstrapResults.bootstrap_distribution
       ~TwoStageBootstrapResults.event_study_cis
       ~TwoStageBootstrapResults.event_study_p_values
@@ -35,5 +33,4 @@
       ~TwoStageBootstrapResults.overall_att_se
       ~TwoStageBootstrapResults.overall_att_ci
       ~TwoStageBootstrapResults.overall_att_p_value
-   
-   
+

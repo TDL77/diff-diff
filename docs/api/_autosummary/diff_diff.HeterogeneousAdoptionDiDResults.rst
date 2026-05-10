@@ -6,26 +6,24 @@
 .. autoclass:: HeterogeneousAdoptionDiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~HeterogeneousAdoptionDiDResults.__init__
       ~HeterogeneousAdoptionDiDResults.print_summary
       ~HeterogeneousAdoptionDiDResults.summary
       ~HeterogeneousAdoptionDiDResults.to_dataframe
       ~HeterogeneousAdoptionDiDResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~HeterogeneousAdoptionDiDResults.effective_dose_mean
       ~HeterogeneousAdoptionDiDResults.variance_formula
       ~HeterogeneousAdoptionDiDResults.att
@@ -49,5 +47,4 @@
       ~HeterogeneousAdoptionDiDResults.survey_metadata
       ~HeterogeneousAdoptionDiDResults.bandwidth_diagnostics
       ~HeterogeneousAdoptionDiDResults.bias_corrected_fit
-   
-   
+

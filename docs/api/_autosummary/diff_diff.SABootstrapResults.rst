@@ -6,22 +6,20 @@
 .. autoclass:: SABootstrapResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
-      ~SABootstrapResults.__init__
-   
-   
 
-   
-   
+      ~SABootstrapResults.__init__
+
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~SABootstrapResults.bootstrap_distribution
       ~SABootstrapResults.n_bootstrap
       ~SABootstrapResults.weight_type
@@ -32,5 +30,4 @@
       ~SABootstrapResults.event_study_ses
       ~SABootstrapResults.event_study_cis
       ~SABootstrapResults.event_study_p_values
-   
-   
+

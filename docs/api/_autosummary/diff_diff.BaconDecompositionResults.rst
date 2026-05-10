@@ -6,27 +6,25 @@
 .. autoclass:: BaconDecompositionResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~BaconDecompositionResults.__init__
       ~BaconDecompositionResults.effect_by_type
       ~BaconDecompositionResults.print_summary
       ~BaconDecompositionResults.summary
       ~BaconDecompositionResults.to_dataframe
       ~BaconDecompositionResults.weight_by_type
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~BaconDecompositionResults.decomposition_error
       ~BaconDecompositionResults.n_obs
       ~BaconDecompositionResults.survey_metadata
@@ -41,5 +39,4 @@
       ~BaconDecompositionResults.n_timing_groups
       ~BaconDecompositionResults.n_never_treated
       ~BaconDecompositionResults.timing_groups
-   
-   
+

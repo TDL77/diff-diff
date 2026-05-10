@@ -6,25 +6,23 @@
 .. autoclass:: EfficientDiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~EfficientDiDResults.__init__
       ~EfficientDiDResults.print_summary
       ~EfficientDiDResults.summary
       ~EfficientDiDResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~EfficientDiDResults.alpha
       ~EfficientDiDResults.anticipation
       ~EfficientDiDResults.att
@@ -64,5 +62,4 @@
       ~EfficientDiDResults.n_obs
       ~EfficientDiDResults.n_treated_units
       ~EfficientDiDResults.n_control_units
-   
-   
+

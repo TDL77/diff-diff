@@ -6,25 +6,23 @@
 .. autoclass:: TROP
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~TROP.__init__
       ~TROP.fit
       ~TROP.get_params
       ~TROP.set_params
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~TROP.CONVERGENCE_TOL_SVD
       ~TROP.max_iter
       ~TROP.tol
@@ -36,5 +34,4 @@
       ~TROP.alpha
       ~TROP.results_
       ~TROP.is_fitted_
-   
-   
+

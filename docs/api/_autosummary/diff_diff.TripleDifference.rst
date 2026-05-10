@@ -6,21 +6,18 @@
 .. autoclass:: TripleDifference
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~TripleDifference.__init__
       ~TripleDifference.fit
       ~TripleDifference.get_params
       ~TripleDifference.print_summary
       ~TripleDifference.set_params
       ~TripleDifference.summary
-   
-   
 
-   
-   
-   
+
+
+

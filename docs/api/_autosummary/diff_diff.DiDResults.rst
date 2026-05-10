@@ -6,26 +6,24 @@
 .. autoclass:: DiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~DiDResults.__init__
       ~DiDResults.print_summary
       ~DiDResults.summary
       ~DiDResults.to_dataframe
       ~DiDResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~DiDResults.alpha
       ~DiDResults.bootstrap_distribution
       ~DiDResults.cluster_name
@@ -50,5 +48,4 @@
       ~DiDResults.n_obs
       ~DiDResults.n_treated
       ~DiDResults.n_control
-   
-   
+

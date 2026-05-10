@@ -6,22 +6,19 @@
 .. autoclass:: DeltaRM
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
-      ~DeltaRM.__init__
-   
-   
 
-   
-   
+      ~DeltaRM.__init__
+
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~DeltaRM.Mbar
-   
-   
+

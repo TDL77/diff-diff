@@ -6,22 +6,20 @@
 .. autoclass:: DCDHBootstrapResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
-      ~DCDHBootstrapResults.__init__
-   
-   
 
-   
-   
+      ~DCDHBootstrapResults.__init__
+
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~DCDHBootstrapResults.bootstrap_distribution
       ~DCDHBootstrapResults.cband_crit_value
       ~DCDHBootstrapResults.event_study_cis
@@ -53,5 +51,4 @@
       ~DCDHBootstrapResults.overall_se
       ~DCDHBootstrapResults.overall_ci
       ~DCDHBootstrapResults.overall_p_value
-   
-   
+

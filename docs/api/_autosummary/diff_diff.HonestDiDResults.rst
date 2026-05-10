@@ -6,26 +6,24 @@
 .. autoclass:: HonestDiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~HonestDiDResults.__init__
       ~HonestDiDResults.print_summary
       ~HonestDiDResults.summary
       ~HonestDiDResults.to_dataframe
       ~HonestDiDResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~HonestDiDResults.alpha
       ~HonestDiDResults.ci_method
       ~HonestDiDResults.ci_width
@@ -47,5 +45,4 @@
       ~HonestDiDResults.method
       ~HonestDiDResults.original_estimate
       ~HonestDiDResults.original_se
-   
-   
+

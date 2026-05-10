@@ -6,22 +6,20 @@
 .. autoclass:: ImputationBootstrapResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
-      ~ImputationBootstrapResults.__init__
-   
-   
 
-   
-   
+      ~ImputationBootstrapResults.__init__
+
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~ImputationBootstrapResults.bootstrap_distribution
       ~ImputationBootstrapResults.event_study_cis
       ~ImputationBootstrapResults.event_study_p_values
@@ -35,5 +33,4 @@
       ~ImputationBootstrapResults.overall_att_se
       ~ImputationBootstrapResults.overall_att_ci
       ~ImputationBootstrapResults.overall_att_p_value
-   
-   
+

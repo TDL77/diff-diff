@@ -6,12 +6,11 @@
 .. autoclass:: TROPResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~TROPResults.__init__
       ~TROPResults.get_time_effects_df
       ~TROPResults.get_treatment_effects_df
@@ -20,15 +19,14 @@
       ~TROPResults.summary
       ~TROPResults.to_dataframe
       ~TROPResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~TROPResults.alpha
       ~TROPResults.bootstrap_distribution
       ~TROPResults.coef_var
@@ -56,5 +54,4 @@
       ~TROPResults.factor_matrix
       ~TROPResults.effective_rank
       ~TROPResults.loocv_score
-   
-   
+

@@ -6,25 +6,23 @@
 .. autoclass:: SimulationMDEResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~SimulationMDEResults.__init__
       ~SimulationMDEResults.summary
       ~SimulationMDEResults.to_dataframe
       ~SimulationMDEResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~SimulationMDEResults.effective_n_units
       ~SimulationMDEResults.survey_config
       ~SimulationMDEResults.mde
@@ -36,5 +34,4 @@
       ~SimulationMDEResults.n_steps
       ~SimulationMDEResults.search_path
       ~SimulationMDEResults.estimator_name
-   
-   
+

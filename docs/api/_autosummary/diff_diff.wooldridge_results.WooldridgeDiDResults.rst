@@ -6,26 +6,24 @@
 .. autoclass:: WooldridgeDiDResults
    :no-members:
 
-   
-   
+
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~WooldridgeDiDResults.__init__
       ~WooldridgeDiDResults.aggregate
       ~WooldridgeDiDResults.plot_event_study
       ~WooldridgeDiDResults.summary
       ~WooldridgeDiDResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~WooldridgeDiDResults.alpha
       ~WooldridgeDiDResults.anticipation
       ~WooldridgeDiDResults.att
@@ -50,5 +48,4 @@
       ~WooldridgeDiDResults.overall_conf_int
       ~WooldridgeDiDResults.groups
       ~WooldridgeDiDResults.time_periods
-   
-   
+
