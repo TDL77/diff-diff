@@ -4,25 +4,22 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: CSBootstrapResults
+   :no-members:
 
-   
-   .. automethod:: __init__
 
-   
    .. rubric:: Methods
 
    .. autosummary::
-   
-      ~CSBootstrapResults.__init__
-   
-   
 
-   
-   
+      ~CSBootstrapResults.__init__
+
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~CSBootstrapResults.bootstrap_distribution
       ~CSBootstrapResults.cband_crit_value
       ~CSBootstrapResults.event_study_cis
@@ -40,5 +37,4 @@
       ~CSBootstrapResults.group_time_ses
       ~CSBootstrapResults.group_time_cis
       ~CSBootstrapResults.group_time_p_values
-   
-   
+

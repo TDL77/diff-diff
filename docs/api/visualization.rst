@@ -188,6 +188,27 @@ Example
    # Grey out non-significant cells
    ax = plot_group_time_heatmap(results, mask_insignificant=True)
 
+plot_bacon
+----------
+
+Visualize Goodman-Bacon decomposition results.
+
+.. autofunction:: diff_diff.plot_bacon
+
+Example
+~~~~~~~
+
+.. code-block:: python
+
+   from diff_diff import BaconDecomposition, plot_bacon
+
+   bd = BaconDecomposition()
+   results = bd.fit(data, outcome='y', unit='unit_id',
+                    time='period', first_treat='first_treat')
+
+   # Scatter of 2x2 comparisons by weight, colored by comparison type
+   ax = plot_bacon(results)
+
 Plotly Backend
 --------------
 

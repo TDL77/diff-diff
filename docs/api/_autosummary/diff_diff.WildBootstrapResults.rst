@@ -4,27 +4,24 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: WildBootstrapResults
+   :no-members:
 
-   
-   .. automethod:: __init__
 
-   
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~WildBootstrapResults.__init__
       ~WildBootstrapResults.print_summary
       ~WildBootstrapResults.summary
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~WildBootstrapResults.alpha
       ~WildBootstrapResults.bootstrap_distribution
       ~WildBootstrapResults.se
@@ -35,5 +32,4 @@
       ~WildBootstrapResults.n_clusters
       ~WildBootstrapResults.n_bootstrap
       ~WildBootstrapResults.weight_type
-   
-   
+

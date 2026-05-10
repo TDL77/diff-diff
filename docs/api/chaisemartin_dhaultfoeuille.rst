@@ -104,8 +104,6 @@ library option for non-absorbing treatments.
   Difference-in-Differences Estimators of Intertemporal Treatment
   Effects. NBER Working Paper 29873.
 
-.. module:: diff_diff.chaisemartin_dhaultfoeuille
-
 ChaisemartinDHaultfoeuille
 --------------------------
 
@@ -174,7 +172,7 @@ treatment effects that could flip the sign of the plain TWFE coefficient.
 
 .. autofunction:: diff_diff.twowayfeweights
 
-.. autoclass:: diff_diff.chaisemartin_dhaultfoeuille.TWFEWeightsResult
+.. autoclass:: diff_diff.TWFEWeightsResult
    :no-index:
    :members:
 

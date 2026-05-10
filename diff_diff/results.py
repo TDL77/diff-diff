@@ -1275,6 +1275,7 @@ class SyntheticDiDResults:
                 - ``pre_fit_rmse`` — RMSE on the fake pre-window
                 - ``n_pre_fake`` — periods before the fake date
                 - ``n_post_fake`` — periods from the fake date onward
+
             NaN is emitted only for dimensional infeasibility. Frank-Wolfe
             does not expose a mid-solver non-convergence signal; inspect
             ``pre_fit_rmse`` for poor refit quality.

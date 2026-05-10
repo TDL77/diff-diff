@@ -100,6 +100,13 @@ Compute minimum detectable violation.
 
 .. autofunction:: diff_diff.compute_mdv
 
+plot_pretrends_power
+~~~~~~~~~~~~~~~~~~~~
+
+Plot a pre-trends test power curve.
+
+.. autofunction:: diff_diff.plot_pretrends_power
+
 Violation Types
 ---------------
 

@@ -4,32 +4,37 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: TwoStageDiDResults
+   :no-members:
 
-   
-   .. automethod:: __init__
 
-   
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~TwoStageDiDResults.__init__
       ~TwoStageDiDResults.print_summary
       ~TwoStageDiDResults.summary
       ~TwoStageDiDResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~TwoStageDiDResults.alpha
+      ~TwoStageDiDResults.anticipation
+      ~TwoStageDiDResults.att
       ~TwoStageDiDResults.bootstrap_results
+      ~TwoStageDiDResults.coef_var
+      ~TwoStageDiDResults.conf_int
       ~TwoStageDiDResults.is_significant
+      ~TwoStageDiDResults.p_value
+      ~TwoStageDiDResults.se
       ~TwoStageDiDResults.significance_stars
+      ~TwoStageDiDResults.survey_metadata
+      ~TwoStageDiDResults.t_stat
       ~TwoStageDiDResults.treatment_effects
       ~TwoStageDiDResults.overall_att
       ~TwoStageDiDResults.overall_se
@@ -45,5 +50,4 @@
       ~TwoStageDiDResults.n_untreated_obs
       ~TwoStageDiDResults.n_treated_units
       ~TwoStageDiDResults.n_control_units
-   
-   
+

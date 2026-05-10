@@ -147,6 +147,13 @@ Simulation-based sample size for any DiD estimator.
 
 .. autofunction:: diff_diff.simulate_sample_size
 
+plot_power_curve
+~~~~~~~~~~~~~~~~
+
+Visualization for a power curve from ``PowerAnalysis`` results.
+
+.. autofunction:: diff_diff.plot_power_curve
+
 Complete Example
 ----------------
 

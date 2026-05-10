@@ -4,34 +4,39 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: ImputationDiDResults
+   :no-members:
 
-   
-   .. automethod:: __init__
 
-   
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~ImputationDiDResults.__init__
       ~ImputationDiDResults.pretrend_test
       ~ImputationDiDResults.print_summary
       ~ImputationDiDResults.summary
       ~ImputationDiDResults.to_dataframe
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~ImputationDiDResults.alpha
+      ~ImputationDiDResults.anticipation
+      ~ImputationDiDResults.att
       ~ImputationDiDResults.bootstrap_results
+      ~ImputationDiDResults.coef_var
+      ~ImputationDiDResults.conf_int
       ~ImputationDiDResults.is_significant
+      ~ImputationDiDResults.p_value
       ~ImputationDiDResults.pretrend_results
+      ~ImputationDiDResults.se
       ~ImputationDiDResults.significance_stars
+      ~ImputationDiDResults.survey_metadata
+      ~ImputationDiDResults.t_stat
       ~ImputationDiDResults.treatment_effects
       ~ImputationDiDResults.overall_att
       ~ImputationDiDResults.overall_se
@@ -47,5 +52,4 @@
       ~ImputationDiDResults.n_untreated_obs
       ~ImputationDiDResults.n_treated_units
       ~ImputationDiDResults.n_control_units
-   
-   
+

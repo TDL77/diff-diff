@@ -4,30 +4,27 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: PreTrendsPowerResults
+   :no-members:
 
-   
-   .. automethod:: __init__
 
-   
    .. rubric:: Methods
 
    .. autosummary::
-   
+
       ~PreTrendsPowerResults.__init__
       ~PreTrendsPowerResults.power_at
       ~PreTrendsPowerResults.print_summary
       ~PreTrendsPowerResults.summary
       ~PreTrendsPowerResults.to_dataframe
       ~PreTrendsPowerResults.to_dict
-   
-   
 
-   
-   
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~PreTrendsPowerResults.is_informative
       ~PreTrendsPowerResults.original_results
       ~PreTrendsPowerResults.power_adequate
@@ -44,5 +41,4 @@
       ~PreTrendsPowerResults.pre_period_effects
       ~PreTrendsPowerResults.pre_period_ses
       ~PreTrendsPowerResults.vcov
-   
-   
+

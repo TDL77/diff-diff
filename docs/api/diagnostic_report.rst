@@ -13,12 +13,12 @@ result.
 
 Methodology deviations (no traffic-light gates, opt-in placebo
 battery, estimator-native diagnostic routing, power-aware phrasing
-threshold) are documented in :doc:`../methodology/REPORTING`.
+threshold) are documented in ``docs/methodology/REPORTING.md``.
 
 The schema carries a top-level ``target_parameter`` block
 (experimental) naming what the headline scalar represents per
 estimator. See the "Target parameter" section of
-:doc:`../methodology/REPORTING` for the per-estimator dispatch and
+``docs/methodology/REPORTING.md`` for the per-estimator dispatch and
 schema shape.
 
 Data-dependent checks (2x2 parallel trends on simple DiD,

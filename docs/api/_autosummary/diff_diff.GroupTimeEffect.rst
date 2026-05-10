@@ -4,25 +4,22 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: GroupTimeEffect
+   :no-members:
 
-   
-   .. automethod:: __init__
 
-   
    .. rubric:: Methods
 
    .. autosummary::
-   
-      ~GroupTimeEffect.__init__
-   
-   
 
-   
-   
+      ~GroupTimeEffect.__init__
+
+
+
+
    .. rubric:: Attributes
 
    .. autosummary::
-   
+
       ~GroupTimeEffect.is_significant
       ~GroupTimeEffect.significance_stars
       ~GroupTimeEffect.group
@@ -34,5 +31,4 @@
       ~GroupTimeEffect.conf_int
       ~GroupTimeEffect.n_treated
       ~GroupTimeEffect.n_control
-   
-   
+
