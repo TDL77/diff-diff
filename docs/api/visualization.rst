@@ -204,7 +204,7 @@ Example
 
    bd = BaconDecomposition()
    results = bd.fit(data, outcome='y', unit='unit_id',
-                    time='period', treatment='treated')
+                    time='period', first_treat='first_treat')
 
    # Scatter of 2x2 comparisons by weight, colored by comparison type
    ax = plot_bacon(results)
