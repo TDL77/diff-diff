@@ -2506,7 +2506,7 @@ Shipped in `diff_diff/had_pretests.py` as `stute_joint_pretest()` (residuals-in 
 - **Note:** Horizon labels in `StuteJointResult.horizon_labels` are `str(t)` verbatim and carry STRING IDENTITY ONLY — NOT a chronological ordering key. Callers who need chronological order must preserve the original period values alongside (e.g. from the `pre_periods` / `post_periods` argument).
 - **Note:** NaN propagation is explicit: when any horizon has NaN in residuals, `cvm_stat_joint=NaN`, `p_value=NaN`, `reject=False`, AND `per_horizon_stats={label: np.nan for every horizon}` (full dict preserved with NaN values — not empty, not partial).
 
-**Phase 3 follow-up delivery:** `stute_joint_pretest()`, `joint_pretrends_test()`, `joint_homogeneity_test()`, `StuteJointResult`, and `did_had_pretest_workflow(aggregate="event_study")` shipped together in PR #353 (2026-04). The `practitioner_next_steps()` integration and tutorial are queued for Phase 5.
+**Phase 3 follow-up delivery:** `stute_joint_pretest()`, `joint_pretrends_test()`, `joint_homogeneity_test()`, `StuteJointResult`, and `did_had_pretest_workflow(aggregate="event_study")` shipped together in PR #353 (2026-04). The `practitioner_next_steps()` HAD handlers landed in Phase 5 wave 1 (PR #402); the T21 HAD pretest workflow tutorial landed in PR #409 (Phase 5 wave 2 first slice). T22 weighted/survey HAD tutorial remains queued.
 
 **Reference implementation(s):**
 - R: `did_had` (de Chaisemartin, Ciccia, D'Haultfœuille, Knau 2024a); `stute_test` (2024c); `yatchew_test` (Online Appendix, Table 3).
