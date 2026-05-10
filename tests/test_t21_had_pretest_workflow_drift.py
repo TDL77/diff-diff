@@ -204,14 +204,14 @@ def test_overall_qug_fails_to_reject(overall_report):
 
 
 def test_overall_stute_fails_to_reject(overall_report):
-    """Section 3 narrative claims Stute fails-to-reject linearity.
-    Stute uses Mammen wild bootstrap so the p-value is RNG-dependent;
-    use binary fail-to-reject + abs tolerance band per
-    `feedback_bootstrap_drift_tests_need_backend_tolerance`."""
+    """Section 3 narrative quotes Stute p_value ~0.686. Stute uses
+    Mammen wild bootstrap so the p-value is RNG-dependent; use a
+    bounded abs tolerance band per
+    `feedback_bootstrap_drift_tests_need_backend_tolerance` (>= 0.15
+    width). Both bounds tight enough to catch methodology drift in
+    either direction, loose enough for backend RNG path differences."""
     assert overall_report.stute.reject is False
-    # Tight enough to catch methodology drift, loose enough for backend
-    # RNG path differences.
-    assert overall_report.stute.p_value > 0.50, overall_report.stute.p_value
+    assert 0.53 <= overall_report.stute.p_value <= 0.84, overall_report.stute.p_value
 
 
 def test_overall_yatchew_fails_to_reject(overall_report):
@@ -292,11 +292,16 @@ def test_event_study_pretrends_fails_to_reject(event_study_report):
 
 def test_event_study_homogeneity_fails_to_reject(event_study_report):
     """Section 4 narrative claims joint homogeneity strongly fails to
-    reject (~0.76 from numbers.json)."""
+    reject and quotes p ~0.763 from numbers.json. Use a bounded abs
+    tolerance band per
+    `feedback_bootstrap_drift_tests_need_backend_tolerance` so that
+    drift in either direction (toward rejection or toward an even
+    cleaner pass) flags the prose as stale rather than silently
+    passing."""
     hj = event_study_report.homogeneity_joint
     assert hj is not None
     assert hj.reject is False
-    assert hj.p_value > 0.50, hj.p_value
+    assert 0.61 <= hj.p_value <= 0.92, hj.p_value
 
 
 def test_had_design_auto_lands_on_continuous_at_zero(two_period):
