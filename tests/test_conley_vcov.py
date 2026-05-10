@@ -659,6 +659,30 @@ class TestConleyLinearRegression:
         assert vcov is not None
         assert np.all(np.isfinite(np.diag(vcov)))
 
+    def test_linear_regression_conley_with_survey_design_raises(self, fit_data):
+        """LinearRegression(vcov_type='conley', survey_design=...) must raise
+        NotImplementedError before fitting. Without the front-door guard,
+        LinearRegression.fit() silently bypasses the documented Conley+survey
+        rejection: it sets `return_vcov=False` on the solve_ols call when
+        survey vcov is needed, skipping the linalg validator, and the survey
+        vcov path then overwrites `vcov_` with a non-Conley variance under a
+        Conley request. Phase 5 will lift this rejection (Bertanha-Imbens 2014
+        weighted-Conley); Phase 1 is unweighted only.
+        """
+        from diff_diff.survey import make_pweight_design
+
+        X, y, coords = fit_data
+        n = X.shape[0]
+        survey = make_pweight_design(np.ones(n))
+        with pytest.raises(NotImplementedError, match="conley.*survey"):
+            LinearRegression(
+                vcov_type="conley",
+                include_intercept=True,
+                conley_coords=coords,
+                conley_cutoff_km=2000.0,
+                survey_design=survey,
+            ).fit(X, y)
+
 
 class TestConleyEstimatorIntegration:
     """Step 4 smoke tests: DifferenceInDifferences and MultiPeriodDiD accept

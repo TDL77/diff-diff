@@ -1886,21 +1886,31 @@ inference = reg.get_inference(coef_index)  # -> InferenceResult
 ### Conley Spatial HAC Standard Errors
 
 Conley (1999) spatial heteroskedasticity-and-autocorrelation-consistent standard
-errors for DiD designs with geocoded data. Use when residuals are spatially
-correlated (geo experiments, regional shocks, common-supplier effects).
-Available on `DifferenceInDifferences`, `TwoWayFixedEffects`, `MultiPeriodDiD`.
+errors. Use when residuals are spatially correlated (geo experiments, regional
+shocks, common-supplier effects). **Phase 1 supports cross-sectional Conley only**,
+via direct `compute_robust_vcov` / `LinearRegression` on a single-period design.
+**Panel estimators (`DifferenceInDifferences`, `TwoWayFixedEffects`,
+`MultiPeriodDiD`) reject `vcov_type="conley"` at fit-time** with
+`NotImplementedError`: cross-sectional Conley over `(unit, time)` rows would
+treat same-unit cross-time pairs as `d_ij = 0 → K = 1`, mishandling the
+space-time HAC. Practitioners pre-collapse to per-unit first-differences and
+call `compute_robust_vcov` directly. Phase 2 will add the space-time product
+kernel (Driscoll-Kraay) and lift the panel rejection.
 
 ```python
-from diff_diff import TwoWayFixedEffects
+import numpy as np
+from diff_diff.linalg import LinearRegression
 
-result = TwoWayFixedEffects(
+# Cross-sectional design: 1 row per unit, n × 2 lat/lon coords.
+reg = LinearRegression(
     vcov_type="conley",
-    conley_coords=("lat", "lon"),       # column names with lat/lon (degrees)
+    include_intercept=True,
+    conley_coords=coords,                # n × 2 array of (lat, lon) in degrees
     conley_cutoff_km=200.0,              # required; no default
     conley_metric="haversine",           # or "euclidean", or callable
     conley_kernel="bartlett",            # or "uniform"
-).fit(data, outcome="y", treatment="treated", time="post", unit="unit_id")
-print(result.summary())  # variance line: "Conley spatial HAC (bartlett, cutoff=200.0km)"
+).fit(X, y)
+se = np.sqrt(np.diag(reg.vcov_))
 ```
 
 **Variance estimator:**
@@ -1912,7 +1922,7 @@ print(result.summary())  # variance line: "Conley spatial HAC (bartlett, cutoff=
 - `"uniform"`: `K(u) = 1{|u| ≤ 1}`. Easier to interpret; emits `UserWarning` if the resulting meat has a materially negative eigenvalue.
 
 **Distance metrics:**
-- `"haversine"` (default): great-circle in km, Earth's mean radius 6371 km. Validates `lat ∈ [-90, 90]`, `lon ∈ [-180, 180]`.
+- `"haversine"` (default): great-circle in km, Earth's mean radius 6371.01 km (matching R `conleyreg`). Validates `lat ∈ [-90, 90]`, `lon ∈ [-180, 180]`.
 - `"euclidean"`: from projected coordinates; user owns the units.
 - `callable(coords1, coords2) -> n×n array`: custom distance for non-geographic networks.
 
@@ -1921,9 +1931,9 @@ recommends a sensitivity grid (e.g., 50, 100, 200, 500 km) and reporting the
 SE range.
 
 **Restrictions in this release:**
-- `vcov_type="conley"` + `cluster=` → `NotImplementedError` (combined kernel deferred to Phase 2).
-- `vcov_type="conley"` + `weights=` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up).
-- `vcov_type="conley"` + `absorb=` → `NotImplementedError` (only TWFE's two-FE within-transformation is supported).
+- Panel estimators (`DifferenceInDifferences`, `TwoWayFixedEffects`, `MultiPeriodDiD`) `+ vcov_type="conley"` → `NotImplementedError` at fit-time. Phase 2 adds the space-time product kernel.
+- `LinearRegression(vcov_type="conley", cluster_ids=...)` → `NotImplementedError` (combined kernel deferred to Phase 2).
+- `LinearRegression(vcov_type="conley", weights=...)` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up).
 - `SyntheticDiD(vcov_type="conley")` → `TypeError` (uses bootstrap, not analytical sandwich).
 - `n > 20_000` emits a `UserWarning` about O(n²) distance-matrix memory.
 

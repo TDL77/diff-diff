@@ -57,7 +57,7 @@ class DifferenceInDifferences:
         ``vcov_type``: with ``"hc1"`` dispatches to CR1 (Liang-Zeger); with
         ``"hc2_bm"`` dispatches to CR2 Bell-McCaffrey (Pustejovsky-Tipton 2018
         symmetric-sqrt + Satterthwaite DOF).
-    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, optional
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm"}, optional
         Variance-covariance family. Defaults to the ``robust`` alias.
 
         - ``"classical"``: non-robust OLS SEs, ``sigma_hat^2 * (X'X)^{-1}``.
@@ -69,11 +69,15 @@ class DifferenceInDifferences:
           with ``cluster=``, Pustejovsky-Tipton (2018) CR2 cluster-robust.
           (Note: ``MultiPeriodDiD`` does NOT yet support ``cluster=`` with
           ``"hc2_bm"`` — see ``MultiPeriodDiD`` docstring and REGISTRY.md.)
-        - ``"conley"``: Conley (1999) spatial-HAC sandwich. Requires
-          ``conley_coords`` (lat/lon column tuple) and ``conley_cutoff_km``
-          (positive bandwidth — REQUIRED, no default per the no-silent-failures
-          rule). Combining with ``cluster=``, ``survey_design=``, or ``absorb=``
-          raises ``NotImplementedError`` (deferred to Phase 2+).
+
+        ``vcov_type="conley"`` (Conley 1999 spatial-HAC) is **rejected** at
+        fit-time on ``DifferenceInDifferences`` in Phase 1 because DiD is
+        intrinsically a two-period panel design, and Phase 1's cross-
+        sectional Conley does not handle the time dimension. The supported
+        Phase 1 path for Conley is direct ``compute_robust_vcov`` /
+        ``LinearRegression`` on a single-period regression. Phase 2 will
+        add the space-time product kernel (Driscoll-Kraay) and lift the
+        rejection.
     alpha : float, default=0.05
         Significance level for confidence intervals.
     inference : str, default="analytical"
@@ -93,20 +97,13 @@ class DifferenceInDifferences:
         - "warn": Issue warning and drop linearly dependent columns (default)
         - "error": Raise ValueError
         - "silent": Drop columns silently without warning
-    conley_coords : tuple of (str, str), optional
-        Column-name tuple ``(lat_col, lon_col)`` for Conley spatial HAC SE.
-        Required when ``vcov_type="conley"``; raises ``ValueError`` otherwise.
-    conley_cutoff_km : float, optional
-        Positive finite bandwidth in km (haversine) or coord units (euclidean).
-        Required when ``vcov_type="conley"``; no default per Conley 1999
-        Section 5 sensitivity-grid recommendation.
-    conley_metric : str, default "haversine"
-        Distance metric: ``"haversine"`` (lat/lon, km), ``"euclidean"`` (any
-        units), or a callable ``(coords1, coords2) -> n×n``.
-    conley_kernel : str, default "bartlett"
-        Kernel function: ``"bartlett"`` (PSD-guaranteed, default) or
-        ``"uniform"`` (emits ``UserWarning`` if the meat has a materially
-        negative eigenvalue per Conley 1999 footnote 11).
+    conley_coords, conley_cutoff_km, conley_metric, conley_kernel
+        Accepted by the constructor for sklearn-style API symmetry, but
+        ``vcov_type="conley"`` is rejected at fit-time on
+        ``DifferenceInDifferences`` (see ``vcov_type`` above). Use direct
+        ``compute_robust_vcov`` / ``LinearRegression`` on a single-period
+        regression for cross-sectional Conley in Phase 1; Phase 2 will lift
+        the panel rejection.
 
     Attributes
     ----------
@@ -1036,7 +1033,7 @@ class MultiPeriodDiD(DifferenceInDifferences):
         ``TODO.md``; also documented as a Note in
         ``docs/methodology/REGISTRY.md`` under the HeterogeneousAdoptionDiD
         requirements-checklist block.
-    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, optional
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm"}, optional
         Variance-covariance family. Defaults to the ``robust`` alias.
 
         - ``"classical"``: non-robust OLS SEs, ``sigma_hat^2 * (X'X)^{-1}``.
@@ -1047,23 +1044,21 @@ class MultiPeriodDiD(DifferenceInDifferences):
         - ``"hc2_bm"``: one-way HC2 + Imbens-Kolesar (2016) Satterthwaite DOF
           per coefficient plus a contrast-aware DOF for the post-period-average
           ATT. **Unsupported with** ``cluster=`` — see ``cluster`` above.
-        - ``"conley"``: Conley (1999) spatial-HAC sandwich. Requires
-          ``conley_coords`` and ``conley_cutoff_km``. Combining with
-          ``cluster=``, ``survey_design=``, or ``absorb=`` raises
-          ``NotImplementedError`` (deferred to Phase 2+).
+
+        ``vcov_type="conley"`` (Conley 1999 spatial-HAC) is **rejected** at
+        fit-time on ``MultiPeriodDiD`` in Phase 1 because MultiPeriodDiD is
+        intrinsically a multi-period panel estimator and Phase 1's cross-
+        sectional Conley does not handle the time dimension. The supported
+        Phase 1 path for Conley is direct ``compute_robust_vcov`` /
+        ``LinearRegression`` on a single-period regression. Phase 2 will
+        add the space-time product kernel (Driscoll-Kraay) and lift the
+        rejection.
     alpha : float, default=0.05
         Significance level for confidence intervals.
-    conley_coords : tuple of (str, str), optional
-        Column-name tuple ``(lat_col, lon_col)`` for Conley spatial HAC SE.
-        Required when ``vcov_type="conley"``.
-    conley_cutoff_km : float, optional
-        Positive finite bandwidth for Conley spatial HAC. Required when
-        ``vcov_type="conley"`` (no default per Conley 1999 sensitivity-grid).
-    conley_metric : str, default "haversine"
-        Distance metric for Conley: ``"haversine"`` (lat/lon, km),
-        ``"euclidean"``, or a callable.
-    conley_kernel : str, default "bartlett"
-        Conley kernel: ``"bartlett"`` (PSD-guaranteed) or ``"uniform"``.
+    conley_coords, conley_cutoff_km, conley_metric, conley_kernel
+        Accepted by the constructor for sklearn-style API symmetry, but
+        ``vcov_type="conley"`` is rejected at fit-time on ``MultiPeriodDiD``
+        (see ``vcov_type`` above).
 
     Attributes
     ----------

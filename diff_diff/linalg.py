@@ -2534,6 +2534,25 @@ class LinearRegression:
                         stacklevel=2,
                     )
 
+        # Reject vcov_type='conley' + survey_design at LinearRegression entry.
+        # The downstream `_validate_vcov_args` rejects this combination inside
+        # `compute_robust_vcov`, but `LinearRegression.fit()` skips that path
+        # entirely when the survey design needs survey variance (return_vcov
+        # is set to False on the solve_ols call), and the survey vcov path
+        # would silently overwrite the result with a non-Conley variance
+        # under a Conley request. Front-door the rejection here so the
+        # contract is enforced uniformly. Phase 5 (Bertanha-Imbens 2014
+        # weighted-Conley) will lift this; Phase 1 supports cross-sectional
+        # unweighted Conley only.
+        if _fit_vcov_type == "conley" and _use_survey_vcov:
+            raise NotImplementedError(
+                "LinearRegression(vcov_type='conley', survey_design=...) "
+                "is deferred to Phase 5 (Bertanha-Imbens 2014 weighted-"
+                "Conley). Phase 1 supports cross-sectional unweighted "
+                "Conley only via compute_robust_vcov / LinearRegression "
+                "without a survey design."
+            )
+
         # Resolve effective fit-time weights/weight_type WITHOUT mutating
         # self. When a survey design is present, canonicalize weights from
         # the design so coefficient estimation and survey vcov agree.
