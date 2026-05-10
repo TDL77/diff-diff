@@ -100,8 +100,6 @@ library option for non-absorbing treatments.
   Difference-in-Differences Estimators of Intertemporal Treatment
   Effects. NBER Working Paper 29873.
 
-.. module:: diff_diff.chaisemartin_dhaultfoeuille
-
 ChaisemartinDHaultfoeuille
 --------------------------
 
@@ -157,7 +155,6 @@ Convenience Function
 --------------------
 
 .. autofunction:: diff_diff.chaisemartin_dhaultfoeuille
-   :no-index:
 
 Standalone TWFE Decomposition Diagnostic
 ----------------------------------------

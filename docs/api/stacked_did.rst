@@ -23,8 +23,6 @@ which addresses bias in naive stacked DiD regressions by:
 Difference-in-Differences. *NBER Working Paper* 32054.
 `<http://www.nber.org/papers/w32054>`_
 
-.. module:: diff_diff.stacked_did
-
 StackedDiD
 ----------
 
@@ -68,7 +66,6 @@ Convenience Function
 --------------------
 
 .. autofunction:: diff_diff.stacked_did
-   :no-index:
 
 Example Usage
 -------------

@@ -25,8 +25,6 @@ which combines three robustness components:
 **Reference:** Athey, S., Imbens, G. W., Qu, Z., & Viviano, D. (2025). Triply Robust
 Panel Estimators. *Working Paper*. `arXiv:2508.21536 <https://arxiv.org/abs/2508.21536>`_
 
-.. module:: diff_diff.trop
-
 TROP
 ----
 
@@ -74,7 +72,6 @@ Convenience Function
 --------------------
 
 .. autofunction:: diff_diff.trop
-   :no-index:
 
 Tuning Parameters
 -----------------
