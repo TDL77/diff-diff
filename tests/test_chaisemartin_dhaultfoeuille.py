@@ -10298,6 +10298,209 @@ class TestByPathHeterogeneity:
             f"{[str(w.message) for w in multi_baseline]}"
         )
 
+    # Survey composition (slow)
+
+    @staticmethod
+    def _by_path_het_data_with_survey(seed=44, n_replicates=0):
+        """Extends `_by_path_het_data` with survey columns (weights /
+        strata / PSU). When ``n_replicates > 0``, also attaches BRR
+        replicate-weight columns ``rep_0..rep_{n_replicates-1}``.
+
+        Strata are coarser than groups (3 strata) and PSU=group for the
+        analytical Binder TSL path. Replicate weights are mutually
+        exclusive with strata/PSU/FPC at the SurveyDesign level (see
+        survey.py validation), so the caller picks one mode by passing
+        the appropriate kwargs to SurveyDesign.
+        """
+        rng = np.random.RandomState(seed)
+        n_switchers, n_controls, n_periods = 90, 30, 10
+        n_groups_total = n_switchers + n_controls
+        H = (
+            rng.choice([-1, 1], size=(n_groups_total, n_replicates))
+            if n_replicates > 0
+            else None
+        )
+        rows = []
+        paths = [(0, 1, 1, 1), (0, 1, 0, 0), (0, 1, 1, 0)]
+        for g in range(n_switchers):
+            F_g = 3 + ((g // 3) % 3)
+            path = paths[g % 3]
+            het_x = 1 if g < n_switchers // 2 else 0
+            effect = 5.0 + 3.0 * het_x
+            stratum = g // 30
+            psu = g // 3
+            weight = 1.0 + 0.1 * (g % 5)
+            for t in range(n_periods):
+                if F_g - 1 <= t < F_g - 1 + len(path):
+                    d = path[t - (F_g - 1)]
+                elif t >= F_g - 1 + len(path):
+                    d = path[-1]
+                else:
+                    d = 0
+                y = 0.5 * t + effect * d + rng.normal(0, 0.5)
+                row = {
+                    "group": g,
+                    "period": t,
+                    "treatment": d,
+                    "outcome": y,
+                    "het_x": het_x,
+                    "survey_weights": weight,
+                    "strata": stratum,
+                    "psu": psu,
+                }
+                if H is not None:
+                    for r in range(n_replicates):
+                        row[f"rep_{r}"] = float(weight) * (1 + 0.5 * H[g, r])
+                rows.append(row)
+        for k in range(n_controls):
+            het_x = 1 if k < n_controls // 2 else 0
+            g = n_switchers + k
+            stratum = g // 30
+            psu = g // 3
+            weight = 1.0 + 0.1 * (k % 5)
+            for t in range(n_periods):
+                row = {
+                    "group": g,
+                    "period": t,
+                    "treatment": 0,
+                    "outcome": 0.5 * t + rng.normal(0, 0.5),
+                    "het_x": het_x,
+                    "survey_weights": weight,
+                    "strata": stratum,
+                    "psu": psu,
+                }
+                if H is not None:
+                    for r in range(n_replicates):
+                        row[f"rep_{r}"] = float(weight) * (1 + 0.5 * H[g, r])
+                rows.append(row)
+        return pd.DataFrame(rows)
+
+    @pytest.mark.slow
+    def test_per_path_heterogeneity_under_survey_finite(self):
+        """Analytical Binder TSL SE finite per (path, l) under
+        ``by_path + heterogeneity + survey_design``. Wave 5 #11 plan
+        regression coverage for the documented survey composition
+        (REGISTRY: "Per-path heterogeneity testing" → "Survey
+        composition")."""
+        from diff_diff.survey import SurveyDesign
+
+        df = self._by_path_het_data_with_survey()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(drop_larger_lower=False, by_path=2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+                heterogeneity="het_x",
+                survey_design=sd,
+            )
+        assert res.path_heterogeneity_effects
+        finite_count = 0
+        for path, horizons in res.path_heterogeneity_effects.items():
+            for l_h, vals in horizons.items():
+                if vals["n_obs"] >= 3:
+                    assert np.isfinite(vals["beta"]), (
+                        f"path={path} l={l_h}: beta is NaN under survey TSL"
+                    )
+                    assert np.isfinite(vals["se"]) and vals["se"] > 0, (
+                        f"path={path} l={l_h}: se non-positive under survey TSL"
+                    )
+                    finite_count += 1
+        assert finite_count >= 4, (
+            f"Expected ≥4 finite (path, l) entries, got {finite_count}"
+        )
+
+    @pytest.mark.slow
+    def test_per_path_heterogeneity_replicate_weights_propagates_n_valid(self):
+        """Under replicate weights, every per-(path, l) replicate fit
+        appends ``n_valid`` to the shared accumulator and the final
+        ``survey_metadata.df_survey`` reflects ``min(n_valid) - 1``.
+
+        For BRR with ``n_replicates=8`` and well-formed data, the
+        expected df_survey is ``n_replicates - 1 = 7`` (every replicate
+        produces a finite SE on this DGP). Anti-regression: drives the
+        end-to-end `_replicate_n_valid_list` accumulator through per-
+        (path, l) heterogeneity calls.
+        """
+        from diff_diff.survey import SurveyDesign
+
+        n_replicates = 8
+        df = self._by_path_het_data_with_survey(n_replicates=n_replicates)
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=[f"rep_{r}" for r in range(n_replicates)],
+            replicate_method="BRR",
+        )
+        est = ChaisemartinDHaultfoeuille(drop_larger_lower=False, by_path=2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+                heterogeneity="het_x",
+                survey_design=sd,
+            )
+        assert res.path_heterogeneity_effects
+        assert res.survey_metadata is not None
+        # df_survey ≤ n_replicates - 1 per Rao-Wu replicate convention.
+        # With well-formed BRR weights and n_obs >= 3 per (path, l), we
+        # expect every replicate fit to produce finite SE → df = 7.
+        assert res.survey_metadata.df_survey is not None, (
+            "df_survey must be populated under replicate-weight survey"
+        )
+        assert res.survey_metadata.df_survey == n_replicates - 1, (
+            f"df_survey={res.survey_metadata.df_survey}, "
+            f"expected {n_replicates - 1}"
+        )
+        # Every populated (path, l) should have finite inference under
+        # replicate weights too.
+        for path, horizons in res.path_heterogeneity_effects.items():
+            for l_h, vals in horizons.items():
+                if vals["n_obs"] >= 3:
+                    assert np.isfinite(vals["se"]), (
+                        f"path={path} l={l_h}: replicate SE non-finite"
+                    )
+
+    @pytest.mark.slow
+    def test_survey_design_plus_n_bootstrap_with_heterogeneity_still_raises(
+        self,
+    ):
+        """The existing ``by_path + survey_design + n_bootstrap > 0``
+        gate (PR #408) must still fire when ``heterogeneity`` is also
+        set. Anti-regression: confirms heterogeneity composition does
+        not accidentally re-route around the multiplier-bootstrap
+        gate.
+        """
+        from diff_diff.survey import SurveyDesign
+
+        df = self._by_path_het_data_with_survey()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=2, n_bootstrap=10, seed=1
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with pytest.raises(NotImplementedError, match="multiplier"):
+                est.fit(
+                    df,
+                    outcome="outcome",
+                    group="group",
+                    time="period",
+                    treatment="treatment",
+                    L_max=3,
+                    heterogeneity="het_x",
+                    survey_design=sd,
+                )
+
     # DataFrame integration
 
     def test_to_dataframe_by_path_includes_heterogeneity_columns(self):
