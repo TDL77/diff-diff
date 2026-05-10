@@ -996,7 +996,7 @@ Before finalizing, confirm you have run each of these audits on the diff:
      claim of correctness) or **P1** (missing assumption check).
    - **Tests**: a behavioral regression test exists for the claimed behavior.
      Missing test for shipped behavior is **P2** per the deferral rule
-     (per the Deferred Work Acceptance section above) — TODO.md tracking does
+     (per the Deferred Work Acceptance section below) — TODO.md tracking does
      NOT downgrade this.
    - **Public docstrings**: affected method/class docstrings mention the new
      behavior (parameters, return-shape additions, side effects). Missing is
