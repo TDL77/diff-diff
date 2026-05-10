@@ -270,7 +270,8 @@ def test_event_study_homogeneity_horizons_correct(event_study_report):
 
 def test_event_study_pretrends_fails_to_reject(event_study_report):
     """Section 4 narrative quotes the pre-trends p-value as 'close to
-    alpha = 0.05 but conclusive' (~0.07 from numbers.json). Use binary
+    alpha = 0.05 ... warrants scrutiny' (~0.07 from numbers.json) -
+    non-rejection is not a clean pass at this margin. Use binary
     fail-to-reject + a wide abs tolerance band - bootstrap p-values
     near alpha are the most sensitive to RNG path differences."""
     pj = event_study_report.pretrends_joint
