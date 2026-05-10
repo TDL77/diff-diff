@@ -1418,6 +1418,29 @@ class ChaisemartinDHaultfoeuilleResults:
                                 ce["p_value"],
                             )
                         )
+            # Per-path heterogeneity rows (under heterogeneity=col).
+            # Mirrors the global `_render_heterogeneity_section` block
+            # but scoped to this path. Skip silently when
+            # path_heterogeneity_effects is None or this path lacks an
+            # entry (e.g., when `heterogeneity` was not requested).
+            if (
+                self.path_heterogeneity_effects is not None
+                and path in self.path_heterogeneity_effects
+            ):
+                het_horizons = self.path_heterogeneity_effects[path]
+                if het_horizons:
+                    lines.append("  Heterogeneity Test (Section 1.5, partial):")
+                    for l_h in sorted(het_horizons.keys()):
+                        het = het_horizons[l_h]
+                        lines.append(
+                            _format_inference_row(
+                                f"  l={l_h}",
+                                het["beta"],
+                                het["se"],
+                                het["t_stat"],
+                                het["p_value"],
+                            )
+                        )
             # Per-path joint sup-t critical value (when populated).
             # Mirrors the OVERALL sup-t crit print at line ~1019.
             if self.path_sup_t_bands is not None and path in self.path_sup_t_bands:

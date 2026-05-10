@@ -10328,6 +10328,47 @@ class TestByPathHeterogeneity:
         positive_rows = out[out.horizon > 0]
         assert positive_rows["het_beta"].notna().any()
 
+    def test_per_path_heterogeneity_renders_in_summary(self):
+        """``summary()`` includes per-path heterogeneity sub-block.
+
+        Sibling-surface mirror of `_render_heterogeneity_section`
+        (global) and `path_cumulated_event_study` rendering. Anti-
+        regression: ensures `path_heterogeneity_effects` is not
+        silently omitted from the user-facing report.
+        """
+        df = _by_path_het_data()
+        est = ChaisemartinDHaultfoeuille(drop_larger_lower=False, by_path=2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        report = res.summary()
+        assert "Heterogeneity Test (Section 1.5, partial)" in report, (
+            "summary() must render the per-path heterogeneity sub-block"
+        )
+        # The header appears in BOTH the global and per-path blocks; check
+        # that at least one populated path's beta value is rendered. We
+        # use a small float comparison rather than a full string match
+        # because `_format_inference_row` formats with 4 decimal places.
+        assert res.path_heterogeneity_effects
+        rendered_any = False
+        for path, horizons in res.path_heterogeneity_effects.items():
+            for l_h, vals in horizons.items():
+                if not np.isfinite(vals["beta"]):
+                    continue
+                fragment = f"{vals['beta']:.4f}"
+                if fragment in report:
+                    rendered_any = True
+                    break
+            if rendered_any:
+                break
+        assert rendered_any, (
+            "summary() must contain at least one per-path heterogeneity "
+            "beta value rounded to 4 decimal places"
+        )
+
     # Edge cases
 
     def test_path_unobserved_under_heterogeneity_warns_omits(self):
