@@ -26,14 +26,16 @@ This tutorial picks up where T20 left off. We re-run the brand campaign on a pan
 
 ## 1. The Pre-test Battery
 
-de Chaisemartin et al. (2026) Section 4.2 lays out a four-step workflow for HAD identification:
+de Chaisemartin et al. (2026) Section 4.2 lays out a four-step pre-test workflow for HAD identification:
 
 1. **Step 1 - QUG support-infimum test (paper Theorem 4):** is the support of the dose distribution consistent with `d_lower = 0` (Design 1', `continuous_at_zero`, target = `WAS`)? Or is the support strictly above zero (Design 1, `continuous_near_d_lower`, target = `WAS_d_lower`)? The two designs identify different estimands; getting this right matters.
 2. **Step 2 - Parallel pre-trends (paper Assumption 7):** does the differenced outcome behave the same way across dose groups in the *pre-treatment* periods? Same identifying logic as classic DiD.
 3. **Step 3 - Linearity / homogeneity (paper Assumption 8):** is `E[dY | D]` linear in `D`, so that the WAS reading reflects the average per-dose marginal effect rather than masking heterogeneity bias?
-4. **Step 4 - Boundary continuity (paper Assumptions 5, 6):** local-linearity of the dose-response near the boundary `d_lower`. **Non-testable**; argued from domain knowledge.
+4. **Step 4 - Decision rule:** if Steps 1-3 all fail to reject, TWFE may be used to estimate the treatment effect (paper Section 4.3).
 
 The library bundles the testable steps into one entry point: `did_had_pretest_workflow`. It dispatches to a two-period implementation (steps 1 + 3 only - step 2 needs at least two pre-periods) or a multi-period implementation (steps 1 + 2 + 3 jointly). The Yatchew-HR test from Step 3 is also exposed standalone with two null modes; we exercise both in the side panel.
+
+**Non-testable identification caveat (separate from the four-step workflow).** Identification of the WAS estimand under Design 1' (`continuous_at_zero`, target = `WAS`) requires **Assumption 3** (uniform continuity of `d -> Y_2(d)` at zero, holds if the dose-response is Lipschitz; not testable). The Design 1 paths (`continuous_near_d_lower` / `mass_point`, target = `WAS_d_lower`) instead need **Assumption 5** (sign identification) or **Assumption 6** (`WAS_d_lower` point identification) - that is the caveat T20's tutorial flagged because T20's panel was Design 1. T21's panel resolves to Design 1' (see Section 2 + Section 3), so the relevant non-testable caveat here is Assumption 3, NOT Assumptions 5/6. The library reflects this: it emits a UserWarning about Assumption 5/6 on Design 1 fits and does not emit it on `continuous_at_zero` (Design 1') fits.
 
 ## 2. The Panel
 
@@ -260,7 +262,7 @@ homogeneity_joint populated? True
 
 **Reading the event-study verdict.** Now the verdict reads `"QUG, joint pre-trends, and joint linearity diagnostics fail-to-reject (TWFE admissible under Section 4 assumptions)"`. The `"deferred"` caveat from the overall path is gone because the joint pre-trends and joint homogeneity diagnostics now ran. The structural fields confirm: `pretrends_joint` and `homogeneity_joint` are both populated.
 
-A note on the verdict's "TWFE admissible" language. This is the workflow's classifier output when none of the three testable diagnostics rejects at the configured `alpha = 0.05`. That is non-rejection evidence under the diagnostics' finite-sample power and specification, not a proof that the identifying assumptions hold. Step 4 (boundary continuity, paper Assumptions 5 / 6) remains non-testable from data and is not covered by any of the three diagnostics here.
+A note on the verdict's "TWFE admissible" language. This is the workflow's classifier output when none of the three testable diagnostics rejects at the configured `alpha = 0.05` (paper Step 4 decision rule). That is non-rejection evidence under the diagnostics' finite-sample power and specification, not proof that the identifying assumptions hold. The non-testable Design 1' identification caveat (Assumption 3 / boundary regularity at zero, see Section 1) sits alongside this and is not covered by any of the three diagnostics.
 
 The joint pre-trends test runs over `n_horizons = 3` (pre-periods 1, 2, 3, with week 4 reserved as the base period). The joint homogeneity test runs over `n_horizons = 4` (post-periods 5, 6, 7, 8). Let's inspect the per-horizon detail.
 
@@ -333,7 +335,7 @@ The pre-trends p-value (~0.07) sits close to the conventional alpha = 0.05 thres
 
 The joint homogeneity p-value (~0.76) is comfortably far from rejection. The diagnostic does not flag heterogeneity bias on the dose dimension across the four post-launch horizons.
 
-Together with QUG (Step 1's design decision) and joint linearity (Step 3), the workflow has now run all three testable steps and none reject at alpha = 0.05. That is the workflow's strongest non-rejection evidence; it is not proof that the identifying assumptions hold. Step 4 (boundary continuity, Assumptions 5 / 6) remains non-testable from data and is argued from domain knowledge, as in T20.
+Together with QUG (Step 1's design decision) and joint linearity (Step 3), the workflow has now run all three testable steps and none reject at alpha = 0.05. By paper Step 4 (the decision rule), TWFE may then be used. That is the workflow's strongest non-rejection evidence; it is not proof that the identifying assumptions hold. The non-testable Design 1' identification caveat (Assumption 3 / boundary regularity at zero) remains and is argued from domain knowledge.
 
 ## 5. Side Panel: Yatchew-HR Null Modes
 
@@ -417,9 +419,9 @@ Pre-test results travel awkwardly to non-technical audiences. The template below
 > - **Step 2 (parallel pre-trends, Assumption 7):** the joint Stute pre-trends test does not reject (joint p approximately 0.07 across the three pre-period horizons). The p-value is close to alpha = 0.05, so the non-rejection here is not by a wide margin - in a high-stakes deployment we would inspect the per-horizon contributions (`per_horizon_stats`) and consider Pierce-Schott-style linear-trend detrending.
 > - **Step 3 (linearity, Assumption 8):** joint Stute homogeneity does not reject (joint p approximately 0.76 across the four post-launch horizons). The diagnostic does not flag heterogeneity bias on the dose dimension under the test's specification.
 >
-> **Non-testable from data (Step 4, paper Assumptions 5 / 6, boundary continuity):** local-linearity of the dose-response near `d_lower`. Argued from domain knowledge - is there reason to believe the marginal effect of an additional $1K of regional spend is roughly constant across the dose range? In our case yes, by DGP construction; in a real analysis we would justify this from prior knowledge of the channel's response shape.
+> **Non-testable from data (Design 1' identification, paper Assumption 3 / boundary regularity at zero):** uniform continuity of the dose-response `d -> Y_2(d)` at zero. Argued from domain knowledge - is there reason to believe outcomes are continuous in spend at the lower-dose boundary, with no extensive-margin discontinuity at $0? In our case yes, by DGP construction. (Note: this is the Design 1' caveat. T20's panel was Design 1, where the corresponding non-testable caveats are Assumptions 5/6 - the library actually emits a UserWarning surfacing those on Design 1 fits but stays silent on Design 1' fits like ours.)
 >
-> **Bottom line:** the workflow's three testable diagnostics do not flag a violation. Carrying the headline per-$1K lift forward should be paired with the standard caveats: finite-sample power of the diagnostics, the test specifications themselves, and Step 4 (boundary continuity, non-testable from data). None of these are settled by non-rejection of the pre-tests.
+> **Bottom line:** the workflow's three testable diagnostics do not flag a violation, so by paper Step 4 (decision rule) TWFE may be used. Carrying the headline per-$1K lift forward should be paired with the standard caveats: finite-sample power of the diagnostics, the test specifications themselves, and the non-testable Design 1' caveat (Assumption 3 / boundary regularity at zero). None of these are settled by non-rejection of the pre-tests.
 
 ## 7. Extensions
 
@@ -442,7 +444,7 @@ See the [`HeterogeneousAdoptionDiD` API reference](../api/had.html) and the [`HA
 - HAD's pre-test workflow `did_had_pretest_workflow` bundles paper Section 4.2 Steps 1 (QUG support infimum), 2 (joint Stute pre-trends - event-study path only), and 3 (Stute / Yatchew-HR linearity, joint variant on event-study path).
 - The two-period (`aggregate="overall"`) path runs Steps 1 + 3 only - it cannot run Step 2 because a single pre-period structurally has nothing to test against. The verdict says so verbatim: "Assumption 7 pre-trends test NOT run".
 - Upgrade to the multi-period (`aggregate="event_study"`) path to add the joint Stute pre-trends and joint homogeneity diagnostics. The verdict then reads "TWFE admissible under Section 4 assumptions" when none of the three testable diagnostics rejects - that is non-rejection evidence under finite-sample power and test specification, not proof.
-- Step 4 (paper Assumptions 5 / 6, boundary continuity) is **non-testable** from data - argue from domain knowledge.
+- Paper Step 4 is the **decision rule** (if Steps 1-3 don't reject, use TWFE), not a non-testable assumption. The non-testable identification caveat is design-path-specific: **Assumption 3** (boundary regularity at zero) for `continuous_at_zero` (Design 1', T21), or **Assumptions 5/6** for the Design 1 paths (`continuous_near_d_lower` / `mass_point`, T20).
 - The Yatchew-HR test exposes two null modes: `null="linearity"` (paper Theorem 7, default; what the workflow calls under the hood) and `null="mean_independence"` (Phase 4 R-parity with R `YatchewTest::yatchew_test(order=0)`, useful on placebo pre-period data).
 - QUG fail-to-reject means the data are statistically consistent with `d_lower = 0`; it does not prove the true support starts at zero. The QUG test and HAD's `design="auto"` selector are independent rules: QUG is a statistical test on `H0: d_lower = 0`; `design="auto"` calls `_detect_design()` which uses a min/median heuristic on the dose vector. Both pointed to `continuous_at_zero` on this panel; finite-sample uncertainty in either decision is a remaining caveat.
 - Bootstrap p-values are RNG-dependent. The drift test for this notebook lives in `tests/test_t21_had_pretest_workflow_drift.py` and uses tolerance bands per backend (Rust vs pure-Python).
