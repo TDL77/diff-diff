@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: TwoStageDiDResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -27,9 +26,17 @@
    .. autosummary::
    
       ~TwoStageDiDResults.alpha
+      ~TwoStageDiDResults.anticipation
+      ~TwoStageDiDResults.att
       ~TwoStageDiDResults.bootstrap_results
+      ~TwoStageDiDResults.coef_var
+      ~TwoStageDiDResults.conf_int
       ~TwoStageDiDResults.is_significant
+      ~TwoStageDiDResults.p_value
+      ~TwoStageDiDResults.se
       ~TwoStageDiDResults.significance_stars
+      ~TwoStageDiDResults.survey_metadata
+      ~TwoStageDiDResults.t_stat
       ~TwoStageDiDResults.treatment_effects
       ~TwoStageDiDResults.overall_att
       ~TwoStageDiDResults.overall_se

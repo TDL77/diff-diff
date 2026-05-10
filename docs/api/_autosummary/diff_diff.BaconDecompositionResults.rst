@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: BaconDecompositionResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -30,6 +29,7 @@
    
       ~BaconDecompositionResults.decomposition_error
       ~BaconDecompositionResults.n_obs
+      ~BaconDecompositionResults.survey_metadata
       ~BaconDecompositionResults.twfe_estimate
       ~BaconDecompositionResults.comparisons
       ~BaconDecompositionResults.total_weight_treated_vs_never

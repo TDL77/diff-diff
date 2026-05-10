@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: DifferenceInDifferences
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 

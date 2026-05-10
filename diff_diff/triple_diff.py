@@ -355,11 +355,13 @@ class TripleDifference:
 
     Estimates the Average Treatment effect on the Treated (ATT) when treatment
     requires satisfying two criteria: belonging to a treated group AND being
-    in an eligible partition of the population.
+    in an eligible partition of the population. The DDD design was popularized
+    by Gruber (1994) [2]_.
 
-    This implementation follows Ortiz-Villavicencio & Sant'Anna (2025), which
-    shows that naive DDD implementations (difference of two DiDs, three-way
-    fixed effects) are invalid when covariates are needed for identification.
+    This implementation follows Ortiz-Villavicencio & Sant'Anna (2025) [1]_,
+    which shows that naive DDD implementations (difference of two DiDs,
+    three-way fixed effects) are invalid when covariates are needed for
+    identification.
 
     Parameters
     ----------

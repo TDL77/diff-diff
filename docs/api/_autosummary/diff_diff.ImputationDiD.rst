@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: ImputationDiD
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -23,5 +22,16 @@
    
 
    
+   
+   .. rubric:: Attributes
+
+   .. autosummary::
+   
+      ~ImputationDiD.n_bootstrap
+      ~ImputationDiD.bootstrap_weights
+      ~ImputationDiD.alpha
+      ~ImputationDiD.seed
+      ~ImputationDiD.anticipation
+      ~ImputationDiD.horizon_max
    
    

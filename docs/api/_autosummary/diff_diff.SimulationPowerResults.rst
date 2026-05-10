@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: SimulationPowerResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -28,7 +27,12 @@
 
    .. autosummary::
    
+      ~SimulationPowerResults.effective_n_units
+      ~SimulationPowerResults.mean_deff
+      ~SimulationPowerResults.mean_icc_realized
+      ~SimulationPowerResults.n_simulation_failures
       ~SimulationPowerResults.simulation_results
+      ~SimulationPowerResults.survey_config
       ~SimulationPowerResults.power
       ~SimulationPowerResults.power_se
       ~SimulationPowerResults.power_ci

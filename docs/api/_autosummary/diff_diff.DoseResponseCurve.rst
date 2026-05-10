@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: DoseResponseCurve
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -24,6 +23,7 @@
 
    .. autosummary::
    
+      ~DoseResponseCurve.df_survey
       ~DoseResponseCurve.n_bootstrap
       ~DoseResponseCurve.p_value
       ~DoseResponseCurve.dose_grid

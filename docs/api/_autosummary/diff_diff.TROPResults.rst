@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: TROPResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -32,11 +31,13 @@
    
       ~TROPResults.alpha
       ~TROPResults.bootstrap_distribution
+      ~TROPResults.coef_var
       ~TROPResults.is_significant
       ~TROPResults.n_bootstrap
       ~TROPResults.n_post_periods
       ~TROPResults.n_pre_periods
       ~TROPResults.significance_stars
+      ~TROPResults.survey_metadata
       ~TROPResults.att
       ~TROPResults.se
       ~TROPResults.t_stat

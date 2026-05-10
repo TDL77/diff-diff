@@ -937,15 +937,3 @@ Known Differences
    Point estimates and unit/time weights are numerically identical since both
    implementations use the same Frank-Wolfe optimizer.
 
-References
-----------
-
-.. [CS2021] Callaway, B., & Sant'Anna, P. H. (2021). Difference-in-Differences
-   with multiple time periods. *Journal of Econometrics*, 225(2), 200-230.
-
-.. [AHIW2021] Arkhangelsky, D., Athey, S., Hirshberg, D. A., Imbens, G. W.,
-   & Wager, S. (2021). Synthetic Difference-in-Differences. *American Economic
-   Review*, 111(12), 4088-4118.
-
-.. [RR2023] Rambachan, A., & Roth, J. (2023). A More Credible Approach to
-   Parallel Trends. *Review of Economic Studies*, 90(5), 2555-2591.

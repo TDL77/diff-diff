@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: SABootstrapResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 

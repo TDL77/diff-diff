@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: PlaceboTestResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 

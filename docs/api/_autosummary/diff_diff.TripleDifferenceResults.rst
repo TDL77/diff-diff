@@ -4,16 +4,16 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: TripleDifferenceResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
    .. autosummary::
    
       ~TripleDifferenceResults.__init__
+      ~TripleDifferenceResults.epv_summary
       ~TripleDifferenceResults.print_summary
       ~TripleDifferenceResults.summary
       ~TripleDifferenceResults.to_dataframe
@@ -29,14 +29,18 @@
    
       ~TripleDifferenceResults.alpha
       ~TripleDifferenceResults.covariate_balance
+      ~TripleDifferenceResults.epv_diagnostics
+      ~TripleDifferenceResults.epv_threshold
       ~TripleDifferenceResults.group_means
       ~TripleDifferenceResults.inference_method
       ~TripleDifferenceResults.is_significant
       ~TripleDifferenceResults.n_bootstrap
       ~TripleDifferenceResults.n_clusters
+      ~TripleDifferenceResults.pscore_fallback
       ~TripleDifferenceResults.pscore_stats
       ~TripleDifferenceResults.r_squared
       ~TripleDifferenceResults.significance_stars
+      ~TripleDifferenceResults.survey_metadata
       ~TripleDifferenceResults.att
       ~TripleDifferenceResults.se
       ~TripleDifferenceResults.t_stat

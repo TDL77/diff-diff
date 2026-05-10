@@ -79,6 +79,8 @@ Quick Links
 
    tutorials/17_brand_awareness_survey
    tutorials/18_geo_experiments
+   tutorials/19_dcdh_marketing_pulse
+   tutorials/20_had_brand_campaign
 
 .. toctree::
    :maxdepth: 1

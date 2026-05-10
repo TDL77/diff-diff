@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: SunAbraham
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 

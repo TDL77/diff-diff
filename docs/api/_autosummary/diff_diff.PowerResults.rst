@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: PowerResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -27,6 +26,7 @@
 
    .. autosummary::
    
+      ~PowerResults.deff
       ~PowerResults.design
       ~PowerResults.rho
       ~PowerResults.power

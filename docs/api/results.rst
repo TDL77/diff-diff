@@ -24,7 +24,7 @@ Results from basic DifferenceInDifferences estimation.
       ~DiDResults.se
       ~DiDResults.t_stat
       ~DiDResults.p_value
-      ~DiDResults.ci
+      ~DiDResults.conf_int
       ~DiDResults.n_obs
       ~DiDResults.is_significant
       ~DiDResults.significance_stars

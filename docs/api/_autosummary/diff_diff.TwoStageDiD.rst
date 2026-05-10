@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: TwoStageDiD
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -23,5 +22,15 @@
    
 
    
+   
+   .. rubric:: Attributes
+
+   .. autosummary::
+   
+      ~TwoStageDiD.n_bootstrap
+      ~TwoStageDiD.bootstrap_weights
+      ~TwoStageDiD.alpha
+      ~TwoStageDiD.seed
+      ~TwoStageDiD.horizon_max
    
    

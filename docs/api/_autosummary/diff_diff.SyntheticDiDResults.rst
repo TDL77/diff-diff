@@ -4,19 +4,22 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: SyntheticDiDResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
    .. autosummary::
    
       ~SyntheticDiDResults.__init__
+      ~SyntheticDiDResults.get_loo_effects_df
       ~SyntheticDiDResults.get_time_weights_df
       ~SyntheticDiDResults.get_unit_weights_df
+      ~SyntheticDiDResults.get_weight_concentration
+      ~SyntheticDiDResults.in_time_placebo
       ~SyntheticDiDResults.print_summary
+      ~SyntheticDiDResults.sensitivity_to_zeta_omega
       ~SyntheticDiDResults.summary
       ~SyntheticDiDResults.to_dataframe
       ~SyntheticDiDResults.to_dict
@@ -30,12 +33,19 @@
    .. autosummary::
    
       ~SyntheticDiDResults.alpha
+      ~SyntheticDiDResults.coef_var
       ~SyntheticDiDResults.is_significant
       ~SyntheticDiDResults.n_bootstrap
       ~SyntheticDiDResults.noise_level
       ~SyntheticDiDResults.placebo_effects
       ~SyntheticDiDResults.pre_treatment_fit
       ~SyntheticDiDResults.significance_stars
+      ~SyntheticDiDResults.survey_metadata
+      ~SyntheticDiDResults.synthetic_post_trajectory
+      ~SyntheticDiDResults.synthetic_pre_trajectory
+      ~SyntheticDiDResults.time_weights_array
+      ~SyntheticDiDResults.treated_post_trajectory
+      ~SyntheticDiDResults.treated_pre_trajectory
       ~SyntheticDiDResults.variance_method
       ~SyntheticDiDResults.zeta_lambda
       ~SyntheticDiDResults.zeta_omega

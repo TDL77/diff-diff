@@ -50,7 +50,7 @@ StackedDiDResults
 
 Results container for Stacked DiD estimation.
 
-.. autoclass:: diff_diff.stacked_did.StackedDiDResults
+.. autoclass:: diff_diff.StackedDiDResults
    :no-index:
    :members:
    :undoc-members:
@@ -68,6 +68,7 @@ Convenience Function
 --------------------
 
 .. autofunction:: diff_diff.stacked_did
+   :no-index:
 
 Example Usage
 -------------

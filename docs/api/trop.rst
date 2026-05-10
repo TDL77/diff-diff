@@ -52,7 +52,7 @@ TROPResults
 
 Results container for TROP estimation.
 
-.. autoclass:: diff_diff.trop.TROPResults
+.. autoclass:: diff_diff.TROPResults
    :no-index:
    :members:
    :undoc-members:
@@ -74,6 +74,7 @@ Convenience Function
 --------------------
 
 .. autofunction:: diff_diff.trop
+   :no-index:
 
 Tuning Parameters
 -----------------

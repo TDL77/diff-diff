@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: EfficientDiD
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -16,6 +15,7 @@
       ~EfficientDiD.__init__
       ~EfficientDiD.fit
       ~EfficientDiD.get_params
+      ~EfficientDiD.hausman_pretest
       ~EfficientDiD.print_summary
       ~EfficientDiD.set_params
       ~EfficientDiD.summary

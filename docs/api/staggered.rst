@@ -48,7 +48,6 @@ Results container for Callaway-Sant'Anna estimation.
 
    .. autosummary::
 
-      ~CallawaySantAnnaResults.aggregate
       ~CallawaySantAnnaResults.summary
       ~CallawaySantAnnaResults.to_dataframe
 

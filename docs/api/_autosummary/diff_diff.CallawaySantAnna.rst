@@ -4,16 +4,16 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: CallawaySantAnna
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
    .. autosummary::
    
       ~CallawaySantAnna.__init__
+      ~CallawaySantAnna.diagnose_propensity
       ~CallawaySantAnna.fit
       ~CallawaySantAnna.get_params
       ~CallawaySantAnna.print_summary

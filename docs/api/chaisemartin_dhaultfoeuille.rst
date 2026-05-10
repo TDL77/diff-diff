@@ -157,6 +157,7 @@ Convenience Function
 --------------------
 
 .. autofunction:: diff_diff.chaisemartin_dhaultfoeuille
+   :no-index:
 
 Standalone TWFE Decomposition Diagnostic
 ----------------------------------------
@@ -170,7 +171,7 @@ treatment effects that could flip the sign of the plain TWFE coefficient.
 
 .. autofunction:: diff_diff.twowayfeweights
 
-.. autoclass:: diff_diff.chaisemartin_dhaultfoeuille.TWFEWeightsResult
+.. autoclass:: diff_diff.TWFEWeightsResult
    :no-index:
    :members:
 

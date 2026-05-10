@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: MultiPeriodDiDResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -29,17 +28,29 @@
    .. autosummary::
    
       ~MultiPeriodDiDResults.alpha
+      ~MultiPeriodDiDResults.att
+      ~MultiPeriodDiDResults.cluster_name
+      ~MultiPeriodDiDResults.coef_var
       ~MultiPeriodDiDResults.coefficients
+      ~MultiPeriodDiDResults.conf_int
       ~MultiPeriodDiDResults.fitted_values
+      ~MultiPeriodDiDResults.inference_method
       ~MultiPeriodDiDResults.interaction_indices
       ~MultiPeriodDiDResults.is_significant
+      ~MultiPeriodDiDResults.n_bootstrap
+      ~MultiPeriodDiDResults.n_clusters
+      ~MultiPeriodDiDResults.p_value
       ~MultiPeriodDiDResults.post_period_effects
       ~MultiPeriodDiDResults.pre_period_effects
       ~MultiPeriodDiDResults.r_squared
       ~MultiPeriodDiDResults.reference_period
       ~MultiPeriodDiDResults.residuals
+      ~MultiPeriodDiDResults.se
       ~MultiPeriodDiDResults.significance_stars
+      ~MultiPeriodDiDResults.survey_metadata
+      ~MultiPeriodDiDResults.t_stat
       ~MultiPeriodDiDResults.vcov
+      ~MultiPeriodDiDResults.vcov_type
       ~MultiPeriodDiDResults.period_effects
       ~MultiPeriodDiDResults.avg_att
       ~MultiPeriodDiDResults.avg_se

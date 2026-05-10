@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: DiDResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -29,6 +28,8 @@
    
       ~DiDResults.alpha
       ~DiDResults.bootstrap_distribution
+      ~DiDResults.cluster_name
+      ~DiDResults.coef_var
       ~DiDResults.coefficients
       ~DiDResults.fitted_values
       ~DiDResults.inference_method
@@ -38,7 +39,9 @@
       ~DiDResults.r_squared
       ~DiDResults.residuals
       ~DiDResults.significance_stars
+      ~DiDResults.survey_metadata
       ~DiDResults.vcov
+      ~DiDResults.vcov_type
       ~DiDResults.att
       ~DiDResults.se
       ~DiDResults.t_stat

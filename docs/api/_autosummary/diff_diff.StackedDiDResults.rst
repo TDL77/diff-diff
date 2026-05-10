@@ -4,10 +4,9 @@
 .. currentmodule:: diff_diff
 
 .. autoclass:: StackedDiDResults
+   :no-members:
 
    
-   .. automethod:: __init__
-
    
    .. rubric:: Methods
 
@@ -27,7 +26,11 @@
    .. autosummary::
    
       ~StackedDiDResults.alpha
+      ~StackedDiDResults.anticipation
+      ~StackedDiDResults.att
       ~StackedDiDResults.clean_control
+      ~StackedDiDResults.coef_var
+      ~StackedDiDResults.conf_int
       ~StackedDiDResults.is_significant
       ~StackedDiDResults.kappa_post
       ~StackedDiDResults.kappa_pre
@@ -36,7 +39,11 @@
       ~StackedDiDResults.n_stacked_obs
       ~StackedDiDResults.n_sub_experiments
       ~StackedDiDResults.n_treated_units
+      ~StackedDiDResults.p_value
+      ~StackedDiDResults.se
       ~StackedDiDResults.significance_stars
+      ~StackedDiDResults.survey_metadata
+      ~StackedDiDResults.t_stat
       ~StackedDiDResults.weighting
       ~StackedDiDResults.overall_att
       ~StackedDiDResults.overall_se
