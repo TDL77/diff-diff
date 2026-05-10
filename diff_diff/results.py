@@ -52,13 +52,15 @@ def _format_vcov_label(
     cluster_name: Optional[str],
     n_clusters: Optional[int],
     n_obs: Optional[int],
-    conley_cutoff_km: Optional[float] = None,
-    conley_kernel: Optional[str] = None,
 ) -> Optional[str]:
     """Compose a human-readable variance-family label for summary output.
 
     Returns None when vcov_type is not recognized so the caller can skip the
-    line silently (backward-compat).
+    line silently (backward-compat). vcov_type='conley' is intentionally
+    not labeled here: DifferenceInDifferences / MultiPeriodDiD / TwoWayFixedEffects
+    all reject vcov_type='conley' at fit-time (Phase 1 supports cross-sectional
+    Conley only via direct compute_robust_vcov / LinearRegression), so a
+    Conley label cannot be reached on these result classes.
     """
     if vcov_type == "classical":
         return "Classical OLS SEs (non-robust)"
@@ -75,11 +77,6 @@ def _format_vcov_label(
             return f"CR2 Bell-McCaffrey cluster-robust at {cluster_name}{suffix}"
         suffix = f", n={n_obs}" if n_obs else ""
         return f"HC2 + Bell-McCaffrey DOF (one-way{suffix})"
-    if vcov_type == "conley":
-        kernel_str = conley_kernel or "bartlett"
-        if conley_cutoff_km is not None:
-            return f"Conley spatial HAC ({kernel_str}, cutoff={conley_cutoff_km:.1f}km)"
-        return f"Conley spatial HAC ({kernel_str})"
     return None
 
 
@@ -132,14 +129,15 @@ class DiDResults:
     bootstrap_distribution: Optional[np.ndarray] = field(default=None, repr=False)
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None)
-    # Variance-covariance family: "classical" | "hc1" | "hc2" | "hc2_bm" | "conley".
+    # Variance-covariance family: "classical" | "hc1" | "hc2" | "hc2_bm".
     # Plus cluster_name when cluster-robust. Used by summary() to label the
-    # SE family in the output.
+    # SE family in the output. vcov_type='conley' is rejected at fit-time
+    # for all panel estimators (DifferenceInDifferences/MultiPeriodDiD/TWFE)
+    # in Phase 1; the supported Conley path is direct LinearRegression /
+    # compute_robust_vcov on a cross-sectional design, which uses its own
+    # result class.
     vcov_type: Optional[str] = field(default=None)
     cluster_name: Optional[str] = field(default=None)
-    # Conley spatial-HAC parameters; populated only when vcov_type="conley".
-    conley_cutoff_km: Optional[float] = field(default=None)
-    conley_kernel: Optional[str] = field(default=None)
 
     def __repr__(self) -> str:
         """Concise string representation."""
@@ -221,8 +219,6 @@ class DiDResults:
                 cluster_name=self.cluster_name,
                 n_clusters=self.n_clusters,
                 n_obs=self.n_obs,
-                conley_cutoff_km=self.conley_cutoff_km,
-                conley_kernel=self.conley_kernel,
             )
             if label is not None:
                 lines.append(f"{'Variance:':<25} {label:>40}")
@@ -456,11 +452,11 @@ class MultiPeriodDiDResults:
     n_bootstrap: Optional[int] = field(default=None)
     n_clusters: Optional[int] = field(default=None)
     # Variance-covariance family and cluster column for summary() labeling.
+    # vcov_type='conley' is rejected at fit-time for MultiPeriodDiD (Phase 1
+    # supports cross-sectional Conley only via direct compute_robust_vcov);
+    # see _format_vcov_label.
     vcov_type: Optional[str] = field(default=None)
     cluster_name: Optional[str] = field(default=None)
-    # Conley spatial-HAC parameters; populated only when vcov_type="conley".
-    conley_cutoff_km: Optional[float] = field(default=None)
-    conley_kernel: Optional[str] = field(default=None)
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property
@@ -563,8 +559,6 @@ class MultiPeriodDiDResults:
                 cluster_name=self.cluster_name,
                 n_clusters=self.n_clusters,
                 n_obs=self.n_obs,
-                conley_cutoff_km=self.conley_cutoff_km,
-                conley_kernel=self.conley_kernel,
             )
             if label is not None:
                 lines.append(f"{'Variance:':<25} {label:>50}")

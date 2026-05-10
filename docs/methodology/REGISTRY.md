@@ -2928,15 +2928,26 @@ should be a deliberate user choice.
 - Colella, F., Lalive, R., Sakalli, S. O., & Thoenig, M. (2019). Inference with Arbitrary Clustering. IZA DP No. 12584. Stata `acreg` reference implementation; cited as the parallel canonical implementation in the Stata ecosystem (not parity-tested here).
 
 **Scope:** Cross-sectional spatial heteroskedasticity-and-autocorrelation-consistent
-standard errors for OLS / TWFE when residuals are spatially correlated. Extends
+standard errors for OLS when residuals are spatially correlated. Extends
 White (1980) HC0 by allowing pairwise correlation that decays with geographic
-distance. Available on `DifferenceInDifferences`, `TwoWayFixedEffects`,
-`MultiPeriodDiD` via `vcov_type="conley"` plus `conley_coords`,
-`conley_cutoff_km`, `conley_metric`, `conley_kernel`. `SyntheticDiD` is
-explicitly excluded (it uses bootstrap/jackknife/placebo variance, not the
-analytical sandwich); `SyntheticDiD(vcov_type="conley")` raises `TypeError`.
-Phase 1: cross-sectional only; Phase 2 will add the time dimension
-(Driscoll-Kraay) and a sparse k-d-tree fast path.
+distance. Phase 1 supports cross-sectional Conley only via direct
+`compute_robust_vcov` / `LinearRegression` on a single-period design — pass
+`vcov_type="conley"` plus `conley_coords` (n × 2 array) and `conley_cutoff_km`.
+
+**Panel estimators (`DifferenceInDifferences`, `MultiPeriodDiD`,
+`TwoWayFixedEffects`) reject `vcov_type="conley"` at fit-time** with
+`NotImplementedError`. They are intrinsically multi-period panel designs:
+applying cross-sectional Conley over (unit, time) rows would treat same-unit
+cross-time pairs as `d_ij = 0 → K = 1`, giving them full covariance weight as
+if they were one clustered pair, while cross-unit pairs are weighted only by
+spatial distance with no time-lag handling. That is neither documented Conley
+1999 nor a documented space-time HAC. Practitioners needing Conley with a
+panel design should pre-collapse to per-unit first-differences and call
+`compute_robust_vcov` directly. `SyntheticDiD` is also excluded (it uses
+bootstrap/jackknife/placebo variance, not the analytical sandwich);
+`SyntheticDiD(vcov_type="conley")` raises `TypeError`. Phase 2 will add the
+time dimension (Driscoll-Kraay product kernel) and a sparse k-d-tree fast
+path.
 
 **Variance estimator (Conley 1999 Eq 4.2 in pairwise-distance form, OLS specialization):**
 
@@ -2962,12 +2973,18 @@ project's no-silent-failures rule). Practitioners should rerun on a coarse cutof
 grid (e.g., 50, 100, 200, 500 km) and report the SE range, mirroring Conley's
 Section 5 robustness check.
 
-**Note (FWL composability):** Unlike `vcov_type="hc2"` and `vcov_type="hc2_bm"`,
-which depend on the full hat matrix and therefore reject TWFE within-transformation,
-Conley's meat depends only on scores `X_i·ε_i`. FWL preserves both the residualized
-`X` and the residuals `ε`, so the spatial-HAC sandwich computed on the
-within-transformed design equals the sandwich on the full-dummy design.
-`TwoWayFixedEffects(vcov_type="conley", ...)` is therefore supported.
+**Note (FWL composability, Phase 1 status):** Conley's meat depends only on
+scores `X_i·ε_i`, which FWL preserves under within-transformation. In
+principle this means the spatial-HAC sandwich composes with TWFE's within-
+transformation when applied to a single-period cross-sectional residualization
+(unlike `vcov_type="hc2"` / `vcov_type="hc2_bm"`, whose leverage corrections
+depend on the full hat matrix and reject TWFE outright). Phase 1 nevertheless
+rejects `TwoWayFixedEffects(vcov_type="conley")` because TWFE is intrinsically
+a multi-period panel estimator: the FWL-residualized design still has multiple
+rows per unit at distinct (unit, time) coordinates, and Phase 1's
+cross-sectional Conley does not handle the time dimension. Phase 2's
+space-time product kernel (Driscoll-Kraay) is the correct contract for
+panel TWFE.
 
 **Note (R conleyreg parity):** diff-diff's Conley implementation matches R
 `conleyreg` (Düsterhöft 2021, CRAN v0.1.9) to ≤ 1e-6 on three benchmark
@@ -2977,10 +2994,10 @@ constant is 6371.01 km (mean radius), matching
 `cd benchmarks/R && Rscript generate_conley_golden.R`.
 
 **Edge cases / restrictions:**
-- `vcov_type="conley"` + `cluster=` → `NotImplementedError` (combined kernel deferred to Phase 2)
-- `vcov_type="conley"` + `weights=` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up)
-- `vcov_type="conley"` + `absorb=` → `NotImplementedError` (only TWFE's two-FE within is supported in Phase 1; arbitrary `absorb` dimensions are deferred)
+- Panel estimators (`DifferenceInDifferences`, `MultiPeriodDiD`, `TwoWayFixedEffects`) `+ vcov_type="conley"` → `NotImplementedError` at fit-time. Phase 1 supports cross-sectional Conley only; Phase 2 will add the space-time product kernel
 - `SyntheticDiD(vcov_type="conley")` → `TypeError` (SyntheticDiD uses bootstrap/jackknife/placebo variance, not the analytical sandwich; tracked in TODO.md)
+- Cross-sectional `LinearRegression` / `compute_robust_vcov` `+ vcov_type="conley"` `+ cluster_ids=` → `NotImplementedError` (combined kernel deferred to Phase 2)
+- Cross-sectional `LinearRegression` / `compute_robust_vcov` `+ vcov_type="conley"` `+ weights=` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up)
 - `n > 20_000`: emits `UserWarning` about O(n²) distance-matrix memory
 - `conley_cutoff_km ≤ 0`, `nan`, or `inf`: rejected with `ValueError`. The HC0 reduction at h→0 is documented but not the sanctioned path; users should pass `vcov_type="hc1"`
 - Identical coordinates (`d_ij = 0` for `i ≠ j`): `K(0) = 1`, contributing the full HC0 weight per Conley 1999 page 19. Documented behavior; no warning

@@ -684,41 +684,47 @@ class TestConleyEstimatorIntegration:
 
         return pd.DataFrame(rows)
 
-    def test_did_basic_with_conley(self, two_period_panel):
-        """DifferenceInDifferences fits with vcov_type='conley' and produces
-        finite SE > 0."""
+    def test_did_with_conley_raises(self, two_period_panel):
+        """DifferenceInDifferences + vcov_type='conley' is rejected
+        unconditionally. DiD is intrinsically a two-period panel; cross-
+        sectional Conley over (unit, t=0) ∪ (unit, t=1) rows would treat
+        same-unit cross-time pairs as d_ij=0 -> K=1, mishandling the space-
+        time HAC. Phase 2 will add the space-time product kernel; Phase 1's
+        supported Conley path is direct compute_robust_vcov on a single-
+        period design. Closes CI reviewer P1 #1.
+        """
         from diff_diff import DifferenceInDifferences
 
         df = two_period_panel.copy()
-        df["did"] = df["treated"] * df["time"]
-        result = DifferenceInDifferences(
-            vcov_type="conley",
-            conley_coords=("lat", "lon"),
-            conley_cutoff_km=2000.0,
-        ).fit(df, outcome="y", treatment="treated", time="time")
-        assert np.isfinite(result.se) and result.se > 0
-        assert result.vcov_type == "conley"
-        assert result.conley_cutoff_km == 2000.0
-        assert result.conley_kernel == "bartlett"
+        with pytest.raises(NotImplementedError, match="DifferenceInDifferences.*conley"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+            ).fit(df, outcome="y", treatment="treated", time="time")
 
-    def test_did_summary_includes_conley_label(self, two_period_panel):
+    def test_did_with_conley_repeated_coords_raises(self, two_period_panel):
+        """Per CI reviewer P1 #1 recommendation: regression test where
+        coordinates repeat across multiple periods. The fit must reject
+        rather than silently produce wrong SE."""
         from diff_diff import DifferenceInDifferences
 
-        df = two_period_panel.copy()
-        result = DifferenceInDifferences(
-            vcov_type="conley",
-            conley_coords=("lat", "lon"),
-            conley_cutoff_km=1500.0,
-        ).fit(df, outcome="y", treatment="treated", time="time")
-        out = result.summary()
-        assert "Conley spatial HAC" in out
-        assert "1500" in out
-        assert "bartlett" in out
+        # Confirm the fixture has time-invariant coords per unit.
+        coord_var = two_period_panel.groupby("unit")[["lat", "lon"]].nunique()
+        assert (coord_var.values == 1).all(), "Fixture coords must be time-invariant"
 
-    def test_multi_period_did_with_conley(self, two_period_panel):
+        with pytest.raises(NotImplementedError, match="conley"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+            ).fit(two_period_panel, outcome="y", treatment="treated", time="time")
+
+    def test_multi_period_did_with_conley_raises(self):
+        """MultiPeriodDiD is intrinsically a panel estimator; vcov_type='conley'
+        is rejected end-to-end. Closes CI reviewer P1 #1."""
         from diff_diff import MultiPeriodDiD
 
-        # Build a 4-period panel for MultiPeriodDiD
         rng = np.random.default_rng(seed=13)
         n_units = 30
         rows = []
@@ -734,26 +740,28 @@ class TestConleyEstimatorIntegration:
         import pandas as pd
 
         df_mp = pd.DataFrame(rows)
-        result = MultiPeriodDiD(
-            vcov_type="conley",
-            conley_coords=("lat", "lon"),
-            conley_cutoff_km=2000.0,
-        ).fit(df_mp, outcome="y", treatment="treated", time="time", reference_period=1)
-        assert np.isfinite(result.avg_se) and result.avg_se > 0
-        assert result.vcov_type == "conley"
+        with pytest.raises(NotImplementedError, match="MultiPeriodDiD.*conley"):
+            MultiPeriodDiD(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+            ).fit(df_mp, outcome="y", treatment="treated", time="time", reference_period=1)
 
 
 class TestConleyTWFE:
-    """Step 5: TwoWayFixedEffects with Conley SE.
+    """TwoWayFixedEffects rejects vcov_type='conley' end-to-end.
 
-    TWFE composes with Conley because the meat depends only on scores X*epsilon,
-    both of which FWL preserves under within-transformation. This is UNLIKE
-    hc2/hc2_bm which depend on the full hat matrix and are rejected on TWFE.
+    TWFE is intrinsically a multi-period panel estimator. Cross-sectional
+    Conley over (unit, time) rows would treat same-unit cross-time pairs as
+    d_ij=0 -> K=1, mishandling the space-time HAC. The supported Phase 1
+    path for Conley with FE is to demean externally (single-period collapse)
+    and call compute_robust_vcov directly. Phase 2 will add a space-time
+    product kernel / Driscoll-Kraay estimator. Closes CI reviewer P1 #1.
     """
 
     @pytest.fixture
     def panel(self):
-        """Build a 2-period panel with geocoords for TWFE testing."""
+        """Build a 2-period panel with geocoords for TWFE rejection tests."""
         rng = np.random.default_rng(seed=17)
         n_units = 30
         rows = []
@@ -773,21 +781,20 @@ class TestConleyTWFE:
 
         return pd.DataFrame(rows)
 
-    def test_twfe_conley_runs(self, panel):
+    def test_twfe_conley_raises(self, panel):
+        """TWFE + vcov_type='conley' is rejected unconditionally."""
         from diff_diff import TwoWayFixedEffects
 
-        result = TwoWayFixedEffects(
-            vcov_type="conley",
-            conley_coords=("lat", "lon"),
-            conley_cutoff_km=2000.0,
-        ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
-        assert np.isfinite(result.se) and result.se > 0
-        assert result.vcov_type == "conley"
-        assert result.conley_cutoff_km == 2000.0
-        assert result.cluster_name is None  # auto-cluster disabled under conley
+        with pytest.raises(NotImplementedError, match="TwoWayFixedEffects.*conley"):
+            TwoWayFixedEffects(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+            ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
 
     def test_twfe_conley_with_explicit_cluster_raises(self, panel):
-        """User explicitly setting cluster=... with conley should raise."""
+        """User explicitly setting cluster=... with conley still raises (the
+        outer panel-rejection raise fires first)."""
         from diff_diff import TwoWayFixedEffects
 
         with pytest.raises(NotImplementedError, match="conley"):
@@ -799,14 +806,11 @@ class TestConleyTWFE:
             ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
 
     def test_twfe_conley_with_wild_bootstrap_raises(self, panel):
-        """Conley analytical spatial-HAC and wild cluster bootstrap are
-        different inference paths; combining them would either silently drop
-        one or fail downstream (TWFE auto-cluster is disabled under Conley,
-        so the bootstrap would receive cluster_ids=None). Reject early.
-        Closes CI reviewer P1 CQ2."""
+        """Conley + wild_bootstrap on TWFE raises (the outer panel-rejection
+        fires before the inference-mode check)."""
         from diff_diff import TwoWayFixedEffects
 
-        with pytest.raises(NotImplementedError, match="wild_bootstrap"):
+        with pytest.raises(NotImplementedError, match="conley"):
             TwoWayFixedEffects(
                 vcov_type="conley",
                 inference="wild_bootstrap",
@@ -814,29 +818,24 @@ class TestConleyTWFE:
                 conley_cutoff_km=2000.0,
             ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
 
-    def test_twfe_conley_FWL_invariance(self, panel):
-        """TWFE Conley SE matches DifferenceInDifferences with same kwargs
-        (verifies FWL composability — Conley meat survives within-transformation
-        because it depends only on scores X*epsilon)."""
-        from diff_diff import DifferenceInDifferences, TwoWayFixedEffects
+    def test_twfe_conley_repeated_coords_across_periods_raises(self, panel):
+        """Per CI reviewer P1 #1 recommendation: regression test where
+        coordinates repeat across multiple periods. Without the panel
+        rejection, cross-sectional Conley would silently produce wrong SE
+        because pairs (i, t1) <-> (i, t2) have d_ij = 0 -> K = 1."""
+        from diff_diff import TwoWayFixedEffects
 
-        twfe_result = TwoWayFixedEffects(
-            vcov_type="conley",
-            conley_coords=("lat", "lon"),
-            conley_cutoff_km=2000.0,
-        ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
-        # DiD equivalent: simple 2x2, no FE within-transformation
-        did_result = DifferenceInDifferences(
-            vcov_type="conley",
-            conley_coords=("lat", "lon"),
-            conley_cutoff_km=2000.0,
-        ).fit(panel, outcome="y", treatment="treated", time="time")
-        # ATT estimates should be similar (panel structure differs only in FE handling).
-        # We don't expect bit-equivalence — DiD without FE absorbs unit FE
-        # into the residuals while TWFE removes them. The key invariance is
-        # that the SE families are both finite and reasonable.
-        assert np.isfinite(twfe_result.se) and twfe_result.se > 0
-        assert np.isfinite(did_result.se) and did_result.se > 0
+        # Each unit's lat/lon is constant across t=0 and t=1 in the fixture.
+        # Confirm via grouping that coords are time-invariant.
+        coord_var = panel.groupby("unit")[["lat", "lon"]].nunique()
+        assert (coord_var.values == 1).all(), "Fixture coords must be time-invariant"
+
+        with pytest.raises(NotImplementedError, match="conley"):
+            TwoWayFixedEffects(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+            ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
 
 
 class TestConleyEstimatorValidation:
@@ -860,49 +859,44 @@ class TestConleyEstimatorValidation:
             }
         )
 
-    def test_did_conley_with_cluster_raises(self, df):
+    def test_did_conley_combinations_all_raise(self, df):
+        """Every DifferenceInDifferences + vcov_type='conley' combination
+        rejects unconditionally (DiD is intrinsically a two-period panel;
+        cross-sectional Conley is unsafe over (unit, time) rows). Asserts
+        the reject regardless of cluster=, absorb=, or missing coords/cutoff.
+        Closes CI reviewer P1 #1.
+        """
         from diff_diff import DifferenceInDifferences
 
-        with pytest.raises(NotImplementedError, match="cluster.*conley"):
+        # cluster + conley
+        with pytest.raises(NotImplementedError, match="conley"):
             DifferenceInDifferences(
                 vcov_type="conley",
                 cluster="stratum",
                 conley_coords=("lat", "lon"),
                 conley_cutoff_km=100.0,
             ).fit(df, outcome="y", treatment="treated", time="time")
-
-    def test_did_conley_without_coords_raises(self, df):
-        from diff_diff import DifferenceInDifferences
-
-        with pytest.raises(ValueError, match="conley_coords"):
+        # missing conley_coords
+        with pytest.raises(NotImplementedError, match="conley"):
             DifferenceInDifferences(
                 vcov_type="conley",
                 conley_cutoff_km=100.0,
             ).fit(df, outcome="y", treatment="treated", time="time")
-
-    def test_did_conley_without_cutoff_raises(self, df):
-        from diff_diff import DifferenceInDifferences
-
-        with pytest.raises(ValueError, match="conley_cutoff_km"):
+        # missing conley_cutoff_km
+        with pytest.raises(NotImplementedError, match="conley"):
             DifferenceInDifferences(
                 vcov_type="conley",
                 conley_coords=("lat", "lon"),
             ).fit(df, outcome="y", treatment="treated", time="time")
-
-    def test_did_conley_unknown_coord_column_raises(self, df):
-        from diff_diff import DifferenceInDifferences
-
-        with pytest.raises(ValueError, match="not in `data`"):
+        # unknown coord column (data validation skipped — outer reject fires first)
+        with pytest.raises(NotImplementedError, match="conley"):
             DifferenceInDifferences(
                 vcov_type="conley",
                 conley_coords=("missing_lat", "lon"),
                 conley_cutoff_km=100.0,
             ).fit(df, outcome="y", treatment="treated", time="time")
-
-    def test_did_conley_with_absorb_raises(self, df):
-        from diff_diff import DifferenceInDifferences
-
-        with pytest.raises(NotImplementedError, match="absorb.*conley"):
+        # absorb + conley
+        with pytest.raises(NotImplementedError, match="conley"):
             DifferenceInDifferences(
                 vcov_type="conley",
                 conley_coords=("lat", "lon"),

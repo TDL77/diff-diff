@@ -356,65 +356,29 @@ class DifferenceInDifferences:
                 "HC2/CR2-BM are computed on the full projection."
             )
 
-        # Reject Conley + absorb in Phase 1. Conley's meat depends only on
-        # scores X*epsilon, both of which FWL preserves under within-
-        # transformation, so the math composes cleanly for TWFE's two-FE
-        # design. But arbitrary absorb dimensions have not been verified
-        # empirically yet; conservatively reject and tell the user to use
-        # fixed_effects= dummies for the same FE design.
-        if absorb and self.vcov_type == "conley":
-            raise NotImplementedError(
-                "DifferenceInDifferences(absorb=..., vcov_type='conley') "
-                "is deferred to a follow-up. Conley + within-transformation "
-                "for arbitrary absorbed FE dimensions has not been verified; "
-                "use fixed_effects= dummies for an equivalent FE design "
-                "with the full projection, or drop absorb= for "
-                "cross-sectional Conley."
-            )
-
-        # Reject Conley + cluster (combined product kernel is Phase 2+) and
-        # Conley + survey_design (Bertanha-Imbens 2014 territory) early at
-        # the estimator level so the error message references the user-facing
-        # kwarg names rather than the internal cluster_ids/weights array.
+        # Reject vcov_type='conley' on DifferenceInDifferences entirely.
+        # DiD is intrinsically a two-period panel design (the validator
+        # above enforces time has both 0 and 1 values). Cross-sectional
+        # Conley over (unit, t=0) ∪ (unit, t=1) rows is methodologically
+        # wrong: same-unit cross-time pairs have d_ij = 0 -> K(0/h) = 1,
+        # giving them full covariance weight as if they were one clustered
+        # pair, while cross-unit pairs are weighted only by spatial
+        # distance with no time-lag handling. That is neither documented
+        # Conley 1999 nor a documented space-time HAC. Phase 1 supports
+        # cross-sectional Conley only via direct compute_robust_vcov on a
+        # single-period regression; Phase 2 will add a space-time product
+        # kernel / Driscoll-Kraay estimator.
         if self.vcov_type == "conley":
-            if self.cluster is not None:
-                raise NotImplementedError(
-                    f"DifferenceInDifferences(cluster={self.cluster!r}, "
-                    "vcov_type='conley') is deferred to Phase 2 (combined "
-                    "product kernel). Drop cluster= for cross-sectional "
-                    "Conley."
-                )
-            if survey_design is not None:
-                raise NotImplementedError(
-                    "DifferenceInDifferences(survey_design=..., "
-                    "vcov_type='conley') is deferred to Phase 2+ "
-                    "(Bertanha-Imbens 2014). Drop survey_design= for "
-                    "cross-sectional Conley."
-                )
-            if self.conley_coords is None:
-                raise ValueError(
-                    "vcov_type='conley' requires conley_coords=(<lat_col>, "
-                    "<lon_col>) tuple of column names in the data."
-                )
-            if self.conley_cutoff_km is None:
-                raise ValueError(
-                    "vcov_type='conley' requires conley_cutoff_km (positive "
-                    "finite bandwidth in km for haversine, or in coord units "
-                    "for euclidean)."
-                )
-            # Validate columns exist; the validator inside compute_robust_vcov
-            # will check NaN/range/etc on the array values themselves.
-            _coord_cols = list(self.conley_coords)
-            if len(_coord_cols) != 2:
-                raise ValueError(
-                    f"conley_coords must be a 2-tuple of column names; got "
-                    f"{self.conley_coords!r}."
-                )
-            for _col in _coord_cols:
-                if _col not in data.columns:
-                    raise ValueError(
-                        f"conley_coords references column {_col!r} which " f"is not in `data`."
-                    )
+            raise NotImplementedError(
+                "DifferenceInDifferences(vcov_type='conley') is deferred "
+                "to Phase 2 (space-time product kernel / Driscoll-Kraay). "
+                "Phase 1 supports cross-sectional Conley only via direct "
+                "compute_robust_vcov on a single-period design; "
+                "DifferenceInDifferences is intrinsically a two-period "
+                "panel — pre-collapse to per-unit first-differences and "
+                "call compute_robust_vcov directly, or wait for the "
+                "Phase 2 panel extension."
+            )
 
         if absorb:
             # FWL theorem: demean ALL regressors alongside outcome.
@@ -652,8 +616,6 @@ class DifferenceInDifferences:
             # stored `self.vcov_type`.
             vcov_type=_fit_vcov_type,
             cluster_name=self.cluster,
-            conley_cutoff_km=self.conley_cutoff_km if _fit_vcov_type == "conley" else None,
-            conley_kernel=self.conley_kernel if _fit_vcov_type == "conley" else None,
         )
 
         self._coefficients = coefficients
@@ -1437,41 +1399,18 @@ class MultiPeriodDiD(DifferenceInDifferences):
                 "FE design with the full projection, or drop absorb= for "
                 "cross-sectional Conley."
             )
+        # MultiPeriodDiD is intrinsically a multi-period panel estimator;
+        # cross-sectional Conley does not apply (same rationale as
+        # DifferenceInDifferences.fit's panel guard above). Phase 2 will
+        # add a documented space-time HAC.
         if self.vcov_type == "conley":
-            if self.cluster is not None:
-                raise NotImplementedError(
-                    f"MultiPeriodDiD(cluster={self.cluster!r}, "
-                    "vcov_type='conley') is deferred to Phase 2 (combined "
-                    "product kernel). Drop cluster= for cross-sectional "
-                    "Conley."
-                )
-            if survey_design is not None:
-                raise NotImplementedError(
-                    "MultiPeriodDiD(survey_design=..., vcov_type='conley') "
-                    "is deferred to Phase 2+ (Bertanha-Imbens 2014). Drop "
-                    "survey_design= for cross-sectional Conley."
-                )
-            if self.conley_coords is None:
-                raise ValueError(
-                    "vcov_type='conley' requires conley_coords=(<lat_col>, "
-                    "<lon_col>) tuple of column names in the data."
-                )
-            if self.conley_cutoff_km is None:
-                raise ValueError(
-                    "vcov_type='conley' requires conley_cutoff_km (positive " "finite bandwidth)."
-                )
-            _coord_cols_mp = list(self.conley_coords)
-            if len(_coord_cols_mp) != 2:
-                raise ValueError(
-                    f"conley_coords must be a 2-tuple of column names; got "
-                    f"{self.conley_coords!r}."
-                )
-            for _col in _coord_cols_mp:
-                if _col not in data.columns:
-                    raise ValueError(
-                        f"conley_coords references column {_col!r} which " f"is not in `data`."
-                    )
-
+            raise NotImplementedError(
+                "MultiPeriodDiD(vcov_type='conley') is deferred to Phase 2 "
+                "(space-time product kernel / Driscoll-Kraay). Phase 1 "
+                "supports cross-sectional Conley only via direct "
+                "compute_robust_vcov on a single-period design; "
+                "MultiPeriodDiD is intrinsically a multi-period panel."
+            )
         # Pre-compute non_ref_periods (needed for absorb demeaning)
         non_ref_periods = [p for p in all_periods if p != reference_period]
 
@@ -1917,8 +1856,6 @@ class MultiPeriodDiD(DifferenceInDifferences):
             n_clusters=(
                 len(np.unique(effective_cluster_ids)) if effective_cluster_ids is not None else None
             ),
-            conley_cutoff_km=self.conley_cutoff_km if _fit_vcov_type == "conley" else None,
-            conley_kernel=self.conley_kernel if _fit_vcov_type == "conley" else None,
         )
 
         self._coefficients = coefficients

@@ -124,7 +124,7 @@ Full guide: `diff_diff.get_llm_guide("practitioner")`.
 - [Honest DiD](https://diff-diff.readthedocs.io/en/stable/api/honest_did.html) - Rambachan & Roth (2023) sensitivity analysis: robust CI under PT violations, breakdown values
 - [Pre-Trends Power Analysis](https://diff-diff.readthedocs.io/en/stable/api/pretrends.html) - Roth (2022) minimum detectable violation and power curves
 - [Power Analysis](https://diff-diff.readthedocs.io/en/stable/api/power.html) - analytical and simulation-based MDE, sample size, power curves for study design
-- Conley spatial HAC SE (`vcov_type="conley"`) on DifferenceInDifferences/TwoWayFixedEffects/MultiPeriodDiD - Conley (1999) spatial-correlation-aware SEs with parity vs R `conleyreg`
+- Conley spatial HAC SE (`vcov_type="conley"`) on cross-sectional `LinearRegression` / `compute_robust_vcov` - Conley (1999) spatial-correlation-aware SEs with parity vs R `conleyreg`
 
 ## Survey Support
 

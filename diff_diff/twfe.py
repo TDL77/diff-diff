@@ -143,69 +143,24 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 "the full projection."
             )
 
-        # Conley + TWFE: Conley meat = S.T @ K @ S survives FWL because it
-        # depends only on scores X*epsilon. FWL preserves both the
-        # residualized X and the residuals epsilon, so spatial-HAC on the
-        # within-transformed design equals spatial-HAC on a full-dummy
-        # design — UNLIKE hc2/hc2_bm which need the hat matrix.
-        # However, TWFE auto-clusters at unit by default
-        # (twfe.py:205-216), and Conley + cluster is deferred to Phase 2
-        # (combined product kernel). When the user explicitly passes
-        # cluster=..., reject early here for a TWFE-specific message; the
-        # linalg validator's NotImplementedError fires later for non-TWFE
-        # call paths.
-        if self.vcov_type == "conley" and self.cluster is not None:
-            raise NotImplementedError(
-                f"TwoWayFixedEffects(cluster={self.cluster!r}, "
-                "vcov_type='conley') is deferred to Phase 2 (combined "
-                "product kernel). Drop cluster= for cross-sectional "
-                "Conley; the unit auto-cluster default is also disabled "
-                "when vcov_type='conley'."
-            )
-        # Conley + wild_bootstrap: Conley is an analytical spatial-HAC
-        # variance and wild cluster bootstrap is a different inference path
-        # that resamples residuals within clusters. There is no clean
-        # composition — the two methods target different things — and
-        # combining them would either silently drop one or fail downstream
-        # (TWFE auto-cluster is disabled under Conley, so the bootstrap
-        # would receive cluster_ids=None and fail with a non-targeted
-        # error in `wild_bootstrap_se`). Reject early.
-        if self.vcov_type == "conley" and self.inference == "wild_bootstrap":
-            raise NotImplementedError(
-                "TwoWayFixedEffects(vcov_type='conley', inference='wild_bootstrap') "
-                "is not supported: Conley is an analytical spatial-HAC variance and "
-                "wild cluster bootstrap is a different inference path. Use "
-                "inference='analytical' for Conley spatial HAC, or use "
-                "vcov_type='hc1' with inference='wild_bootstrap'."
-            )
+        # Reject Conley on TWFE entirely. TWFE is intrinsically a multi-
+        # period panel estimator; cross-sectional Conley does not apply
+        # (same rationale as DifferenceInDifferences.fit's panel guard:
+        # same-unit cross-time pairs have d_ij=0 -> K=1, which together
+        # with within-transformed residuals that sum to zero per unit
+        # produces an anti-correlated cancellation, not the documented
+        # cross-sectional Conley meat). Phase 1 supports Conley only via
+        # direct compute_robust_vcov on a single-period design; Phase 2
+        # will add a documented space-time HAC (Driscoll-Kraay product
+        # kernel + sparse k-d-tree fast path).
         if self.vcov_type == "conley":
-            if survey_design is not None:
-                raise NotImplementedError(
-                    "TwoWayFixedEffects(survey_design=..., "
-                    "vcov_type='conley') is deferred to Phase 2+ "
-                    "(Bertanha-Imbens 2014). Drop survey_design= for "
-                    "cross-sectional Conley."
-                )
-            if self.conley_coords is None:
-                raise ValueError(
-                    "vcov_type='conley' requires conley_coords=(<lat_col>, "
-                    "<lon_col>) tuple of column names in the data."
-                )
-            if self.conley_cutoff_km is None:
-                raise ValueError(
-                    "vcov_type='conley' requires conley_cutoff_km (positive " "finite bandwidth)."
-                )
-            _twfe_coord_cols = list(self.conley_coords)
-            if len(_twfe_coord_cols) != 2:
-                raise ValueError(
-                    f"conley_coords must be a 2-tuple of column names; got "
-                    f"{self.conley_coords!r}."
-                )
-            for _col in _twfe_coord_cols:
-                if _col not in data.columns:
-                    raise ValueError(
-                        f"conley_coords references column {_col!r} which " f"is not in `data`."
-                    )
+            raise NotImplementedError(
+                "TwoWayFixedEffects(vcov_type='conley') is deferred to "
+                "Phase 2 (space-time product kernel / Driscoll-Kraay). "
+                "Phase 1 supports cross-sectional Conley only via direct "
+                "compute_robust_vcov on a single-period design; "
+                "TwoWayFixedEffects is intrinsically a multi-period panel."
+            )
 
         # Check for staggered treatment timing and warn if detected
         self._check_staggered_treatment(data, treatment, time, unit)
@@ -581,8 +536,6 @@ class TwoWayFixedEffects(DifferenceInDifferences):
             # remapped hc1 under the legacy alias path, not self.vcov_type.
             vcov_type=_fit_vcov_type,
             cluster_name=_twfe_cluster_label,
-            conley_cutoff_km=self.conley_cutoff_km if _fit_vcov_type == "conley" else None,
-            conley_kernel=self.conley_kernel if _fit_vcov_type == "conley" else None,
         )
 
         self.is_fitted_ = True

@@ -3001,8 +3001,6 @@ class LinearRegression:
             and self.survey_design.uses_replicate_variance
         )
         if effective_df is not None and effective_df <= 0 and not _is_replicate:
-            import warnings
-
             warnings.warn(
                 f"Degrees of freedom is non-positive (df={effective_df}). "
                 "Using normal distribution instead of t-distribution for inference.",
