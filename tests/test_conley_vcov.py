@@ -798,6 +798,22 @@ class TestConleyTWFE:
                 conley_cutoff_km=2000.0,
             ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
 
+    def test_twfe_conley_with_wild_bootstrap_raises(self, panel):
+        """Conley analytical spatial-HAC and wild cluster bootstrap are
+        different inference paths; combining them would either silently drop
+        one or fail downstream (TWFE auto-cluster is disabled under Conley,
+        so the bootstrap would receive cluster_ids=None). Reject early.
+        Closes CI reviewer P1 CQ2."""
+        from diff_diff import TwoWayFixedEffects
+
+        with pytest.raises(NotImplementedError, match="wild_bootstrap"):
+            TwoWayFixedEffects(
+                vcov_type="conley",
+                inference="wild_bootstrap",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+            ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
+
     def test_twfe_conley_FWL_invariance(self, panel):
         """TWFE Conley SE matches DifferenceInDifferences with same kwargs
         (verifies FWL composability — Conley meat survives within-transformation
@@ -904,6 +920,52 @@ class TestConleyEstimatorValidation:
 
         with pytest.raises(TypeError, match="conley"):
             SyntheticDiD(conley_cutoff_km=100.0)  # type: ignore[call-arg]
+
+    def test_synthetic_did_set_params_conley_raises(self):
+        """SyntheticDiD.set_params(vcov_type='conley') must raise (mirrors
+        __init__'s contract — closes the silent-bypass gap CI reviewer flagged
+        as P1 CQ1)."""
+        from diff_diff import SyntheticDiD
+
+        est = SyntheticDiD()
+        # Snapshot pre-call state
+        before_variance = est.variance_method
+        before_n_boot = est.n_bootstrap
+        before_zeta = est.zeta_omega
+
+        with pytest.raises(TypeError, match="conley"):
+            est.set_params(vcov_type="conley")
+        # Verify nothing mutated
+        assert est.variance_method == before_variance
+        assert est.n_bootstrap == before_n_boot
+        assert est.zeta_omega == before_zeta
+
+    def test_synthetic_did_set_params_conley_kwarg_raises(self):
+        from diff_diff import SyntheticDiD
+
+        est = SyntheticDiD()
+        with pytest.raises(TypeError, match="conley"):
+            est.set_params(conley_cutoff_km=100.0)
+        # Verify the conley attr stays None (rejected before mutation)
+        assert getattr(est, "conley_cutoff_km", None) is None
+
+    def test_synthetic_did_get_params_includes_conley_keys(self):
+        """get_params() / set_params() round-trip must include the inherited
+        conley_* keys with None values for sklearn-style API consistency
+        (CI reviewer P2 CQ3)."""
+        from diff_diff import SyntheticDiD
+
+        est = SyntheticDiD(variance_method="placebo", n_bootstrap=10)
+        params = est.get_params()
+        assert "vcov_type" in params and params["vcov_type"] is None
+        assert "conley_coords" in params and params["conley_coords"] is None
+        assert "conley_cutoff_km" in params and params["conley_cutoff_km"] is None
+        assert "conley_metric" in params and params["conley_metric"] is None
+        assert "conley_kernel" in params and params["conley_kernel"] is None
+        # Round-trip: passing None values back into set_params is a no-op
+        est.set_params(**params)
+        assert est.variance_method == "placebo"
+        assert est.n_bootstrap == 10
 
 
 class TestConleySetParamsAtomicity:

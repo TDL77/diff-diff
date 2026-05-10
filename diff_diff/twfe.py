@@ -162,6 +162,22 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 "Conley; the unit auto-cluster default is also disabled "
                 "when vcov_type='conley'."
             )
+        # Conley + wild_bootstrap: Conley is an analytical spatial-HAC
+        # variance and wild cluster bootstrap is a different inference path
+        # that resamples residuals within clusters. There is no clean
+        # composition — the two methods target different things — and
+        # combining them would either silently drop one or fail downstream
+        # (TWFE auto-cluster is disabled under Conley, so the bootstrap
+        # would receive cluster_ids=None and fail with a non-targeted
+        # error in `wild_bootstrap_se`). Reject early.
+        if self.vcov_type == "conley" and self.inference == "wild_bootstrap":
+            raise NotImplementedError(
+                "TwoWayFixedEffects(vcov_type='conley', inference='wild_bootstrap') "
+                "is not supported: Conley is an analytical spatial-HAC variance and "
+                "wild cluster bootstrap is a different inference path. Use "
+                "inference='analytical' for Conley spatial HAC, or use "
+                "vcov_type='hc1' with inference='wild_bootstrap'."
+            )
         if self.vcov_type == "conley":
             if survey_design is not None:
                 raise NotImplementedError(
