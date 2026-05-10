@@ -15,12 +15,16 @@ update the prose or investigate the methodology shift before merge.
 
 T21 DGP differs from T20: dose distribution is `Uniform[$0.01K, $50K]`
 (was `[$5K, $50K]` in T20). The true support is strictly positive but very
-near zero, chosen so the QUG step fails-to-reject `H0: d_lower = 0` in this
-finite sample. That QUG outcome lets the workflow's `design="auto"` rule
-land on `continuous_at_zero` (a workflow decision based on the test, not a
-property of the true DGP), which in turn populates the verdict text with
-the load-bearing "Assumption 7 deferred" substring used for the upgrade-arc
-narrative. DGP and seed locked at `_scratch/t21_pretests/10_panel.py`.
+near zero. Two independent things follow from that small `D_(1)` and are
+exercised in this drift file: (a) the QUG step fails-to-reject
+`H0: d_lower = 0` in this finite sample, populating the workflow's verdict
+with the "Assumption 7 deferred" substring used for the upgrade-arc
+narrative; and (b) HAD's `design="auto"` selector - a separate min/median
+heuristic that does NOT consume the QUG p-value - independently lands on
+`continuous_at_zero` because `d.min() < 0.01 * median(|d|)` (per
+`_detect_design()` in `had.py`). Both checks point to the same
+identification path on this panel, but the rules are independent.
+DGP and seed locked at `_scratch/t21_pretests/10_panel.py`.
 Quoted numbers derived from `_scratch/t21_pretests/50_compose_narrative.py`.
 
 Bootstrap p-value pins use **abs tolerance bands >= 0.15** per
@@ -32,10 +36,12 @@ or `round(..., 4)` pins.
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pytest
 
-from diff_diff import did_had_pretest_workflow, generate_continuous_did_data, yatchew_hr_test
+from diff_diff import HAD, did_had_pretest_workflow, generate_continuous_did_data, yatchew_hr_test
 
 # Locked T21 DGP parameters (must stay in sync with the notebook).
 MAIN_SEED = 87
@@ -187,9 +193,10 @@ def test_overall_path_structural_anchors(overall_report):
 
 def test_overall_qug_fails_to_reject(overall_report):
     """Section 3 narrative claims QUG fails-to-reject H0: d_lower = 0
-    (data are statistically consistent with continuous_at_zero design;
-    HAD's design="auto" rule selects that path on this QUG outcome).
-    QUG is fully deterministic; pin exact rounded values."""
+    (data are statistically consistent with continuous_at_zero design).
+    QUG is fully deterministic; pin exact rounded values. The independent
+    HAD `design="auto"` selector decision is locked separately by
+    `test_had_design_auto_lands_on_continuous_at_zero`."""
     assert overall_report.qug.reject is False
     # T statistic = D_(1) / (D_(2) - D_(1)) is fully deterministic.
     assert round(overall_report.qug.t_stat, 2) == 3.86, overall_report.qug.t_stat
@@ -290,6 +297,28 @@ def test_event_study_homogeneity_fails_to_reject(event_study_report):
     assert hj is not None
     assert hj.reject is False
     assert hj.p_value > 0.50, hj.p_value
+
+
+def test_had_design_auto_lands_on_continuous_at_zero(two_period):
+    """Section 2 narrative claims HAD's `design="auto"` selector
+    independently lands on `continuous_at_zero` (target = `WAS`) on
+    this panel because `d.min() < 0.01 * median(|d|)`. This is a
+    separate decision rule from the QUG test (locked by
+    `test_overall_qug_fails_to_reject`); the two happen to agree on
+    this panel but the rules are independent. We fit HAD with
+    `design="auto"` here just to verify the prose."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        est = HAD(design="auto")
+        result = est.fit(
+            two_period,
+            outcome_col="weekly_visits",
+            dose_col="regional_spend_k",
+            time_col="period",
+            unit_col="dma_id",
+        )
+    assert result.design == "continuous_at_zero", result.design
+    assert result.target_parameter == "WAS", result.target_parameter
 
 
 def test_yatchew_side_panel_linearity_passes(yatchew_side_panel_inputs):
