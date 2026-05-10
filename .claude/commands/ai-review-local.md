@@ -397,7 +397,7 @@ Review passed with no findings. Suggested next steps:
 - /submit-pr — commit and open a pull request
 ```
 
-**For ⛔ or ⚠️ (P0/P1 findings)**:
+**For ⛔ or ⚠️ (P0/P1/P2 findings)**:
 ```
 Options:
 1. Enter plan mode to address findings (Recommended)
@@ -405,7 +405,7 @@ Options:
 3. Skip — I'll address these manually
 ```
 
-**For ✅ with P2/P3 findings only**:
+**For ✅ with P3 findings only**:
 ```
 Options:
 1. Address findings before submitting
@@ -414,8 +414,8 @@ Options:
 
 **If user chooses to address findings**: Parse the findings from the review output.
 The review context is already in the conversation. Start addressing the findings
-directly — for P0/P1 issues use `EnterPlanMode` for a structured approach; for P2/P3
-issues, fix them directly since they are minor.
+directly — for P0/P1/P2 issues use `EnterPlanMode` for a structured approach; for
+P3 issues, fix them directly since they are minor.
 
 After fixes are committed, the user re-runs `/ai-review-local` for a follow-up review.
 On re-review, the script automatically activates delta-diff mode (comparing only

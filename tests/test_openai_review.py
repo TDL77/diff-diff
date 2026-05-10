@@ -311,6 +311,63 @@ class TestAdaptReviewCriteria:
                     f"Surface '{surface}' missing in ci_mode={ci_mode}"
                 )
 
+    def test_no_tool_using_audit_claims_in_either_mode(self, review_mod):
+        """The adapted prompt (post-substitution) must NOT instruct the
+        single-shot reviewer to do tool-using audits anywhere — neither in the
+        Mandate (substituted) nor in the Rules section nor in Re-review Scope.
+        Both reviewers are now single-shot; references to 'pattern-wide greps'
+        or 'transitive deps' as required audits are misleading and were the
+        source of PR #415 R2 P1 (sibling-surface drift).
+        """
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        prompt_path = repo_root / ".github" / "codex" / "prompts" / "pr_review.md"
+        if not prompt_path.exists():
+            pytest.skip("pr_review.md not found")
+        source = prompt_path.read_text()
+        for ci_mode in (False, True):
+            adapted = review_mod._adapt_review_criteria(source, ci_mode=ci_mode)
+            # These tool-using-audit phrases must not appear ANYWHERE in the
+            # adapted prompt (Mandate, Rules, or Re-review Scope sections).
+            for phrase in (
+                "pattern-wide greps",
+                "Transitive workflow deps",
+                "transitive deps",
+                "Mandate above authorizes",
+            ):
+                assert phrase not in adapted, (
+                    f"Tool-using-audit phrase '{phrase}' leaked into "
+                    f"adapted prompt (ci_mode={ci_mode})"
+                )
+
+    def test_re_review_scope_uses_new_p2_blocking_rule(self, review_mod):
+        """Re-review Scope must mirror the tightened ✅ rule: P2 blocks ✅
+        even on re-review. Sibling-surface fix from PR #415 R2 P1."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        prompt_path = repo_root / ".github" / "codex" / "prompts" / "pr_review.md"
+        if not prompt_path.exists():
+            pytest.skip("pr_review.md not found")
+        source = prompt_path.read_text()
+        # The old wording said "✅ even if new P2/P3 items are noticed".
+        # The new wording must explicitly say P2 blocks. Check both source
+        # and adapted (post-substitution) since this section isn't substituted.
+        old_p2_carve_out = (
+            "If all previous P1+ findings are resolved, the assessment should "
+            "be ✅ even if new P2/P3 items are noticed"
+        )
+        assert old_p2_carve_out not in source, (
+            "Re-review Scope still has the old P2-carve-out wording; must be "
+            "tightened to match Assessment Criteria"
+        )
+        # New wording must say P2 blocks, in both source and adapted
+        for ci_mode in (False, True):
+            adapted = review_mod._adapt_review_criteria(source, ci_mode=ci_mode)
+            assert "no new unmitigated P2 findings exist" in adapted, (
+                f"P2-blocking wording missing in ci_mode={ci_mode}"
+            )
+            assert "block ✅ just like P1" in adapted
+
 
 # ---------------------------------------------------------------------------
 # compile_prompt
@@ -345,6 +402,26 @@ class TestCompilePrompt:
         assert "<previous-review-output>" in result
         assert "Previous review findings here." in result
         assert "follow-up review" in result
+
+    def test_previous_review_block_uses_new_p2_blocking_rule(self, review_mod):
+        """The previous-review framing in compile_prompt must mirror the
+        tightened ✅ rule: P2 blocks ✅ even on re-review. Sibling-surface fix
+        from PR #415 R2 P1.
+        """
+        result = review_mod.compile_prompt(
+            criteria_text="Criteria.",
+            registry_content="Registry.",
+            diff_text="diff content",
+            changed_files_text="M\tfoo.py",
+            branch_info="main",
+            previous_review="Previous review findings here.",
+        )
+        # Old (stale) wording must NOT appear
+        assert "✅ even if new P2/P3 items are noticed" not in result
+        # New wording must explicitly state P2 blocks
+        assert "P0/P1/P2 findings have been addressed" in result
+        assert "no new unmitigated P2 findings exist" in result
+        assert "block ✅ just like P1" in result
 
     def test_no_previous_review_block_when_none(self, review_mod):
         result = review_mod.compile_prompt(
@@ -1994,6 +2071,33 @@ class TestSkillDocAPIConsistency:
         assert "Chat Completions API" not in text, (
             "Skill doc references stale Chat Completions API; "
             "script uses Responses API at openai_review.py:ENDPOINT"
+        )
+
+    def test_skill_doc_uses_new_p2_blocking_verdict_bar(self):
+        """Skill doc's verdict-handling decision tree must mirror the
+        tightened ✅ rule: P2 triggers ⚠️, not ✅. Sibling-surface fix from
+        PR #415 R2 P1.
+        """
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc_path = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc_path.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc_path.read_text()
+        # Old (stale) wording must NOT appear
+        assert "**For ⛔ or ⚠️ (P0/P1 findings)**" not in text, (
+            "Skill doc still uses old P0/P1-only ⚠️ branch; tighten to P0/P1/P2"
+        )
+        assert "**For ✅ with P2/P3 findings only**" not in text, (
+            "Skill doc still has '✅ with P2/P3 findings only' branch; under "
+            "the new rule, ✅ allows only P3"
+        )
+        # New wording must appear
+        assert "**For ⛔ or ⚠️ (P0/P1/P2 findings)**" in text
+        assert "**For ✅ with P3 findings only**" in text
+        assert (
+            "for P0/P1/P2 issues use `EnterPlanMode` for a structured approach"
+            in text
         )
 
 

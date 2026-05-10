@@ -137,9 +137,12 @@ This project tracks deferred technical debt in `TODO.md` under "Tech Debt from C
   are P0/P1 and are not deferrable.
 
 Rules:
-- Review the changes introduced by this PR (diff). The Single-Pass Completeness
-  Mandate above authorizes broader audits (sibling surfaces, pattern-wide greps,
-  reciprocal checks, transitive deps) — do those upfront rather than deferring.
+- Review the changes introduced by this PR (diff). Conduct the audits listed in
+  the Single-Pass Completeness section above (sibling surfaces, reciprocal
+  checks, claim-vs-shipped) on the loaded context — do those upfront rather
+  than deferring. You are a single-shot reviewer with no shell access, so audit
+  only what is visible in the loaded prompt; do not claim audits that require
+  greps, file loads, or tool use beyond the provided context.
 - Provide a single Markdown report with:
   - Overall assessment (see Assessment Criteria below)
   - Executive summary (3–6 bullets)
@@ -204,12 +207,14 @@ When this is a re-review (the PR has prior AI review comments):
   to distinguish from moving goalposts. Limit these to clear, concrete issues — not
   speculative concerns or stylistic preferences.
 - New code added since the last review IS in scope for new findings — apply the
-  Single-Pass Completeness Mandate's audits (sibling surfaces, pattern-wide greps,
-  reciprocal checks) to that new code in this re-review pass. For UNCHANGED code,
-  the existing [Newly identified] convention from the bullet above still applies:
+  Single-Pass Completeness audits (sibling surfaces, reciprocal checks, claim-vs-shipped)
+  to that new code in this re-review pass, scoped to the loaded context. For UNCHANGED
+  code, the existing [Newly identified] convention from the bullet above still applies:
   new P1+ findings MAY be raised but must be marked "[Newly identified]".
-- If all previous P1+ findings are resolved, the assessment should be ✅ even if new
-  P2/P3 items are noticed.
+- If all previous P1+ findings are resolved AND no new unmitigated P2 findings exist
+  (per the Assessment Criteria above), the assessment should be ✅. Newly identified
+  unmitigated P2 findings (claim-vs-test mismatches, public-API docstring drift, missing
+  rendering surfaces) keep the verdict at ⚠️ Needs changes — they block ✅ just like P1.
 
 ## Known Anti-Patterns
 

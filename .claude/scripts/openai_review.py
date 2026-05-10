@@ -1164,10 +1164,13 @@ def compile_prompt(
         if previous_review:
             sections.append(
                 "This is a follow-up review. The previous review's findings are included "
-                "below. Focus on whether previous P0/P1 findings have been addressed. "
+                "below. Focus on whether previous P0/P1/P2 findings have been addressed. "
                 "New findings on unchanged code should be marked \"[Newly identified]\". "
-                "If all previous P1+ findings are resolved, the assessment should be "
-                "\u2705 even if new P2/P3 items are noticed.\n"
+                "If all previous P1+ findings are resolved AND no new unmitigated P2 "
+                "findings exist (per the Assessment Criteria above), the assessment should "
+                "be \u2705. New unmitigated P2 findings (claim-vs-test mismatches, "
+                "public-API docstring drift, missing rendering surfaces) keep the verdict "
+                "at \u26a0\ufe0f Needs changes \u2014 they block \u2705 just like P1.\n"
             )
             if structured_findings:
                 sections.append("### Full Previous Review\n")
