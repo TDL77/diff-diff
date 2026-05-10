@@ -3,8 +3,6 @@ Datasets
 
 Built-in real-world datasets from published studies for examples, tutorials, and testing.
 
-.. module:: diff_diff.datasets
-
 All datasets are downloaded from public sources on first use and cached locally
 at ``~/.cache/diff_diff/datasets/``. Pass ``force_download=True`` to any loader
 to refresh the cache. If the download fails and a cached copy exists, the cached
@@ -20,7 +18,7 @@ Card & Krueger (1994) minimum wage study. Classic 2x2 DiD comparing fast-food
 employment in New Jersey (treated) and Pennsylvania (control) around NJ's 1992
 minimum wage increase.
 
-.. autofunction:: load_card_krueger
+.. autofunction:: diff_diff.load_card_krueger
 
 Example
 ^^^^^^^
@@ -50,7 +48,7 @@ Castle doctrine (Stand Your Ground) gun law study. Staggered adoption of
 self-defense law expansions across U.S. states (2000--2010), suitable for
 Callaway--Sant'Anna or Sun--Abraham estimation.
 
-.. autofunction:: load_castle_doctrine
+.. autofunction:: diff_diff.load_castle_doctrine
 
 Example
 ^^^^^^^
@@ -77,7 +75,7 @@ Unilateral (no-fault) divorce law reforms. Staggered adoption across U.S.
 states (1968--1988) from Stevenson & Wolfers (2006), with outcomes for divorce
 rate, female labor force participation, and female suicide rate.
 
-.. autofunction:: load_divorce_laws
+.. autofunction:: diff_diff.load_divorce_laws
 
 Example
 ^^^^^^^
@@ -104,7 +102,7 @@ Minimum wage panel data for training (Callaway & Sant'Anna 2021). Simulated
 county-level employment data with staggered minimum wage increases (2003--2007),
 from the R ``did`` package.
 
-.. autofunction:: load_mpdta
+.. autofunction:: diff_diff.load_mpdta
 
 Example
 ^^^^^^^
@@ -132,21 +130,21 @@ load_dataset
 
 Generic loader that fetches a dataset by name.
 
-.. autofunction:: load_dataset
+.. autofunction:: diff_diff.load_dataset
 
 list_datasets
 ~~~~~~~~~~~~~
 
 List all available datasets with descriptions.
 
-.. autofunction:: list_datasets
+.. autofunction:: diff_diff.list_datasets
 
 clear_cache
 ~~~~~~~~~~~~
 
 Remove all cached dataset files from ``~/.cache/diff_diff/datasets/``.
 
-.. autofunction:: clear_cache
+.. autofunction:: diff_diff.clear_cache
 
 Listing and Loading Datasets
 ----------------------------

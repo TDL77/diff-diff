@@ -171,6 +171,13 @@ Heatmap of group-time treatment effects.
 
 .. autofunction:: diff_diff.plot_group_time_heatmap
 
+plot_bacon
+----------
+
+Visualize Goodman-Bacon decomposition results.
+
+.. autofunction:: diff_diff.plot_bacon
+
 Example
 ~~~~~~~
 
