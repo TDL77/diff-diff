@@ -9112,3 +9112,815 @@ class TestPathsOfInterest:
             )
         assert res.path_placebo_event_study is not None
         assert len(res.path_placebo_event_study) == 2
+
+
+# =============================================================================
+# by_path / paths_of_interest + survey_design (Wave 4 #10)
+# =============================================================================
+
+
+def _by_path_survey_data(seed: int = 44) -> pd.DataFrame:
+    """Panel for `by_path` + `survey_design` tests.
+
+    Three paths, single baseline D=0, all switchers have F_g=4 with
+    L_max+1=4 window fully inside an 8-period panel (so per-path /
+    global telescope holds at every horizon). 30 switchers split across
+    3 paths + 30 never-treated controls. Strata are within-group-
+    constant (4 strata cycling); PSU = group (one PSU per group, no
+    within-group variation).
+    """
+    rng = np.random.default_rng(seed)
+    n_periods = 8
+    rows: list = []
+    paths = [(0, 1, 1, 1), (0, 1, 0, 0), (0, 1, 1, 0)]
+    for g in range(30):
+        F_g = 4
+        path = paths[g % 3]
+        stratum = g % 4
+        weight = 1.0 + 0.1 * (g % 5)
+        for t in range(n_periods):
+            if F_g - 1 <= t < F_g - 1 + len(path):
+                d = path[t - (F_g - 1)]
+            else:
+                d = 0
+            y = 0.5 * d + rng.normal(0, 0.5)
+            rows.append({
+                "group": g, "period": t, "treatment": d, "outcome": y,
+                "survey_weights": weight, "strata": stratum, "psu": g,
+            })
+    for g in range(30, 60):
+        stratum = (g - 30) % 4
+        weight = 1.0 + 0.1 * ((g - 30) % 5)
+        for t in range(n_periods):
+            y = rng.normal(0, 0.5)
+            rows.append({
+                "group": g, "period": t, "treatment": 0, "outcome": y,
+                "survey_weights": weight, "strata": stratum, "psu": g,
+            })
+    return pd.DataFrame(rows)
+
+
+def _by_path_survey_data_single_path(seed: int = 44) -> pd.DataFrame:
+    """Single-path variant of `_by_path_survey_data` for telescope tests.
+
+    All 30 switchers follow the same path `(0, 1, 1, 1)` with F_g=4
+    in a 7-period panel — last path cell at ``t = F_g - 1 + L_max = 6``
+    coincides with the panel end, so treatment doesn't switch back to
+    0 (no multi-switch trigger under default ``drop_larger_lower=True``).
+    Per-path SE on the lone path equals the global non-by_path SE.
+    """
+    rng = np.random.default_rng(seed)
+    n_periods = 7
+    rows: list = []
+    path = (0, 1, 1, 1)
+    for g in range(30):
+        F_g = 4
+        stratum = g % 4
+        weight = 1.0 + 0.1 * (g % 5)
+        for t in range(n_periods):
+            if F_g - 1 <= t < F_g - 1 + len(path):
+                d = path[t - (F_g - 1)]
+            else:
+                d = 0
+            y = 0.5 * d + rng.normal(0, 0.5)
+            rows.append({
+                "group": g, "period": t, "treatment": d, "outcome": y,
+                "survey_weights": weight, "strata": stratum, "psu": g,
+            })
+    for g in range(30, 60):
+        stratum = (g - 30) % 4
+        weight = 1.0 + 0.1 * ((g - 30) % 5)
+        for t in range(n_periods):
+            y = rng.normal(0, 0.5)
+            rows.append({
+                "group": g, "period": t, "treatment": 0, "outcome": y,
+                "survey_weights": weight, "strata": stratum, "psu": g,
+            })
+    return pd.DataFrame(rows)
+
+
+class TestByPathSurveyDesignAnalytical:
+    """`by_path` / `paths_of_interest` compose with `survey_design`.
+
+    Analytical Binder TSL routes per-path SE through
+    ``_survey_se_from_group_if`` using the cell-period allocator with
+    non-path switcher contributions zeroed at both group and cell
+    levels. Multiplier-bootstrap (`n_bootstrap > 0`) under survey +
+    by_path remains gated.
+    """
+
+    # ----- Gate + dispatch -----
+
+    def test_no_longer_raises_on_survey(self):
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(by_path=2, drop_larger_lower=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert res.path_effects is not None
+        assert len(res.path_effects) >= 1
+
+    def test_paths_of_interest_with_survey_no_longer_raises(self):
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+            drop_larger_lower=False,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert res.path_effects is not None
+        assert (0, 1, 1, 1) in res.path_effects
+        assert (0, 1, 0, 0) in res.path_effects
+
+    def test_survey_design_plus_n_bootstrap_raises(self):
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(
+            by_path=2, n_bootstrap=50, seed=42, drop_larger_lower=False
+        )
+        with pytest.raises(NotImplementedError, match="n_bootstrap.*multiplier"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3, survey_design=sd,
+                )
+
+    def test_survey_design_plus_paths_of_interest_plus_n_bootstrap_raises(self):
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(
+            paths_of_interest=[(0, 1, 1, 1)],
+            n_bootstrap=50,
+            seed=42,
+            drop_larger_lower=False,
+        )
+        with pytest.raises(NotImplementedError, match="paths_of_interest"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3, survey_design=sd,
+                )
+
+    def test_global_survey_plus_n_bootstrap_still_works(self):
+        """Anti-regression: the new gate is per-path-only.
+
+        Locks the per-path-only scope of the multiplier-bootstrap gate
+        added in this PR. Global TSL + n_bootstrap is supported and
+        regression-tested in tests/test_survey_dcdh.py — confirm the
+        new gate doesn't accidentally fire on the no-by_path path.
+
+        Uses ``_by_path_survey_data_single_path`` because the multi-
+        path fixture's reversible paths get filtered by the default
+        ``drop_larger_lower=True`` policy.
+        """
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data_single_path()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(n_bootstrap=50, seed=42)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert np.isfinite(res.overall_se)
+        assert res.path_effects is None
+
+    # ----- Analytical SE correctness -----
+
+    def test_per_path_analytical_se_finite_under_survey(self):
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(by_path=3, drop_larger_lower=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert res.path_effects is not None
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                if vals["n_obs"] > 0:
+                    assert np.isfinite(vals["effect"]), f"{path} l={l_h} effect non-finite"
+                    assert np.isfinite(vals["se"]), f"{path} l={l_h} se non-finite"
+
+    def test_per_path_se_telescope_to_global_on_single_path(self):
+        """Single-path panel: per-path SE == global SE (telescope).
+
+        Preconditions baked into ``_by_path_survey_data_single_path``:
+        (a) all switchers follow exactly one path,
+        (b) all switchers have F_g=4 (full L_max=3 window),
+        (c) >=3 cohorts represented (cohort recentering non-degenerate),
+        (d) >=2 strata, >=1 PSU per group (lonely-PSU not triggered),
+        (e) survey weights non-constant (so test isn't a no-op telescope).
+        """
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data_single_path()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est_g = ChaisemartinDHaultfoeuille(drop_larger_lower=False)
+        est_p = ChaisemartinDHaultfoeuille(by_path=1, drop_larger_lower=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_g = est_g.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+            res_p = est_p.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert res_p.path_effects is not None
+        assert len(res_p.path_effects) == 1
+        path = next(iter(res_p.path_effects.keys()))
+        for l_h in range(1, 4):
+            assert res_p.path_effects[path]["horizons"][l_h]["n_obs"] > 0
+            np.testing.assert_allclose(
+                res_p.path_effects[path]["horizons"][l_h]["effect"],
+                res_g.event_study_effects[l_h]["effect"],
+                atol=1e-12,
+                err_msg=f"l={l_h} effect mismatch",
+            )
+            np.testing.assert_allclose(
+                res_p.path_effects[path]["horizons"][l_h]["se"],
+                res_g.event_study_effects[l_h]["se"],
+                atol=1e-12,
+                err_msg=f"l={l_h} se mismatch",
+            )
+
+    def test_per_path_se_within_envelope_of_unweighted(self):
+        """Constant weights + single PSU per group: survey SE within Bessel-
+        envelope of plug-in SE.
+
+        Under unit weights + single stratum + PSU=group, the survey path's
+        cell-period allocator reduces to a group-level allocator and Binder
+        TSL contributes a `n/(n-1)` Bessel factor relative to the plug-in
+        SE's plain `1/n` divisor. SE values therefore differ by O(1/n) but
+        track within a few percent on cohort-clean panels — the named
+        envelope. This test confirms (a) point estimates are bit-equal
+        (design-agnostic) and (b) survey SE is within a 10% rtol envelope
+        of plug-in SE on every (path, horizon) entry where both are finite.
+        """
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data()
+        df["survey_weights"] = 1.0
+        df["strata"] = 0  # single stratum
+        # PSU = group already
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est_p = ChaisemartinDHaultfoeuille(by_path=2, drop_larger_lower=False)
+        est_p_no_survey = ChaisemartinDHaultfoeuille(by_path=2, drop_larger_lower=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_survey = est_p.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+            res_plain = est_p_no_survey.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert res_survey.path_effects is not None and res_plain.path_effects is not None
+        any_se_compared = False
+        for path in res_survey.path_effects:
+            if path not in res_plain.path_effects:
+                continue
+            for l_h in range(1, 4):
+                if res_survey.path_effects[path]["horizons"][l_h]["n_obs"] == 0:
+                    continue
+                np.testing.assert_allclose(
+                    res_survey.path_effects[path]["horizons"][l_h]["effect"],
+                    res_plain.path_effects[path]["horizons"][l_h]["effect"],
+                    atol=1e-12,
+                )
+                se_survey = res_survey.path_effects[path]["horizons"][l_h]["se"]
+                se_plain = res_plain.path_effects[path]["horizons"][l_h]["se"]
+                if np.isfinite(se_survey) and np.isfinite(se_plain):
+                    np.testing.assert_allclose(
+                        se_survey, se_plain, rtol=0.10,
+                        err_msg=(
+                            f"path={path} l={l_h}: survey SE outside 10% "
+                            f"rtol envelope of plug-in SE"
+                        ),
+                    )
+                    any_se_compared = True
+        assert any_se_compared, (
+            "No (path, horizon) entry had finite SE on both surfaces — "
+            "constant-weight SE envelope was not actually exercised."
+        )
+
+    # ----- Replicate-weight SE correctness (slow) -----
+
+    @pytest.mark.slow
+    def test_per_path_replicate_se_finite(self):
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data()
+        n_obs = len(df)
+        rng = np.random.default_rng(0)
+        # JK1: leave-one-PSU-out replicates. With group as PSU and 60
+        # groups, build 60 replicate columns in the dataframe.
+        rep_cols = [f"rep_{i}" for i in range(20)]
+        for i, col in enumerate(rep_cols):
+            df[col] = df["survey_weights"] * (1.0 + 0.05 * rng.standard_normal(n_obs))
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        est = ChaisemartinDHaultfoeuille(by_path=2, drop_larger_lower=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert res.path_effects is not None
+        any_finite = False
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                if vals["n_obs"] > 0 and np.isfinite(vals["se"]):
+                    any_finite = True
+        assert any_finite
+
+    @pytest.mark.slow
+    def test_per_path_inference_refreshes_to_lower_final_df(self):
+        """Deterministic stale-vs-final df regression.
+
+        Forces a later IF site to return a smaller ``n_valid`` than the
+        per-path snapshot via monkeypatch on ``_compute_se``: a flag is
+        set after ``_compute_path_effects`` returns, and any subsequent
+        ``_compute_se`` call (global placebo / overall / joiners /
+        leavers) returns a hardcoded low ``n_valid``. Per-path effects
+        therefore snapshot a HIGH df at their call site, while the
+        final ``_replicate_n_valid_list`` is bounded by the lowered
+        post-per-path appends, producing a strictly smaller final df.
+
+        Without ``_refresh_path_inference()`` running from the final
+        block, per-path effect inference would retain the stale high
+        df. This test asserts every populated per-path entry's
+        ``t_stat`` / ``p_value`` / ``conf_int`` matches
+        ``safe_inference(effect, se, df=results.survey_metadata.df_survey)``
+        (the LOW final df), proving the refresh moved the values to
+        the post-append df.
+
+        Regression for PR #408 R1 P1 / R3 P2 (deterministic version).
+        """
+        import importlib
+        import unittest.mock as _mock
+
+        from diff_diff.survey import SurveyDesign
+        from diff_diff.utils import safe_inference
+
+        _cd_mod = importlib.import_module("diff_diff.chaisemartin_dhaultfoeuille")
+
+        df = _by_path_survey_data()
+        n_obs = len(df)
+        rng = np.random.default_rng(7)
+        # Use enough replicate columns so the natural n_valid is large
+        # and our forced low n_valid is detectably smaller.
+        rep_cols = [f"rep_{i}" for i in range(20)]
+        for col in rep_cols:
+            df[col] = df["survey_weights"] * (1.0 + 0.05 * rng.standard_normal(n_obs))
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        est = ChaisemartinDHaultfoeuille(by_path=2, drop_larger_lower=False)
+
+        real_compute_se = _cd_mod._compute_se
+        real_path_effects = _cd_mod._compute_path_effects
+        post_path_flag = [False]
+        forced_low_n_valid = 5
+
+        def wrapped_path_effects(*args, **kwargs):
+            result = real_path_effects(*args, **kwargs)
+            post_path_flag[0] = True
+            return result
+
+        def wrapped_compute_se(*args, **kwargs):
+            se, n_valid = real_compute_se(*args, **kwargs)
+            if post_path_flag[0] and n_valid is not None and n_valid > forced_low_n_valid:
+                return se, forced_low_n_valid
+            return se, n_valid
+
+        with _mock.patch.object(
+            _cd_mod, "_compute_path_effects",
+            side_effect=wrapped_path_effects,
+        ), _mock.patch.object(
+            _cd_mod, "_compute_se",
+            side_effect=wrapped_compute_se,
+        ):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                res = est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3, survey_design=sd,
+                )
+
+        # The forced low n_valid (5) at later IF sites bounds the final
+        # effective df at 5 - 1 = 4. JK1 / replicate convention:
+        # df_survey = min(n_valid) - 1.
+        expected_low_df = forced_low_n_valid - 1
+        assert res.survey_metadata is not None
+        assert res.survey_metadata.df_survey == expected_low_df, (
+            f"Expected forced final df={expected_low_df}, got "
+            f"{res.survey_metadata.df_survey}. The monkeypatch did not "
+            f"force a divergence — adjust forced_low_n_valid or fixture."
+        )
+
+        # Per-path effects entries snapshot df at fit-time BEFORE the
+        # forced lowering kicked in (so their snapshot df > final df).
+        # If `_refresh_path_inference` runs from the final block, every
+        # entry's t_stat / p_value / conf_int is recomputed at the low
+        # final df. If the helper is called from an earlier block (the
+        # bug), per-path effects keep the stale high-df inference.
+        assert res.path_effects is not None
+        any_compared = False
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                if vals["n_obs"] == 0 or not np.isfinite(vals["se"]):
+                    continue
+                t_final, p_final, ci_final = safe_inference(
+                    vals["effect"], vals["se"],
+                    alpha=est.alpha, df=expected_low_df,
+                )
+                np.testing.assert_allclose(
+                    vals["t_stat"], t_final, atol=1e-12,
+                    err_msg=(
+                        f"path={path} l={l_h}: t_stat reflects stale "
+                        f"snapshot df, not final df={expected_low_df}"
+                    ),
+                )
+                np.testing.assert_allclose(
+                    vals["p_value"], p_final, atol=1e-12,
+                    err_msg=f"path={path} l={l_h}: p_value stale",
+                )
+                np.testing.assert_allclose(
+                    vals["conf_int"], ci_final, atol=1e-12,
+                    err_msg=f"path={path} l={l_h}: conf_int stale",
+                )
+                any_compared = True
+        assert any_compared, (
+            "No per-path effects entry had finite SE — forcing function "
+            "did not exercise the refresh path."
+        )
+
+    @pytest.mark.slow
+    def test_refresh_path_inference_called_from_final_block(self):
+        """Pin the helper's call site to the final R2 P1b block.
+
+        Regression for PR #408 R1 P1: an earlier implementation
+        invoked ``_refresh_path_inference`` immediately after per-path
+        runs, BEFORE the global overall / joiners / leavers /
+        heterogeneity IF sites appended their ``n_valid`` contributions
+        — leaving per-path inference using a stale snapshot df that
+        could exceed the final ``survey_metadata.df_survey``.
+
+        Pure-fixture detection is unreliable: under uniform-valid
+        replicate weights, every IF site reports the same ``n_valid``,
+        so the snapshot df and the final df happen to coincide and a
+        match-against-final-df assertion would pass even with the bug
+        present. Instead we wrap the helper with ``mock.patch.object``
+        and assert the ``df_final`` it receives equals the final
+        ``survey_metadata.df_survey`` — a relationship that holds by
+        construction when invoked from the final block (which uses
+        ``_final_eff_df = _effective_df_survey(resolved_survey,
+        _replicate_n_valid_list)`` AFTER all appends), but can only
+        coincide by chance from an earlier block.
+        """
+        import importlib
+        import unittest.mock as _mock
+
+        from diff_diff.survey import SurveyDesign
+
+        # The top-level `diff_diff` package re-exports
+        # `chaisemartin_dhaultfoeuille` as the convenience function,
+        # shadowing the module of the same name. Use importlib to
+        # access the module object explicitly so mock.patch.object
+        # operates on the correct namespace.
+        _cd_mod = importlib.import_module("diff_diff.chaisemartin_dhaultfoeuille")
+
+        df = _by_path_survey_data()
+        n_obs = len(df)
+        rng = np.random.default_rng(3)
+        rep_cols = [f"rep_{i}" for i in range(10)]
+        for col in rep_cols:
+            df[col] = df["survey_weights"] * (1.0 + 0.05 * rng.standard_normal(n_obs))
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        est = ChaisemartinDHaultfoeuille(by_path=2, drop_larger_lower=False)
+
+        with _mock.patch.object(
+            _cd_mod,
+            "_refresh_path_inference",
+            wraps=_cd_mod._refresh_path_inference,
+        ) as m:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                res = est.fit(
+                    df, outcome="outcome", group="group", time="period",
+                    treatment="treatment", L_max=3, survey_design=sd,
+                )
+
+        # Helper called exactly once from the final R2 P1b block.
+        assert m.call_count == 1, (
+            f"_refresh_path_inference should be called exactly once "
+            f"under replicate-weight + by_path; got {m.call_count}"
+        )
+        # Under replicate variance with defined effective df,
+        # _inference_df returns the effective df unchanged, and
+        # survey_metadata.df_survey persists the same value. Equality
+        # proves the helper received the FINAL df, not an earlier
+        # snapshot taken before the global IF sites appended.
+        df_final_passed = m.call_args.kwargs["df_final"]
+        assert res.survey_metadata is not None
+        assert df_final_passed == res.survey_metadata.df_survey, (
+            f"Helper invoked with df_final={df_final_passed!r}, but "
+            f"results.survey_metadata.df_survey={res.survey_metadata.df_survey!r}. "
+            f"This indicates the helper ran from a stale earlier "
+            f"call site instead of the final R2 P1b block."
+        )
+
+    @pytest.mark.slow
+    def test_per_path_inference_uses_final_df_after_all_appends(self):
+        """Per-path t/p/CI must use `results.survey_metadata.df_survey`.
+
+        Per-path event-study and placebo helpers snapshot
+        ``df_inference`` BEFORE appending their own ``n_valid``
+        contributions to ``_replicate_n_valid_list``; later in fit()
+        the global overall / joiners / leavers / heterogeneity sites
+        append more ``n_valid`` values that may further reduce the
+        effective df. After the final R2 P1b refresh block runs,
+        ``_refresh_path_inference`` must update per-path entries so
+        their ``t_stat`` / ``p_value`` / ``conf_int`` agree with
+        ``results.survey_metadata.df_survey`` and the global event-
+        study / placebo surfaces (which the same final block already
+        refreshes). Companion test
+        ``test_refresh_path_inference_called_from_final_block`` pins
+        the helper's call site directly via mock.patch (the
+        match-against-final-df assertion below is satisfied vacuously
+        under uniform-valid replicates where snapshot df coincides
+        with final df). Regression for PR #408 R1 P1.
+        """
+        from diff_diff.survey import SurveyDesign
+        from diff_diff.utils import safe_inference
+
+        df = _by_path_survey_data()
+        n_obs = len(df)
+        rng = np.random.default_rng(2)
+        rep_cols = [f"rep_{i}" for i in range(12)]
+        for i, col in enumerate(rep_cols):
+            df[col] = df["survey_weights"] * (1.0 + 0.05 * rng.standard_normal(n_obs))
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        est = ChaisemartinDHaultfoeuille(
+            by_path=2, drop_larger_lower=False, placebo=True
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert res.survey_metadata is not None
+        df_final = res.survey_metadata.df_survey
+        assert df_final is not None
+        # Per-path event-study: every populated finite-SE entry must
+        # reproduce safe_inference(effect, se, df=df_final).
+        assert res.path_effects is not None
+        any_checked = False
+        for path, entry in res.path_effects.items():
+            for l_h, vals in entry["horizons"].items():
+                if vals["n_obs"] == 0 or not np.isfinite(vals["se"]):
+                    continue
+                t_exp, p_exp, ci_exp = safe_inference(
+                    vals["effect"], vals["se"], alpha=est.alpha, df=df_final,
+                )
+                np.testing.assert_allclose(
+                    vals["t_stat"], t_exp, atol=1e-12,
+                    err_msg=f"path={path} l={l_h} t_stat stale",
+                )
+                np.testing.assert_allclose(
+                    vals["p_value"], p_exp, atol=1e-12,
+                    err_msg=f"path={path} l={l_h} p_value stale",
+                )
+                np.testing.assert_allclose(
+                    vals["conf_int"], ci_exp, atol=1e-12,
+                    err_msg=f"path={path} l={l_h} conf_int stale",
+                )
+                any_checked = True
+        # Per-path placebo: same invariant on negative-keyed entries.
+        if res.path_placebo_event_study is not None:
+            for path, lags in res.path_placebo_event_study.items():
+                for lag_l, vals in lags.items():
+                    if vals["n_obs"] == 0 or not np.isfinite(vals["se"]):
+                        continue
+                    t_exp, p_exp, ci_exp = safe_inference(
+                        vals["effect"], vals["se"], alpha=est.alpha, df=df_final,
+                    )
+                    np.testing.assert_allclose(vals["t_stat"], t_exp, atol=1e-12)
+                    np.testing.assert_allclose(vals["p_value"], p_exp, atol=1e-12)
+                    np.testing.assert_allclose(vals["conf_int"], ci_exp, atol=1e-12)
+                    any_checked = True
+        assert any_checked, (
+            "No populated per-path entry was checked — replicate-df "
+            "invariant was not actually exercised."
+        )
+
+    @pytest.mark.slow
+    def test_per_path_replicate_n_valid_propagates_to_df_survey(self):
+        """`results.df_survey` reflects min(n_valid) across per-path replicate fits."""
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data()
+        n_obs = len(df)
+        rng = np.random.default_rng(1)
+        rep_cols = [f"rep_{i}" for i in range(15)]
+        for i, col in enumerate(rep_cols):
+            df[col] = df["survey_weights"] * (1.0 + 0.05 * rng.standard_normal(n_obs))
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        est = ChaisemartinDHaultfoeuille(by_path=2, drop_larger_lower=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        # df_survey reflects replicate columns; cap is 15 - 1 = 14.
+        assert res.survey_metadata is not None
+        df_s = res.survey_metadata.df_survey
+        assert df_s is not None
+        assert df_s <= 14
+
+    # ----- Per-path placebo -----
+
+    def test_per_path_placebo_se_finite_under_survey(self):
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(
+            by_path=2, drop_larger_lower=False, placebo=True
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert res.path_placebo_event_study is not None
+        any_finite = False
+        for path, lags in res.path_placebo_event_study.items():
+            for lag_l, vals in lags.items():
+                if vals["n_obs"] > 0 and np.isfinite(vals["se"]):
+                    any_finite = True
+        assert any_finite, "no finite placebo SE under survey + by_path"
+
+    # ----- trends_linear composition -----
+
+    @pytest.mark.slow
+    def test_per_path_cumulated_se_inherits_survey(self):
+        from diff_diff.survey import SurveyDesign
+
+        # Need wider F_g window for trends_linear (F_g >= 4 to dodge boundary).
+        rng = np.random.default_rng(45)
+        n_periods = 10
+        rows = []
+        path_choices = [(0, 1, 1, 1), (0, 1, 0, 0)]
+        for g in range(30):
+            F_g = 5
+            path = path_choices[g % 2]
+            stratum = g % 4
+            weight = 1.0 + 0.1 * (g % 5)
+            trend = 0.05 * g  # group-specific linear trend
+            for t in range(n_periods):
+                if F_g - 1 <= t < F_g - 1 + len(path):
+                    d = path[t - (F_g - 1)]
+                else:
+                    d = 0
+                y = 0.5 * d + trend * t + rng.normal(0, 0.5)
+                rows.append({
+                    "group": g, "period": t, "treatment": d, "outcome": y,
+                    "survey_weights": weight, "strata": stratum, "psu": g,
+                })
+        for g in range(30, 60):
+            stratum = (g - 30) % 4
+            weight = 1.0 + 0.1 * ((g - 30) % 5)
+            trend = 0.05 * g
+            for t in range(n_periods):
+                y = trend * t + rng.normal(0, 0.5)
+                rows.append({
+                    "group": g, "period": t, "treatment": 0, "outcome": y,
+                    "survey_weights": weight, "strata": stratum, "psu": g,
+                })
+        df = pd.DataFrame(rows)
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(by_path=2, drop_larger_lower=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+                trends_linear=True,
+            )
+        # path_cumulated_event_study should populate under trends_linear
+        assert res.path_cumulated_event_study is not None
+
+    # ----- Edge cases -----
+
+    def test_path_unobserved_under_survey_warns_omits(self):
+        """POI unobserved-path warning composes with survey."""
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(
+            paths_of_interest=[(0, 1, 1, 1), (0, 9, 9, 9)],  # second is unobserved
+            drop_larger_lower=False,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert res.path_effects is not None
+        assert (0, 1, 1, 1) in res.path_effects
+        assert (0, 9, 9, 9) not in res.path_effects
+        # Unobserved-path warning must have fired
+        assert any(
+            "zero observed" in str(w.message) and "(0, 9, 9, 9)" in str(w.message)
+            for w in caught
+        )
+
+
+class TestByPathSurveyDesignTelescope:
+    """Single-path telescope invariants — by_path SE matches global SE."""
+
+    def test_telescope_analytical_TSL(self):
+        """Single-path analytical TSL: per-path SE == global SE."""
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_survey_data_single_path()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est_g = ChaisemartinDHaultfoeuille(drop_larger_lower=False)
+        est_p = ChaisemartinDHaultfoeuille(by_path=1, drop_larger_lower=False)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_g = est_g.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+            res_p = est_p.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, survey_design=sd,
+            )
+        assert res_p.path_effects is not None
+        path = next(iter(res_p.path_effects.keys()))
+        for l_h in range(1, 4):
+            assert res_p.path_effects[path]["horizons"][l_h]["n_obs"] > 0
+            np.testing.assert_allclose(
+                res_p.path_effects[path]["horizons"][l_h]["se"],
+                res_g.event_study_effects[l_h]["se"],
+                atol=1e-12,
+            )

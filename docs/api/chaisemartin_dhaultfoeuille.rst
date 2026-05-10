@@ -22,7 +22,11 @@ simultaneous bands when ``n_bootstrap > 0`` — Python-only extension
 beyond R, which provides no joint bands at any surface) or via
 ``paths_of_interest=[(...), ...]`` for an explicit user-specified
 path subset (Python-only API; mutex with ``by_path``). ``by_path``
-supports binary or integer-coded discrete (D in Z) treatment.
+supports binary or integer-coded discrete (D in Z) treatment, and
+composes with ``survey_design`` for analytical Binder TSL SE and
+replicate-weight bootstrap variance (multiplier bootstrap under
+survey + by_path remains gated; no R parity since R
+``did_multiplegt_dyn`` does not support survey weighting).
 
 The estimator:
 

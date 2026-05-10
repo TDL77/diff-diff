@@ -458,9 +458,20 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
         treatment (D in Z); path tuples become integer-state tuples
         like ``(0, 2, 2, 2)``. D values must be integer-valued
         (``D == round(D)``); a ``ValueError`` is raised at fit-time on
-        continuous D. Incompatible with ``heterogeneity``, ``design2``,
-        ``honest_did``, and ``survey_design`` (each combination raises
-        ``NotImplementedError`` in the current release).
+        continuous D. Compatible with ``survey_design`` for analytical
+        Binder TSL SE and replicate-weight bootstrap; per-path SE
+        routes through the cell-period allocator, with non-path
+        switcher-side contributions skipped (control contributions
+        remain unchanged, matching the joiners/leavers IF convention).
+        ``n_bootstrap > 0`` (multiplier bootstrap) under
+        ``survey_design`` is not yet supported and raises
+        ``NotImplementedError``. Top-k path ranking under
+        ``survey_design`` remains group-cardinality-based (unweighted),
+        not population-weight-based — survey weights do not affect
+        which paths are selected as "top-k". Incompatible with
+        ``heterogeneity``, ``design2``, and ``honest_did`` (each
+        combination raises ``NotImplementedError`` in the current
+        release).
 
         Mutually exclusive with ``paths_of_interest`` — use
         ``by_path=k`` for top-k automatic ranking by frequency, or
@@ -622,8 +633,10 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
         Compatible with all downstream surfaces inherited by
         ``by_path``: bootstrap, per-path placebos, per-path joint
         sup-t bands, ``controls``, ``trends_linear``,
-        ``trends_nonparam``. Mechanical extension to path
-        enumeration; no methodology change.
+        ``trends_nonparam``, and ``survey_design`` (analytical Binder
+        TSL + replicate-weight; multiplier bootstrap under survey
+        remains gated, same as ``by_path=k``). Mechanical extension
+        to path enumeration; no methodology change.
 
         **Order semantics**: paths appear in
         ``results.path_effects`` in the user-specified order, modulo
@@ -1230,12 +1243,17 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                     "(HonestDiD sensitivity analysis) is deferred to a "
                     "future release."
                 )
-            if survey_design is not None:
+            if survey_design is not None and self.n_bootstrap > 0:
                 raise NotImplementedError(
-                    "by_path / paths_of_interest combined with "
-                    "survey_design is deferred to a future release: the "
-                    "cell-period IF allocator under path subsets has not "
-                    "been derived."
+                    "by_path / paths_of_interest combined with both "
+                    "survey_design and n_bootstrap>0 (multiplier "
+                    "bootstrap) is not yet supported (the survey-aware "
+                    "perturbation pivot for path-restricted IFs has "
+                    "not been derived). Use n_bootstrap=0 for "
+                    "analytical Binder TSL SE under survey_design, or "
+                    "use replicate weights "
+                    "(SurveyDesign(..., replicate_weights=...)) for "
+                    "design-based bootstrap variance."
                 )
 
         # ------------------------------------------------------------------
@@ -2215,6 +2233,15 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
             eligible_mask_var = np.array(
                 [g not in singleton_baseline_set for g in all_groups], dtype=bool
             )
+            # Lift eligible_groups_var once for downstream by_path /
+            # paths_of_interest call sites; mirrors the inline
+            # `_elig_groups_l` construction at the global per-horizon
+            # path so both surfaces share the same variance-eligibility
+            # ordering. Used to align per-group IF entries with the
+            # cell-period allocator's `eligible_groups` argument.
+            eligible_groups_var: List[Any] = [
+                all_groups[g] for g in range(len(all_groups)) if eligible_mask_var[g]
+            ]
 
             multi_horizon_se = {}
             multi_horizon_inference = {}
@@ -2351,6 +2378,9 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                 alpha=self.alpha,
                 df_inference=_inference_df(_df_s_bp, resolved_survey),
                 set_ids=set_ids_arr,
+                obs_survey_info=_obs_survey_info,
+                eligible_groups=eligible_groups_var,
+                replicate_n_valid_list=_replicate_n_valid_list,
             )
             # NOTE: per-path cumulated layer is computed AFTER the
             # bootstrap propagation block below (search for
@@ -2517,7 +2547,19 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                     alpha=self.alpha,
                     df_inference=_inference_df(_df_s_bp_pl, resolved_survey),
                     set_ids=set_ids_arr,
+                    obs_survey_info=_obs_survey_info,
+                    eligible_groups=eligible_groups_var,
+                    replicate_n_valid_list=_replicate_n_valid_list,
                 )
+
+            # Per-path inference for replicate-weight designs is
+            # refreshed in the final R2 P1b block below (alongside
+            # global event-study / placebo / heterogeneity surfaces),
+            # so it reflects the FINAL `_replicate_n_valid_list` after
+            # heterogeneity / overall / joiners / leavers IF sites
+            # have appended their own `n_valid` values. Computing it
+            # here would only see per-path appends and miss any later
+            # df shrinkage from those subsequent IF sites.
 
             # Normalized effects DID^n_l (suppressed under trends_linear
             # because event_study_effects holds second-differences DID^{fd}_l,
@@ -3979,6 +4021,19 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                     _info_r2["t_stat"] = _t_r2
                     _info_r2["p_value"] = _p_r2
                     _info_r2["conf_int"] = _ci_r2
+            # Per-path event-study and placebo surfaces: their helpers
+            # snapshotted df_inference BEFORE appending their own n_valid
+            # contributions, and the global event-study / placebo /
+            # heterogeneity / overall / joiners / leavers IF sites
+            # appended their n_valid AFTER per-path runs. Refresh per-path
+            # inference with the final df so it agrees with the global
+            # surfaces and `survey_metadata.df_survey`.
+            _refresh_path_inference(
+                path_effects=path_effects,
+                path_placebos=path_placebos,
+                alpha=self.alpha,
+                df_final=_final_inf_df,
+            )
 
         # Persist the final effective df_survey into survey_metadata so
         # downstream consumers — HonestDiD bounds (honest_did.py:973
@@ -5788,6 +5843,9 @@ def _compute_path_effects(
     df_inference: Optional[int] = None,
     set_ids: Optional[np.ndarray] = None,
     paths_of_interest: Optional[List[Tuple[int, ...]]] = None,
+    obs_survey_info: Optional[Dict[str, Any]] = None,
+    eligible_groups: Optional[List[Any]] = None,
+    replicate_n_valid_list: Optional[List[int]] = None,
 ) -> Optional[Dict[Tuple[int, ...], Dict[str, Any]]]:
     """
     Compute per-path event-study effects using the joiners/leavers IF pattern.
@@ -5906,13 +5964,13 @@ def _compute_path_effects(
             T_g=T_g,
             L_max=L_max,
             set_ids=set_ids,
-            compute_per_period=False,
+            compute_per_period=(obs_survey_info is not None),
             switcher_subset_mask=switcher_mask,
         )
 
         horizons: Dict[int, Dict[str, Any]] = {}
         for l_h in range(1, L_max + 1):
-            U_l_path, _ = per_path_if[l_h]
+            U_l_path, U_pp_l_path = per_path_if[l_h]
 
             # N_l_path: path-restricted count of eligible switchers at
             # horizon l. Mirror _compute_multi_horizon_dids' eligibility
@@ -5938,10 +5996,30 @@ def _compute_path_effects(
             # Point estimate: within-path mean DID
             effect_path = float(U_l_path.sum() / n_l_path)
 
-            # SE: cohort-recenter with ORIGINAL cohort structure, then
-            # plug-in with path-specific divisor (joiners/leavers pattern).
+            # SE: cohort-recenter with ORIGINAL cohort structure. Under
+            # survey, route through _survey_se_from_group_if (cell-period
+            # allocator). Otherwise plug-in with path-specific divisor
+            # (joiners/leavers pattern).
             U_centered_path = _cohort_recenter(U_l_path_elig, cohort_id_eligible)
-            se_path = _plugin_se(U_centered=U_centered_path, divisor=n_l_path)
+            if obs_survey_info is None:
+                se_path = _plugin_se(U_centered=U_centered_path, divisor=n_l_path)
+            else:
+                assert U_pp_l_path is not None
+                assert eligible_groups is not None
+                U_pp_l_path_elig = U_pp_l_path[eligible_mask_var]
+                U_centered_pp_path = _cohort_recenter_per_period(
+                    U_pp_l_path_elig, cohort_id_eligible
+                )
+                U_scaled = U_centered_path / n_l_path
+                U_pp_scaled = U_centered_pp_path / n_l_path
+                se_path, n_valid_replicates = _survey_se_from_group_if(
+                    U_centered=U_scaled,
+                    eligible_groups=eligible_groups,
+                    obs_survey_info=obs_survey_info,
+                    U_centered_per_period=U_pp_scaled,
+                )
+                if n_valid_replicates is not None and replicate_n_valid_list is not None:
+                    replicate_n_valid_list.append(n_valid_replicates)
 
             # Path-scoped degenerate-cohort warning. Mirrors the overall-
             # path surface (`Cohort-recentered analytical variance is
@@ -6131,6 +6209,9 @@ def _compute_path_placebos(
     df_inference: Optional[int] = None,
     set_ids: Optional[np.ndarray] = None,
     paths_of_interest: Optional[List[Tuple[int, ...]]] = None,
+    obs_survey_info: Optional[Dict[str, Any]] = None,
+    eligible_groups: Optional[List[Any]] = None,
+    replicate_n_valid_list: Optional[List[int]] = None,
 ) -> Optional[Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]]:
     """
     Compute per-path backward-horizon placebos ``DID^{pl}_{path, l}``.
@@ -6221,13 +6302,13 @@ def _compute_path_placebos(
             T_g=T_g,
             L_max=L_max,
             set_ids=set_ids,
-            compute_per_period=False,
+            compute_per_period=(obs_survey_info is not None),
             switcher_subset_mask=switcher_mask,
         )
 
         horizons: Dict[int, Dict[str, Any]] = {}
         for lag_l in range(1, L_max + 1):
-            U_pl_l_path, _ = per_path_pl_if[lag_l]
+            U_pl_l_path, U_pp_pl_l_path = per_path_pl_if[lag_l]
 
             pl_data = multi_horizon_placebos.get(lag_l)
             if pl_data is None:
@@ -6254,7 +6335,25 @@ def _compute_path_placebos(
             effect_pl_path = float(U_pl_l_path.sum() / n_pl_l_path)
 
             U_centered_pl_path = _cohort_recenter(U_pl_l_path_elig, cohort_id_eligible)
-            se_pl_path = _plugin_se(U_centered=U_centered_pl_path, divisor=n_pl_l_path)
+            if obs_survey_info is None:
+                se_pl_path = _plugin_se(U_centered=U_centered_pl_path, divisor=n_pl_l_path)
+            else:
+                assert U_pp_pl_l_path is not None
+                assert eligible_groups is not None
+                U_pp_pl_l_path_elig = U_pp_pl_l_path[eligible_mask_var]
+                U_centered_pp_pl_path = _cohort_recenter_per_period(
+                    U_pp_pl_l_path_elig, cohort_id_eligible
+                )
+                U_pl_scaled = U_centered_pl_path / n_pl_l_path
+                U_pp_pl_scaled = U_centered_pp_pl_path / n_pl_l_path
+                se_pl_path, n_valid_pl_replicates = _survey_se_from_group_if(
+                    U_centered=U_pl_scaled,
+                    eligible_groups=eligible_groups,
+                    obs_survey_info=obs_survey_info,
+                    U_centered_per_period=U_pp_pl_scaled,
+                )
+                if n_valid_pl_replicates is not None and replicate_n_valid_list is not None:
+                    replicate_n_valid_list.append(n_valid_pl_replicates)
 
             if np.isnan(se_pl_path) and U_centered_pl_path.size > 0 and n_pl_l_path > 0:
                 warnings.warn(
@@ -6326,9 +6425,12 @@ def _collect_path_bootstrap_inputs(
     ``_bootstrap_one_target`` downstream.
 
     Returns a nested dict ``{path: {horizon: (U_centered, n, effect, None)}}``;
-    the 4th slot is always ``None`` because per-path survey-cell IFs
-    are a future wave item (the ``by_path + survey_design`` combination
-    is gated out before this helper runs).
+    the 4th slot is always ``None`` because the multiplier-bootstrap
+    path under ``survey_design + by_path`` is gated out at fit-time
+    (``n_bootstrap > 0`` + ``survey_design`` + per-path selectors raises
+    ``NotImplementedError``); analytical and replicate-weight survey
+    SE under per-path selectors flows through ``_compute_path_effects``
+    directly and does not reach this helper.
 
     ``_enumerate_treatment_paths`` is called again here (the analytical
     pass already called it inside ``_compute_path_effects``). The
@@ -7575,6 +7677,53 @@ def _validate_cell_constant_strata_psu(
                 f"group (relaxation over the previous within-group "
                 f"constancy rule shipped in earlier releases)."
             )
+
+
+def _refresh_path_inference(
+    path_effects: Optional[Dict[Tuple[int, ...], Dict[str, Any]]],
+    path_placebos: Optional[Dict[Tuple[int, ...], Dict[int, Dict[str, Any]]]],
+    alpha: float,
+    df_final: Optional[int],
+) -> None:
+    """Refresh per-path inference fields (t_stat, p_value, conf_int) with
+    the final ``df_final`` so they agree with the global surfaces and
+    ``results.survey_metadata.df_survey`` after all replicate-weight
+    ``n_valid`` appends complete.
+
+    Per-path event-study and placebo helpers compute inference using a
+    snapshot of ``_replicate_n_valid_list`` taken at fit-time BEFORE
+    they append their own ``n_valid`` contributions. The final R2 P1b
+    block in ``fit()`` already refreshes the global surfaces (overall /
+    joiners / leavers / multi_horizon_inference / placebo_horizon_inference
+    / heterogeneity / normalized) with the final df; this helper is its
+    per-path counterpart, called from the same final block.
+
+    No-op under TSL (analytical) or non-survey fits — they skip
+    replicate-n_valid bookkeeping entirely. Mutates dicts in place.
+    """
+    from diff_diff.utils import safe_inference
+
+    def _refresh_entry(entry: Dict[str, Any]) -> None:
+        eff = entry.get("effect")
+        se = entry.get("se")
+        if eff is None or se is None:
+            return
+        if not np.isfinite(se):
+            return
+        t_new, p_new, ci_new = safe_inference(eff, se, alpha=alpha, df=df_final)
+        entry["t_stat"] = t_new
+        entry["p_value"] = p_new
+        entry["conf_int"] = ci_new
+
+    if path_effects is not None:
+        for path_data in path_effects.values():
+            horizons = path_data.get("horizons", {})
+            for entry in horizons.values():
+                _refresh_entry(entry)
+    if path_placebos is not None:
+        for path_horizons in path_placebos.values():
+            for entry in path_horizons.values():
+                _refresh_entry(entry)
 
 
 def _inference_df(
