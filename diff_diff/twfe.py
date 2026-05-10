@@ -231,13 +231,6 @@ class TwoWayFixedEffects(DifferenceInDifferences):
             # Explicit classical + analytical inference: drop the auto-cluster
             # so the validator doesn't reject ``cluster_ids + classical``.
             cluster_var = None
-        elif self.vcov_type == "conley":
-            # Conley + TWFE: disable the auto-cluster default. Conley + cluster
-            # is deferred to Phase 2; the user wants spatial-HAC at the unit
-            # level via the kernel, not cluster-robust at the unit level. The
-            # explicit-cluster case is rejected upstream; reaching here means
-            # cluster=None.
-            cluster_var = None
         else:
             cluster_var = unit
 

@@ -1112,8 +1112,9 @@ def resolve_vcov_type(
 
     - If ``vcov_type`` is ``None``: map ``robust=True`` to ``"hc1"`` and
       ``robust=False`` to ``"classical"``.
-    - If ``vcov_type`` is supplied: it must be one of
-      ``{"classical", "hc1", "hc2", "hc2_bm"}``.
+    - If ``vcov_type`` is supplied: it must be one of the values in the
+      module-level ``_VALID_VCOV_TYPES`` set, namely
+      ``{"classical", "hc1", "hc2", "hc2_bm", "conley"}``.
     - If ``robust=False`` is supplied together with a non-``"classical"`` ``vcov_type``,
       raise ``ValueError`` - the combination is ambiguous.
 
@@ -1127,7 +1128,7 @@ def resolve_vcov_type(
     Returns
     -------
     str
-        One of ``"classical"``, ``"hc1"``, ``"hc2"``, ``"hc2_bm"``.
+        One of ``"classical"``, ``"hc1"``, ``"hc2"``, ``"hc2_bm"``, ``"conley"``.
 
     Raises
     ------
