@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
@@ -576,6 +577,169 @@ class TestCompilePromptWithPRContext:
         )
         assert "## PR Context" not in result
         assert "Should be ignored" not in result
+
+    def test_option_looking_pr_title_body_preserved_literally(self, review_mod):
+        """compile_prompt must preserve PR title/body text starting with `--`
+        as literal data — not strip, mangle, or interpret it. Pairs with the
+        workflow's --key=value argv form (PR #415 R1 P1) which prevents
+        argparse from misparsing such values upstream."""
+        adversarial_titles = ["--ci-mode hijack", "--help", "--pr-body=injected"]
+        adversarial_bodies = ["--foo bar", "---\nyaml: header\n---", "--also-not-a-flag"]
+        for title in adversarial_titles:
+            for body in adversarial_bodies:
+                result = review_mod.compile_prompt(
+                    criteria_text="C.",
+                    registry_content="R.",
+                    diff_text="D.",
+                    changed_files_text="M\tf.py",
+                    branch_info="b",
+                    previous_review=None,
+                    ci_mode=True,
+                    pr_title=title,
+                    pr_body=body,
+                )
+                assert title in result, (
+                    f"option-looking title {title!r} not preserved"
+                )
+                # Body is wrapped, so check inside the wrapper
+                inside_wrapper = result.split('<pr-body untrusted="true">', 1)[1]
+                inside_wrapper = inside_wrapper.split("</pr-body>", 1)[0]
+                assert body in inside_wrapper, (
+                    f"option-looking body {body!r} not preserved"
+                )
+
+
+# ---------------------------------------------------------------------------
+# Workflow contract — pin the CI single-shot migration claim
+# ---------------------------------------------------------------------------
+
+
+class TestWorkflowContract:
+    """Pins what ``.github/workflows/ai_pr_review.yml`` ships, so a future
+    edit cannot accidentally reintroduce ``openai/codex-action``, drop
+    ``--ci-mode``, omit ``--full-registry``, stop passing PR context, or
+    change the canonical comment marker without a visible test failure.
+
+    Regression coverage requested by PR #415 R1 P2 (claim-vs-shipped audit
+    self-applied to the workflow surface)."""
+
+    @pytest.fixture(scope="class")
+    def workflow_text(self):
+        if _SCRIPT_PATH is None:
+            pytest.skip("Could not resolve script path")
+        assert _SCRIPT_PATH is not None  # narrow for type checker
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        wf_path = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
+        if not wf_path.exists():
+            pytest.skip("ai_pr_review.yml not found")
+        return wf_path.read_text()
+
+    def test_codex_action_not_invoked(self, workflow_text):
+        assert "openai/codex-action" not in workflow_text, (
+            "Workflow must not reintroduce the Codex action — the migration "
+            "moved CI to single-shot Responses API via openai_review.py."
+        )
+
+    def test_invokes_python_review_script(self, workflow_text):
+        assert "python3 .claude/scripts/openai_review.py" in workflow_text
+
+    def test_passes_required_flags(self, workflow_text):
+        for flag in [
+            "--ci-mode",
+            "--full-registry",
+            "--context standard",
+            "--model gpt-5.5",
+            "--review-criteria",
+            "--registry",
+            "--diff",
+            "--changed-files",
+            "--output",
+            "--branch-info",
+            "--repo-root",
+        ]:
+            assert flag in workflow_text, f"Missing required flag {flag!r}"
+
+    def test_passes_pr_title_body_in_equals_form(self, workflow_text):
+        """Untrusted PR title/body MUST use --key=value form so argparse can't
+        misinterpret an option-looking value. Separate-value form is forbidden."""
+        assert '"--pr-title=$PR_TITLE"' in workflow_text
+        assert '"--pr-body=$PR_BODY"' in workflow_text
+        # And the unsafe forms must not appear
+        assert '--pr-title "$PR_TITLE"' not in workflow_text
+        assert '--pr-body "$PR_BODY"' not in workflow_text
+
+    def test_canonical_comment_marker_preserved(self, workflow_text):
+        """Backward-compat: historical PR canonical comments use the
+        :codex: marker. Renaming would orphan them."""
+        assert '<!-- ai-pr-review:codex:auto -->' in workflow_text
+        assert 'ai-pr-review:codex:rerun:' in workflow_text
+
+    def test_diff_path_excludes_preserved(self, workflow_text):
+        """Large generated/data files must stay out of the unified diff to
+        avoid blowing the model's input limit."""
+        for exclude in [
+            "':!benchmarks/data/real/*.json'",
+            "':!benchmarks/data/real/*.csv'",
+            "':!docs/tutorials/*.ipynb'",
+        ]:
+            assert exclude in workflow_text, f"Missing diff exclude {exclude!r}"
+
+
+# ---------------------------------------------------------------------------
+# main() CLI propagation — pin the script's --ci-mode + PR-context flow
+# ---------------------------------------------------------------------------
+
+
+class TestMainCLIPropagation:
+    """Run main() in --dry-run mode with --ci-mode + --pr-title/--pr-body
+    and assert the PR Context section appears in the printed prompt with the
+    literal values. Regression coverage for PR #415 R1 P2."""
+
+    def test_main_dry_run_propagates_pr_context_via_equals_form(
+        self, review_mod, monkeypatch, capsys, tmp_path
+    ):
+        """Equals-form CLI args (matches workflow) must reach compile_prompt."""
+        # Minimal input files
+        (tmp_path / "diff.patch").write_text("diff --git a/foo b/foo\n")
+        (tmp_path / "files.txt").write_text("M\tdiff_diff/foo.py\n")
+        # Use the real prompt so substitutions don't fire warnings
+        if _SCRIPT_PATH is None:
+            pytest.skip("Could not resolve script path")
+        assert _SCRIPT_PATH is not None  # narrow for type checker
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        criteria_path = repo_root / ".github" / "codex" / "prompts" / "pr_review.md"
+        registry_path = repo_root / "docs" / "methodology" / "REGISTRY.md"
+        if not criteria_path.exists() or not registry_path.exists():
+            pytest.skip("Required prompt/registry files not present")
+
+        # Adversarial PR title/body that would break argparse without
+        # the --key=value form.
+        argv = [
+            "openai_review.py",
+            "--dry-run",
+            "--ci-mode",
+            "--full-registry",
+            "--context", "minimal",
+            "--review-criteria", str(criteria_path),
+            "--registry", str(registry_path),
+            "--diff", str(tmp_path / "diff.patch"),
+            "--changed-files", str(tmp_path / "files.txt"),
+            "--output", str(tmp_path / "out.md"),
+            "--branch-info", "test-branch",
+            "--pr-title=--option-looking-title",
+            "--pr-body=--option-looking-body with --more --flags",
+        ]
+        monkeypatch.setattr(sys, "argv", argv)
+
+        with pytest.raises(SystemExit) as exc_info:
+            review_mod.main()
+        assert exc_info.value.code == 0
+
+        captured = capsys.readouterr()
+        # Dry-run prints the compiled prompt to stdout
+        assert "## PR Context" in captured.out
+        assert "--option-looking-title" in captured.out
+        assert "--option-looking-body with --more --flags" in captured.out
 
 
 # ---------------------------------------------------------------------------

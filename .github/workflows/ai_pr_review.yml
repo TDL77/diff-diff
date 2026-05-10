@@ -145,6 +145,9 @@ jobs:
 
           # Pin --model gpt-5.5 explicitly so future bumps to the script's
           # DEFAULT_MODEL don't silently ship to CI without review.
+          # Use --key=value form for untrusted PR title/body so argparse
+          # cannot misinterpret an option-looking value (e.g. a PR body
+          # starting with "--") as a separate flag and break the job.
           ARGS=(--ci-mode --full-registry --context standard --model gpt-5.5
                 --review-criteria .github/codex/prompts/pr_review.md
                 --registry docs/methodology/REGISTRY.md
@@ -152,8 +155,8 @@ jobs:
                 --changed-files /tmp/pr-files.txt
                 --output /tmp/review-output.md
                 --branch-info "$BRANCH"
-                --pr-title "$PR_TITLE"
-                --pr-body "$PR_BODY"
+                "--pr-title=$PR_TITLE"
+                "--pr-body=$PR_BODY"
                 --repo-root "$(pwd)")
           if [ "$IS_RERUN" = "true" ] && [ -f /tmp/previous-review.md ]; then
             ARGS+=(--previous-review /tmp/previous-review.md)
