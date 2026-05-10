@@ -407,6 +407,71 @@ class TestConleyDirectHelper:
                 bread_matrix=bread,
             )
 
+    def test_indefinite_meat_warning_fires_for_bartlett(self):
+        """Both kernels (radial 1-D bartlett and uniform) are practitioner
+        specializations of Conley 1999 and are NOT formally PSD-guaranteed
+        (Conley's explicit PSD formula is the 2-D separable product window,
+        Eq 3.14, not the 1-D radial form). The PSD guard must therefore
+        fire for bartlett too, not just uniform.
+
+        Forces the indefinite path by monkey-patching `_bartlett_kernel` to
+        return a kernel matrix with an aggressive negative off-diagonal,
+        making the resulting meat indefinite. Verifies the warning surfaces
+        with the kernel name in the message.
+        """
+        from diff_diff import conley as conley_mod
+
+        rng = np.random.default_rng(seed=11)
+        n = 6
+        coords = rng.uniform(0, 1, size=(n, 2))
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        eps = np.ones(n)  # non-zero residuals so meat is non-zero
+        bread = X.T @ X
+
+        # Patch the bartlett kernel to return a sign-pattern that DEFINITELY
+        # produces an indefinite meat. The native bartlett is non-negative;
+        # injecting large negative off-diagonals breaks the
+        # PSD-by-non-negative-window heuristic.
+        original = conley_mod._bartlett_kernel
+
+        def _indefinite(u: np.ndarray) -> np.ndarray:
+            base = np.eye(u.shape[0])
+            # Aggressive negative off-diagonals; this kernel is itself
+            # indefinite and so is S.T @ K @ S for generic S.
+            for i in range(u.shape[0]):
+                for j in range(u.shape[0]):
+                    if i != j:
+                        base[i, j] = -10.0
+            return base
+
+        try:
+            conley_mod._bartlett_kernel = _indefinite
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                conley_mod._compute_conley_vcov(
+                    X,
+                    eps,
+                    coords,
+                    cutoff=10.0,
+                    metric="euclidean",
+                    kernel="bartlett",
+                    bread_matrix=bread,
+                )
+            # Verify a PSD warning fired naming the bartlett kernel
+            psd_warnings = [
+                msg
+                for msg in w
+                if issubclass(msg.category, UserWarning)
+                and "bartlett" in str(msg.message)
+                and "negative eigenvalue" in str(msg.message)
+            ]
+            assert len(psd_warnings) >= 1, (
+                f"Expected a UserWarning naming kernel='bartlett' and "
+                f"'negative eigenvalue'; got {[str(m.message) for m in w]}"
+            )
+        finally:
+            conley_mod._bartlett_kernel = original
+
 
 # ---------------------------------------------------------------------------
 # TestConleyReductions — Bartlett+tiny cutoff → HC0 meat; etc.
@@ -685,9 +750,15 @@ class TestConleyLinearRegression:
 
 
 class TestConleyEstimatorIntegration:
-    """Step 4 smoke tests: DifferenceInDifferences and MultiPeriodDiD accept
-    vcov_type='conley' with the conley_* kwargs and produce finite SEs.
-    Also tests that summary() prints the Conley label."""
+    """Panel-estimator rejection tests for vcov_type='conley'.
+
+    DiD and MultiPeriodDiD reject Conley at fit-time in Phase 1 because
+    cross-sectional Conley over (unit, time) rows mishandles same-unit
+    cross-time pairs (d_ij = 0 -> K = 1). The supported Phase 1 path for
+    Conley is direct compute_robust_vcov / LinearRegression on a single-
+    period regression. Phase 2 will add the space-time product kernel and
+    lift the rejection.
+    """
 
     @pytest.fixture
     def two_period_panel(self):

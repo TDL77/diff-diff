@@ -86,10 +86,18 @@ def _pairwise_distance_matrix(coords: np.ndarray, metric) -> np.ndarray:
 
 
 def _bartlett_kernel(u: np.ndarray) -> np.ndarray:
-    """Bartlett (linear taper) kernel: K(u) = max(0, 1 - |u|).
+    """Bartlett (linear taper) kernel on pairwise distance: K(u) = max(0, 1 - |u|).
 
-    Conley (1999) Eq 3.14 + Andrews (1991). PSD-guaranteed (non-negative
-    spectral window), so the resulting Conley meat is PSD.
+    This is the radial 1-D specialization of Conley (1999)'s Bartlett window
+    that R ``conleyreg`` (Düsterhöft 2021), Stata ``acreg`` (Colella et al.
+    2019), and Hsiang (2010) all use as their Bartlett path. Conley's
+    explicit PSD formula (Eq 3.14, page 12) is the **2-D separable product
+    window** ``K(j, k) = (1 - |j|/L_M)(1 - |k|/L_N)`` indexed on a lattice;
+    the 1-D radial form on pairwise distance is a practitioner specialization
+    that is not explicitly written in the paper and is therefore **not
+    PSD-guaranteed**. The caller checks the resulting meat for indefiniteness
+    and emits a ``UserWarning`` if the smallest eigenvalue is materially
+    negative (regardless of kernel).
     """
     return np.maximum(0.0, 1.0 - np.abs(u))
 
@@ -99,7 +107,7 @@ def _uniform_kernel(u: np.ndarray) -> np.ndarray:
 
     Cited as White (1980) truncated estimator; Conley (1999) page 11. Easier
     to interpret than Bartlett but the spectral window is negative in regions
-    (Conley 1999 footnote 11), so the resulting meat is NOT guaranteed PSD.
+    (Conley 1999 footnote 11), so the resulting meat is not guaranteed PSD.
     Caller emits ``UserWarning`` if any meat eigenvalue is materially negative.
     """
     return (np.abs(u) <= 1.0).astype(np.float64)
@@ -128,8 +136,10 @@ def _validate_conley_kwargs(
     if coords is None:
         raise ValueError(
             "vcov_type='conley' requires conley_coords (n×2 array of [lat, lon] "
-            "or projected coords). Pass via TwoWayFixedEffects(conley_coords=...) "
-            "or compute_robust_vcov(conley_coords=...)."
+            "or projected coords). Pass via LinearRegression(conley_coords=...) "
+            "or compute_robust_vcov(conley_coords=...) on a cross-sectional "
+            "design (Phase 1 supports cross-sectional Conley only; panel "
+            "estimators are deferred to Phase 2)."
         )
     coords_arr = np.asarray(coords, dtype=np.float64)
     if coords_arr.ndim != 2 or coords_arr.shape[1] != 2:
@@ -209,9 +219,13 @@ def _compute_conley_vcov(
 
     Notes
     -----
-    For ``kernel == "uniform"`` the meat is not guaranteed PSD (Conley 1999
-    footnote 11); a ``UserWarning`` is emitted if the smallest meat eigenvalue
-    is materially negative (< -1e-12).
+    Neither the uniform kernel (negative spectral regions, Conley 1999
+    footnote 11) nor the **radial 1-D Bartlett** specialization implemented
+    here is PSD-guaranteed. Conley's explicit PSD formula (Eq 3.14) is the
+    2-D separable product window on a lattice; the radial pairwise form is
+    a practitioner specialization (R ``conleyreg``, Stata ``acreg``, Hsiang
+    2010) that is not formally PSD. We emit a ``UserWarning`` if the smallest
+    meat eigenvalue is materially negative (< -1e-12) regardless of kernel.
     """
     coords_arr = np.asarray(coords, dtype=np.float64)
     D = _pairwise_distance_matrix(coords_arr, metric)
@@ -243,18 +257,25 @@ def _compute_conley_vcov(
             "score matrix for NaN/Inf."
         )
 
-    # PSD guard for uniform kernel (Conley 1999 fn 11)
-    if kernel == "uniform":
-        eigvals = np.linalg.eigvalsh(meat)
-        if eigvals.size and eigvals.min() < -1e-12:
-            warnings.warn(
-                f"Conley meat with uniform kernel has a negative eigenvalue "
-                f"({eigvals.min():.2e}); the variance estimator is not "
-                "guaranteed PSD. Consider conley_kernel='bartlett' (PSD by "
-                "construction).",
-                UserWarning,
-                stacklevel=3,
-            )
+    # PSD guard. Neither the uniform kernel (Conley 1999 fn 11) nor the
+    # radial 1-D Bartlett specialization is formally PSD-guaranteed —
+    # Conley's explicit PSD Bartlett formula (Eq 3.14) is the 2-D separable
+    # product window, not the 1-D radial pairwise form that R `conleyreg`,
+    # Stata `acreg`, and this implementation use. Check both kernels.
+    eigvals = np.linalg.eigvalsh(meat)
+    if eigvals.size and eigvals.min() < -1e-12:
+        warnings.warn(
+            f"Conley meat with conley_kernel={kernel!r} has a materially "
+            f"negative eigenvalue ({eigvals.min():.2e}); the variance "
+            "estimator is not guaranteed PSD on this design. Both "
+            "supported kernels (radial bartlett and uniform) are "
+            "practitioner specializations of Conley 1999 and are not "
+            "formally PSD-guaranteed; consider varying conley_cutoff_km "
+            "or reviewing the design for collinearity / degenerate "
+            "residual structure.",
+            UserWarning,
+            stacklevel=3,
+        )
 
     # Sandwich via two solves (mirrors _compute_cr2_bm pattern in linalg.py)
     try:

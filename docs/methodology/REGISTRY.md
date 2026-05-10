@@ -2958,8 +2958,10 @@ where `d_ij` is the geographic distance, `h` is the user-supplied bandwidth
 the standard White HC0 term `X_i ε_i² X_i'`.
 
 **Kernel functions:**
-- `conley_kernel="bartlett"` (default): `K(u) = max(0, 1 - |u|)`. Conley 1999 Eq 3.14, Andrews 1991. PSD-guaranteed (non-negative spectral window).
-- `conley_kernel="uniform"`: `K(u) = 1{|u| ≤ 1}`. Spectral window negative in regions (Conley 1999 footnote 11) — meat not guaranteed PSD; implementation emits `UserWarning` if any meat eigenvalue < `-1e-12`.
+- `conley_kernel="bartlett"` (default): `K(u) = max(0, 1 - |u|)` evaluated on the pairwise distance `d_ij/h`. The radial 1-D form on pairwise distance, matching R `conleyreg`, Stata `acreg` (Colella et al. 2019), and Hsiang (2010).
+- `conley_kernel="uniform"`: `K(u) = 1{|u| ≤ 1}`. Conley 1999 page 11; spectral window negative in regions (footnote 11).
+
+**Note (deviation / source specialization):** Conley 1999's explicitly PSD-guaranteed Bartlett formula (Eq 3.14, page 12) is the **2-D separable product window** `K(j, k) = (1 - |j|/L_M)(1 - |k|/L_N)` indexed on a lattice. The 1-D radial form on pairwise distance that diff-diff implements (matching R `conleyreg`) is a practitioner specialization that is not explicitly written in the paper and is therefore **not formally PSD-guaranteed**. We apply the same indefiniteness check to both kernels: a `UserWarning` is emitted if any meat eigenvalue is materially negative (< `-1e-12`).
 
 **Distance metrics:**
 - `conley_metric="haversine"` (default): great-circle in km using Earth's mean radius (6371.01 km, matching R `conleyreg`). Validates `lat ∈ [-90, 90]`, `lon ∈ [-180, 180]`.
