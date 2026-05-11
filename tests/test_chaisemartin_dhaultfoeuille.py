@@ -10273,29 +10273,133 @@ class TestByPathHeterogeneity:
             assert not np.isfinite(vals["conf_int"][0])
             assert not np.isfinite(vals["conf_int"][1])
 
+    @staticmethod
+    def _multi_baseline_het_data(seed=44):
+        """Multi-baseline DGP: joiners (D_{g,1}=0, path (0,1,1,1)) +
+        leavers (D_{g,1}=1, path (1,0,0,0)). F_g varies in {3,4,5} for
+        BOTH baselines so each path has multi-cohort variation. het_x
+        binary, balanced within each baseline. This is the regime where
+        ``controls`` and ``trends_linear`` emit a multi-baseline
+        UserWarning (R-divergence); per-path heterogeneity must NOT
+        emit one because cohort dummies absorb baseline.
+        """
+        rng = np.random.RandomState(seed)
+        rows = []
+        n_per_baseline, n_periods = 60, 10
+        # Joiners: baseline=0, path (0,1,1,1)
+        for g in range(n_per_baseline):
+            F_g = 3 + ((g // 3) % 3)
+            het_x = 1 if g < n_per_baseline // 2 else 0
+            effect = 5.0 + 3.0 * het_x
+            path = (0, 1, 1, 1)
+            for t in range(n_periods):
+                if F_g - 1 <= t < F_g - 1 + len(path):
+                    d = path[t - (F_g - 1)]
+                elif t >= F_g - 1 + len(path):
+                    d = path[-1]
+                else:
+                    d = 0
+                y = 0.5 * t + effect * d + rng.normal(0, 0.5)
+                rows.append({"group": g, "period": t, "treatment": d,
+                             "outcome": y, "het_x": het_x})
+        # Leavers: baseline=1, path (1,0,0,0)
+        for g_offset in range(n_per_baseline):
+            g = n_per_baseline + g_offset
+            F_g = 3 + ((g_offset // 3) % 3)
+            het_x = 1 if g_offset < n_per_baseline // 2 else 0
+            effect = 5.0 + 3.0 * het_x
+            path = (1, 0, 0, 0)
+            for t in range(n_periods):
+                if F_g - 1 <= t < F_g - 1 + len(path):
+                    d = path[t - (F_g - 1)]
+                elif t >= F_g - 1 + len(path):
+                    d = path[-1]
+                else:
+                    d = 1  # baseline=1 — treated pre-window
+                y = 0.5 * t + effect * d + rng.normal(0, 0.5)
+                rows.append({"group": g, "period": t, "treatment": d,
+                             "outcome": y, "het_x": het_x})
+        return pd.DataFrame(rows)
+
     def test_per_path_heterogeneity_no_multi_baseline_warning(self):
-        """Anti-regression: heterogeneity + by_path does NOT emit the
-        multi-baseline UserWarning that controls/trends_linear emit.
-        Cohort dummies absorb baseline by construction (REGISTRY)."""
-        df = _by_path_het_data()
+        """Anti-regression: heterogeneity + by_path / paths_of_interest
+        does NOT emit the multi-baseline UserWarning that
+        ``controls`` / ``trends_linear`` emit on switcher panels
+        spanning multiple ``D_{g,1}`` values. Cohort dummies in the
+        design matrix absorb baseline by construction (REGISTRY:
+        "Per-path heterogeneity testing"), so cross-baseline switcher
+        panels do not produce R-divergence in the heterogeneity test
+        and no parallel warning is needed.
+
+        Uses a TRUE multi-baseline DGP (joiners with D_{g,1}=0 path
+        ``(0,1,1,1)`` + leavers with D_{g,1}=1 path ``(1,0,0,0)``)
+        selected via ``paths_of_interest``. Verified empirically:
+        both paths produce finite per-path heterogeneity at l=1,2
+        with zero baseline-related warnings.
+        """
+        df = self._multi_baseline_het_data()
+        # Sanity check: panel actually has both baselines among switchers
+        baselines = df.groupby("group")["treatment"].first().unique()
+        assert set(baselines) >= {0, 1}, (
+            f"fixture must include both baselines; got {sorted(baselines)}"
+        )
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             res = ChaisemartinDHaultfoeuille(
-                drop_larger_lower=False, by_path=3
+                drop_larger_lower=False,
+                paths_of_interest=[(0, 1, 1, 1), (1, 0, 0, 0)],
             ).fit(
-                df, outcome="outcome", group="group", time="period",
-                treatment="treatment", L_max=3, heterogeneity="het_x",
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+                heterogeneity="het_x",
             )
-        assert res.path_heterogeneity_effects
-        # Filter for any multi-baseline-style warning
+
+        # Both selected paths surface (per-baseline switchers populate both)
+        assert res.path_heterogeneity_effects is not None
+        assert (0, 1, 1, 1) in res.path_heterogeneity_effects
+        assert (1, 0, 0, 0) in res.path_heterogeneity_effects
+
+        # Each path has at least one finite (path, horizon) entry —
+        # confirms the regression is non-degenerate under multi-baseline.
+        for path in [(0, 1, 1, 1), (1, 0, 0, 0)]:
+            horizons = res.path_heterogeneity_effects[path]
+            finite_count = sum(
+                1 for v in horizons.values()
+                if np.isfinite(v["beta"]) and np.isfinite(v["se"])
+            )
+            assert finite_count >= 1, (
+                f"path={path}: expected ≥1 finite per-(path, l) entry, "
+                f"got {finite_count}"
+            )
+
+        # No multi-baseline UserWarning. Match the controls / trends_lin
+        # warning shape (mentions "baseline" + "multi" or "by_path /
+        # paths_of_interest + controls/trends_linear" R-divergence text).
+        # Be strict — both fragments must appear in the same warning.
         multi_baseline = [
             w for w in caught
             if "baseline" in str(w.message).lower()
             and "multi" in str(w.message).lower()
         ]
         assert not multi_baseline, (
-            f"Unexpected multi-baseline warning(s): "
+            f"Unexpected multi-baseline warning(s) under heterogeneity: "
             f"{[str(w.message) for w in multi_baseline]}"
+        )
+
+        # Also check no controls/trends-linear divergence verbatim text
+        controls_divergence = [
+            w for w in caught
+            if "by_path / paths_of_interest + controls" in str(w.message)
+            or "by_path / paths_of_interest + trends_linear" in str(w.message)
+        ]
+        assert not controls_divergence, (
+            f"Unexpected controls / trends_linear divergence warning(s): "
+            f"{[str(w.message) for w in controls_divergence]}"
         )
 
     # Survey composition (slow)
