@@ -73,6 +73,10 @@ docs = [
     "sphinx-sitemap>=2.5",
     "nbsphinx>=0.9",
     "matplotlib>=3.5",
+    # ipython provides the 'ipython3' Pygments lexer used by nbsphinx for
+    # notebook code cells; without it Sphinx emits highlighting_failure
+    # warnings on every notebook.
+    "ipython>=8.0",
 ]
 
 [project.urls]

@@ -81,6 +81,7 @@ Quick Links
    tutorials/18_geo_experiments
    tutorials/19_dcdh_marketing_pulse
    tutorials/20_had_brand_campaign
+   tutorials/21_had_pretest_workflow
 
 .. toctree::
    :maxdepth: 1
