@@ -618,6 +618,61 @@ extract_dcdh_by_path <- function(res, n_effects, n_placebos = 0) {
   list(by_path = out)
 }
 
+# Helper: extract global predict_het results. R's predict_het slot is at
+# res$results$predict_het, a data.frame with columns
+# {effect, covariate, Estimate, SE, t, LB, UB, N, pF}. Estimate is the
+# WLS coefficient on the heterogeneity covariate.
+extract_dcdh_predict_het <- function(res, n_effects) {
+  ph <- res$results$predict_het
+  horizons <- list()
+  if (is.null(ph) || nrow(ph) == 0) return(list(predict_het = horizons))
+  for (h in seq_len(min(n_effects, nrow(ph)))) {
+    horizons[[as.character(ph$effect[h])]] <- list(
+      beta = as.numeric(ph$Estimate[h]),
+      se = as.numeric(ph$SE[h]),
+      t = as.numeric(ph$t[h]),
+      ci_lo = as.numeric(ph$LB[h]),
+      ci_hi = as.numeric(ph$UB[h]),
+      n_obs = as.numeric(ph$N[h]),
+      p_value = as.numeric(ph$pF[h])
+    )
+  }
+  list(predict_het = horizons)
+}
+
+# Helper: extract per-path predict_het results. Under by_path=k +
+# predict_het, R's per-by_level dispatcher writes a predict_het table to
+# each res$by_level_i$results$predict_het. Output mirrors
+# extract_dcdh_by_path's shape with a horizons dict keyed by horizon.
+extract_dcdh_by_path_predict_het <- function(res, n_effects) {
+  by_levels <- res$by_levels
+  out <- list()
+  for (i in seq_along(by_levels)) {
+    slot <- res[[paste0("by_level_", i)]]
+    ph <- slot$results$predict_het
+    horizons <- list()
+    if (!is.null(ph) && nrow(ph) > 0) {
+      for (h in seq_len(min(n_effects, nrow(ph)))) {
+        horizons[[as.character(ph$effect[h])]] <- list(
+          beta = as.numeric(ph$Estimate[h]),
+          se = as.numeric(ph$SE[h]),
+          t = as.numeric(ph$t[h]),
+          ci_lo = as.numeric(ph$LB[h]),
+          ci_hi = as.numeric(ph$UB[h]),
+          n_obs = as.numeric(ph$N[h]),
+          p_value = as.numeric(ph$pF[h])
+        )
+      }
+    }
+    out[[i]] <- list(
+      path = by_levels[i],
+      frequency_rank = i,
+      horizons = horizons
+    )
+  }
+  list(by_path_predict_het = out)
+}
+
 # Scenario 13: mixed_single_switch + by_path=2 (basic 2-path case).
 # The mixed_single_switch DGP produces joiners (path 0,1,1,1) and
 # leavers (path 1,0,0,0) as its only two observed paths at L_max=3, so
@@ -1015,6 +1070,136 @@ cat("  Scenario 19: multi_path_reversible_by_path_non_binary\n")
                   n_periods = 13L, seed = 119L, effects = 3, placebo = 1,
                   by_path = 3, ci_level = 95),
     results = extract_dcdh_by_path(res19, n_effects = 3, n_placebos = 1)
+  )
+}
+
+# Scenarios 20 + 21: predict_het R-parity (Wave 5 #11). Scenario 20 is
+# the global anchor (predict_het without by_path); scenario 21 is the
+# per-path version (by_path + predict_het). Both use the same DGP so the
+# Python-side parity tests can calibrate atol on the global scenario and
+# inherit the same atol for the per-path test. R's predict_het syntax
+# requires a 2-element list: list(covariate_name, horizons_vec).
+#
+# DGP shape: 90 switchers + 30 never-treated controls, 10 periods, 3
+# paths (0,1,1,1) / (0,1,0,0) / (0,1,1,0), F_g varies in {3,4,5}
+# INDEPENDENTLY of path so each path has multiple cohorts. het_x is
+# binary {0,1}, balanced across both switchers and controls. Effect =
+# 5.0 + 3.0 * het_x to produce a detectable heterogeneity signal.
+# Never-treated controls are required for R's predict_het to compute
+# horizons l>=2 under reversal paths (otherwise R returns
+# "max effects = 2" or empty cohort dummies). `dont_drop_larger_lower
+# = TRUE` matches the Python by_path requirement that
+# `drop_larger_lower=False`.
+cat("  Scenarios 20/21: multi_path_reversible_predict_het + by_path version\n")
+{
+  set.seed(120L)
+  n_switchers20 <- 90L
+  n_controls20 <- 30L
+  n_groups20 <- n_switchers20 + n_controls20
+  n_periods20 <- 10L
+  paths20 <- list(c(0L, 1L, 1L, 1L), c(0L, 1L, 0L, 0L), c(0L, 1L, 1L, 0L))
+  D20 <- matrix(0L, nrow = n_groups20, ncol = n_periods20)
+  het_x20 <- integer(n_groups20)
+  group_fe20 <- rnorm(n_groups20, 0, 2.0)
+  # Switchers (groups 1..n_switchers20)
+  for (g in seq_len(n_switchers20)) {
+    F_g_choice <- ((g - 1L) %/% 3L) %% 3L
+    F_g <- 3L + F_g_choice
+    path_idx <- ((g - 1L) %% 3L) + 1L
+    pp <- paths20[[path_idx]]
+    het_x20[g] <- if (g <= n_switchers20 %/% 2L) 1L else 0L
+    for (j in seq_along(pp)) {
+      t <- F_g - 1L + j
+      if (t >= 1L && t <= n_periods20) D20[g, t] <- pp[j]
+    }
+    if (F_g - 1L + length(pp) <= n_periods20) {
+      tail_t <- (F_g - 1L + length(pp)):n_periods20
+      D20[g, tail_t] <- pp[length(pp)]
+    }
+  }
+  # Never-treated controls (groups n_switchers20+1..n_groups20).
+  # Balanced het_x assignment so the heterogeneity covariate has
+  # variation in the control pool too.
+  for (g in (n_switchers20 + 1L):n_groups20) {
+    k <- g - n_switchers20
+    het_x20[g] <- if (k <= n_controls20 %/% 2L) 1L else 0L
+  }
+  noise20 <- matrix(rnorm(n_groups20 * n_periods20, 0, 0.5),
+                    nrow = n_groups20, ncol = n_periods20)
+  period_arr20 <- 0:(n_periods20 - 1L)
+  effect20 <- 5.0 + 3.0 * het_x20  # heterogeneity signal
+  Y20 <- matrix(group_fe20, nrow = n_groups20, ncol = n_periods20) +
+    matrix(0.5 * period_arr20, nrow = n_groups20, ncol = n_periods20, byrow = TRUE) +
+    matrix(effect20, nrow = n_groups20, ncol = n_periods20) * D20 +
+    noise20
+  d20 <- data.frame(
+    group = rep(seq_len(n_groups20) - 1L, each = n_periods20),
+    period = rep(period_arr20, n_groups20),
+    treatment = as.vector(t(D20)),
+    outcome = as.vector(t(Y20)),
+    het_x = rep(het_x20, each = n_periods20)
+  )
+
+  # Scenario 20: global predict_het anchor (no by_path).
+  # `dont_drop_larger_lower = TRUE` preserves multi-switch cohorts so the
+  # heterogeneity regression has cohort variation at every horizon.
+  # Without this, R drops off-switch paths at l>=2, leaving a single
+  # cohort and triggering the `prod_het_l_XX ~ het_x + ` empty-cohort
+  # error. dCDH `by_path` requires `drop_larger_lower=False` on the Python
+  # side anyway, so this flag is consistent with the per-path scope.
+  res20 <- did_multiplegt_dyn(
+    df = d20, outcome = "outcome", group = "group", time = "period",
+    treatment = "treatment", effects = 3,
+    dont_drop_larger_lower = TRUE,
+    predict_het = list("het_x", c(1, 2, 3)),
+    ci_level = 95, graph_off = TRUE
+  )
+  scenarios$multi_path_reversible_predict_het <- list(
+    data = list(
+      group = as.numeric(d20$group),
+      period = as.numeric(d20$period),
+      treatment = as.numeric(d20$treatment),
+      outcome = as.numeric(d20$outcome),
+      het_x = as.numeric(d20$het_x)
+    ),
+    params = list(pattern = "multi_path_reversible_predict_het",
+                  n_switchers = n_switchers20, n_controls = n_controls20,
+                  n_groups = n_groups20, n_periods = n_periods20,
+                  seed = 120L, effects = 3,
+                  predict_het_var = "het_x",
+                  predict_het_horizons = c(1, 2, 3),
+                  ci_level = 95,
+                  dont_drop_larger_lower = TRUE),
+    results = extract_dcdh_predict_het(res20, n_effects = 3)
+  )
+
+  # Scenario 21: by_path + predict_het (per-path version on same DGP).
+  # `dont_drop_larger_lower = TRUE` matches scenario 20 + Python
+  # by_path's `drop_larger_lower=False` requirement.
+  res21 <- did_multiplegt_dyn(
+    df = d20, outcome = "outcome", group = "group", time = "period",
+    treatment = "treatment", effects = 3, by_path = 3,
+    dont_drop_larger_lower = TRUE,
+    predict_het = list("het_x", c(1, 2, 3)),
+    ci_level = 95, graph_off = TRUE
+  )
+  scenarios$multi_path_reversible_by_path_predict_het <- list(
+    data = list(
+      group = as.numeric(d20$group),
+      period = as.numeric(d20$period),
+      treatment = as.numeric(d20$treatment),
+      outcome = as.numeric(d20$outcome),
+      het_x = as.numeric(d20$het_x)
+    ),
+    params = list(pattern = "multi_path_reversible_by_path_predict_het",
+                  n_switchers = n_switchers20, n_controls = n_controls20,
+                  n_groups = n_groups20, n_periods = n_periods20,
+                  seed = 120L, effects = 3, by_path = 3,
+                  predict_het_var = "het_x",
+                  predict_het_horizons = c(1, 2, 3),
+                  ci_level = 95,
+                  dont_drop_larger_lower = TRUE),
+    results = extract_dcdh_by_path_predict_het(res21, n_effects = 3)
   )
 }
 

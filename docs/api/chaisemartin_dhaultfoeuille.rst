@@ -26,7 +26,11 @@ supports binary or integer-coded discrete (D in Z) treatment, and
 composes with ``survey_design`` for analytical Binder TSL SE and
 replicate-weight bootstrap variance (multiplier bootstrap under
 survey + by_path remains gated; no R parity since R
-``did_multiplegt_dyn`` does not support survey weighting).
+``did_multiplegt_dyn`` does not support survey weighting). ``by_path``
+and ``paths_of_interest`` also compose with ``heterogeneity="<col>"``:
+per-path heterogeneity coefficient surfaces on
+``results.path_heterogeneity_effects`` (mirrors R
+``did_multiplegt_dyn(..., by_path, predict_het)`` per-by_level).
 
 The estimator:
 
