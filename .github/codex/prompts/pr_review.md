@@ -90,23 +90,60 @@ Before finalizing, confirm you have run each of these audits on the diff:
    - `benchmarks/data/real/*.json`
    - `benchmarks/data/real/*.csv`
 
+6. **Claim-vs-shipped audit**: For every behavior the PR explicitly claims is
+   shipped (in `REGISTRY.md`, `CHANGELOG.md`, the PR body, or methodology
+   notes), trace the claim through every relevant surface and flag absences.
+   This is a *directive* audit — actively cross-reference each claim, do not
+   accept "the existing surfaces look adequate" without tracing.
+
+   For each claimed behavior, check:
+   - **Implementation**: the code path exists in the diff and is wired into
+     the public API (`fit`, results dataclass, etc.). Missing implementation
+     when REGISTRY/CHANGELOG/PR-body advertises it as working is **P0** (false
+     claim of correctness) or **P1** (missing assumption check).
+   - **Tests**: a behavioral regression test exists for the claimed behavior.
+     Missing test for shipped behavior is **P2** per the deferral rule
+     (per the Deferred Work Acceptance section below) — TODO.md tracking does
+     NOT downgrade this.
+   - **Public docstrings**: affected method/class docstrings mention the new
+     behavior (parameters, return-shape additions, side effects). Missing is
+     **P2** (claim-vs-docstring drift).
+   - **Rendering surfaces**: `summary()`, `to_dataframe()`, and other
+     downstream consumers reflect the new behavior. Missing is **P2** (or
+     **P1** if the rendering surface is the only way users observe the
+     result).
+   - **Cross-doc consistency**: if claimed in REGISTRY.md / CHANGELOG.md /
+     PR body, the implementation, tests, docstrings, and rendering all agree.
+
 ## Deferred Work Acceptance
 
 This project tracks deferred technical debt in `TODO.md` under "Tech Debt from Code Reviews."
 
 - If a limitation is already tracked in `TODO.md` with a PR reference, it is NOT a blocker.
-- If a PR ADDS a new `TODO.md` entry for deferred work, that counts as properly tracking
-  deferrable items (test gaps, documentation, performance). Classify those as
-  P3-informational ("tracked in TODO.md"), not P1/P2.
+- If a PR ADDS a new `TODO.md` entry for deferred work (test gaps, documentation, performance
+  improvements), that counts as properly tracking and downgrades the finding from P2 to
+  P3-informational ("tracked in TODO.md"). The finding MUST still be enumerated in the report —
+  tracking changes the classification, not the visibility. Test gaps for behavior the PR
+  explicitly claims is shipped remain P2 even when added to TODO.md — TODO.md is not a
+  substitute for shipping the test.
 - Only flag deferred work as P1+ if it introduces a SILENT correctness bug (wrong numbers
   with no warning/error) that is NOT tracked anywhere.
-- Test gaps, documentation gaps, and performance improvements are deferrable. Missing NaN guards
-  and incorrect statistical output are not.
+- Test gaps, documentation gaps, and performance improvements MUST be enumerated as findings —
+  do NOT silently skip them. Default severity is P2. They may be mitigated to P3-informational
+  only when tracked in `TODO.md` ("Tech Debt from Code Reviews") or documented in `REGISTRY.md`
+  (with a Note/Deviation label), either pre-existing or added within this PR. Exception: test
+  gaps for behavior the PR explicitly claims is shipped and working (in `REGISTRY.md`,
+  `CHANGELOG.md`, the PR body, or methodology notes) remain P2 even when tracked — TODO.md is
+  not a substitute for shipping the test. Missing NaN guards and incorrect statistical output
+  are P0/P1 and are not deferrable.
 
 Rules:
-- Review the changes introduced by this PR (diff). The Single-Pass Completeness
-  Mandate above authorizes broader audits (sibling surfaces, pattern-wide greps,
-  reciprocal checks, transitive deps) — do those upfront rather than deferring.
+- Review the changes introduced by this PR (diff). Conduct the audits listed in
+  the Single-Pass Completeness section above (sibling surfaces, reciprocal
+  checks, claim-vs-shipped) on the loaded context — do those upfront rather
+  than deferring. You are a single-shot reviewer with no shell access, so audit
+  only what is visible in the loaded prompt; do not claim audits that require
+  greps, file loads, or tool use beyond the provided context.
 - Provide a single Markdown report with:
   - Overall assessment (see Assessment Criteria below)
   - Executive summary (3–6 bullets)
@@ -124,12 +161,14 @@ Apply the assessment based on the HIGHEST severity of UNMITIGATED findings:
 ⛔ Blocker — One or more P0: silent correctness bugs (wrong statistical output with no
   warning), data corruption, or security vulnerabilities.
 
-⚠️ Needs changes — One or more P1 (no P0s): missing edge-case handling that could produce
-  errors in production, undocumented methodology deviations, or anti-pattern violations.
+⚠️ Needs changes — One or more P1 or P2 (no P0s): P1 = missing edge-case handling that could
+  produce errors in production, undocumented methodology deviations, or anti-pattern
+  violations; P2 = should-fix items the PR has not addressed (claim-vs-test mismatches,
+  public-API docstring drift, missing rendering surfaces). Both block ✅.
 
-✅ Looks good — No unmitigated P0 or P1 findings. P2/P3 items may exist. A PR does NOT need
-  to be perfect to receive ✅. Tracked limitations, documented deviations, and minor gaps
-  are compatible with ✅.
+✅ Looks good — No unmitigated P0/P1/P2 findings. P3 items may exist. A PR does NOT need
+  to be perfect to receive ✅. Tracked limitations, documented deviations, and P3-classified
+  minor gaps are compatible with ✅.
 
 A finding is MITIGATED (does not count toward assessment) if:
 - The deviation is documented in `docs/methodology/REGISTRY.md` with a Note/Deviation label
@@ -137,11 +176,25 @@ A finding is MITIGATED (does not count toward assessment) if:
 - The PR itself adds a TODO.md entry or REGISTRY.md note for the issue
 - The finding is about an implementation choice between valid numerical approaches
 
+**Mitigated findings MUST still be enumerated in the report** — mitigation changes the
+classification (typically to P3-informational) and removes the finding from the assessment
+tally, but does not authorize silent omission. The reviewer's job is to surface every issue
+it sees; "deferrable" is never a license to skip.
+
+**One targeted carve-out for P2**: a P2 finding for a test gap covering behavior the PR
+explicitly claims is shipped and working (in REGISTRY.md, CHANGELOG.md, the PR body, or
+methodology notes) cannot be mitigated by adding a TODO.md entry — TODO.md is not a
+substitute for shipping the test. Such findings must be resolved or the claim revised.
+All other P2 mitigation paths (REGISTRY.md Notes, pre-existing TODO entries, valid numerical
+approach reclassification) remain available.
+
 A finding is NEVER mitigated by TODO.md tracking if it is:
 - A P0: silent correctness bug, NaN/inference inconsistency, data corruption, or security issue
 - A P1: missing assumption check, incorrect variance/SE, or undocumented methodology deviation
-Only P2/P3 findings (code quality, test gaps, documentation, performance) can be downgraded
-by tracking in TODO.md.
+P0/P1 findings can be downgraded only via REGISTRY.md documentation of the deviation, not
+TODO.md tracking alone. P2/P3 findings (code quality, test gaps, documentation, performance)
+can be downgraded by tracking in TODO.md, with the one carve-out above for shipped-behavior
+test gaps.
 
 When the assessment is ⚠️ or ⛔, include a "Path to Approval" section listing specific,
 enumerated changes that would move the assessment to ✅. Each item must be concrete and
@@ -155,12 +208,14 @@ When this is a re-review (the PR has prior AI review comments):
   to distinguish from moving goalposts. Limit these to clear, concrete issues — not
   speculative concerns or stylistic preferences.
 - New code added since the last review IS in scope for new findings — apply the
-  Single-Pass Completeness Mandate's audits (sibling surfaces, pattern-wide greps,
-  reciprocal checks) to that new code in this re-review pass. For UNCHANGED code,
-  the existing [Newly identified] convention from the bullet above still applies:
+  Single-Pass Completeness audits (sibling surfaces, reciprocal checks, claim-vs-shipped)
+  to that new code in this re-review pass, scoped to the loaded context. For UNCHANGED
+  code, the existing [Newly identified] convention from the bullet above still applies:
   new P1+ findings MAY be raised but must be marked "[Newly identified]".
-- If all previous P1+ findings are resolved, the assessment should be ✅ even if new
-  P2/P3 items are noticed.
+- If all previous P1+ findings are resolved AND no new unmitigated P2 findings exist
+  (per the Assessment Criteria above), the assessment should be ✅. Newly identified
+  unmitigated P2 findings (claim-vs-test mismatches, public-API docstring drift, missing
+  rendering surfaces) keep the verdict at ⚠️ Needs changes — they block ✅ just like P1.
 
 ## Known Anti-Patterns
 

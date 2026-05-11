@@ -397,7 +397,7 @@ Review passed with no findings. Suggested next steps:
 - /submit-pr — commit and open a pull request
 ```
 
-**For ⛔ or ⚠️ (P0/P1 findings)**:
+**For ⛔ or ⚠️ (P0/P1/P2 findings)**:
 ```
 Options:
 1. Enter plan mode to address findings (Recommended)
@@ -405,7 +405,7 @@ Options:
 3. Skip — I'll address these manually
 ```
 
-**For ✅ with P2/P3 findings only**:
+**For ✅ with P3 findings only**:
 ```
 Options:
 1. Address findings before submitting
@@ -414,8 +414,8 @@ Options:
 
 **If user chooses to address findings**: Parse the findings from the review output.
 The review context is already in the conversation. Start addressing the findings
-directly — for P0/P1 issues use `EnterPlanMode` for a structured approach; for P2/P3
-issues, fix them directly since they are minor.
+directly — for P0/P1/P2 issues use `EnterPlanMode` for a structured approach; for
+P3 issues, fix them directly since they are minor.
 
 After fixes are committed, the user re-runs `/ai-review-local` for a follow-up review.
 On re-review, the script automatically activates delta-diff mode (comparing only
@@ -502,8 +502,9 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
 - The review criteria are adapted from `.github/codex/prompts/pr_review.md` (same
   methodology axes, severity levels, and anti-patterns) but framed for local
   code-change review rather than PR review
-- The CI review (Codex action with full repo access) remains the authoritative final
-  check — local review is a fast first pass to catch most issues early
+- The CI review (single-shot Responses API, same architecture as local but with
+  `--ci-mode` and `--full-registry`) remains the authoritative final check — local
+  review is a fast first pass to catch most issues early
 - **Data transmission**: In non-dry-run mode, this skill transmits the unified diff,
   changed-file metadata, full source file contents (in standard/deep mode),
   import-context files (in deep mode), selected methodology registry text, and
