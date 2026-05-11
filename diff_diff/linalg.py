@@ -520,6 +520,30 @@ def solve_ols(
           raises ``NotImplementedError`` because the BM DOF helper is
           inconsistent with ``solve_ols``'s WLS transform. Tracked in
           ``TODO.md``.
+        - ``"conley"``: Conley (1999) spatial-HAC sandwich. Requires
+          ``conley_coords`` (n × 2 array) and ``conley_cutoff_km`` (positive
+          bandwidth, no default per Conley 1999 Section 5's sensitivity-grid
+          recommendation). Combining with ``cluster_ids`` or ``weights``
+          raises ``NotImplementedError`` (combined product kernel + Bertanha-
+          Imbens 2014 weighted-Conley deferred to Phase 2+). Cross-sectional
+          one-way only.
+    conley_coords : ndarray of shape (n, 2), optional
+        Required when ``vcov_type="conley"``. Two-column array of
+        ``[lat, lon]`` (degrees, for ``conley_metric="haversine"``) or
+        projected coordinates (for ``conley_metric="euclidean"`` / callable
+        metric).
+    conley_cutoff_km : float, optional
+        Required when ``vcov_type="conley"``. Positive finite bandwidth in
+        km (haversine) or coord units (euclidean / callable).
+    conley_metric : {"haversine", "euclidean", callable}, default "haversine"
+        Distance metric. Haversine uses Earth's mean radius 6371.01 km
+        (matching R ``conleyreg``). Euclidean treats coords as already
+        projected. Callable signature ``(coords1, coords2) -> n×n``.
+    conley_kernel : {"bartlett", "uniform"}, default "bartlett"
+        Kernel evaluated on pairwise distance ``d_ij/h``. Both kernels emit
+        a ``UserWarning`` if the resulting meat is materially indefinite;
+        the radial 1-D Bartlett (matching R ``conleyreg``) is not formally
+        PSD-guaranteed — see :func:`compute_robust_vcov`.
 
     Returns
     -------
@@ -2362,6 +2386,37 @@ class LinearRegression:
         currently inconsistent with the WLS transform). On top of the
         sandwich, the class stores per-coefficient BM Satterthwaite DOF
         (``self._bm_dof``) and threads it into ``get_inference``.
+
+        For ``"conley"`` (Conley 1999 spatial-HAC) the supported Phase 1
+        path is the cross-sectional `LinearRegression` / `compute_robust_vcov`
+        surface; requires ``conley_coords`` (n × 2 array) and a positive
+        ``conley_cutoff_km``. Combining ``vcov_type="conley"`` with
+        ``cluster_ids``, ``weights``, or ``survey_design`` raises
+        ``NotImplementedError`` (combined product kernel + Bertanha-Imbens
+        2014 weighted-Conley deferred to Phase 2+). The panel DiD /
+        MultiPeriodDiD / TwoWayFixedEffects estimators reject
+        ``vcov_type="conley"`` at fit-time entirely in Phase 1.
+    conley_coords : ndarray of shape (n, 2), optional
+        Required when ``vcov_type="conley"``. Two-column array of
+        ``[lat, lon]`` (degrees, for ``conley_metric="haversine"``) or
+        projected coordinates (for ``conley_metric="euclidean"`` / callable
+        metric). Raises ``ValueError`` when missing under Conley.
+    conley_cutoff_km : float, optional
+        Required when ``vcov_type="conley"``. Positive finite bandwidth in
+        km (haversine) or coord units (euclidean / callable). No default
+        per Conley 1999 Section 5's sensitivity-grid recommendation.
+    conley_metric : {"haversine", "euclidean", callable}, default "haversine"
+        Distance metric. Haversine uses Earth's mean radius 6371.01 km
+        matching R ``conleyreg``. Euclidean treats the coords as already
+        projected. Callable signature ``(coords1, coords2) -> n×n``.
+    conley_kernel : {"bartlett", "uniform"}, default "bartlett"
+        Kernel evaluated on pairwise distance ``d_ij/h``. ``"bartlett"`` is
+        the radial 1-D specialization (matching R ``conleyreg``);
+        ``"uniform"`` is the truncated indicator. Both kernels emit a
+        ``UserWarning`` if the resulting meat is materially indefinite —
+        neither is formally PSD-guaranteed in the radial pairwise form
+        (Conley 1999's explicit PSD Bartlett formula is the 2-D separable
+        product window, Eq 3.14, not the 1-D radial pairwise form).
 
     Attributes
     ----------

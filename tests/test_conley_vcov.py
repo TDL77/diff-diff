@@ -83,16 +83,27 @@ class TestConleyKernels:
     def test_uniform_kernel_at_zero_one(self):
         np.testing.assert_allclose(_uniform_kernel(np.array([0.0])), 1.0)
 
-    def test_bartlett_psd_on_random_distances(self):
-        """Bartlett-weighted Gram matrix has all eigenvalues >= -tol."""
+    def test_bartlett_kernel_finite_and_in_unit_interval(self):
+        """Bartlett-weighted kernel matrix on random pairwise distances is
+        finite, symmetric, and bounded in [0, 1]. We do NOT assert PSD here:
+        the radial 1-D Bartlett on pairwise distance is a practitioner
+        specialization of Conley 1999 (matching R conleyreg) and is NOT
+        formally PSD-guaranteed — see REGISTRY ConleySpatialHAC. The
+        runtime path emits a UserWarning if the resulting Conley meat is
+        materially indefinite; that contract is locked separately in
+        ``test_indefinite_meat_warning_fires_for_bartlett``.
+        """
         rng = np.random.default_rng(seed=11)
         n = 25
         coords = rng.uniform(0, 1, size=(n, 2))
         diff = coords[:, None, :] - coords[None, :, :]
         D = np.sqrt((diff * diff).sum(axis=-1))
         K = _bartlett_kernel(D / 0.3)
-        eigvals = np.linalg.eigvalsh(0.5 * (K + K.T))  # ensure symmetric
-        assert eigvals.min() > -1e-12
+        assert K.shape == (n, n)
+        assert np.all(np.isfinite(K))
+        assert np.all(K >= 0.0)
+        assert np.all(K <= 1.0)
+        np.testing.assert_allclose(K, K.T, atol=1e-15)
 
 
 # ---------------------------------------------------------------------------

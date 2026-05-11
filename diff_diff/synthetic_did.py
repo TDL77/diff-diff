@@ -86,6 +86,19 @@ class SyntheticDiD(DifferenceInDifferences):
         Random seed for reproducibility. If None (default), results
         will vary between runs.
 
+    Notes (Conley spatial-HAC rejection)
+    ------------------------------------
+    SyntheticDiD does not support the Conley (1999) spatial-HAC analytical
+    sandwich. Passing ``vcov_type="conley"`` or any non-``None`` Conley
+    keyword (``conley_coords``, ``conley_cutoff_km``, ``conley_metric``,
+    ``conley_kernel``) to ``__init__`` or ``set_params`` raises
+    ``TypeError``. Rationale: SyntheticDiD's variance is derived from
+    bootstrap / jackknife / placebo resampling (Arkhangelsky et al. 2021
+    Algorithms 2–4), not the sandwich identity Conley plugs into. Adding
+    Conley support would require either an analytical SDID sandwich path
+    or a spatial-block bootstrap (Politis-Romano 1994 territory). Tracked
+    as a follow-up in ``TODO.md``.
+
     Attributes
     ----------
     results_ : SyntheticDiDResults

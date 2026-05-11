@@ -1374,19 +1374,13 @@ class MultiPeriodDiD(DifferenceInDifferences):
                 "switch to fixed_effects= dummies for a full-dummy design."
             )
 
-        # Reject Conley combinations early at the estimator level (see
-        # DifferenceInDifferences.fit for the matching block and rationale).
-        if absorb and self.vcov_type == "conley":
-            raise NotImplementedError(
-                "MultiPeriodDiD(absorb=..., vcov_type='conley') is deferred "
-                "to a follow-up. Use fixed_effects= dummies for an equivalent "
-                "FE design with the full projection, or drop absorb= for "
-                "cross-sectional Conley."
-            )
         # MultiPeriodDiD is intrinsically a multi-period panel estimator;
         # cross-sectional Conley does not apply (same rationale as
         # DifferenceInDifferences.fit's panel guard above). Phase 2 will
-        # add a documented space-time HAC.
+        # add a documented space-time HAC. The rejection is unconditional
+        # — `absorb` and other Conley-adjacent kwargs cannot make
+        # MultiPeriodDiD Conley-compatible because the panel structure is
+        # the load-bearing reason Phase 1 cannot apply Conley here.
         if self.vcov_type == "conley":
             raise NotImplementedError(
                 "MultiPeriodDiD(vcov_type='conley') is deferred to Phase 2 "
