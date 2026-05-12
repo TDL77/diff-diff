@@ -391,32 +391,59 @@ class TestConleyDirectHelper:
         assert vcov.shape == (k, k)
 
     def test_uniform_kernel_negative_eigenvalue_warns(self):
-        """Construct a degenerate setup that produces a uniform-kernel
-        meat with a small negative eigenvalue. Verifies the PSD-warning
-        path. The setup uses two clusters of identical-coordinate points so
-        the uniform-kernel meat reduces to a known structure that is
-        numerically borderline."""
+        """The uniform kernel is documented as not PSD-guaranteed (Conley
+        1999 footnote 11): its spectral window is negative in regions, so
+        the resulting meat can be indefinite. Force the indefinite path
+        deterministically by monkey-patching ``_uniform_kernel`` to return
+        a kernel matrix with aggressive negative off-diagonals (mirroring
+        the bartlett warning test below), and assert the warning surfaces
+        with kernel='uniform' in the message.
+        """
+        from diff_diff import conley as conley_mod
+
         rng = np.random.default_rng(seed=1)
-        n = 30
-        # Mix of identical-coord pairs; uniform kernel sums full pairs
-        coords = np.repeat(rng.uniform(0, 1, size=(n // 2, 2)), 2, axis=0)
+        n = 6
+        coords = rng.uniform(0, 1, size=(n, 2))
         X = np.column_stack([np.ones(n), rng.standard_normal(n)])
-        eps = rng.standard_normal(n)
+        eps = np.ones(n)
         bread = X.T @ X
-        # No assertion on the exact meat — only that the PSD path is
-        # exercised. The warning may or may not fire depending on numerical
-        # condition; this test mainly ensures the code path runs without error.
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            _compute_conley_vcov(
-                X,
-                eps,
-                coords,
-                cutoff=10.0,
-                metric="euclidean",
-                kernel="uniform",
-                bread_matrix=bread,
+
+        original = conley_mod._uniform_kernel
+
+        def _indefinite(u: np.ndarray) -> np.ndarray:
+            base = np.eye(u.shape[0])
+            for i in range(u.shape[0]):
+                for j in range(u.shape[0]):
+                    if i != j:
+                        base[i, j] = -10.0
+            return base
+
+        try:
+            conley_mod._uniform_kernel = _indefinite
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                conley_mod._compute_conley_vcov(
+                    X,
+                    eps,
+                    coords,
+                    cutoff=10.0,
+                    metric="euclidean",
+                    kernel="uniform",
+                    bread_matrix=bread,
+                )
+            psd_warnings = [
+                msg
+                for msg in w
+                if issubclass(msg.category, UserWarning)
+                and "uniform" in str(msg.message)
+                and "negative eigenvalue" in str(msg.message)
+            ]
+            assert len(psd_warnings) >= 1, (
+                f"Expected a UserWarning naming kernel='uniform' and "
+                f"'negative eigenvalue'; got {[str(m.message) for m in w]}"
             )
+        finally:
+            conley_mod._uniform_kernel = original
 
     def test_indefinite_meat_warning_fires_for_bartlett(self):
         """Both kernels (radial 1-D bartlett and uniform) are practitioner
