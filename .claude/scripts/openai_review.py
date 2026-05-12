@@ -954,6 +954,21 @@ def _adapt_review_criteria(criteria_text: str) -> str:
     return text
 
 
+def _sanitize_previous_review(text: str) -> str:
+    """Escape `</previous-review-output>` in untrusted prior-review content
+    so a hostile prior comment cannot close the wrapper early.
+
+    Handles case and whitespace variants (e.g. `</PREVIOUS-REVIEW-OUTPUT>`,
+    `</ previous-review-output  >`).
+    """
+    return re.sub(
+        r"</\s*previous-review-output\s*>",
+        "&lt;/previous-review-output&gt;",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+
 def compile_prompt(
     criteria_text: str,
     registry_content: str,
@@ -1021,8 +1036,8 @@ def compile_prompt(
             )
             if structured_findings:
                 sections.append("### Full Previous Review\n")
-            sections.append("<previous-review-output>")
-            sections.append(previous_review)
+            sections.append('<previous-review-output untrusted="true">')
+            sections.append(_sanitize_previous_review(previous_review))
             sections.append("</previous-review-output>\n")
 
     # Delta diff section (re-review with changes since last review)
