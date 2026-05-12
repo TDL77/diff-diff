@@ -49,6 +49,16 @@ from diff_diff._backend import (
     _rust_solve_ols,
 )
 
+# Conley (1999) spatial HAC helpers live in diff_diff.conley to keep this
+# module focused on linear-algebra primitives. Imported at the top so the
+# `ConleyMetric` type alias is in scope for the public function signatures
+# below (which advertise `conley_metric: ConleyMetric`).
+from diff_diff.conley import (
+    ConleyMetric,
+    _compute_conley_vcov,
+    _validate_conley_kwargs,
+)
+
 # =============================================================================
 # Utility Functions
 # =============================================================================
@@ -352,7 +362,7 @@ def solve_ols(
     vcov_type: str = ...,
     conley_coords: Optional[np.ndarray] = ...,
     conley_cutoff_km: Optional[float] = ...,
-    conley_metric: str = ...,
+    conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]: ...
 
@@ -374,7 +384,7 @@ def solve_ols(
     vcov_type: str = ...,
     conley_coords: Optional[np.ndarray] = ...,
     conley_cutoff_km: Optional[float] = ...,
-    conley_metric: str = ...,
+    conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]: ...
 
@@ -396,7 +406,7 @@ def solve_ols(
     vcov_type: str = ...,
     conley_coords: Optional[np.ndarray] = ...,
     conley_cutoff_km: Optional[float] = ...,
-    conley_metric: str = ...,
+    conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
 ) -> Union[
     Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]],
@@ -454,7 +464,7 @@ def solve_ols(
     vcov_type: str = "hc1",
     conley_coords: Optional[np.ndarray] = None,
     conley_cutoff_km: Optional[float] = None,
-    conley_metric: str = "haversine",
+    conley_metric: ConleyMetric = "haversine",
     conley_kernel: str = "bartlett",
 ) -> Union[
     Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]],
@@ -818,7 +828,7 @@ def _solve_ols_numpy(
     vcov_type: str = ...,
     conley_coords: Optional[np.ndarray] = ...,
     conley_cutoff_km: Optional[float] = ...,
-    conley_metric: str = ...,
+    conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]: ...
 
@@ -838,7 +848,7 @@ def _solve_ols_numpy(
     vcov_type: str = ...,
     conley_coords: Optional[np.ndarray] = ...,
     conley_cutoff_km: Optional[float] = ...,
-    conley_metric: str = ...,
+    conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]: ...
 
@@ -858,7 +868,7 @@ def _solve_ols_numpy(
     vcov_type: str = ...,
     conley_coords: Optional[np.ndarray] = ...,
     conley_cutoff_km: Optional[float] = ...,
-    conley_metric: str = ...,
+    conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
 ) -> Union[
     Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]],
@@ -880,7 +890,7 @@ def _solve_ols_numpy(
     vcov_type: str = "hc1",
     conley_coords: Optional[np.ndarray] = None,
     conley_cutoff_km: Optional[float] = None,
-    conley_metric: str = "haversine",
+    conley_metric: ConleyMetric = "haversine",
     conley_kernel: str = "bartlett",
 ) -> Union[
     Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]],
@@ -1175,11 +1185,8 @@ def resolve_vcov_type(
     return vcov_type
 
 
-# Conley (1999) spatial HAC helpers live in diff_diff.conley to keep linalg.py
-# focused on linear-algebra primitives. Imported here so the dispatch in
-# `_compute_robust_vcov_numpy` can route `vcov_type="conley"` without a
-# late/local import.
-from diff_diff.conley import _compute_conley_vcov, _validate_conley_kwargs  # noqa: E402
+# Conley helpers are imported at module top — see the from-import near the
+# header of this file.
 
 
 def compute_robust_vcov(
@@ -1193,7 +1200,7 @@ def compute_robust_vcov(
     *,
     conley_coords: Optional[np.ndarray] = None,
     conley_cutoff_km: Optional[float] = None,
-    conley_metric: str = "haversine",
+    conley_metric: ConleyMetric = "haversine",
     conley_kernel: str = "bartlett",
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
@@ -1640,7 +1647,7 @@ def _compute_robust_vcov_numpy(
     *,
     conley_coords: Optional[np.ndarray] = None,
     conley_cutoff_km: Optional[float] = None,
-    conley_metric: str = "haversine",
+    conley_metric: ConleyMetric = "haversine",
     conley_kernel: str = "bartlett",
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
@@ -2478,7 +2485,7 @@ class LinearRegression:
         vcov_type: Optional[str] = None,
         conley_coords: Optional[np.ndarray] = None,
         conley_cutoff_km: Optional[float] = None,
-        conley_metric: str = "haversine",
+        conley_metric: ConleyMetric = "haversine",
         conley_kernel: str = "bartlett",
     ):
         self.include_intercept = include_intercept

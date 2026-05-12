@@ -22,9 +22,21 @@ kernel) and a sparse k-d-tree fast path; both will live in this module.
 from __future__ import annotations
 
 import warnings
-from typing import Optional
+from typing import Callable, Literal, Optional, Union
 
 import numpy as np
+
+# Public type alias for the ``conley_metric`` parameter accepted by
+# ``compute_robust_vcov``, ``solve_ols``, and ``LinearRegression``. The
+# implementation accepts the two named strings as well as a user-supplied
+# callable ``(coords1, coords2) -> n×n distance matrix`` for custom
+# (e.g. network) distance metrics. Exported so the public signatures
+# in :mod:`diff_diff.linalg` can advertise the full accepted type to
+# static checkers and IDEs.
+ConleyMetric = Union[
+    Literal["haversine", "euclidean"],
+    Callable[[np.ndarray, np.ndarray], np.ndarray],
+]
 
 # Earth's mean radius (km), matching R conleyreg's haversine convention
 # (Düsterhöft 2021, conleyreg::haversine_dist in src/distance_functions.cpp,
@@ -63,7 +75,7 @@ def _haversine_km(
     return _CONLEY_EARTH_RADIUS_KM * 2.0 * np.arcsin(np.sqrt(a))
 
 
-def _pairwise_distance_matrix(coords: np.ndarray, metric) -> np.ndarray:
+def _pairwise_distance_matrix(coords: np.ndarray, metric: ConleyMetric) -> np.ndarray:
     """Build the dense n×n pairwise distance matrix.
 
     ``metric`` is one of ``"haversine"`` (lat/lon in degrees, distance in km),
@@ -116,7 +128,7 @@ def _uniform_kernel(u: np.ndarray) -> np.ndarray:
 def _validate_conley_kwargs(
     coords: Optional[np.ndarray],
     cutoff: Optional[float],
-    metric,
+    metric: ConleyMetric,
     kernel: str,
     n: int,
 ) -> None:
@@ -197,7 +209,7 @@ def _compute_conley_vcov(
     residuals: np.ndarray,
     coords: np.ndarray,
     cutoff: float,
-    metric,
+    metric: ConleyMetric,
     kernel: str,
     bread_matrix: np.ndarray,
 ) -> np.ndarray:
