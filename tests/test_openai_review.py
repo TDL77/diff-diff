@@ -1755,6 +1755,44 @@ class TestWorkflowPromptHardening:
         assert "&lt;/previous-ai-review-output&gt;" in text
 
 
+class TestWorkflowCommentPosting:
+    """The post-comment step must distinguish initial `opened` (update canonical
+    comment) from every other trigger (create new comment), so re-reviews on
+    push / reopen / /ai-review preserve prior review history.
+
+    Without this, `pull_request: synchronize` from a push would overwrite the
+    original review comment via GitHub's update-comment API, losing the prior
+    content (the API does not expose comment edit history)."""
+
+    def test_isrerun_includes_non_opened_pull_request(self):
+        """Non-opened pull_request events (synchronize, reopened) must be
+        treated as reruns so they create a new comment, not update."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
+        if not wf.exists():
+            pytest.skip("workflow not found")
+        text = wf.read_text()
+        # The isRerun JS expression must gate on action !== "opened" for
+        # pull_request events.
+        assert 'context.payload.action !== "opened"' in text, (
+            "Workflow comment-posting must treat pull_request events other "
+            "than 'opened' as reruns; otherwise synchronize/reopened will "
+            "overwrite the canonical review comment and lose prior content."
+        )
+
+    def test_isrerun_still_includes_comment_events(self):
+        """Issue-comment and review-comment triggers must remain reruns."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
+        if not wf.exists():
+            pytest.skip("workflow not found")
+        text = wf.read_text()
+        assert 'context.eventName === "issue_comment"' in text
+        assert 'context.eventName === "pull_request_review_comment"' in text
+
+
 class TestExtractResponseText:
     def test_prefers_output_text_field(self, review_mod):
         result = {"output_text": "Direct text.", "output": []}
