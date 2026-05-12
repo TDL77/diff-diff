@@ -70,6 +70,11 @@ jobs:
             const { owner, repo } = context.repo;
             const pr = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
 
+            // head.repo can be null on fork PRs from deleted forks; fall back
+            // to the base repo so checkout still has a sensible target.
+            const headRepoFullName =
+              pr.data.head.repo?.full_name || `${owner}/${repo}`;
+
             core.setOutput("number", prNumber);
             core.setOutput("title", pr.data.title || "");
             core.setOutput("body", pr.data.body || "");
@@ -77,28 +82,32 @@ jobs:
             core.setOutput("head_sha", pr.data.head.sha);
             core.setOutput("base_ref", pr.data.base.ref);
             core.setOutput("head_ref", pr.data.head.ref);
+            core.setOutput("head_repo_full_name", headRepoFullName);
 
       - uses: actions/checkout@v6
         with:
-          # Check out the PR head by SHA, resolved by the metadata step above.
-          # The previous workflow used `refs/pull/<N>/merge`, which GitHub
-          # garbage-collects on closed/merged PRs and breaks `/ai-review`
-          # reruns post-merge. `refs/pull/<N>/head` is durable for merged PRs
-          # but is documented as racy right after API-created PR creation
-          # (see .claude/commands/submit-pr.md:327-345). Checking out the SHA
-          # the metadata step just got from `pulls.get` avoids both failure
-          # modes. The diff the reviewer sees is unchanged: it's computed
-          # from BASE_SHA/HEAD_SHA below, captured in the same metadata step.
+          # Check out the PR head by SHA from the head repo (which equals
+          # github.repository for owner-created PRs and points at the fork
+          # for fork PRs). The previous workflow used `refs/pull/<N>/merge`,
+          # which GitHub garbage-collects on closed/merged PRs and breaks
+          # `/ai-review` reruns post-merge. Switching to head_sha avoids that,
+          # and pointing at the head repo also avoids the documented race
+          # where `refs/pull/<N>/head` on the base repo has not yet mirrored
+          # a fresh fork PR's head (see .claude/commands/submit-pr.md:327-345).
+          # The diff the reviewer sees is unchanged: it's computed from
+          # BASE_SHA/HEAD_SHA below, captured in the same metadata step.
+          repository: ${{ steps.pr.outputs.head_repo_full_name }}
           ref: ${{ steps.pr.outputs.head_sha }}
 
       - name: Pre-fetch base SHA
         run: |
           set -euo pipefail
-          # Fetch the base-side commit by SHA so `git diff BASE_SHA HEAD_SHA`
-          # has both trees locally. Using the SHA (not base_ref) avoids the
-          # race where the base branch has moved past base_sha between the
-          # metadata-resolution step and this fetch.
-          git fetch --no-tags --depth=1 origin "${{ steps.pr.outputs.base_sha }}"
+          # base_sha lives on the base repo (github.repository), which differs
+          # from origin when this is a fork PR. Add an explicit `base` remote
+          # so `git diff BASE_SHA HEAD_SHA` always finds the base-side tree,
+          # regardless of whether origin points at the fork or the base repo.
+          git remote add base "https://github.com/${{ github.repository }}.git"
+          git fetch --no-tags --depth=1 base "${{ steps.pr.outputs.base_sha }}"
 
       - name: Fetch previous AI review (if any)
         id: prev_review
