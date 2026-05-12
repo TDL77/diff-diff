@@ -113,7 +113,12 @@ jobs:
           PR_BODY: ${{ steps.pr.outputs.body }}
           BASE_SHA: ${{ steps.pr.outputs.base_sha }}
           HEAD_SHA: ${{ steps.pr.outputs.head_sha }}
-          IS_RERUN: ${{ github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment' }}
+          # IS_RERUN must agree with the post-comment step's `isRerun` JS
+          # expression below: any non-`opened` pull_request event is also a
+          # rerun. Otherwise synchronize/reopened pushes get a new comment
+          # but the prompt omits <previous-ai-review-output>, and the model
+          # cannot focus on whether prior findings were addressed.
+          IS_RERUN: ${{ github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment' || (github.event_name == 'pull_request' && github.event.action != 'opened') }}
           PREV_REVIEW: ${{ steps.prev_review.outputs.body }}
           PREV_REVIEW_FOUND: ${{ steps.prev_review.outputs.found }}
         run: |
@@ -213,7 +218,7 @@ jobs:
           model: gpt-5.4
           effort: xhigh
 
-      - name: Post PR comment (new on /ai-review, update on opened)
+      - name: Post PR comment (new on every event except initial open)
         uses: actions/github-script@v9
         env:
           CODEX_FINAL_MESSAGE: ${{ steps.run_codex.outputs.final-message }}
@@ -227,10 +232,19 @@ jobs:
             const { owner, repo } = context.repo;
             const issue_number = Number(process.env.PR_NUMBER);
 
-            // If this run was triggered by /ai-review (issue_comment or review_comment), create a NEW comment.
+            // Treat anything other than the PR's initial `opened` event as a
+            // rerun for comment-posting purposes:
+            //  - issue_comment / pull_request_review_comment: explicit /ai-review trigger
+            //  - pull_request.synchronize: push to PR branch
+            //  - pull_request.reopened: PR was reopened
+            // Only `pull_request.opened` updates the canonical comment in-place
+            // (creating it if absent). All other events create a new comment so
+            // that prior review history is preserved.
             const isRerun =
               context.eventName === "issue_comment" ||
-              context.eventName === "pull_request_review_comment";
+              context.eventName === "pull_request_review_comment" ||
+              (context.eventName === "pull_request" &&
+               context.payload.action !== "opened");
 
             // Marker for the "canonical" auto comment
             const marker = "<!-- ai-pr-review:codex:auto -->";
