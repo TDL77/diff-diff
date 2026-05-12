@@ -80,15 +80,15 @@ jobs:
 
       - uses: actions/checkout@v6
         with:
-          # Check out the PR head by immutable SHA. The previous workflow used
-          # `refs/pull/<N>/merge`, which GitHub garbage-collects on closed/merged
-          # PRs and breaks `/ai-review` reruns post-merge. `refs/pull/<N>/head`
-          # is durable for merged PRs but is documented as racy right after
-          # API-created PR creation (see .claude/commands/submit-pr.md:327-345).
-          # The head SHA on `pulls.get` is frozen the moment the PR is created,
-          # so checking it out directly avoids both failure modes. The diff the
-          # reviewer sees is unchanged: it's computed from the frozen
-          # BASE_SHA/HEAD_SHA below, not from the checked-out filesystem.
+          # Check out the PR head by SHA, resolved by the metadata step above.
+          # The previous workflow used `refs/pull/<N>/merge`, which GitHub
+          # garbage-collects on closed/merged PRs and breaks `/ai-review`
+          # reruns post-merge. `refs/pull/<N>/head` is durable for merged PRs
+          # but is documented as racy right after API-created PR creation
+          # (see .claude/commands/submit-pr.md:327-345). Checking out the SHA
+          # the metadata step just got from `pulls.get` avoids both failure
+          # modes. The diff the reviewer sees is unchanged: it's computed
+          # from BASE_SHA/HEAD_SHA below, captured in the same metadata step.
           ref: ${{ steps.pr.outputs.head_sha }}
 
       - name: Pre-fetch base SHA
@@ -96,7 +96,8 @@ jobs:
           set -euo pipefail
           # Fetch the base-side commit by SHA so `git diff BASE_SHA HEAD_SHA`
           # has both trees locally. Using the SHA (not base_ref) avoids the
-          # race where main has moved past base_sha after the PR was opened.
+          # race where the base branch has moved past base_sha between the
+          # metadata-resolution step and this fetch.
           git fetch --no-tags --depth=1 origin "${{ steps.pr.outputs.base_sha }}"
 
       - name: Fetch previous AI review (if any)
