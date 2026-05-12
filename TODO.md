@@ -135,6 +135,7 @@ Deferred items from PR reviews that were not addressed before merge.
 | Add CI validation for `docs/doc-deps.yaml` integrity (stale paths, unmapped source files) | `docs/doc-deps.yaml` | #269 | Low |
 | HonestDiD `test_m0_short_circuit` uses wall-clock `elapsed < 0.5s` as a proxy for "short-circuit path taken" instead of calling the full optimizer. Replace with a direct correctness signal (mock/spy the optimizer or check a state flag) so the test doesn't depend on CI timing. Not flaky today at 500ms, but load-bearing correctness on a timing proxy is brittle. | `tests/test_methodology_honest_did.py:246` | — | Low |
 | SyntheticDiD: rename internal `placebo_effects` variable to `variance_effects` (or `resampled_effects`). Misleading name across the placebo/bootstrap/jackknife dispatch paths — holds three different contents depending on variance method. Low-risk refactor; user-facing field rename should preserve `placebo_effects` as a deprecated alias for one release. | `synthetic_did.py`, `results.py` | follow-up | Medium |
+| AI review CI: pin workflow contract via test (uses `openai/codex-action@v1`, passes `prompt-file`, reads `steps.run_codex.outputs.final-message`, preserves diff-exclude paths and comment markers). Currently only the wrapper-tag and closing-tag-escape strings are asserted. | `tests/test_openai_review.py`, `.github/workflows/ai_pr_review.yml` | #416 | Low |
 
 ---
 

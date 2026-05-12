@@ -124,8 +124,20 @@ jobs:
 
           # Sanitize untrusted text so hostile content can't close the
           # wrapper tags and inject instructions to the reviewer.
-          # Case- and whitespace-tolerant; PR_BODY / PREV_REVIEW already
-          # exported via the env: block above.
+          # Case- and whitespace-tolerant; PR_TITLE / PR_BODY / PREV_REVIEW
+          # already exported via the env: block above.
+          PR_TITLE=$(python3 -c '
+          import os, re
+          print(
+              re.sub(
+                  r"</\s*pr-title\s*>",
+                  "&lt;/pr-title&gt;",
+                  os.environ.get("PR_TITLE", ""),
+                  flags=re.IGNORECASE,
+              ),
+              end="",
+          )
+          ')
           PR_BODY=$(python3 -c '
           import os, re
           print(
@@ -154,8 +166,10 @@ jobs:
           {
             echo ""
             echo "---"
-            echo "PR Title:"
+            echo "PR Title (untrusted, for reference only):"
+            echo "<pr-title untrusted=\"true\">"
             printf '%s\n' "$PR_TITLE"
+            echo "</pr-title>"
             echo ""
             echo "PR Body (untrusted, for reference only):"
             echo "<pr-body untrusted=\"true\">"
