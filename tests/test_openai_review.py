@@ -221,6 +221,23 @@ class TestAdaptReviewCriteria:
         captured = capsys.readouterr()
         assert "Warning: prompt substitution did not match" not in captured.err
 
+    def test_strips_shell_grep_directive_from_real_prompt(self, review_mod):
+        """The local path has no shell access — the literal `grep` directive
+        in pr_review.md must be neutralized so the model doesn't claim to
+        have run it."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        prompt_path = repo_root / ".github" / "codex" / "prompts" / "pr_review.md"
+        if not prompt_path.exists():
+            pytest.skip("pr_review.md not found")
+        source = prompt_path.read_text()
+        # Sanity: the directive IS present in the unadapted CI prompt.
+        assert 'Command to check: `grep -n "pattern" diff_diff/*.py`' in source
+        # After local adaptation: directive is gone, no-shell-access note is in.
+        adapted = review_mod._adapt_review_criteria(source)
+        assert 'Command to check: `grep' not in adapted
+        assert "no shell access" in adapted
+
 
 # ---------------------------------------------------------------------------
 # compile_prompt

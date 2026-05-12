@@ -911,6 +911,15 @@ _SUBSTITUTIONS = [
         "If the PR fixes a pattern bug",
         "If the changes fix a pattern bug",
     ),
+    # Strip the shell-only `grep` directive — the local Responses API path
+    # has no shell access and would either hallucinate having run grep or
+    # silently skip the check. Replace with a static-context directive that
+    # scopes the check to the loaded source files.
+    (
+        '   - Command to check: `grep -n "pattern" diff_diff/*.py`',
+        "   - Verify by inspecting the loaded source files (no shell access "
+        "in this path; do not claim to have run `grep`)",
+    ),
     (
         "the PR has prior AI review comments",
         "there is a previous review",
