@@ -22,14 +22,14 @@ pre-PR use. Designed for iterative review/revision cycles before submitting a PR
   files (default: 200000). Changed source files are always included regardless of budget.
 - `--force-fresh`: Skip delta-diff mode, run a full fresh review even if previous state exists
 - `--full-registry`: Include the entire REGISTRY.md instead of selective sections
-- `--model <name>`: Override the OpenAI model (default: `gpt-5.5`)
-- `--timeout <seconds>`: HTTP request timeout. If omitted, defaults to 900 for reasoning models (gpt-5.4, gpt-5.5, *-pro, o1/o3/o4) and 300 otherwise.
+- `--model <name>`: Override the OpenAI model (default: `gpt-5.4`)
+- `--timeout <seconds>`: HTTP request timeout (default: 300). Use 900 for reasoning models.
 - `--dry-run`: Print the compiled prompt without calling the API
 
-**Reasoning models** (`gpt-5.5`, `gpt-5.5-pro`, `o3`, `o4-mini`, etc.): Reviews may take 10-15
+**Reasoning models** (`gpt-5.4-pro`, `o3`, `o4-mini`, etc.): Reviews may take 10-15
 minutes. For deep reviews with reasoning models, combine `--token-budget` with `--model`:
 ```
-/ai-review-local --model gpt-5.5-pro --token-budget 500000 --context deep
+/ai-review-local --model gpt-5.4-pro --token-budget 500000 --context deep
 ```
 
 ## Constraints
@@ -47,7 +47,7 @@ before any data is sent externally.
 ### Step 1: Parse Arguments
 
 Parse `$ARGUMENTS` for the optional flags listed above. All flags are optional —
-the default behavior (standard context, selective registry, gpt-5.5, live API call)
+the default behavior (standard context, selective registry, gpt-5.4, live API call)
 requires no arguments.
 
 ### Step 2: Validate Prerequisites
@@ -334,15 +334,9 @@ python3 .claude/scripts/openai_review.py \
 Note: `--force-fresh` is a skill-only flag — it controls whether delta diffs are
 generated in Step 4 and is NOT passed to the script.
 
-**Reasoning model handling:** Resolve the effective model first — `effective_model` is
-the value of `--model` if the user provided one, otherwise the script default `gpt-5.5`.
-The `--model`, `--timeout`, and `--dry-run` flags pass through to the script when provided.
-
-If `effective_model` contains `-pro`, starts with `o1`/`o3`/`o4`, or starts with
-`gpt-5.4`/`gpt-5.5` (e.g., `gpt-5.5`, `gpt-5.5-pro`, `o3`, `o4-mini`):
-- The script's `_resolve_timeout()` already auto-selects 900s for these models when
-  `--timeout` is omitted, so no wrapper timeout pass-through is required. (Passing
-  `--timeout 900` explicitly remains harmless and is fine for backward compatibility.)
+**Reasoning model handling:** If the model contains `-pro` or starts with `o1`/`o3`/`o4`
+(e.g., `gpt-5.4-pro`, `o3`, `o4-mini`):
+- Pass `--timeout 900` to the script (unless the user explicitly specified `--timeout`)
 - Run the Bash command with `run_in_background: true` (bypasses the 600s Bash tool timeout cap)
 - After the background command completes, continue to Step 6
 
@@ -397,7 +391,7 @@ Review passed with no findings. Suggested next steps:
 - /submit-pr — commit and open a pull request
 ```
 
-**For ⛔ or ⚠️ (P0/P1/P2 findings)**:
+**For ⛔ or ⚠️ (P0/P1 findings)**:
 ```
 Options:
 1. Enter plan mode to address findings (Recommended)
@@ -405,7 +399,7 @@ Options:
 3. Skip — I'll address these manually
 ```
 
-**For ✅ with P3 findings only**:
+**For ✅ with P2/P3 findings only**:
 ```
 Options:
 1. Address findings before submitting
@@ -414,8 +408,8 @@ Options:
 
 **If user chooses to address findings**: Parse the findings from the review output.
 The review context is already in the conversation. Start addressing the findings
-directly — for P0/P1/P2 issues use `EnterPlanMode` for a structured approach; for
-P3 issues, fix them directly since they are minor.
+directly — for P0/P1 issues use `EnterPlanMode` for a structured approach; for P2/P3
+issues, fix them directly since they are minor.
 
 After fixes are committed, the user re-runs `/ai-review-local` for a follow-up review.
 On re-review, the script automatically activates delta-diff mode (comparing only
@@ -472,7 +466,7 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
 /ai-review-local --model gpt-4.1 --full-registry
 
 # Deep review with reasoning model (may take 10-15 minutes)
-/ai-review-local --model gpt-5.5-pro --token-budget 500000 --context deep
+/ai-review-local --model gpt-5.4-pro --token-budget 500000 --context deep
 
 # Limit token budget for faster/cheaper reviews
 /ai-review-local --token-budget 100000
@@ -502,13 +496,12 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
 - The review criteria are adapted from `.github/codex/prompts/pr_review.md` (same
   methodology axes, severity levels, and anti-patterns) but framed for local
   code-change review rather than PR review
-- The CI review (single-shot Responses API, same architecture as local but with
-  `--ci-mode` and `--full-registry`) remains the authoritative final check — local
-  review is a fast first pass to catch most issues early
+- The CI review (Codex action with full repo access) remains the authoritative final
+  check — local review is a fast first pass to catch most issues early
 - **Data transmission**: In non-dry-run mode, this skill transmits the unified diff,
   changed-file metadata, full source file contents (in standard/deep mode),
   import-context files (in deep mode), selected methodology registry text, and
-  prior review context (if present) to OpenAI via the Responses API.
+  prior review context (if present) to OpenAI via the Chat Completions API.
   Use `--dry-run` to preview exactly what would be sent.
 - This skill pairs naturally with the iterative workflow:
   `/ai-review-local` -> address findings -> `/ai-review-local` -> `/submit-pr`
