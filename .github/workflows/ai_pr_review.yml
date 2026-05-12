@@ -83,19 +83,27 @@ jobs:
             core.setOutput("base_ref", pr.data.base.ref);
             core.setOutput("head_ref", pr.data.head.ref);
             core.setOutput("head_repo_full_name", headRepoFullName);
+            core.setOutput("state", pr.data.state);
 
+      # Closed/merged PR (e.g. `/ai-review` rerun on a merged PR):
+      # use the base-repo mirror of the PR head, which GitHub keeps
+      # durably even after the fork is deleted or branches removed.
+      # The previous workflow used `refs/pull/<N>/merge`, which is
+      # garbage-collected on closed PRs — this path replaces that.
       - uses: actions/checkout@v6
+        if: steps.pr.outputs.state != 'open'
         with:
-          # Check out the PR head by SHA from the head repo (which equals
-          # github.repository for owner-created PRs and points at the fork
-          # for fork PRs). The previous workflow used `refs/pull/<N>/merge`,
-          # which GitHub garbage-collects on closed/merged PRs and breaks
-          # `/ai-review` reruns post-merge. Switching to head_sha avoids that,
-          # and pointing at the head repo also avoids the documented race
-          # where `refs/pull/<N>/head` on the base repo has not yet mirrored
-          # a fresh fork PR's head (see .claude/commands/submit-pr.md:327-345).
-          # The diff the reviewer sees is unchanged: it's computed from
-          # BASE_SHA/HEAD_SHA below, captured in the same metadata step.
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+
+      # Open PR: check out by head_sha from the head repo (= base repo
+      # for owner PRs, = the fork for fork PRs). This avoids the
+      # documented race where `refs/pull/<N>/head` on the base repo
+      # has not yet mirrored a freshly API-created PR's head
+      # (see .claude/commands/submit-pr.md:327-345). head_sha is
+      # guaranteed to exist on the head repo for an open PR.
+      - uses: actions/checkout@v6
+        if: steps.pr.outputs.state == 'open'
+        with:
           repository: ${{ steps.pr.outputs.head_repo_full_name }}
           ref: ${{ steps.pr.outputs.head_sha }}
 
@@ -103,9 +111,9 @@ jobs:
         run: |
           set -euo pipefail
           # base_sha lives on the base repo (github.repository), which differs
-          # from origin when this is a fork PR. Add an explicit `base` remote
-          # so `git diff BASE_SHA HEAD_SHA` always finds the base-side tree,
-          # regardless of whether origin points at the fork or the base repo.
+          # from origin when this is an open fork PR. Add an explicit `base`
+          # remote so `git diff BASE_SHA HEAD_SHA` finds the base-side tree
+          # regardless of which checkout path ran.
           git remote add base "https://github.com/${{ github.repository }}.git"
           git fetch --no-tags --depth=1 base "${{ steps.pr.outputs.base_sha }}"
 
