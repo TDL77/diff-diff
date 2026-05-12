@@ -1196,13 +1196,14 @@ class TestDCDHDynRParityByPathNonBinary:
     Wave 3 #8 lift. R's ``did_multiplegt_dyn(..., by_path=k)`` accepts
     discrete non-binary treatment naturally; the per-path string
     encoding (``"0,2,2,2"``) maps bit-for-bit to Python's tuple key
-    ``(0, 2, 2, 2)`` for D in {0..9}. R's
+    ``(0, 2, 2, 2)`` whenever every D value renders as a single
+    character (nonnegative single-digit states). R's
     ``substr(path_index$path, 1, 1)`` baseline-derivation (in
-    ``did_multiplegt_by_path``) breaks for D >= 10 (it captures only
-    the first character of the comma-separated path string), but
-    Python's tuple-key matching is correct in that regime — the
-    parity scenario stays in {0, 1, 2} so the R bug does not
-    interfere.
+    ``did_multiplegt_by_path``) breaks for multi-character baselines
+    (``D >= 10`` or negative ``D``): it captures only the first
+    character of the comma-separated path string. Python's tuple-key
+    matching is correct in both regimes — the shipped R-parity
+    scenario stays in ``{0, 1, 2}`` so the R bug does not interfere.
 
     The fixture mirrors Scenario 17's single-baseline custom DGP:
     78 switchers across 3 non-binary paths, 20 never-treated and 20
