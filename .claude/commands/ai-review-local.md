@@ -23,7 +23,7 @@ pre-PR use. Designed for iterative review/revision cycles before submitting a PR
 - `--force-fresh`: Skip delta-diff mode, run a full fresh review even if previous state exists
 - `--full-registry`: Include the entire REGISTRY.md instead of selective sections
 - `--model <name>`: Override the OpenAI model (default: `gpt-5.4`)
-- `--timeout <seconds>`: HTTP request timeout (default: 300). Use 900 for reasoning models.
+- `--timeout <seconds>`: HTTP request timeout. If omitted, defaults to 900 for reasoning models (gpt-5.4, *-pro, o1/o3/o4) and 300 otherwise.
 - `--dry-run`: Print the compiled prompt without calling the API
 
 **Reasoning models** (`gpt-5.4-pro`, `o3`, `o4-mini`, etc.): Reviews may take 10-15
@@ -334,9 +334,10 @@ python3 .claude/scripts/openai_review.py \
 Note: `--force-fresh` is a skill-only flag — it controls whether delta diffs are
 generated in Step 4 and is NOT passed to the script.
 
-**Reasoning model handling:** If the model contains `-pro` or starts with `o1`/`o3`/`o4`
-(e.g., `gpt-5.4-pro`, `o3`, `o4-mini`):
-- Pass `--timeout 900` to the script (unless the user explicitly specified `--timeout`)
+**Reasoning model handling:** If the model is `gpt-5.4`, contains `-pro`, or starts with
+`o1`/`o3`/`o4` (e.g., `gpt-5.4`, `gpt-5.4-pro`, `o3`, `o4-mini`):
+- The script auto-resolves `--timeout` to 900s for reasoning models when omitted, so
+  no extra flag is required unless overriding
 - Run the Bash command with `run_in_background: true` (bypasses the 600s Bash tool timeout cap)
 - After the background command completes, continue to Step 6
 

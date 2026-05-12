@@ -1546,8 +1546,12 @@ class TestIsReasoningModel:
     def test_pro_snapshot_is_reasoning(self, review_mod):
         assert review_mod._is_reasoning_model("gpt-5.4-pro-2026-03-05") is True
 
-    def test_gpt54_is_not_reasoning(self, review_mod):
-        assert review_mod._is_reasoning_model("gpt-5.4") is False
+    def test_gpt54_is_reasoning(self, review_mod):
+        # gpt-5.4 is a reasoning model per OpenAI docs (latent bug fix).
+        assert review_mod._is_reasoning_model("gpt-5.4") is True
+
+    def test_gpt54_snapshot_is_reasoning(self, review_mod):
+        assert review_mod._is_reasoning_model("gpt-5.4-2026-03-05") is True
 
     def test_gpt41_is_not_reasoning(self, review_mod):
         assert review_mod._is_reasoning_model("gpt-4.1") is False
@@ -1570,6 +1574,30 @@ class TestProModelPricing:
         snapshot = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.4-pro-2026-03-05")
         base = review_mod.estimate_cost(1_000_000, 1_000_000, "gpt-5.4-pro")
         assert snapshot == base
+
+
+class TestResolveTimeout:
+    """Omitted --timeout must auto-resolve to 900s for reasoning models
+    and 300s otherwise; explicit values pass through unchanged."""
+
+    def test_reasoning_model_default(self, review_mod):
+        assert review_mod._resolve_timeout(None, "gpt-5.4") == review_mod.REASONING_TIMEOUT
+        assert review_mod._resolve_timeout(None, "gpt-5.4") == 900
+        assert review_mod._resolve_timeout(None, "o3") == 900
+        assert review_mod._resolve_timeout(None, "gpt-5.4-pro") == 900
+
+    def test_non_reasoning_model_default(self, review_mod):
+        assert review_mod._resolve_timeout(None, "gpt-4.1") == review_mod.DEFAULT_TIMEOUT
+        assert review_mod._resolve_timeout(None, "gpt-4.1") == 300
+
+    def test_explicit_value_passthrough(self, review_mod):
+        assert review_mod._resolve_timeout(60, "gpt-4.1") == 60
+        assert review_mod._resolve_timeout(1200, "gpt-5.4") == 1200
+
+    def test_zero_is_explicit_value_not_default(self, review_mod):
+        # 0 is a valid explicit value (means "no timeout"); only None triggers
+        # auto-resolution.
+        assert review_mod._resolve_timeout(0, "gpt-5.4") == 0
 
 
 class TestSkillDocAPIConsistency:
@@ -1795,7 +1823,9 @@ class TestCallOpenAIPayload:
 
     def test_standard_model_payload(self, review_mod, mock_urlopen):
         """Standard model sends input, max_output_tokens, and temperature=0."""
-        content, usage = review_mod.call_openai("test prompt", "gpt-5.4", "fake-key")
+        # gpt-4.1 is the canonical non-reasoning model; gpt-5.4 hits the
+        # reasoning branch (different max_tokens, no temperature).
+        content, usage = review_mod.call_openai("test prompt", "gpt-4.1", "fake-key")
         payload = mock_urlopen["payload"]
         assert payload["input"] == "test prompt"
         assert payload["max_output_tokens"] == review_mod.DEFAULT_MAX_TOKENS

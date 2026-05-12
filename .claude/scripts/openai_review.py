@@ -1117,13 +1117,26 @@ def compile_prompt(
 ENDPOINT = "https://api.openai.com/v1/responses"
 DEFAULT_MODEL = "gpt-5.4"
 DEFAULT_TIMEOUT = 300  # seconds
+REASONING_TIMEOUT = 900  # seconds
 DEFAULT_MAX_TOKENS = 16384
 REASONING_MAX_TOKENS = 32768
 
 
 def _is_reasoning_model(model: str) -> bool:
     """Return True for models that use internal chain-of-thought reasoning."""
-    return model.startswith(("o1", "o3", "o4")) or "-pro" in model
+    return model.startswith(("o1", "o3", "o4", "gpt-5.4")) or "-pro" in model
+
+
+def _resolve_timeout(timeout: "int | None", model: str) -> int:
+    """Auto-resolve omitted --timeout based on model class.
+
+    Reasoning models (o1/o3/o4/gpt-5.4/*-pro) get REASONING_TIMEOUT (900s).
+    Non-reasoning models get DEFAULT_TIMEOUT (300s).
+    Explicit values are passed through unchanged.
+    """
+    if timeout is not None:
+        return timeout
+    return REASONING_TIMEOUT if _is_reasoning_model(model) else DEFAULT_TIMEOUT
 
 
 def estimate_tokens(text: str) -> int:
@@ -1154,13 +1167,19 @@ def call_openai(
     prompt: str,
     model: str,
     api_key: str,
-    timeout: int = DEFAULT_TIMEOUT,
+    timeout: "int | None" = None,
 ) -> "tuple[str, dict]":
     """Call the OpenAI Responses API.
+
+    If ``timeout`` is None, resolves to REASONING_TIMEOUT (900s) for
+    reasoning models and DEFAULT_TIMEOUT (300s) otherwise — same logic
+    as the CLI ``--timeout`` flag. This guards future direct callers
+    against the old 300s-everywhere default.
 
     Returns (content, usage) where usage is the API response's usage dict
     containing input_tokens and output_tokens.
     """
+    timeout = _resolve_timeout(timeout, model)
     reasoning = _is_reasoning_model(model)
     max_tokens = REASONING_MAX_TOKENS if reasoning else DEFAULT_MAX_TOKENS
 
@@ -1363,8 +1382,12 @@ def main() -> None:
     parser.add_argument(
         "--timeout",
         type=int,
-        default=DEFAULT_TIMEOUT,
-        help=f"HTTP request timeout in seconds (default: {DEFAULT_TIMEOUT})",
+        default=None,
+        help=(
+            f"HTTP request timeout in seconds. If omitted, defaults to "
+            f"{REASONING_TIMEOUT} for reasoning models (gpt-5.4, *-pro, "
+            f"o1/o3/o4) and {DEFAULT_TIMEOUT} otherwise."
+        ),
     )
     parser.add_argument(
         "--delta-diff",
@@ -1634,13 +1657,8 @@ def main() -> None:
         sys.exit(0)
 
     # Call OpenAI API
-    if _is_reasoning_model(args.model) and args.timeout == DEFAULT_TIMEOUT:
-        print(
-            f"Note: {args.model} is a reasoning model. Consider --timeout 900 "
-            "for large reviews.",
-            file=sys.stderr,
-        )
-    print(f"Sending review to {args.model}...", file=sys.stderr)
+    args.timeout = _resolve_timeout(args.timeout, args.model)
+    print(f"Sending review to {args.model} (timeout={args.timeout}s)...", file=sys.stderr)
     print(f"Estimated input tokens: ~{est_tokens:,}", file=sys.stderr)
     if cost_str:
         print(f"Estimated cost: {cost_str}", file=sys.stderr)
