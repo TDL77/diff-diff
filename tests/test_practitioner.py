@@ -894,6 +894,47 @@ class TestHADDispatch:
                 "assumption."
             )
 
+    def test_had_step_3_qualifies_supported_survey_scope(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        # Per diff_diff/had_pretests.py:1725-1740 + :1927-1940, only
+        # pweight + PSU/FPC survey designs are supported on HAD
+        # pretests. Stratified (SurveyDesign(strata=...)) and
+        # replicate-weight (BRR/Fay/JK1/JKn/SDR) designs raise
+        # NotImplementedError on the linearity kernels. Both HAD
+        # handlers' Step-3 text must call out the supported subset
+        # and the deferred regimes so agents don't generate
+        # `practitioner_next_steps` outputs that overstate what the
+        # workflow will run on a given survey design.
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            step_3_steps = [s for s in output["next_steps"] if s["baker_step"] == 3]
+            assert len(step_3_steps) == 1
+            text = step_3_steps[0].get("why", "").lower()
+            # Supported subset must be named explicitly.
+            assert "pweight" in text and "psu" in text and "fpc" in text, (
+                "Step-3 text must name the supported survey-pretest scope "
+                "(pweight + PSU/FPC) so agents do not assume any "
+                "survey_design= path is supported."
+            )
+            # Deferred regimes must be flagged explicitly so agents
+            # know not to attempt them.
+            assert "stratif" in text, (
+                "Step-3 text must explicitly note that stratified "
+                "(SurveyDesign(strata=...)) survey designs are not yet "
+                "supported on HAD pretests."
+            )
+            assert "replicate" in text, (
+                "Step-3 text must explicitly note that replicate-weight "
+                "(BRR/Fay/JK1/JKn/SDR) survey designs are not yet "
+                "supported on HAD pretests."
+            )
+            assert "notimplementederror" in text, (
+                "Step-3 text must name the actual exception raised "
+                "(NotImplementedError) so agents can match it in "
+                "error-handling paths."
+            )
+
     def test_had_step_3_pretest_assumption_labels_correct(self, mock_had_results):
         # Per docs/methodology/REGISTRY.md and diff_diff/had_pretests.py
         # docstrings:
