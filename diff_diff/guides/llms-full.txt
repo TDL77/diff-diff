@@ -636,21 +636,26 @@ had.fit(
 ```python
 from diff_diff import HeterogeneousAdoptionDiD, did_had_pretest_workflow
 
-# Vet the testable identifying assumptions first:
+# `aggregate="overall"` (the default) is two-period-only: did_had_pretest_workflow
+# reduces to a single first-difference and HeterogeneousAdoptionDiD.fit hard-rejects
+# panels with more than two periods. `aggregate="event_study"` requires a
+# multi-period panel. Use distinct data objects for the two regimes.
+
+# Vet the testable identifying assumptions on the two-period panel first:
 report = did_had_pretest_workflow(
-    data, outcome_col='y', unit_col='unit', time_col='t',
+    data_2p, outcome_col='y', unit_col='unit', time_col='t',
     dose_col='d', first_treat_col='first_treat')
 print(report.summary())
 
-# Single-period scalar WAS (aggregate="overall" default):
+# Single-period scalar WAS (aggregate="overall" default) on the two-period panel:
 est = HeterogeneousAdoptionDiD()
-results = est.fit(data, outcome_col='y', unit_col='unit',
+results = est.fit(data_2p, outcome_col='y', unit_col='unit',
                   time_col='t', dose_col='d',
                   first_treat_col='first_treat')
 print(results.summary())
 
-# Multi-period per-horizon WAS:
-es = est.fit(data, outcome_col='y', unit_col='unit',
+# Multi-period per-horizon WAS on the multi-period panel:
+es = est.fit(data_mp, outcome_col='y', unit_col='unit',
              time_col='t', dose_col='d',
              first_treat_col='first_treat',
              aggregate='event_study')
