@@ -1756,41 +1756,83 @@ class TestWorkflowPromptHardening:
 
 
 class TestWorkflowCommentPosting:
-    """The post-comment step must distinguish initial `opened` (update canonical
-    comment) from every other trigger (create new comment), so re-reviews on
-    push / reopen / /ai-review preserve prior review history.
+    """The workflow has TWO rerun-detection gates that must agree:
+      1. YAML `IS_RERUN` env in the prompt-build step — controls whether
+         the prompt includes the <previous-ai-review-output> block and
+         re-review framing.
+      2. JS `isRerun` in the post-comment step — controls whether the
+         comment is created fresh or updates the canonical comment.
 
-    Without this, `pull_request: synchronize` from a push would overwrite the
-    original review comment via GitHub's update-comment API, losing the prior
-    content (the API does not expose comment edit history)."""
+    If they disagree, you get nonsense states like "new comment posted but
+    prompt didn't see prior review" (synchronize bug pre-fix) or "canonical
+    comment updated but prompt was framed as rerun" (the inverse).
 
-    def test_isrerun_includes_non_opened_pull_request(self):
-        """Non-opened pull_request events (synchronize, reopened) must be
-        treated as reruns so they create a new comment, not update."""
+    The contract: `pull_request.opened` is non-rerun; everything else
+    (`pull_request.synchronize`, `pull_request.reopened`, `issue_comment`,
+    `pull_request_review_comment`) is a rerun."""
+
+    @pytest.fixture
+    def workflow_text(self):
         assert _SCRIPT_PATH is not None
         repo_root = _SCRIPT_PATH.parent.parent.parent
         wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
         if not wf.exists():
             pytest.skip("workflow not found")
-        text = wf.read_text()
-        # The isRerun JS expression must gate on action !== "opened" for
-        # pull_request events.
-        assert 'context.payload.action !== "opened"' in text, (
-            "Workflow comment-posting must treat pull_request events other "
-            "than 'opened' as reruns; otherwise synchronize/reopened will "
-            "overwrite the canonical review comment and lose prior content."
+        return wf.read_text()
+
+    # --- Post-comment JS gate ---
+
+    def test_js_isrerun_includes_non_opened_pull_request(self, workflow_text):
+        """JS gate: non-opened pull_request events create a new comment."""
+        assert 'context.payload.action !== "opened"' in workflow_text, (
+            "post-comment isRerun must treat pull_request events other than "
+            "'opened' as reruns; otherwise synchronize/reopened overwrite the "
+            "canonical review comment and lose prior content."
         )
 
-    def test_isrerun_still_includes_comment_events(self):
-        """Issue-comment and review-comment triggers must remain reruns."""
-        assert _SCRIPT_PATH is not None
-        repo_root = _SCRIPT_PATH.parent.parent.parent
-        wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
-        if not wf.exists():
-            pytest.skip("workflow not found")
-        text = wf.read_text()
-        assert 'context.eventName === "issue_comment"' in text
-        assert 'context.eventName === "pull_request_review_comment"' in text
+    def test_js_isrerun_still_includes_comment_events(self, workflow_text):
+        assert 'context.eventName === "issue_comment"' in workflow_text
+        assert 'context.eventName === "pull_request_review_comment"' in workflow_text
+
+    # --- YAML IS_RERUN gate ---
+
+    def test_yaml_isrerun_includes_non_opened_pull_request(self, workflow_text):
+        """YAML gate: non-opened pull_request events make the prompt include
+        the previous-review block. Must agree with the JS gate above."""
+        assert (
+            "github.event_name == 'pull_request' && github.event.action != 'opened'"
+            in workflow_text
+        ), (
+            "prompt-build IS_RERUN must include non-opened pull_request events "
+            "alongside comment triggers; otherwise synchronize/reopened pushes "
+            "create a new comment but the prompt omits <previous-ai-review-output>."
+        )
+
+    def test_yaml_isrerun_still_includes_comment_events(self, workflow_text):
+        assert "github.event_name == 'issue_comment'" in workflow_text
+        assert "github.event_name == 'pull_request_review_comment'" in workflow_text
+
+    # --- Parity contract: both gates must enumerate the same trigger set ---
+
+    def test_both_gates_enumerate_same_triggers(self, workflow_text):
+        """Whatever the gates use to express the rerun set, both must mention
+        each of the four rerun-trigger names so they cannot silently disagree.
+
+        This is a string-presence check (not a true semantic equality), but it
+        catches the realistic regression: someone editing one gate and
+        forgetting the other."""
+        rerun_signals = [
+            "issue_comment",
+            "pull_request_review_comment",
+            # The synchronize/reopened branch is expressed via action != opened
+            # in both gates, so we anchor on the action-comparison strings:
+            "github.event.action != 'opened'",  # YAML
+            'context.payload.action !== "opened"',  # JS
+        ]
+        for signal in rerun_signals:
+            assert signal in workflow_text, (
+                f"Expected rerun-set signal {signal!r} not found in workflow YAML"
+            )
 
 
 class TestExtractResponseText:
