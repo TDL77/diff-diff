@@ -2045,6 +2045,26 @@ class TestCodexBackendDocConsistency:
         assert "brew install --cask codex" in text or "@openai/codex" in text
         assert "codex login" in text
 
+    def test_skill_step5_command_template_forwards_backend(self):
+        """Regression: the Step-5 invocation MUST pass --backend through to
+        the script. Without this, /ai-review-local --backend codex (or api)
+        is silently ignored — the script's parsed --backend always defaults
+        to 'auto'. This is the exact 'incomplete parameter propagation'
+        anti-pattern; pin the template."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc.read_text()
+        # The Step 5 command template must contain the --backend flag,
+        # forwarded as a shell variable substitution.
+        assert "--backend " in text and "$backend" in text, (
+            "Step 5 command template must forward --backend to the script "
+            "(use `--backend \"$backend\"`); otherwise users' explicit "
+            "--backend selection is dropped."
+        )
+
 
 class TestExtractResponseText:
     def test_prefers_output_text_field(self, review_mod):

@@ -36,6 +36,13 @@ Notes:
   cleaned up automatically.
 - `--context` and `--token-budget` are ignored under the codex backend (Codex
   chooses what to load on its own); the script warns if you pass them.
+- **Surface area**: under the codex backend, Codex can read any file under the
+  repo root via `--cd`, not just the staged diff. This is the same surface that
+  any direct invocation of `codex` itself would have, but worth knowing: the
+  Step 3b pre-upload secret scan only covers diff content, NOT files Codex may
+  load on its own. If your repo contains sensitive files outside the diff
+  (e.g. `.env`, local credentials), prefer `--backend api` or run the codex
+  backend from a sanitized worktree.
 
 ## Arguments
 
@@ -356,10 +363,11 @@ review via `--previous-review`.
 ### Step 5: Run the Review Script
 
 Build and run the command. Include optional arguments only when their conditions are met:
+- `--backend`: pass through from parsed arguments (default `auto`); the script auto-detects
 - `--previous-review`: only if `.claude/reviews/local-review-previous.md` exists AND `--force-fresh` was NOT set
 - `--delta-diff` and `--delta-changed-files`: only if delta files were generated in Step 4
 - `--review-state`, `--commit-sha`, `--base-ref`: always include (even with `--force-fresh`, to seed a new baseline)
-- `--context`, `--include-files`, `--token-budget`: pass through from parsed arguments
+- `--context`, `--include-files`, `--token-budget`: pass through from parsed arguments (only meaningful for `--backend api`; ignored under codex)
 
 ```bash
 python3 .claude/scripts/openai_review.py \
@@ -370,6 +378,7 @@ python3 .claude/scripts/openai_review.py \
     --output .claude/reviews/local-review-latest.md \
     --branch-info "$branch_name" \
     --repo-root "$(pwd)" \
+    --backend "$backend" \
     --context "$context_level" \
     --review-state .claude/reviews/review-state.json \
     --commit-sha "$(git rev-parse HEAD)" \
@@ -384,6 +393,12 @@ python3 .claude/scripts/openai_review.py \
     [--timeout <seconds>] \
     [--dry-run]
 ```
+
+Always pass `--backend "$backend"` (where `$backend` is the parsed value, defaulting
+to `auto`). The script handles auto-detection internally; forwarding the flag means
+explicit `/ai-review-local --backend codex` and `/ai-review-local --backend api`
+choices are honored end-to-end. Without forwarding, the user's `--backend` selection
+would be silently ignored.
 
 Note: `--force-fresh` is a skill-only flag — it controls whether delta diffs are
 generated in Step 4 and is NOT passed to the script.
