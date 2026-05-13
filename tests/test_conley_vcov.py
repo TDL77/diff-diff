@@ -433,6 +433,43 @@ class TestConleyValidatorHelpers:
                 lag_cutoff=1,
             )
 
+    def test_panel_unit_nan_float_raises(self):
+        """NaN unit IDs would silently drop those rows from the per-unit
+        serial HAC sum at `np.unique(unit_arr) + mask_u = unit_arr == u_val`.
+        Closes Codex P1.
+        """
+        n = 4
+        unit = np.array([1.0, 2.0, np.nan, 3.0])
+        with pytest.raises(ValueError, match="conley_unit contains NaN"):
+            _validate_conley_kwargs(
+                coords=np.zeros((n, 2)),
+                cutoff=100.0,
+                metric="euclidean",
+                kernel="bartlett",
+                n=n,
+                time=np.array([1.0, 2.0, 1.0, 2.0]),
+                unit=unit,
+                lag_cutoff=1,
+            )
+
+    def test_panel_unit_pd_na_object_raises(self):
+        """Object-dtype unit IDs (mixed string + pd.NA) must also raise."""
+        import pandas as pd
+
+        n = 4
+        unit = np.array(["A", "B", pd.NA, "C"], dtype=object)
+        with pytest.raises(ValueError, match="conley_unit contains NaN"):
+            _validate_conley_kwargs(
+                coords=np.zeros((n, 2)),
+                cutoff=100.0,
+                metric="euclidean",
+                kernel="bartlett",
+                n=n,
+                time=np.array([1.0, 2.0, 1.0, 2.0]),
+                unit=unit,
+                lag_cutoff=1,
+            )
+
 
 # ---------------------------------------------------------------------------
 # TestConleyDirectHelper — _compute_conley_vcov correctness
@@ -1060,6 +1097,122 @@ class TestConleyEstimatorIntegration:
                 post_periods=[2],
                 unit="unit",
                 reference_period=1,
+            )
+
+    def test_multi_period_did_conley_with_survey_design_raises(self):
+        """MPD + vcov_type='conley' + survey_design raises NotImplementedError.
+
+        Closes Codex P0: previously, MPD passed return_vcov=False to solve_ols
+        when _use_survey_vcov=True, bypassing the conley + weights guard, and
+        then overwrote vcov with compute_survey_vcov — silently returning
+        survey SEs under a Conley request.
+        """
+        import pandas as pd
+
+        from diff_diff import MultiPeriodDiD
+        from diff_diff.survey import SurveyDesign
+
+        rng = np.random.default_rng(seed=29)
+        n_units = 24
+        rows = []
+        for u in range(n_units):
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            for t in range(3):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": rng.normal(),
+                        "treated": int(u < 12),
+                        "lat": lat,
+                        "lon": lon,
+                        "weight": 1.0 + 0.1 * rng.random(),
+                        "stratum": u % 4,
+                        "psu": u // 6,
+                    }
+                )
+        df_mp = pd.DataFrame(rows)
+        # Pure pweight (no PSU / strata) — would route through analytical conley
+        # path; the guard must fire before solve_ols.
+        sd_tsl = SurveyDesign(weights="weight", weight_type="pweight")
+        with pytest.raises(NotImplementedError, match="survey_design"):
+            MultiPeriodDiD(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                df_mp,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                post_periods=[2],
+                unit="unit",
+                reference_period=1,
+                survey_design=sd_tsl,
+            )
+        # Stratified PSU survey design — would route through Taylor TSL path
+        # and was the canonical bypass case the codex reviewer flagged.
+        sd_psu = SurveyDesign(
+            weights="weight",
+            strata="stratum",
+            psu="psu",
+            weight_type="pweight",
+            nest=True,
+        )
+        with pytest.raises(NotImplementedError, match="survey_design"):
+            MultiPeriodDiD(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                df_mp,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                post_periods=[2],
+                unit="unit",
+                reference_period=1,
+                survey_design=sd_psu,
+            )
+
+    def test_multi_period_did_conley_missing_coords_raises(self):
+        """MPD + vcov_type='conley' without conley_coords raises a clean
+        ValueError instead of a raw TypeError on `self.conley_coords[0]`.
+        Closes Codex P2 #1.
+        """
+        import pandas as pd
+
+        from diff_diff import MultiPeriodDiD
+
+        rng = np.random.default_rng(seed=31)
+        n_units = 10
+        rows = []
+        for u in range(n_units):
+            for t in range(2):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": rng.normal(),
+                        "treated": int(u < 5),
+                    }
+                )
+        df_mp = pd.DataFrame(rows)
+        with pytest.raises(ValueError, match="conley_coords.*conley_cutoff_km"):
+            MultiPeriodDiD(
+                vcov_type="conley",
+                conley_lag_cutoff=1,
+            ).fit(
+                df_mp,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                post_periods=[1],
+                unit="unit",
+                reference_period=0,
             )
 
 

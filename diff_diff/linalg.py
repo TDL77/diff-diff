@@ -660,6 +660,19 @@ def solve_ols(
                 "Clean your data or set check_finite=False to skip this check."
             )
 
+    # Front-door Conley-specific validation. Runs BEFORE the routing/backend
+    # branching so `return_vcov=False` cannot bypass the conley+weights /
+    # conley+cluster_ids guards. Conley needs this because survey-replicate
+    # paths in MultiPeriodDiD pass `return_vcov=False` + `weights=survey_w`
+    # and would otherwise silently return survey SEs under a Conley request.
+    # The full `_validate_vcov_args` is NOT called here because other vcov
+    # types (e.g. `hc2_bm` + replicate weights) intentionally fall through
+    # to the survey-vcov path with the analytical validator skipped — that
+    # legacy contract is preserved.
+    if vcov_type == "conley":
+        if cluster_ids is not None or weights is not None:
+            _validate_vcov_args(vcov_type, cluster_ids, weights)
+
     # WLS transformation: apply sqrt(w) scaling to X and y
     # This happens BEFORE routing to Rust or NumPy backends — they receive
     # pre-transformed X_w, y_w and solve standard OLS.

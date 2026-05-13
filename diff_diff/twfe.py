@@ -67,19 +67,24 @@ class TwoWayFixedEffects(DifferenceInDifferences):
     ``TODO.md`` under Methodology/Correctness; also documented in
     ``docs/methodology/REGISTRY.md``.
 
-    **Conley spatial-HAC (``vcov_type="conley"``) is rejected at fit-time
-    in Phase 1.** TwoWayFixedEffects is intrinsically a multi-period panel
-    estimator and Phase 1's cross-sectional Conley does not handle the
-    time dimension — applying it over (unit, time) rows would treat same-
-    unit cross-time pairs as ``d_ij = 0 → K = 1``, mishandling the space-
-    time HAC. The supported Phase 1 path for Conley is direct
-    ``compute_robust_vcov`` / ``LinearRegression`` on a single-period
-    regression. The ``conley_*`` kwargs are inherited from
-    ``DifferenceInDifferences.__init__`` for sklearn-style API symmetry
-    (``get_params`` / ``set_params`` round-trip), but
-    ``TwoWayFixedEffects(vcov_type="conley").fit(...)`` raises
-    ``NotImplementedError``. Phase 2 will add the space-time product kernel
-    (Driscoll-Kraay) and lift the rejection.
+    **Conley spatial-HAC (``vcov_type="conley"``) is supported via the
+    block-decomposed panel sandwich (matches R ``conleyreg`` with
+    ``lag_cutoff > 0``).** Pass ``conley_coords=(lat_col, lon_col)``,
+    ``conley_cutoff_km=<float>``, and ``conley_lag_cutoff=<int>`` on the
+    constructor; the ``time`` / ``unit`` arrays are auto-derived from the
+    estimator's ``time`` and ``unit`` column-name arguments at fit-time.
+    The sandwich sums within-period spatial pairs plus within-unit
+    Bartlett serial pairs (lag=0 excluded to avoid double-counting); this
+    is NOT a multiplicative product kernel. FWL composability: the
+    within-transformed scores ``S = X_demeaned * residuals_demeaned`` form
+    the same meat as the full-dummy-expansion design. The temporal kernel
+    is hardcoded Bartlett regardless of ``conley_kernel`` (matches
+    ``conleyreg::time_dist``). Restrictions:
+    ``inference="wild_bootstrap"`` + Conley raises (incompatible inference
+    modes); explicit ``cluster=...`` + Conley raises (combined spatial-
+    cluster kernel deferred to a follow-up PR; auto-cluster on the Conley
+    path is silently dropped); ``survey_design=`` + Conley raises (Phase 5
+    follow-up).
 
     Warning: TWFE can be biased with staggered treatment timing
     and heterogeneous treatment effects. Consider using

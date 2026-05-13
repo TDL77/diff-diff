@@ -1380,6 +1380,12 @@ class MultiPeriodDiD(DifferenceInDifferences):
         # array extraction (and conley_coords resolution from column names)
         # happens just below at the solve_ols call.
         if self.vcov_type == "conley":
+            if self.conley_coords is None or self.conley_cutoff_km is None:
+                raise ValueError(
+                    "MultiPeriodDiD(vcov_type='conley') requires "
+                    "conley_coords=(lat_col, lon_col) and conley_cutoff_km "
+                    "on the constructor."
+                )
             if unit is None:
                 raise ValueError(
                     "MultiPeriodDiD(vcov_type='conley') requires unit= at "
@@ -1392,6 +1398,15 @@ class MultiPeriodDiD(DifferenceInDifferences):
                     "conley_lag_cutoff (non-negative int; 0 means spatial-"
                     "within-period only, no serial component). See R "
                     "conleyreg's `lag_cutoff` argument for the convention."
+                )
+            if survey_design is not None:
+                raise NotImplementedError(
+                    "MultiPeriodDiD(vcov_type='conley', survey_design=...) "
+                    "is not supported: Conley + survey weights / replicate "
+                    "vcov is deferred to a follow-up PR (Bertanha-Imbens 2014 "
+                    "territory). Use vcov_type='hc1' for survey-aware "
+                    "cluster-robust without spatial HAC, or drop survey_design= "
+                    "for panel Conley."
                 )
         # Pre-compute non_ref_periods (needed for absorb demeaning)
         non_ref_periods = [p for p in all_periods if p != reference_period]

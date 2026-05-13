@@ -230,13 +230,25 @@ def _validate_conley_kwargs(
             raise ValueError(
                 f"conley_time must be a 1-D array of length {n}; got shape {time_arr.shape}."
             )
-        if not np.isfinite(time_arr).all():
+        # Use pandas.isna for object/categorical dtypes; np.isfinite catches
+        # NaN/inf for numeric dtypes only.
+        import pandas as _pd
+
+        if _pd.isna(time_arr).any():
+            raise ValueError("conley_time contains NaN or missing values.")
+        if time_arr.dtype.kind in "fc" and not np.isfinite(time_arr).all():
             raise ValueError("conley_time contains NaN or inf values.")
         unit_arr = np.asarray(unit)
         if unit_arr.ndim != 1 or unit_arr.shape[0] != n:
             raise ValueError(
                 f"conley_unit must be a 1-D array of length {n}; got shape {unit_arr.shape}."
             )
+        # conley_unit may be any hashable (int, string, categorical). Use
+        # pandas.isna for cross-dtype NA detection. NaN unit IDs would silently
+        # drop those rows from the per-unit serial HAC sum at
+        # `np.unique(unit_arr) + mask_u = unit_arr == u_val`.
+        if _pd.isna(unit_arr).any():
+            raise ValueError("conley_unit contains NaN or missing values.")
         if not (isinstance(lag_cutoff, (int, np.integer)) and int(lag_cutoff) >= 0):
             raise ValueError(
                 f"conley_lag_cutoff must be a non-negative integer; got {lag_cutoff!r}."
