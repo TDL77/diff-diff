@@ -2128,7 +2128,8 @@ class TestCodexBackendDocConsistency:
 
 class TestSensitiveFileScan:
     """`_scan_sensitive_files` recursively scans the repo for sensitive-pattern
-    filenames (gitignore-aware via git ls-files; falls back to os.walk).
+    filenames via os.walk (skips heavy dirs but does NOT respect .gitignore —
+    gitignored .env files are exactly what we want to catch).
     `_print_sensitive_warning` formats the stderr block for the abort and
     --allow-secrets-continue paths."""
 
@@ -2234,6 +2235,113 @@ class TestSensitiveFileScan:
         review_mod._print_sensitive_warning(str(tmp_path), many, abort=True)
         err = capsys.readouterr().err
         assert "and 30 more" in err
+
+
+class TestSensitiveContentScan:
+    """`_scan_sensitive_content` catches secrets stored under innocuous
+    filenames by applying the canonical content secret-regex (mirrors
+    Step 3b in the skill doc). `_preflight_codex_secrets` combines the
+    filename + content scans into the single check used by the codex gate."""
+
+    def test_finds_aws_key_in_innocuous_file(self, tmp_path, review_mod):
+        """Secret stored in notes.txt under no sensitive name must be caught."""
+        (tmp_path / "notes.txt").write_text(
+            "TODO: rotate AKIAIOSFODNN7EXAMPLE before next quarter"
+        )
+        assert "notes.txt" in review_mod._scan_sensitive_content(str(tmp_path))
+
+    def test_finds_openai_key_in_yaml(self, tmp_path, review_mod):
+        (tmp_path / "config.yml").write_text(
+            "openai:\n  key: sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        )
+        assert "config.yml" in review_mod._scan_sensitive_content(str(tmp_path))
+
+    def test_finds_github_token_in_md(self, tmp_path, review_mod):
+        (tmp_path / "README.md").write_text(
+            "Run with: GH_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
+        assert "README.md" in review_mod._scan_sensitive_content(str(tmp_path))
+
+    def test_finds_api_key_assignment(self, tmp_path, review_mod):
+        (tmp_path / "settings.toml").write_text('api_key = "abc123"')
+        assert "settings.toml" in review_mod._scan_sensitive_content(str(tmp_path))
+
+    def test_skips_binary_suffix(self, tmp_path, review_mod):
+        """Binary/asset files aren't scanned (would be false positives + slow).
+        The regex would match many random byte sequences."""
+        # Write a .png file with content that DOES match the regex
+        (tmp_path / "image.png").write_text("password=anything")
+        assert "image.png" not in review_mod._scan_sensitive_content(str(tmp_path))
+
+    def test_skips_oversized_files(self, tmp_path, review_mod, monkeypatch):
+        """Files >1MB are skipped (typically generated/binary)."""
+        # Force a small cap to make the test fast
+        monkeypatch.setattr(review_mod, "_SCAN_MAX_FILE_BYTES", 100)
+        (tmp_path / "huge.py").write_text("x = 1\n" * 1000)  # ~6KB > 100B cap
+        # Even though the file content doesn't match secrets, this verifies
+        # the size gate triggers; for a positive test we'd need a small file.
+        (tmp_path / "small.py").write_text("password = 'x'")
+        found = review_mod._scan_sensitive_content(str(tmp_path))
+        assert "small.py" in found
+        assert "huge.py" not in found
+
+    def test_clean_content_returns_empty(self, tmp_path, review_mod):
+        (tmp_path / "main.py").write_text("def f(): return 42")
+        (tmp_path / "README.md").write_text("# Project")
+        assert review_mod._scan_sensitive_content(str(tmp_path)) == []
+
+    def test_preflight_combines_filename_and_content_scans(
+        self, tmp_path, review_mod
+    ):
+        """`_preflight_codex_secrets` returns union of filename + content hits."""
+        (tmp_path / ".env").write_text("X=1")  # filename match
+        (tmp_path / "notes.txt").write_text(
+            "AKIAIOSFODNN7EXAMPLE"
+        )  # content match
+        (tmp_path / "clean.py").write_text("x = 1")  # neither
+        result = review_mod._preflight_codex_secrets(str(tmp_path))
+        assert ".env" in result
+        assert "notes.txt" in result
+        assert "clean.py" not in result
+
+    def test_preflight_dedupes_files_matching_both(self, tmp_path, review_mod):
+        """A file matching BOTH (e.g. .env with secrets) appears once."""
+        (tmp_path / ".env").write_text("api_key = abc")
+        result = review_mod._preflight_codex_secrets(str(tmp_path))
+        assert result.count(".env") == 1
+
+    def test_content_scan_skips_tests_dir(self, tmp_path, review_mod):
+        """Test files commonly contain literal pattern matches as fixtures
+        for the secret-detection regex itself; content scan must skip them.
+        Filename scan still applies."""
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_secrets.py").write_text(
+            "expected_token = 'AKIAIOSFODNN7EXAMPLE'  # fixture for regex test"
+        )
+        # Content scan should NOT flag this
+        assert review_mod._scan_sensitive_content(str(tmp_path)) == []
+        # But a real .env in tests/ would still be caught by filename scan
+        (tmp_path / "tests" / ".env").write_text("X=1")
+        filenames = review_mod._scan_sensitive_files(str(tmp_path))
+        assert any(".env" in p for p in filenames)
+
+    def test_content_scan_skips_github_workflows(self, tmp_path, review_mod):
+        """Workflow YAMLs that DEFINE secret-detection regexes contain
+        literal pattern matches as part of the workflow logic, not as
+        actual secrets."""
+        (tmp_path / ".github" / "workflows").mkdir(parents=True)
+        (tmp_path / ".github" / "workflows" / "scan.yml").write_text(
+            "regex: ghp_[A-Za-z0-9]{36}|api_key=  # workflow secret detector"
+        )
+        assert review_mod._scan_sensitive_content(str(tmp_path)) == []
+
+    def test_content_scan_skips_docs_dir(self, tmp_path, review_mod):
+        """Documentation may show example secrets in code blocks."""
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs" / "auth.md").write_text(
+            "Example: `api_key=YOUR_KEY_HERE`"
+        )
+        assert review_mod._scan_sensitive_content(str(tmp_path)) == []
 
 
 class TestMainBackendDispatch:
@@ -2400,6 +2508,126 @@ class TestMainBackendDispatch:
         assert exc.value.code == 0
         # api backend with --include-files MUST have called read_source_files
         assert main_env["load_calls"]["read_source_files"] >= 1
+
+
+class TestMainCodexSecretGate:
+    """Non-dry-run integration tests for the codex secret-preflight gate.
+    The gate runs AFTER the dry-run check exits, so dry-run-only tests
+    (TestMainBackendDispatch) don't exercise it. These do."""
+
+    @pytest.fixture
+    def gate_env(self, tmp_path, monkeypatch, review_mod):
+        """Like main_env but stubs call_codex so we can drive non-dry-run."""
+        criteria = tmp_path / "criteria.md"
+        criteria.write_text(
+            "You are an automated PR reviewer for a causal inference library.\n"
+        )
+        registry = tmp_path / "registry.md"
+        registry.write_text("# Methodology Registry\n")
+        diff = tmp_path / "diff.patch"
+        diff.write_text("--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-x\n+y\n")
+        files = tmp_path / "files.txt"
+        files.write_text("M\tfoo.py\n")
+        output = tmp_path / "review.md"
+
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-fake")
+        monkeypatch.setattr(
+            review_mod, "_detect_backend", lambda r: "codex"
+        )
+
+        # Stub call_codex so non-dry-run doesn't actually invoke the CLI
+        codex_calls = {"called": False, "repo_root": None}
+
+        def fake_call_codex(prompt, model, repo_root):
+            codex_calls["called"] = True
+            codex_calls["repo_root"] = repo_root
+            return "## Mock review", {
+                "backend": "codex", "input_tokens": None, "output_tokens": None,
+            }
+
+        monkeypatch.setattr(review_mod, "call_codex", fake_call_codex)
+
+        return {
+            "tmp_path": tmp_path,
+            "criteria": criteria,
+            "registry": registry,
+            "diff": diff,
+            "files": files,
+            "output": output,
+            "codex_calls": codex_calls,
+            "monkeypatch": monkeypatch,
+        }
+
+    def _run(self, env, review_mod, **flags):
+        """Run main() WITHOUT --dry-run so the secret gate is exercised."""
+        argv = [
+            "openai_review.py",
+            "--review-criteria", str(env["criteria"]),
+            "--registry", str(env["registry"]),
+            "--diff", str(env["diff"]),
+            "--changed-files", str(env["files"]),
+            "--output", str(env["output"]),
+            "--backend", "codex",
+            "--context", "minimal",
+            "--repo-root", str(env["tmp_path"]),
+        ]
+        for k, v in flags.items():
+            argv.append(f"--{k.replace('_', '-')}")
+            if v is not None and v is not True:
+                argv.append(str(v))
+        env["monkeypatch"].setattr(sys, "argv", argv)
+        return review_mod.main()
+
+    def test_aborts_when_sensitive_files_present(
+        self, gate_env, review_mod, capsys
+    ):
+        """A repo with .env triggers ABORT and exit 1; codex NOT invoked."""
+        (gate_env["tmp_path"] / ".env").write_text("SECRET=hunter2")
+        with pytest.raises(SystemExit) as exc:
+            self._run(gate_env, review_mod)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "ABORT" in captured.err
+        assert ".env" in captured.err
+        assert not gate_env["codex_calls"]["called"]
+
+    def test_aborts_on_content_match_in_innocuous_file(
+        self, gate_env, review_mod, capsys
+    ):
+        """Secret in notes.txt (no sensitive filename) still triggers abort."""
+        (gate_env["tmp_path"] / "notes.txt").write_text(
+            "TODO: rotate AKIAIOSFODNN7EXAMPLE"
+        )
+        with pytest.raises(SystemExit) as exc:
+            self._run(gate_env, review_mod)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "ABORT" in captured.err
+        assert "notes.txt" in captured.err
+        assert not gate_env["codex_calls"]["called"]
+
+    def test_allow_secrets_overrides_abort(
+        self, gate_env, review_mod, capsys
+    ):
+        """--allow-secrets prints WARNING but lets codex proceed."""
+        (gate_env["tmp_path"] / ".env").write_text("X=1")
+        # Should NOT raise SystemExit (codex run completes)
+        self._run(gate_env, review_mod, allow_secrets=True)
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert "ABORT" not in captured.err
+        assert gate_env["codex_calls"]["called"]
+
+    def test_clean_repo_proceeds_to_codex_without_warning(
+        self, gate_env, review_mod, capsys
+    ):
+        """No sensitive files → no warning printed, codex invoked normally."""
+        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
+        self._run(gate_env, review_mod)
+        captured = capsys.readouterr()
+        assert "ABORT" not in captured.err
+        assert "WARNING" not in captured.err
+        assert gate_env["codex_calls"]["called"]
 
 
 class TestExtractResponseText:

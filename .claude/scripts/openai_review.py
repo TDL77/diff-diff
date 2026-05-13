@@ -1198,11 +1198,69 @@ SENSITIVE_FILE_PATTERNS = (
 # examples). Excluded from sensitive-file matches.
 SENSITIVE_FILE_SAFE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 
-# Directories to skip during fallback os.walk scan (when not in a git repo).
+# Directories to skip during the recursive scan. The skip set covers heavy
+# vendored/generated dirs that often contain test fixtures matching the
+# sensitive-filename or content patterns; including them would bury real
+# matches in noise without adding signal.
 _SCAN_SKIP_DIRS = frozenset({
     ".git", ".venv", "venv", ".tox", ".eggs", ".pytest_cache", ".mypy_cache",
     "node_modules", "__pycache__", "dist", "build", "target",
+    ".claude",  # local review artifacts (.claude/reviews/) + tooling
 })
+
+# Path prefixes (repo-relative, forward-slash) skipped by the CONTENT scan
+# only — the filename scan still applies. These directories commonly contain
+# literal pattern matches as test fixtures, regex definitions, or documented
+# examples (NOT real secrets), so blanket-skipping them keeps the false-
+# positive rate manageable. Real secrets in these locations would also be
+# committed to source control, which is a separate problem the user should
+# notice via code review long before our preflight matters.
+_SCAN_SKIP_CONTENT_PREFIXES = (
+    "tests/", "test/", "__tests__/",
+    ".github/",
+    "docs/",
+    "examples/", "example/",
+    "fixtures/",
+)
+
+# Canonical secret-content regex — mirrors the patterns in
+# .claude/commands/ai-review-local.md Step 3b (the pre-upload diff scan) so
+# the codex preflight uses the same definition of "secret content" as the
+# api-backend scan. Detects:
+#   - AWS access key IDs (AKIA prefix)
+#   - GitHub tokens (ghp_, gho_)
+#   - OpenAI API keys (sk-)
+#   - Common assignment patterns: api_key=, secret_key=, password=, token=
+#   - Bearer tokens
+#   - PRIVATE_KEY identifiers
+SECRET_CONTENT_PATTERN = re.compile(
+    r"AKIA[A-Z0-9]{16}"
+    r"|ghp_[A-Za-z0-9]{36}"
+    r"|sk-[A-Za-z0-9]{48}"
+    r"|gho_[A-Za-z0-9]{36}"
+    r"|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy][\t ]*[=:]"
+    r"|[Ss][Ee][Cc][Rr][Ee][Tt][_-]?[Kk][Ee][Yy][\t ]*[=:]"
+    r"|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd][\t ]*[=:]"
+    r"|[Pp][Rr][Ii][Vv][Aa][Tt][Ee][_-]?[Kk][Ee][Yy]"
+    r"|[Bb][Ee][Aa][Rr][Ee][Rr][\t ]+[A-Za-z0-9_-]+"
+    r"|[Tt][Oo][Kk][Ee][Nn][\t ]*[=:]"
+)
+
+# File-size cap for content scan (skip files >1MB — typically binaries or
+# generated assets, not human-authored code where secrets would be).
+_SCAN_MAX_FILE_BYTES = 1_000_000
+
+# Suffixes worth content-scanning. Skip binary/asset/generated formats where
+# false positives are common and real secrets are not how-people-store-them.
+_SCAN_CONTENT_SUFFIXES = (
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb", ".java",
+    ".sh", ".bash", ".zsh", ".fish",
+    ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg", ".conf", ".config",
+    ".env", ".envrc",
+    ".txt", ".md", ".rst",
+    ".sql", ".graphql",
+    ".html", ".xml",
+)
 
 
 def _list_files_for_scan(repo_root: str) -> "list[str]":
@@ -1249,6 +1307,57 @@ def _scan_sensitive_files(repo_root: str) -> "list[str]":
     return sorted(set(found))
 
 
+def _scan_sensitive_content(repo_root: str) -> "list[str]":
+    """Recursively scan repo file contents for the canonical secret-content
+    regex (mirrors `.claude/commands/ai-review-local.md` Step 3b's pattern).
+
+    Catches secrets stored under innocuous filenames — e.g. an API key in
+    `notes.txt` or `config.yml` — that the basename scan in
+    `_scan_sensitive_files()` would miss.
+
+    Scope limits to keep runtime + false-positive count manageable:
+      - File suffixes in `_SCAN_CONTENT_SUFFIXES` only (skip binaries / assets)
+      - Files > `_SCAN_MAX_FILE_BYTES` are skipped (likely binaries / generated)
+      - Same skip-dir set as `_scan_sensitive_files()`
+      - Same gitignored-files-included posture (we want to catch `.env`)
+
+    Returns repo-relative paths of files containing at least one match.
+    """
+    found: "list[str]" = []
+    for rel_path in _list_files_for_scan(repo_root):
+        if not rel_path.endswith(_SCAN_CONTENT_SUFFIXES):
+            continue
+        # Skip content scan for path prefixes that commonly hold literal
+        # pattern matches as fixtures / regex definitions / examples (not
+        # real secrets). Filename scan still applies to these dirs.
+        normalized = rel_path.replace(os.sep, "/")
+        if any(normalized.startswith(p) for p in _SCAN_SKIP_CONTENT_PREFIXES):
+            continue
+        full_path = os.path.join(repo_root, rel_path)
+        try:
+            if os.path.getsize(full_path) > _SCAN_MAX_FILE_BYTES:
+                continue
+        except OSError:
+            continue
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+        if SECRET_CONTENT_PATTERN.search(content):
+            found.append(rel_path)
+    return sorted(set(found))
+
+
+def _preflight_codex_secrets(repo_root: str) -> "list[str]":
+    """Combined preflight: returns unique repo-relative paths flagged by
+    EITHER the filename scan OR the content scan. Empty list = clean repo,
+    safe to invoke codex without `--allow-secrets`."""
+    return sorted(set(
+        _scan_sensitive_files(repo_root) + _scan_sensitive_content(repo_root)
+    ))
+
+
 def _print_sensitive_warning(
     repo_root: str, found: "list[str]", abort: bool
 ) -> None:
@@ -1264,7 +1373,8 @@ def _print_sensitive_warning(
     print(f"  --cd {repo_root}", file=sys.stderr)
     print(
         f"Detected {len(found)} potentially sensitive file(s) "
-        "(recursive scan, includes gitignored files):",
+        "(recursive scan: filename patterns + content secret-regex; "
+        "includes gitignored files):",
         file=sys.stderr,
     )
     for f in found[:20]:
@@ -1725,7 +1835,8 @@ def main() -> None:
         help=(
             "Codex backend only. By default, the script aborts before "
             "invoking codex if it detects potentially sensitive files in the "
-            "repo (.env, *.pem, id_rsa, secrets.*, etc.; gitignore-aware). "
+            "repo (.env, *.pem, id_rsa, secrets.*, etc., plus content "
+            "secret-regex; recursive scan including gitignored files). "
             "Pass this flag to acknowledge the surface and proceed anyway. "
             "Codex CAN read those files inside its agentic loop (under the "
             "read-only sandbox)."
@@ -2069,7 +2180,7 @@ def main() -> None:
 
     if backend == "codex":
         codex_repo_root = args.repo_root or os.getcwd()
-        sensitive = _scan_sensitive_files(codex_repo_root)
+        sensitive = _preflight_codex_secrets(codex_repo_root)
         if sensitive:
             _print_sensitive_warning(
                 codex_repo_root, sensitive, abort=not args.allow_secrets

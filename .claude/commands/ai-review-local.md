@@ -38,16 +38,33 @@ Notes:
   chooses what to load on its own); the script warns if you pass them.
 - **Surface area + abort-by-default**: under the codex backend, Codex can read
   any file under the repo root via `--cd`, not just the staged diff. Before
-  invoking codex, the script runs a recursive sensitive-file scan for patterns
-  like `.env`, `.env.local`, `id_rsa`, `*.pem`, `*.key`,
-  `secrets.{yml,yaml,json}`, `.netrc`, `.npmrc`, `.pypirc`. Common safe
-  variants (`.env.example`, `.env.sample`, `.env.template`) are excluded.
-  Heavy directories (`.venv`, `node_modules`, `__pycache__`, etc.) are
-  skipped to avoid vendored test fixtures. The scan does NOT respect
-  `.gitignore` — gitignored `.env` files are exactly what we want to catch.
-  If any matches exist, codex is **NOT invoked** and the script exits 1
-  unless you pass `--allow-secrets` to acknowledge the surface. This is
-  enforcement, not just a warning.
+  invoking codex, the script runs a recursive preflight scan with TWO checks:
+
+  1. **Filename patterns**: `.env`, `.env.local`, `id_rsa`, `*.pem`, `*.key`,
+     `secrets.{yml,yaml,json}`, `.netrc`, `.npmrc`, `.pypirc`, etc. Safe
+     template variants (`.env.example`, `.env.sample`, `.env.template`)
+     excluded.
+  2. **Content secret-regex**: same canonical pattern used for the api
+     backend's pre-upload scan (Step 3b) — catches AWS keys (`AKIA…`),
+     GitHub tokens (`ghp_…`, `gho_…`), OpenAI keys (`sk-…`), `api_key=`,
+     `secret_key=`, `password=`, `token=`, bearer tokens, and
+     `PRIVATE_KEY` strings — applied recursively to repo files. Catches
+     secrets stored under innocuous filenames like `notes.txt`. Limited
+     to common text suffixes (`.py`, `.js`, `.yml`, `.json`, `.env`, `.md`,
+     etc.); files >1MB skipped (likely binaries/generated assets). Common
+     false-positive directories (`tests/`, `.github/`, `docs/`, `examples/`,
+     `fixtures/`) are skipped for content scan only — those locations
+     legitimately contain literal pattern matches as test fixtures, regex
+     definitions, or doc examples. Filename scan still applies to those
+     dirs (so a real `.env` checked into `tests/` would still be caught).
+
+  Heavy dirs (`.venv`, `node_modules`, `__pycache__`, `.claude`, etc.) are
+  skipped to avoid vendored test fixtures. Both scans include gitignored
+  files — gitignored `.env` files are exactly what we want to catch.
+
+  If either scan finds matches, codex is **NOT invoked** and the script
+  exits 1 unless you pass `--allow-secrets` to acknowledge the surface.
+  This is enforcement, not just a warning.
 
 ## Arguments
 
@@ -55,7 +72,8 @@ Notes:
 - `--backend {auto,codex,api}`: Reviewer backend (default: `auto`). See above.
 - `--allow-secrets`: Codex backend only. By default, the script aborts before
   invoking codex if it detects sensitive files anywhere under the repo root
-  (gitignore-aware recursive scan). Pass this flag to acknowledge and proceed.
+  (recursive filename + content-regex scan including gitignored files). Pass
+  this flag to acknowledge and proceed.
 - `--context {minimal,standard,deep}`: Context depth (default: `standard`).
   *Api backend only.*
   - `minimal`: Diff only (original behavior)
