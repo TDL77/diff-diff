@@ -67,6 +67,20 @@ class TwoWayFixedEffects(DifferenceInDifferences):
     ``TODO.md`` under Methodology/Correctness; also documented in
     ``docs/methodology/REGISTRY.md``.
 
+    **Conley spatial-HAC (``vcov_type="conley"``) is rejected at fit-time
+    in Phase 1.** TwoWayFixedEffects is intrinsically a multi-period panel
+    estimator and Phase 1's cross-sectional Conley does not handle the
+    time dimension — applying it over (unit, time) rows would treat same-
+    unit cross-time pairs as ``d_ij = 0 → K = 1``, mishandling the space-
+    time HAC. The supported Phase 1 path for Conley is direct
+    ``compute_robust_vcov`` / ``LinearRegression`` on a single-period
+    regression. The ``conley_*`` kwargs are inherited from
+    ``DifferenceInDifferences.__init__`` for sklearn-style API symmetry
+    (``get_params`` / ``set_params`` round-trip), but
+    ``TwoWayFixedEffects(vcov_type="conley").fit(...)`` raises
+    ``NotImplementedError``. Phase 2 will add the space-time product kernel
+    (Driscoll-Kraay) and lift the rejection.
+
     Warning: TWFE can be biased with staggered treatment timing
     and heterogeneous treatment effects. Consider using
     more robust estimators (e.g., Callaway-Sant'Anna) for
@@ -141,6 +155,25 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 "switch to fixed_effects= dummies on DifferenceInDifferences "
                 "for a full-dummy design where HC2/CR2-BM are computed on "
                 "the full projection."
+            )
+
+        # Reject Conley on TWFE entirely. TWFE is intrinsically a multi-
+        # period panel estimator; cross-sectional Conley does not apply
+        # (same rationale as DifferenceInDifferences.fit's panel guard:
+        # same-unit cross-time pairs have d_ij=0 -> K=1, which together
+        # with within-transformed residuals that sum to zero per unit
+        # produces an anti-correlated cancellation, not the documented
+        # cross-sectional Conley meat). Phase 1 supports Conley only via
+        # direct compute_robust_vcov on a single-period design; Phase 2
+        # will add a documented space-time HAC (Driscoll-Kraay product
+        # kernel + sparse k-d-tree fast path).
+        if self.vcov_type == "conley":
+            raise NotImplementedError(
+                "TwoWayFixedEffects(vcov_type='conley') is deferred to "
+                "Phase 2 (space-time product kernel / Driscoll-Kraay). "
+                "Phase 1 supports cross-sectional Conley only via direct "
+                "compute_robust_vcov on a single-period design; "
+                "TwoWayFixedEffects is intrinsically a multi-period panel."
             )
 
         # Check for staggered treatment timing and warn if detected
@@ -298,6 +331,7 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         # remapped vcov_type disagrees; the remapped `vcov_type` is the
         # single source of truth.
         _fit_vcov_type = self._resolve_effective_vcov_type(survey_cluster_ids)
+
         if self.rank_deficient_action == "error":
             reg = LinearRegression(
                 include_intercept=False,

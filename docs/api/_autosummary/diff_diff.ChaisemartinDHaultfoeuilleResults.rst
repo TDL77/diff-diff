@@ -41,6 +41,7 @@
       ~ChaisemartinDHaultfoeuilleResults.p_value
       ~ChaisemartinDHaultfoeuilleResults.path_cumulated_event_study
       ~ChaisemartinDHaultfoeuilleResults.path_effects
+      ~ChaisemartinDHaultfoeuilleResults.path_heterogeneity_effects
       ~ChaisemartinDHaultfoeuilleResults.path_placebo_event_study
       ~ChaisemartinDHaultfoeuilleResults.path_sup_t_bands
       ~ChaisemartinDHaultfoeuilleResults.placebo_event_study

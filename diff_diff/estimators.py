@@ -57,7 +57,7 @@ class DifferenceInDifferences:
         ``vcov_type``: with ``"hc1"`` dispatches to CR1 (Liang-Zeger); with
         ``"hc2_bm"`` dispatches to CR2 Bell-McCaffrey (Pustejovsky-Tipton 2018
         symmetric-sqrt + Satterthwaite DOF).
-    vcov_type : {"classical", "hc1", "hc2", "hc2_bm"}, optional
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, optional
         Variance-covariance family. Defaults to the ``robust`` alias.
 
         - ``"classical"``: non-robust OLS SEs, ``sigma_hat^2 * (X'X)^{-1}``.
@@ -69,6 +69,15 @@ class DifferenceInDifferences:
           with ``cluster=``, Pustejovsky-Tipton (2018) CR2 cluster-robust.
           (Note: ``MultiPeriodDiD`` does NOT yet support ``cluster=`` with
           ``"hc2_bm"`` — see ``MultiPeriodDiD`` docstring and REGISTRY.md.)
+        - ``"conley"``: Conley 1999 spatial-HAC sandwich. **Accepted by the
+          constructor for sklearn-style API symmetry but rejected at
+          fit-time on ``DifferenceInDifferences``** because DiD is
+          intrinsically a two-period panel design, and Phase 1's cross-
+          sectional Conley does not handle the time dimension. The
+          supported Phase 1 path for Conley is direct
+          ``compute_robust_vcov`` / ``LinearRegression`` on a single-period
+          regression. Phase 2 will add the space-time product kernel
+          (Driscoll-Kraay) and lift the rejection.
     alpha : float, default=0.05
         Significance level for confidence intervals.
     inference : str, default="analytical"
@@ -88,6 +97,13 @@ class DifferenceInDifferences:
         - "warn": Issue warning and drop linearly dependent columns (default)
         - "error": Raise ValueError
         - "silent": Drop columns silently without warning
+    conley_coords, conley_cutoff_km, conley_metric, conley_kernel
+        Accepted by the constructor for sklearn-style API symmetry, but
+        ``vcov_type="conley"`` is rejected at fit-time on
+        ``DifferenceInDifferences`` (see ``vcov_type`` above). Use direct
+        ``compute_robust_vcov`` / ``LinearRegression`` on a single-period
+        regression for cross-sectional Conley in Phase 1; Phase 2 will lift
+        the panel rejection.
 
     Attributes
     ----------
@@ -147,6 +163,10 @@ class DifferenceInDifferences:
         bootstrap_weights: str = "rademacher",
         seed: Optional[int] = None,
         rank_deficient_action: str = "warn",
+        conley_coords: Optional[Tuple[str, str]] = None,
+        conley_cutoff_km: Optional[float] = None,
+        conley_metric: str = "haversine",
+        conley_kernel: str = "bartlett",
     ):
         # Resolve vcov_type from the legacy `robust` alias via the shared
         # helper so __init__ and set_params use identical validation logic.
@@ -169,6 +189,12 @@ class DifferenceInDifferences:
         self.bootstrap_weights = bootstrap_weights
         self.seed = seed
         self.rank_deficient_action = rank_deficient_action
+        # Conley spatial-HAC parameters; column names (NOT array values) for
+        # the coords. Validation happens at fit() when `data` is in scope.
+        self.conley_coords = conley_coords
+        self.conley_cutoff_km = conley_cutoff_km
+        self.conley_metric = conley_metric
+        self.conley_kernel = conley_kernel
 
         self.is_fitted_ = False
         self.results_ = None
@@ -325,6 +351,30 @@ class DifferenceInDifferences:
                 "vcov_type='hc1' with absorb=, or switch to "
                 "fixed_effects= dummies for a full-dummy design where "
                 "HC2/CR2-BM are computed on the full projection."
+            )
+
+        # Reject vcov_type='conley' on DifferenceInDifferences entirely.
+        # DiD is intrinsically a two-period panel design (the validator
+        # above enforces time has both 0 and 1 values). Cross-sectional
+        # Conley over (unit, t=0) ∪ (unit, t=1) rows is methodologically
+        # wrong: same-unit cross-time pairs have d_ij = 0 -> K(0/h) = 1,
+        # giving them full covariance weight as if they were one clustered
+        # pair, while cross-unit pairs are weighted only by spatial
+        # distance with no time-lag handling. That is neither documented
+        # Conley 1999 nor a documented space-time HAC. Phase 1 supports
+        # cross-sectional Conley only via direct compute_robust_vcov on a
+        # single-period regression; Phase 2 will add a space-time product
+        # kernel / Driscoll-Kraay estimator.
+        if self.vcov_type == "conley":
+            raise NotImplementedError(
+                "DifferenceInDifferences(vcov_type='conley') is deferred "
+                "to Phase 2 (space-time product kernel / Driscoll-Kraay). "
+                "Phase 1 supports cross-sectional Conley only via direct "
+                "compute_robust_vcov on a single-period design; "
+                "DifferenceInDifferences is intrinsically a two-period "
+                "panel — pre-collapse to per-unit first-differences and "
+                "call compute_robust_vcov directly, or wait for the "
+                "Phase 2 panel extension."
             )
 
         if absorb:
@@ -819,6 +869,10 @@ class DifferenceInDifferences:
             "bootstrap_weights": self.bootstrap_weights,
             "seed": self.seed,
             "rank_deficient_action": self.rank_deficient_action,
+            "conley_coords": self.conley_coords,
+            "conley_cutoff_km": self.conley_cutoff_km,
+            "conley_metric": self.conley_metric,
+            "conley_kernel": self.conley_kernel,
         }
 
     def set_params(self, **params) -> "DifferenceInDifferences":
@@ -968,7 +1022,7 @@ class MultiPeriodDiD(DifferenceInDifferences):
         ``TODO.md``; also documented as a Note in
         ``docs/methodology/REGISTRY.md`` under the HeterogeneousAdoptionDiD
         requirements-checklist block.
-    vcov_type : {"classical", "hc1", "hc2", "hc2_bm"}, optional
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, optional
         Variance-covariance family. Defaults to the ``robust`` alias.
 
         - ``"classical"``: non-robust OLS SEs, ``sigma_hat^2 * (X'X)^{-1}``.
@@ -979,8 +1033,21 @@ class MultiPeriodDiD(DifferenceInDifferences):
         - ``"hc2_bm"``: one-way HC2 + Imbens-Kolesar (2016) Satterthwaite DOF
           per coefficient plus a contrast-aware DOF for the post-period-average
           ATT. **Unsupported with** ``cluster=`` — see ``cluster`` above.
+        - ``"conley"``: Conley 1999 spatial-HAC sandwich. **Accepted by the
+          constructor for sklearn-style API symmetry but rejected at
+          fit-time on ``MultiPeriodDiD``** because MultiPeriodDiD is
+          intrinsically a multi-period panel estimator and Phase 1's
+          cross-sectional Conley does not handle the time dimension. The
+          supported Phase 1 path for Conley is direct
+          ``compute_robust_vcov`` / ``LinearRegression`` on a single-period
+          regression. Phase 2 will add the space-time product kernel
+          (Driscoll-Kraay) and lift the rejection.
     alpha : float, default=0.05
         Significance level for confidence intervals.
+    conley_coords, conley_cutoff_km, conley_metric, conley_kernel
+        Accepted by the constructor for sklearn-style API symmetry, but
+        ``vcov_type="conley"`` is rejected at fit-time on ``MultiPeriodDiD``
+        (see ``vcov_type`` above).
 
     Attributes
     ----------
@@ -1307,6 +1374,21 @@ class MultiPeriodDiD(DifferenceInDifferences):
                 "switch to fixed_effects= dummies for a full-dummy design."
             )
 
+        # MultiPeriodDiD is intrinsically a multi-period panel estimator;
+        # cross-sectional Conley does not apply (same rationale as
+        # DifferenceInDifferences.fit's panel guard above). Phase 2 will
+        # add a documented space-time HAC. The rejection is unconditional
+        # — `absorb` and other Conley-adjacent kwargs cannot make
+        # MultiPeriodDiD Conley-compatible because the panel structure is
+        # the load-bearing reason Phase 1 cannot apply Conley here.
+        if self.vcov_type == "conley":
+            raise NotImplementedError(
+                "MultiPeriodDiD(vcov_type='conley') is deferred to Phase 2 "
+                "(space-time product kernel / Driscoll-Kraay). Phase 1 "
+                "supports cross-sectional Conley only via direct "
+                "compute_robust_vcov on a single-period design; "
+                "MultiPeriodDiD is intrinsically a multi-period panel."
+            )
         # Pre-compute non_ref_periods (needed for absorb demeaning)
         non_ref_periods = [p for p in all_periods if p != reference_period]
 

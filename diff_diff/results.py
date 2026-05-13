@@ -56,7 +56,11 @@ def _format_vcov_label(
     """Compose a human-readable variance-family label for summary output.
 
     Returns None when vcov_type is not recognized so the caller can skip the
-    line silently (backward-compat).
+    line silently (backward-compat). vcov_type='conley' is intentionally
+    not labeled here: DifferenceInDifferences / MultiPeriodDiD / TwoWayFixedEffects
+    all reject vcov_type='conley' at fit-time (Phase 1 supports cross-sectional
+    Conley only via direct compute_robust_vcov / LinearRegression), so a
+    Conley label cannot be reached on these result classes.
     """
     if vcov_type == "classical":
         return "Classical OLS SEs (non-robust)"
@@ -127,7 +131,11 @@ class DiDResults:
     survey_metadata: Optional[Any] = field(default=None)
     # Variance-covariance family: "classical" | "hc1" | "hc2" | "hc2_bm".
     # Plus cluster_name when cluster-robust. Used by summary() to label the
-    # SE family in the output.
+    # SE family in the output. vcov_type='conley' is rejected at fit-time
+    # for all panel estimators (DifferenceInDifferences/MultiPeriodDiD/TWFE)
+    # in Phase 1; the supported Conley path is direct LinearRegression /
+    # compute_robust_vcov on a cross-sectional design, which uses its own
+    # result class.
     vcov_type: Optional[str] = field(default=None)
     cluster_name: Optional[str] = field(default=None)
 
@@ -444,6 +452,9 @@ class MultiPeriodDiDResults:
     n_bootstrap: Optional[int] = field(default=None)
     n_clusters: Optional[int] = field(default=None)
     # Variance-covariance family and cluster column for summary() labeling.
+    # vcov_type='conley' is rejected at fit-time for MultiPeriodDiD (Phase 1
+    # supports cross-sectional Conley only via direct compute_robust_vcov);
+    # see _format_vcov_label.
     vcov_type: Optional[str] = field(default=None)
     cluster_name: Optional[str] = field(default=None)
 
