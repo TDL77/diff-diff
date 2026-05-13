@@ -1935,6 +1935,47 @@ class TestWorkflowPromptHardening:
             "omitting the prose section."
         )
 
+    def test_workflow_steady_state_has_aggregate_budget_cap(self):
+        """The per-notebook `--max-total-chars 200000` cap bounds one
+        tutorial, but a PR touching many tutorials could still concatenate
+        well past the Codex prompt budget. The steady-state loop MUST
+        enforce an aggregate cap, stop appending once exceeded, and emit
+        an in-prose truncation marker listing omitted notebooks.
+
+        Locked here per PR #423 R3 P2 ("notebook extraction has no
+        cumulative cap across multi-notebook PRs")."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
+        if not wf.exists():
+            pytest.skip("workflow not found")
+        text = wf.read_text()
+        # Aggregate cap variable must be defined and used in a per-iter
+        # size check before append.
+        assert "AGGREGATE_CAP=" in text, (
+            "Steady-state branch must define an aggregate prose cap "
+            "variable (AGGREGATE_CAP=...) so multi-notebook PRs can't "
+            "exceed the Codex prompt budget."
+        )
+        # Per-iter size check via wc -c before appending another notebook.
+        assert "wc -c < /tmp/notebook-prose.md" in text, (
+            "Aggregate cap enforcement requires checking the current size "
+            "of /tmp/notebook-prose.md (via `wc -c`) before each append. "
+            "Missing this check means the cap variable is decorative."
+        )
+        # Truncation must be tracked + reported in-prose, not silently
+        # discarded.
+        assert "NB_TRUNCATED" in text, (
+            "Aggregate truncation must be tracked in a flag (NB_TRUNCATED) "
+            "so the workflow can emit a marker once the cap is hit."
+        )
+        assert "AGGREGATE TRUNCATION" in text, (
+            "When the aggregate cap is exceeded, the wrapper body must "
+            "include an explicit `--- AGGREGATE TRUNCATION ---` marker "
+            "listing omitted notebooks; silent omission would recreate "
+            "the notebook-blind-spot this PR is meant to close."
+        )
+
 
 class TestWorkflowCommentPosting:
     """The workflow has TWO rerun-detection gates that must agree:

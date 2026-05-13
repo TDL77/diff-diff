@@ -273,8 +273,25 @@ jobs:
           if [ -f /tmp/notebook_md_extract.py ]; then
             if [ -n "$CHANGED_NB" ]; then
               : > /tmp/notebook-prose.md
+              # Aggregate prompt-budget cap: the per-notebook cap
+              # (--max-total-chars 200000) bounds a single tutorial, but a
+              # PR that touches many tutorials could still concatenate well
+              # past the Codex prompt budget once the unified diff,
+              # REGISTRY, PR title/body, and previous-review block are
+              # added. Cap aggregate prose at 800000 chars (~200K tokens);
+              # if exceeded, stop appending and emit a truncation marker
+              # explaining which notebooks were omitted.
+              AGGREGATE_CAP=800000
+              NB_TRUNCATED=false
+              NB_OMITTED=""
               while IFS= read -r -d '' nb; do
                 if [ -f "$nb" ]; then
+                  CURRENT_SIZE=$(wc -c < /tmp/notebook-prose.md 2>/dev/null || echo 0)
+                  if [ "$CURRENT_SIZE" -ge "$AGGREGATE_CAP" ]; then
+                    NB_TRUNCATED=true
+                    NB_OMITTED="$NB_OMITTED $nb"
+                    continue
+                  fi
                   {
                     echo ""
                     echo "--- $nb ---"
@@ -285,6 +302,20 @@ jobs:
                 fi
               done < <(git --no-pager diff --name-only -z "$BASE_SHA" "$HEAD_SHA" \
                 -- 'docs/tutorials/*.ipynb' 2>/dev/null || true)
+              if [ "$NB_TRUNCATED" = "true" ]; then
+                # Append a truncation marker INSIDE the prose file (before
+                # the sanitization pass) so it gets the same close-tag
+                # escaping as the rest of the body.
+                {
+                  echo ""
+                  echo "--- AGGREGATE TRUNCATION ---"
+                  echo "Aggregate prose cap ($AGGREGATE_CAP chars) reached;"
+                  echo "remaining notebooks omitted:"
+                  for omitted in $NB_OMITTED; do
+                    echo "  - $omitted"
+                  done
+                } >> /tmp/notebook-prose.md
+              fi
               if [ -s /tmp/notebook-prose.md ]; then
                 # Sanitize close-tag variants once over the full block (mirrors
                 # the pr-body / pr-title / previous-ai-review-output
