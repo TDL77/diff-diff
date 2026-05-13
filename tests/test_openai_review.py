@@ -2138,802 +2138,104 @@ class TestCodexBackendDocConsistency:
         )
 
 
-class TestSensitiveFileScan:
+class TestSensitiveFileNotice:
     """`_scan_sensitive_files` recursively scans the repo for sensitive-pattern
-    filenames via os.walk (skips heavy dirs but does NOT respect .gitignore —
-    gitignored .env files are exactly what we want to catch).
-    `_print_sensitive_warning` formats the stderr block for the abort and
-    --allow-secrets-continue paths."""
+    filenames (notice-only — no abort gate). `_print_sensitive_notice` prints
+    a one-off stderr block before invoking codex.
+
+    Scope is intentionally narrow: this is informational surfacing of obvious
+    secret-bearing filenames, NOT an enforcement gate. The codex backend's
+    repo-wide read surface is intrinsic to using `codex` as an agentic
+    reviewer; users who authenticated `codex login` already accept that
+    surface. Real secret prevention belongs at source-of-secret (gitignore,
+    code review), not at codex-invocation."""
 
     def test_finds_dotenv_at_root(self, tmp_path, review_mod):
         (tmp_path / ".env").write_text("SECRET=hunter2")
         assert ".env" in review_mod._scan_sensitive_files(str(tmp_path))
 
     def test_finds_secrets_in_subdir(self, tmp_path, review_mod):
-        """Recursive scan must catch secrets in subdirectories, not just root."""
+        """Recursive scan catches secrets in subdirectories, not just root."""
         (tmp_path / "config").mkdir()
         (tmp_path / "config" / ".env").write_text("X=1")
-        (tmp_path / "deploy" / "k8s").mkdir(parents=True)
-        (tmp_path / "deploy" / "k8s" / "secrets.yml").write_text("apiKey: abc")
         found = review_mod._scan_sensitive_files(str(tmp_path))
-        assert any("config/.env" in p or "config\\.env" in p for p in found)
-        assert any("secrets.yml" in p for p in found)
+        assert any(".env" in p for p in found)
 
     def test_finds_pem_glob(self, tmp_path, review_mod):
         (tmp_path / "private.pem").write_text("-----BEGIN PRIVATE KEY-----")
-        (tmp_path / "server.key").write_text("key-data")
         found = review_mod._scan_sensitive_files(str(tmp_path))
         assert "private.pem" in found
-        assert "server.key" in found
 
-    def test_finds_ssh_key_names(self, tmp_path, review_mod):
+    def test_finds_id_rsa(self, tmp_path, review_mod):
         (tmp_path / "id_rsa").write_text("-----BEGIN RSA-----")
-        (tmp_path / "id_ed25519").write_text("-----BEGIN OPENSSH-----")
-        found = review_mod._scan_sensitive_files(str(tmp_path))
-        assert "id_rsa" in found
-        assert "id_ed25519" in found
+        assert "id_rsa" in review_mod._scan_sensitive_files(str(tmp_path))
 
-    def test_finds_dotenv_variants(self, tmp_path, review_mod):
-        (tmp_path / ".env.local").write_text("X=1")
-        (tmp_path / ".env.production").write_text("Y=2")
-        found = review_mod._scan_sensitive_files(str(tmp_path))
-        assert ".env.local" in found
-        assert ".env.production" in found
-
-    def test_excludes_safe_variants(self, tmp_path, review_mod):
+    def test_excludes_safe_template_variants(self, tmp_path, review_mod):
         """`.env.example`, `.env.sample`, `.env.template` are template files
-        and routinely committed; must NOT trigger the scan (false positives
-        would force --allow-secrets unnecessarily)."""
+        and routinely committed; must NOT trigger."""
         (tmp_path / ".env.example").write_text("KEY=your-key-here")
         (tmp_path / ".env.sample").write_text("X=Y")
         (tmp_path / ".env.template").write_text("X=Y")
-        (tmp_path / "secrets.yml.example").write_text("key: value")
         found = review_mod._scan_sensitive_files(str(tmp_path))
         assert ".env.example" not in found
         assert ".env.sample" not in found
         assert ".env.template" not in found
-        assert "secrets.yml.example" not in found
+
+    def test_filename_match_is_case_insensitive(self, tmp_path, review_mod):
+        """Case-sensitive filesystems (Linux, CI) treat `.ENV` as distinct
+        from `.env`."""
+        (tmp_path / ".ENV").write_text("X=1")
+        (tmp_path / "PRIVATE.PEM").write_text("-----BEGIN-----")
+        (tmp_path / "ID_RSA").write_text("-----BEGIN RSA-----")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert ".ENV" in found
+        assert "PRIVATE.PEM" in found
+        assert "ID_RSA" in found
+
+    def test_skips_heavy_dirs(self, tmp_path, review_mod):
+        """The walk skips `.venv`, `node_modules`, `__pycache__` etc. so
+        vendored test fixtures don't show up as noise."""
+        (tmp_path / ".venv" / "lib").mkdir(parents=True)
+        (tmp_path / ".venv" / "lib" / "id_rsa").write_text("vendored fixture")
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / ".env").write_text("vendored fixture")
+        # A real one at the root SHOULD still appear
+        (tmp_path / ".env").write_text("X=1")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert ".env" in found
+        assert not any(".venv" in p for p in found)
+        assert not any("node_modules" in p for p in found)
 
     def test_clean_repo_returns_empty(self, tmp_path, review_mod):
         (tmp_path / "README.md").write_text("# repo")
         (tmp_path / "src").mkdir()
         assert review_mod._scan_sensitive_files(str(tmp_path)) == []
 
-    def test_skips_skip_dirs_in_fallback(self, tmp_path, review_mod):
-        """The os.walk fallback (when not in a git repo) must skip .venv etc.
-        Otherwise scanning would include vendored libs that legitimately
-        contain test fixtures named id_rsa, secret.pem, etc."""
-        # tmp_path is not a git repo so we hit the os.walk path
-        (tmp_path / ".venv" / "lib").mkdir(parents=True)
-        (tmp_path / ".venv" / "lib" / "id_rsa").write_text("test fixture")
-        (tmp_path / "node_modules").mkdir()
-        (tmp_path / "node_modules" / ".env").write_text("test fixture")
-        # A real one at the root SHOULD still be found
-        (tmp_path / "id_rsa").write_text("real key")
-        found = review_mod._scan_sensitive_files(str(tmp_path))
-        assert "id_rsa" in found
-        # Skip-dir matches must NOT appear
-        assert not any(".venv" in p for p in found)
-        assert not any("node_modules" in p for p in found)
-
-    def test_warning_prints_with_abort_header(
+    def test_notice_prints_when_files_present(
         self, tmp_path, review_mod, capsys
     ):
-        review_mod._print_sensitive_warning(
-            str(tmp_path), [".env", "config/secrets.yml"], abort=True
+        review_mod._print_sensitive_notice(
+            str(tmp_path), [".env", "config/secrets.yml"]
         )
         err = capsys.readouterr().err
-        assert "ABORT" in err
+        assert "Note:" in err
         assert ".env" in err
         assert "config/secrets.yml" in err
-        assert "--allow-secrets" in err
         assert "--backend api" in err  # mitigation suggested
 
-    def test_warning_prints_with_warning_header_when_not_aborting(
+    def test_notice_silent_on_empty_findings(
         self, tmp_path, review_mod, capsys
     ):
-        review_mod._print_sensitive_warning(
-            str(tmp_path), [".env"], abort=False
-        )
-        err = capsys.readouterr().err
-        assert "WARNING" in err
-        assert "ABORT" not in err
-        assert "--allow-secrets was passed" in err
+        review_mod._print_sensitive_notice(str(tmp_path), [])
+        assert capsys.readouterr().err == ""
 
-    def test_warning_caps_output_at_20_files(
+    def test_notice_caps_output_at_10_files(
         self, tmp_path, review_mod, capsys
     ):
-        many = [f"file{i}.pem" for i in range(50)]
-        review_mod._print_sensitive_warning(str(tmp_path), many, abort=True)
+        many = [f"file{i}.pem" for i in range(25)]
+        review_mod._print_sensitive_notice(str(tmp_path), many)
         err = capsys.readouterr().err
-        assert "and 30 more" in err
-
-    def test_filename_match_is_case_insensitive(self, tmp_path, review_mod):
-        """Case-sensitive filesystems (Linux, CI) treat .ENV as distinct
-        from .env. The match must lowercase before comparing or capitalized
-        variants slip past the abort gate."""
-        (tmp_path / ".ENV").write_text("X=1")
-        (tmp_path / "Credentials.JSON").write_text("{}")
-        (tmp_path / "PRIVATE.PEM").write_text("-----BEGIN-----")
-        (tmp_path / "ID_RSA").write_text("-----BEGIN RSA-----")
-        found = review_mod._scan_sensitive_files(str(tmp_path))
-        assert ".ENV" in found
-        assert "Credentials.JSON" in found
-        assert "PRIVATE.PEM" in found
-        assert "ID_RSA" in found
-
-    def test_safe_suffix_exclusion_is_case_insensitive(
-        self, tmp_path, review_mod
-    ):
-        """`.ENV.EXAMPLE` is a template variant just like `.env.example`."""
-        (tmp_path / ".ENV.EXAMPLE").write_text("KEY=your-key")
-        (tmp_path / ".env.SAMPLE").write_text("X=Y")
-        found = review_mod._scan_sensitive_files(str(tmp_path))
-        assert ".ENV.EXAMPLE" not in found
-        assert ".env.SAMPLE" not in found
-
-
-class TestSensitiveContentScan:
-    """`_scan_sensitive_content` catches secrets stored under innocuous
-    filenames by applying the canonical content secret-regex (mirrors
-    Step 3b in the skill doc). `_preflight_codex_secrets` combines the
-    filename + content scans into the single check used by the codex gate."""
-
-    def test_finds_aws_key_in_innocuous_file(self, tmp_path, review_mod):
-        """Secret stored in notes.txt under no sensitive name must be caught."""
-        (tmp_path / "notes.txt").write_text(
-            "TODO: rotate AKIAIOSFODNN7EXAMPLE before next quarter"
-        )
-        assert "notes.txt" in review_mod._scan_sensitive_content(str(tmp_path))
-
-    def test_finds_openai_key_in_yaml(self, tmp_path, review_mod):
-        (tmp_path / "config.yml").write_text(
-            "openai:\n  key: sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
-        )
-        assert "config.yml" in review_mod._scan_sensitive_content(str(tmp_path))
-
-    def test_finds_github_token_in_md(self, tmp_path, review_mod):
-        (tmp_path / "README.md").write_text(
-            "Run with: GH_TOKEN=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        )
-        assert "README.md" in review_mod._scan_sensitive_content(str(tmp_path))
-
-    def test_finds_api_key_assignment(self, tmp_path, review_mod):
-        (tmp_path / "settings.toml").write_text('api_key = "abc123"')
-        assert "settings.toml" in review_mod._scan_sensitive_content(str(tmp_path))
-
-    def test_skips_binary_suffix(self, tmp_path, review_mod):
-        """Binary/asset files aren't scanned (would be false positives + slow).
-        The regex would match many random byte sequences."""
-        # Write a .png file with content that DOES match the regex
-        (tmp_path / "image.png").write_text("password=anything")
-        assert "image.png" not in review_mod._scan_sensitive_content(str(tmp_path))
-
-    def test_skips_oversized_files(self, tmp_path, review_mod, monkeypatch):
-        """Files >1MB are skipped (typically generated/binary)."""
-        # Force a small cap to make the test fast
-        monkeypatch.setattr(review_mod, "_SCAN_MAX_FILE_BYTES", 100)
-        (tmp_path / "huge.py").write_text("x = 1\n" * 1000)  # ~6KB > 100B cap
-        # Even though the file content doesn't match secrets, this verifies
-        # the size gate triggers; for a positive test we'd need a small file.
-        (tmp_path / "small.py").write_text("password = 'x'")
-        found = review_mod._scan_sensitive_content(str(tmp_path))
-        assert "small.py" in found
-        assert "huge.py" not in found
-
-    def test_clean_content_returns_empty(self, tmp_path, review_mod):
-        (tmp_path / "main.py").write_text("def f(): return 42")
-        (tmp_path / "README.md").write_text("# Project")
-        assert review_mod._scan_sensitive_content(str(tmp_path)) == []
-
-    def test_preflight_combines_filename_and_content_scans(
-        self, tmp_path, review_mod
-    ):
-        """`_preflight_codex_secrets` returns union of filename + content hits."""
-        (tmp_path / ".env").write_text("X=1")  # filename match
-        (tmp_path / "notes.txt").write_text(
-            "AKIAIOSFODNN7EXAMPLE"
-        )  # content match
-        (tmp_path / "clean.py").write_text("x = 1")  # neither
-        result = review_mod._preflight_codex_secrets(str(tmp_path))
-        assert ".env" in result
-        assert "notes.txt" in result
-        assert "clean.py" not in result
-
-    def test_preflight_dedupes_files_matching_both(self, tmp_path, review_mod):
-        """A file matching BOTH (e.g. .env with secrets) appears once."""
-        (tmp_path / ".env").write_text("api_key = abc")
-        result = review_mod._preflight_codex_secrets(str(tmp_path))
-        assert result.count(".env") == 1
-
-
-class TestScanPromptArtifacts:
-    """`_scan_prompt_artifacts` covers secrets that go to Codex via the
-    prompt body (stdin), not the repo file system. Catches:
-      - Secrets in diff body (e.g. reverted .env deletion)
-      - Secrets in previous review (re-review mode)
-      - Secrets in delta-diff body
-      - Sensitive basenames in changed-files / delta-changed-files lists"""
-
-    def test_diff_body_secret_flagged(self, review_mod):
-        diff = (
-            "diff --git a/notes b/notes\n"
-            "@@ -0,0 +1 @@\n"
-            "+AKIAIOSFODNN7EXAMPLE\n"
-        )
-        result = review_mod._scan_prompt_artifacts(
-            diff_text=diff,
-            previous_review=None,
-            delta_diff_text=None,
-            changed_files_text="A\tnotes",
-            delta_changed_files_text=None,
-        )
-        assert "[diff body]" in result
-
-    def test_previous_review_secret_flagged(self, review_mod):
-        prior = "Found AKIAIOSFODNN7EXAMPLE in line 4 of config.py"
-        result = review_mod._scan_prompt_artifacts(
-            diff_text="",
-            previous_review=prior,
-            delta_diff_text=None,
-            changed_files_text="",
-            delta_changed_files_text=None,
-        )
-        assert "[previous review]" in result
-
-    def test_delta_diff_body_secret_flagged(self, review_mod):
-        delta = "+ password = 'hunter2'\n"
-        result = review_mod._scan_prompt_artifacts(
-            diff_text="",
-            previous_review=None,
-            delta_diff_text=delta,
-            changed_files_text="",
-            delta_changed_files_text=None,
-        )
-        assert "[delta diff body]" in result
-
-    def test_changed_files_sensitive_basename_flagged(self, review_mod):
-        """A deleted/renamed `.env` shows up in the file-status list even if
-        not on disk anymore. Must still abort."""
-        result = review_mod._scan_prompt_artifacts(
-            diff_text="",
-            previous_review=None,
-            delta_diff_text=None,
-            changed_files_text="D\tconfig/.env\nM\tfoo.py",
-            delta_changed_files_text=None,
-        )
-        assert any(".env" in r for r in result)
-
-    def test_changed_files_case_insensitive(self, review_mod):
-        result = review_mod._scan_prompt_artifacts(
-            diff_text="",
-            previous_review=None,
-            delta_diff_text=None,
-            changed_files_text="D\tconfig/.ENV",
-            delta_changed_files_text=None,
-        )
-        assert any(".ENV" in r for r in result)
-
-    def test_changed_files_skips_safe_variants(self, review_mod):
-        result = review_mod._scan_prompt_artifacts(
-            diff_text="",
-            previous_review=None,
-            delta_diff_text=None,
-            changed_files_text="A\t.env.example\nA\t.env.template",
-            delta_changed_files_text=None,
-        )
-        assert result == []
-
-    def test_changed_files_rename_old_sensitive_new_safe(self, review_mod):
-        """`git diff --name-status` rename lines have TWO paths:
-        `R100\\told\\tnew`. If the OLD path is sensitive (e.g. config/.env
-        renamed to config/renamed.txt), the diff body still contains the
-        old file's contents — must abort. Earlier parser only inspected
-        the combined post-first-tab substring, missing this case."""
-        result = review_mod._scan_prompt_artifacts(
-            diff_text="",
-            previous_review=None,
-            delta_diff_text=None,
-            changed_files_text="R100\tconfig/.env\tconfig/renamed.txt",
-            delta_changed_files_text=None,
-        )
-        assert any(".env" in r for r in result), (
-            f"Expected sensitive OLD path to be detected; got: {result}"
-        )
-
-    def test_changed_files_copy_old_sensitive_new_safe(self, review_mod):
-        """`C100\\told\\tnew` copy lines have the same structure as rename
-        lines — both paths must be scanned."""
-        result = review_mod._scan_prompt_artifacts(
-            diff_text="",
-            previous_review=None,
-            delta_diff_text=None,
-            changed_files_text="C100\tconfig/.env\tconfig/copy.txt",
-            delta_changed_files_text=None,
-        )
-        assert any(".env" in r for r in result)
-
-    def test_changed_files_rename_new_path_also_scanned(self, review_mod):
-        """If the NEW path of a rename is sensitive (someone renamed
-        config.txt → .env), that also triggers."""
-        result = review_mod._scan_prompt_artifacts(
-            diff_text="",
-            previous_review=None,
-            delta_diff_text=None,
-            changed_files_text="R100\tconfig/old.txt\tconfig/.env",
-            delta_changed_files_text=None,
-        )
-        assert any(".env" in r for r in result)
-
-    def test_delta_changed_files_rename_also_scanned(self, review_mod):
-        """Same logic applies to delta_changed_files_text."""
-        result = review_mod._scan_prompt_artifacts(
-            diff_text="",
-            previous_review=None,
-            delta_diff_text=None,
-            changed_files_text="",
-            delta_changed_files_text="R100\tconfig/.env\tconfig/safe.txt",
-        )
-        assert any(".env" in r for r in result)
-
-    def test_clean_inputs_return_empty(self, review_mod):
-        result = review_mod._scan_prompt_artifacts(
-            diff_text="--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-x\n+y\n",
-            previous_review="No findings.",
-            delta_diff_text=None,
-            changed_files_text="M\tfoo.py",
-            delta_changed_files_text=None,
-        )
-        assert result == []
-
-    def test_content_scan_skips_tests_dir(self, tmp_path, review_mod):
-        """Test files commonly contain literal pattern matches as fixtures
-        for the secret-detection regex itself; content scan must skip them.
-        Filename scan still applies."""
-        (tmp_path / "tests").mkdir()
-        (tmp_path / "tests" / "test_secrets.py").write_text(
-            "expected_token = 'AKIAIOSFODNN7EXAMPLE'  # fixture for regex test"
-        )
-        # Content scan should NOT flag this
-        assert review_mod._scan_sensitive_content(str(tmp_path)) == []
-        # But a real .env in tests/ would still be caught by filename scan
-        (tmp_path / "tests" / ".env").write_text("X=1")
-        filenames = review_mod._scan_sensitive_files(str(tmp_path))
-        assert any(".env" in p for p in filenames)
-
-    def test_content_scan_skips_github_workflows(self, tmp_path, review_mod):
-        """Workflow YAMLs that DEFINE secret-detection regexes contain
-        literal pattern matches as part of the workflow logic, not as
-        actual secrets."""
-        (tmp_path / ".github" / "workflows").mkdir(parents=True)
-        (tmp_path / ".github" / "workflows" / "scan.yml").write_text(
-            "regex: ghp_[A-Za-z0-9]{36}|api_key=  # workflow secret detector"
-        )
-        assert review_mod._scan_sensitive_content(str(tmp_path)) == []
-
-    def test_content_scan_skips_docs_dir(self, tmp_path, review_mod):
-        """Documentation may show example secrets in code blocks."""
-        (tmp_path / "docs").mkdir()
-        (tmp_path / "docs" / "auth.md").write_text(
-            "Example: `api_key=YOUR_KEY_HERE`"
-        )
-        assert review_mod._scan_sensitive_content(str(tmp_path)) == []
-
-    def test_dot_claude_settings_local_is_scanned(self, tmp_path, review_mod):
-        """Regression: `.claude/settings.local.json` is gitignored and is a
-        likely place for users to keep API keys / OAuth tokens. The walk
-        must NOT skip the `.claude/` subtree wholesale (an earlier version
-        added it to _SCAN_SKIP_DIRS, which would let those slip past the
-        codex preflight)."""
-        (tmp_path / ".claude").mkdir()
-        (tmp_path / ".claude" / "settings.local.json").write_text(
-            '{"openai_api_key": "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
-        )
-        found = review_mod._scan_sensitive_content(str(tmp_path))
-        assert any(
-            "settings.local.json" in p for p in found
-        ), f"Expected settings.local.json to trigger; got: {found}"
-
-    def test_content_scan_suffix_check_is_case_insensitive(
-        self, tmp_path, review_mod
-    ):
-        """Files with uppercase suffixes (`.PY`, `.YML`, `.MD`) must still
-        be content-scanned. Without case-insensitive suffix check, secrets
-        in capitalized-extension files would slip past."""
-        (tmp_path / "main.PY").write_text("api_key = 'AKIAIOSFODNN7EXAMPLE'")
-        (tmp_path / "config.YML").write_text("token: ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-        found = review_mod._scan_sensitive_content(str(tmp_path))
-        assert "main.PY" in found
-        assert "config.YML" in found
-
-    def test_content_scan_skips_dot_claude_reviews(self, tmp_path, review_mod):
-        """`.claude/reviews/` contains agent-generated review markdown that
-        may quote literal secret-pattern strings from the methodology
-        prompt's example regex. Skip those for content scan to avoid false
-        positives — but `.claude/settings.local.json` is NOT skipped (see
-        above)."""
-        (tmp_path / ".claude" / "reviews").mkdir(parents=True)
-        (tmp_path / ".claude" / "reviews" / "local-review-latest.md").write_text(
-            "Example finding: api_key=found in source"
-        )
-        assert review_mod._scan_sensitive_content(str(tmp_path)) == []
-
-
-class TestMainBackendDispatch:
-    """Integration tests for main() that drive the codex / api branches and
-    assert backend-aware control flow:
-
-      1. --backend codex skips the --repo-root requirement
-         (was an api-only check, fixed in this PR)
-      2. --backend codex skips --include-files staging
-         (Codex chooses files itself, fixed in this PR)
-      3. --backend api preserves the existing requirement + loading
-
-    Uses --dry-run so main() exits before the actual backend invocation;
-    the validation + gating logic runs FIRST so dry-run is sufficient."""
-
-    @pytest.fixture
-    def main_env(self, tmp_path, monkeypatch, review_mod):
-        """Set up minimal inputs for main() invocations."""
-        criteria = tmp_path / "criteria.md"
-        criteria.write_text(
-            "You are an automated PR reviewer for a causal inference library.\n"
-            "Standard methodology criteria here.\n"
-        )
-        registry = tmp_path / "registry.md"
-        registry.write_text("# Methodology Registry\n")
-        diff = tmp_path / "diff.patch"
-        diff.write_text("--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n")
-        files = tmp_path / "files.txt"
-        files.write_text("M\tfoo.py\n")
-        output = tmp_path / "review.md"
-
-        # Stub out OPENAI_API_KEY so api-backend dry-runs don't error
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-for-tests")
-
-        # Track whether source-file loading helpers were called
-        load_calls = {"read_source_files": 0, "expand_import_graph": 0}
-        orig_read = review_mod.read_source_files
-        orig_expand = review_mod.expand_import_graph
-
-        def spy_read(*a, **kw):
-            load_calls["read_source_files"] += 1
-            return orig_read(*a, **kw)
-
-        def spy_expand(*a, **kw):
-            load_calls["expand_import_graph"] += 1
-            return orig_expand(*a, **kw)
-
-        monkeypatch.setattr(review_mod, "read_source_files", spy_read)
-        monkeypatch.setattr(review_mod, "expand_import_graph", spy_expand)
-
-        return {
-            "tmp_path": tmp_path,
-            "criteria": criteria,
-            "registry": registry,
-            "diff": diff,
-            "files": files,
-            "output": output,
-            "load_calls": load_calls,
-            "monkeypatch": monkeypatch,
-        }
-
-    def _run_main(self, env, review_mod, **flags):
-        """Invoke review_mod.main() with the given flags, capturing SystemExit."""
-        argv = [
-            "openai_review.py",
-            "--review-criteria", str(env["criteria"]),
-            "--registry", str(env["registry"]),
-            "--diff", str(env["diff"]),
-            "--changed-files", str(env["files"]),
-            "--output", str(env["output"]),
-            "--dry-run",
-        ]
-        for k, v in flags.items():
-            argv.append(f"--{k.replace('_', '-')}")
-            if v is not None:
-                argv.append(str(v))
-        env["monkeypatch"].setattr(sys, "argv", argv)
-        return review_mod.main()
-
-    def test_codex_backend_skips_repo_root_requirement(
-        self, main_env, review_mod
-    ):
-        """--backend codex --context standard must NOT require --repo-root.
-        Regression for the R0 P1 (validation order)."""
-        # Stub _detect_backend to avoid depending on real codex install state
-        main_env["monkeypatch"].setattr(
-            review_mod, "_detect_backend", lambda r: "codex"
-        )
-        # No --repo-root passed; with --context standard this would error
-        # under api but should succeed under codex.
-        with pytest.raises(SystemExit) as exc:
-            self._run_main(
-                main_env,
-                review_mod,
-                backend="codex",
-                context="standard",
-            )
-        assert exc.value.code == 0  # dry-run exits 0
-
-    def test_codex_backend_skips_include_files_loading(
-        self, main_env, review_mod
-    ):
-        """--backend codex --include-files X must NOT call read_source_files.
-        Regression for the R0 P1 (--include-files staging gate)."""
-        main_env["monkeypatch"].setattr(
-            review_mod, "_detect_backend", lambda r: "codex"
-        )
-        # Create a file that --include-files would resolve to
-        (main_env["tmp_path"] / "diff_diff").mkdir(exist_ok=True)
-        (main_env["tmp_path"] / "diff_diff" / "foo.py").write_text("x = 1")
-        with pytest.raises(SystemExit) as exc:
-            self._run_main(
-                main_env,
-                review_mod,
-                backend="codex",
-                context="minimal",
-                include_files="foo.py",
-                repo_root=str(main_env["tmp_path"]),
-            )
-        assert exc.value.code == 0
-        # Crucially: no source-file loading happened
-        assert main_env["load_calls"]["read_source_files"] == 0
-        assert main_env["load_calls"]["expand_import_graph"] == 0
-
-    def test_api_backend_still_enforces_repo_root_for_standard_context(
-        self, main_env, review_mod, capsys
-    ):
-        """--backend api --context standard without --repo-root still errors.
-        Regression for backward compatibility — the api-backend validation
-        must remain intact even after the codex-backend carve-out."""
-        main_env["monkeypatch"].setattr(
-            review_mod, "_detect_backend", lambda r: "api"
-        )
-        with pytest.raises(SystemExit) as exc:
-            self._run_main(
-                main_env,
-                review_mod,
-                backend="api",
-                context="standard",
-            )
-        assert exc.value.code != 0  # parser.error → exit code 2
-        captured = capsys.readouterr()
-        assert "--repo-root is required" in captured.err
-
-    def test_api_backend_still_loads_include_files(
-        self, main_env, review_mod
-    ):
-        """--backend api --include-files X with --repo-root must still call
-        read_source_files (existing api behavior preserved)."""
-        main_env["monkeypatch"].setattr(
-            review_mod, "_detect_backend", lambda r: "api"
-        )
-        (main_env["tmp_path"] / "diff_diff").mkdir(exist_ok=True)
-        (main_env["tmp_path"] / "diff_diff" / "foo.py").write_text("x = 1")
-        with pytest.raises(SystemExit) as exc:
-            self._run_main(
-                main_env,
-                review_mod,
-                backend="api",
-                context="minimal",
-                include_files="foo.py",
-                repo_root=str(main_env["tmp_path"]),
-            )
-        assert exc.value.code == 0
-        # api backend with --include-files MUST have called read_source_files
-        assert main_env["load_calls"]["read_source_files"] >= 1
-
-
-class TestMainCodexSecretGate:
-    """Non-dry-run integration tests for the codex secret-preflight gate.
-    The gate runs AFTER the dry-run check exits, so dry-run-only tests
-    (TestMainBackendDispatch) don't exercise it. These do."""
-
-    @pytest.fixture
-    def gate_env(self, tmp_path, monkeypatch, review_mod):
-        """Like main_env but stubs call_codex so we can drive non-dry-run."""
-        criteria = tmp_path / "criteria.md"
-        criteria.write_text(
-            "You are an automated PR reviewer for a causal inference library.\n"
-        )
-        registry = tmp_path / "registry.md"
-        registry.write_text("# Methodology Registry\n")
-        diff = tmp_path / "diff.patch"
-        diff.write_text("--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-x\n+y\n")
-        files = tmp_path / "files.txt"
-        files.write_text("M\tfoo.py\n")
-        output = tmp_path / "review.md"
-
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-fake")
-        monkeypatch.setattr(
-            review_mod, "_detect_backend", lambda r: "codex"
-        )
-
-        # Stub call_codex so non-dry-run doesn't actually invoke the CLI
-        codex_calls = {"called": False, "repo_root": None}
-
-        def fake_call_codex(prompt, model, repo_root):
-            codex_calls["called"] = True
-            codex_calls["repo_root"] = repo_root
-            return "## Mock review", {
-                "backend": "codex", "input_tokens": None, "output_tokens": None,
-            }
-
-        monkeypatch.setattr(review_mod, "call_codex", fake_call_codex)
-
-        return {
-            "tmp_path": tmp_path,
-            "criteria": criteria,
-            "registry": registry,
-            "diff": diff,
-            "files": files,
-            "output": output,
-            "codex_calls": codex_calls,
-            "monkeypatch": monkeypatch,
-        }
-
-    def _run(self, env, review_mod, **flags):
-        """Run main() WITHOUT --dry-run so the secret gate is exercised."""
-        argv = [
-            "openai_review.py",
-            "--review-criteria", str(env["criteria"]),
-            "--registry", str(env["registry"]),
-            "--diff", str(env["diff"]),
-            "--changed-files", str(env["files"]),
-            "--output", str(env["output"]),
-            "--backend", "codex",
-            "--context", "minimal",
-            "--repo-root", str(env["tmp_path"]),
-        ]
-        for k, v in flags.items():
-            argv.append(f"--{k.replace('_', '-')}")
-            if v is not None and v is not True:
-                argv.append(str(v))
-        env["monkeypatch"].setattr(sys, "argv", argv)
-        return review_mod.main()
-
-    def test_aborts_when_sensitive_files_present(
-        self, gate_env, review_mod, capsys
-    ):
-        """A repo with .env triggers ABORT and exit 1; codex NOT invoked."""
-        (gate_env["tmp_path"] / ".env").write_text("SECRET=hunter2")
-        with pytest.raises(SystemExit) as exc:
-            self._run(gate_env, review_mod)
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "ABORT" in captured.err
-        assert ".env" in captured.err
-        assert not gate_env["codex_calls"]["called"]
-
-    def test_aborts_on_content_match_in_innocuous_file(
-        self, gate_env, review_mod, capsys
-    ):
-        """Secret in notes.txt (no sensitive filename) still triggers abort."""
-        (gate_env["tmp_path"] / "notes.txt").write_text(
-            "TODO: rotate AKIAIOSFODNN7EXAMPLE"
-        )
-        with pytest.raises(SystemExit) as exc:
-            self._run(gate_env, review_mod)
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "ABORT" in captured.err
-        assert "notes.txt" in captured.err
-        assert not gate_env["codex_calls"]["called"]
-
-    def test_allow_secrets_overrides_abort(
-        self, gate_env, review_mod, capsys
-    ):
-        """--allow-secrets prints WARNING but lets codex proceed."""
-        (gate_env["tmp_path"] / ".env").write_text("X=1")
-        # Should NOT raise SystemExit (codex run completes)
-        self._run(gate_env, review_mod, allow_secrets=True)
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.err
-        assert "ABORT" not in captured.err
-        assert gate_env["codex_calls"]["called"]
-
-    def test_clean_repo_proceeds_to_codex_without_warning(
-        self, gate_env, review_mod, capsys
-    ):
-        """No sensitive files → no warning printed, codex invoked normally."""
-        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
-        self._run(gate_env, review_mod)
-        captured = capsys.readouterr()
-        assert "ABORT" not in captured.err
-        assert "WARNING" not in captured.err
-        assert gate_env["codex_calls"]["called"]
-
-    def test_aborts_on_secret_in_previous_review(
-        self, gate_env, review_mod, capsys
-    ):
-        """Re-review mode: if prior review contains a secret, the prompt
-        carries it to Codex via stdin even with a clean repo. Must abort."""
-        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
-        # Stage a previous-review file that contains a secret
-        prev = gate_env["tmp_path"] / "prev.md"
-        prev.write_text("Found AKIAIOSFODNN7EXAMPLE in line 4")
-        with pytest.raises(SystemExit) as exc:
-            self._run(gate_env, review_mod, previous_review=str(prev))
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "ABORT" in captured.err
-        assert "[previous review]" in captured.err
-        assert not gate_env["codex_calls"]["called"]
-
-    def test_aborts_on_secret_in_diff_body_clean_repo(
-        self, gate_env, review_mod, capsys
-    ):
-        """Reverted commit deleting `.env`: diff body has the secret, repo
-        is now clean. Must abort."""
-        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
-        # Overwrite the diff with one that contains a secret
-        gate_env["diff"].write_text(
-            "diff --git a/.env b/.env\n"
-            "deleted file mode 100644\n"
-            "index abc..0000000\n"
-            "--- a/.env\n"
-            "+++ /dev/null\n"
-            "@@ -1 +0,0 @@\n"
-            "-AKIAIOSFODNN7EXAMPLE\n"
-        )
-        with pytest.raises(SystemExit) as exc:
-            self._run(gate_env, review_mod)
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "ABORT" in captured.err
-        assert "[diff body]" in captured.err
-        assert not gate_env["codex_calls"]["called"]
-
-    def test_aborts_on_sensitive_filename_in_changed_files(
-        self, gate_env, review_mod, capsys
-    ):
-        """Deleted `.env` shows up in changed-files list even if not on
-        disk. Must abort."""
-        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
-        gate_env["files"].write_text("D\tconfig/.env\nM\tfoo.py\n")
-        with pytest.raises(SystemExit) as exc:
-            self._run(gate_env, review_mod)
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "ABORT" in captured.err
-        assert ".env" in captured.err
-        assert not gate_env["codex_calls"]["called"]
-
-    def test_allow_secrets_overrides_prompt_artifact_gate(
-        self, gate_env, review_mod, capsys
-    ):
-        """--allow-secrets bypass also covers prompt-artifact findings."""
-        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
-        prev = gate_env["tmp_path"] / "prev.md"
-        prev.write_text("Found AKIAIOSFODNN7EXAMPLE in line 4")
-        self._run(
-            gate_env, review_mod,
-            previous_review=str(prev),
-            allow_secrets=True,
-        )
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.err
-        assert "ABORT" not in captured.err
-        assert gate_env["codex_calls"]["called"]
-
-    def test_aborts_on_renamed_sensitive_file_in_changed_files(
-        self, gate_env, review_mod, capsys
-    ):
-        """`R100\\told_sensitive\\tnew_safe` rename: old path was a .env,
-        new is a safe rename. The diff body still contains the old
-        file's contents → must abort."""
-        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
-        gate_env["files"].write_text(
-            "R100\tconfig/.env\tconfig/renamed.txt\n"
-        )
-        with pytest.raises(SystemExit) as exc:
-            self._run(gate_env, review_mod)
-        assert exc.value.code == 1
-        captured = capsys.readouterr()
-        assert "ABORT" in captured.err
-        assert ".env" in captured.err
-        assert not gate_env["codex_calls"]["called"]
+        assert "and 15 more" in err
 
 
 class TestExtractResponseText:

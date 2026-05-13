@@ -1,6 +1,6 @@
 ---
 description: Run AI code review locally using Codex CLI or OpenAI API before opening a PR
-argument-hint: "[--backend auto|codex|api] [--allow-secrets] [--context minimal|standard|deep] [--include-files <files>] [--token-budget <n>] [--force-fresh] [--full-registry] [--model <model>] [--timeout <seconds>] [--dry-run]"
+argument-hint: "[--backend auto|codex|api] [--context minimal|standard|deep] [--include-files <files>] [--token-budget <n>] [--force-fresh] [--full-registry] [--model <model>] [--timeout <seconds>] [--dry-run]"
 ---
 
 # Local AI Code Review
@@ -36,62 +36,23 @@ Notes:
   cleaned up automatically.
 - `--context` and `--token-budget` are ignored under the codex backend (Codex
   chooses what to load on its own); the script warns if you pass them.
-- **Surface area + abort-by-default**: under the codex backend, Codex can read
-  any file under the repo root via `--cd`, AND consumes the compiled prompt
-  (criteria + diff + previous review + changed-files list) via stdin. Before
-  invoking codex, the script runs a preflight scan with TWO layers:
-
-  1. **Filename patterns**: `.env`, `.env.local`, `id_rsa`, `*.pem`, `*.key`,
-     `secrets.{yml,yaml,json}`, `.netrc`, `.npmrc`, `.pypirc`, etc. Safe
-     template variants (`.env.example`, `.env.sample`, `.env.template`)
-     excluded.
-  2. **Content secret-regex**: same canonical pattern used for the api
-     backend's pre-upload scan (Step 3b) — catches AWS keys (`AKIA…`),
-     GitHub tokens (`ghp_…`, `gho_…`), OpenAI keys (`sk-…`), `api_key=`,
-     `secret_key=`, `password=`, `token=`, bearer tokens, and
-     `PRIVATE_KEY` strings — applied recursively to repo files. Catches
-     secrets stored under innocuous filenames like `notes.txt`. Limited
-     to common text suffixes (`.py`, `.js`, `.yml`, `.json`, `.env`, `.md`,
-     etc.); files >1MB skipped (likely binaries/generated assets). Common
-     false-positive directories (`tests/`, `.github/`, `docs/`, `examples/`,
-     `fixtures/`) are skipped for content scan only — those locations
-     legitimately contain literal pattern matches as test fixtures, regex
-     definitions, or doc examples. Filename scan still applies to those
-     dirs (so a real `.env` checked into `tests/` would still be caught).
-
-  Heavy dirs (`.venv`, `node_modules`, `__pycache__`, etc.) are skipped from
-  the walk to avoid vendored test fixtures. The `.claude/` subtree is NOT
-  skipped wholesale — `.claude/settings.local.json` (gitignored, common
-  place for OAuth tokens) is content-scanned. Only `.claude/reviews/` and
-  `.claude/paper-review/` (agent-generated review artifacts that may quote
-  literal pattern strings) are excluded from the content scan; their
-  filenames are still scanned. Both scans include gitignored files —
-  gitignored `.env` files are exactly what we want to catch.
-
-  Layer 2 — **prompt-artifact scan**: applies the same content secret-regex
-  to the diff body, the optional delta-diff body, and the previous-review
-  text (re-review mode), and applies the filename pattern set to entries
-  in the changed-files list / delta-changed-files list. Catches secrets
-  that go to Codex via stdin even when the repo on disk is clean — for
-  example a reverted commit deleting a `.env` (the diff body still
-  contains the secret), or a deleted/renamed sensitive file that no longer
-  exists but appears in the file-status list.
-
-  All matching is case-insensitive (Linux + CI are case-sensitive
-  filesystems where `.ENV` would otherwise slip past `.env`).
-
-  If EITHER layer finds matches, codex is **NOT invoked** and the script
-  exits 1 unless you pass `--allow-secrets` to acknowledge the surface.
-  This is enforcement, not just a warning.
+- **Surface area (informational, non-blocking)**: under the codex backend,
+  Codex reads any file under the repo root via `--cd`. This is intrinsic to
+  using `codex` as an agentic reviewer — the same surface anyone running
+  `codex` directly already accepts via `codex login`. Before invoking codex
+  the script does a quick recursive filename scan for obvious secret-bearing
+  patterns (`.env`, `.env.local`, `id_rsa`, `*.pem`, `*.key`,
+  `secrets.{yml,yaml,json}`, `.netrc`, `.npmrc`, `.pypirc`, etc.; safe
+  template variants like `.env.example` excluded; case-insensitive). If any
+  matches exist, a stderr notice lists them and codex still runs. CTRL-C and
+  switch to `--backend api` (or sanitize the worktree) if you don't want
+  Codex to see those files. This is a notice, not a gate — real secret
+  prevention belongs at gitignore + code review, not at codex invocation.
 
 ## Arguments
 
 `$ARGUMENTS` may contain optional flags:
 - `--backend {auto,codex,api}`: Reviewer backend (default: `auto`). See above.
-- `--allow-secrets`: Codex backend only. By default, the script aborts before
-  invoking codex if it detects sensitive files anywhere under the repo root
-  (recursive filename + content-regex scan including gitignored files). Pass
-  this flag to acknowledge and proceed.
 - `--context {minimal,standard,deep}`: Context depth (default: `standard`).
   *Api backend only.*
   - `minimal`: Diff only (original behavior)
@@ -134,11 +95,11 @@ Step 5 invokes the chosen backend:
 - **api backend**: single external HTTP call to OpenAI Responses API. Step 3b/3c
   run the canonical pre-upload secret scan before any data is sent.
 - **codex backend**: spawns `codex exec` as a subprocess, which talks to
-  OpenAI iteratively under a read-only sandbox. The script runs its own
-  recursive sensitive-file + content-secret preflight before invoking codex
-  (aborts unless `--allow-secrets` is passed); the api-backend's Step 3b/3c
-  scans don't apply because Codex's read surface is the whole repo, not just
-  the diff.
+  OpenAI iteratively under a read-only sandbox. The script prints a stderr
+  notice if obvious sensitive-filename patterns are present in the repo
+  (informational; codex still runs). The api-backend's Step 3b/3c scans
+  don't apply — Codex's read surface is the whole repo, intrinsic to using
+  it as an agentic reviewer.
 
 ## Instructions
 
@@ -442,7 +403,6 @@ python3 .claude/scripts/openai_review.py \
     [--include-files "$include_files"] \
     [--token-budget "$token_budget"] \
     [--full-registry] \
-    [--allow-secrets] \
     [--model <model>] \
     [--timeout <seconds>] \
     [--dry-run]
@@ -637,9 +597,9 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
     context (if present) to OpenAI via the Responses API.
   - **codex backend**: the compiled prompt (criteria + diff + previous review)
     is piped to `codex exec`'s stdin, and Codex itself reads additional repo
-    files agentically (read-only sandbox) and talks to OpenAI iteratively. The
-    secret preflight (filename + content scan) gates this path; see "Surface
-    area + abort-by-default" above.
+    files agentically (read-only sandbox) and talks to OpenAI iteratively. A
+    one-off stderr notice surfaces obvious sensitive-filename matches before
+    invoking codex (see "Surface area" above) — informational only.
 
   Use `--dry-run` to preview the compiled prompt without invoking either backend.
 - This skill pairs naturally with the iterative workflow:

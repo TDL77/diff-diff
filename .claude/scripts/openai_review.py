@@ -26,19 +26,17 @@ Skill/Script Contract:
       installed + logged in, else api)
     - Prompt compilation: reading criteria, registry, diff; adapting framing
     - Registry section extraction: mapping changed files to REGISTRY.md sections
-    - Codex preflight (codex backend only): recursive sensitive-file +
-      content-secret scan; aborts unless --allow-secrets is passed
+    - Codex sensitive-filename notice: surfaces obvious secret-bearing
+      filenames (.env, id_rsa, *.pem, etc.) in stderr before invoking
+      codex — informational only, no abort gate (codex's read surface is
+      intrinsic to using it as an agentic reviewer; users opting in via
+      `codex login` already accept that surface)
     - Backend dispatch: subprocess `codex exec` (codex backend) OR HTTP call
       to OpenAI Responses API (api backend)
     - Output: writing review markdown to --output path
     - Review state: reading/writing review-state.json (finding tracking across rounds)
     - Cost estimation: token counting and pricing lookup (api backend only;
       codex doesn't expose token counts)
-
-    The api backend's pre-upload secret scanning is owned by the skill
-    (Step 3b/3c, before this script runs). The codex backend's preflight is
-    owned by this script (it must scan before invoking `codex exec`, which
-    can read any file under --cd).
 """
 
 import argparse
@@ -1172,14 +1170,21 @@ def _resolve_timeout(timeout: "int | None", model: str) -> int:
 
 CODEX_AUTH_PATH = os.path.expanduser("~/.codex/auth.json")
 
-# Filenames that commonly hold secrets. The codex backend's read-only sandbox
-# lets Codex read any file under --cd, so before invoking it we recursively
-# scan the repo for these patterns. If any are found, codex is NOT invoked
-# unless `--allow-secrets` is passed (explicit user opt-in).
+# Codex backend: notice-only sensitive-file surface
+# -----------------------------------------------------------------------------
+# Codex sees the entire repo via `--cd <repo_root>`. That's intrinsic to using
+# `codex` as an agentic reviewer — the same surface anyone running `codex`
+# directly already accepts via `codex login`. We do NOT enforce a secret gate
+# here; that's a code-review and source-management concern, not a runtime
+# wrapper concern. We DO surface a one-off stderr notice at codex invocation
+# if the most common secret-bearing filenames (.env, id_rsa, *.pem, etc.) are
+# present anywhere in the tree, so users who didn't realize those files were
+# in their checkout can CTRL-C and switch to --backend api or sanitize.
 #
-# Patterns are matched against basename only via fnmatch. Common safe
-# variants (.env.example, .env.sample, .env.template) are explicitly excluded
-# below.
+# Patterns are matched against basename only via fnmatch; common safe template
+# variants (.env.example etc.) are excluded. Match is case-insensitive so
+# `.ENV` on Linux/CI is also caught.
+
 SENSITIVE_FILE_PATTERNS = (
     ".env",
     ".env.local",
@@ -1207,312 +1212,73 @@ SENSITIVE_FILE_PATTERNS = (
     "*.pfx",
 )
 
-# Filename suffixes that look sensitive but are typically safe (templates /
-# examples). Excluded from sensitive-file matches.
+# Safe template variants — same name pattern but commonly committed and not
+# secret-bearing.
 SENSITIVE_FILE_SAFE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 
-# Directories to skip during the recursive scan. The skip set covers heavy
-# vendored/generated dirs that often contain test fixtures matching the
-# sensitive-filename or content patterns; including them would bury real
-# matches in noise without adding signal.
-#
-# IMPORTANT: do NOT skip `.claude` here. `.claude/settings.local.json` is
-# explicitly gitignored and a likely place for users to keep API keys / OAuth
-# tokens. Skipping the whole subtree would let those slip past the codex
-# preflight. Only the auto-generated `.claude/reviews/` subpath is excluded
-# from CONTENT scan via `_SCAN_SKIP_CONTENT_PREFIXES` below.
+# Heavy vendored/generated dirs to skip — speeds up the walk and avoids
+# noise from test fixtures or installed packages that happen to match.
 _SCAN_SKIP_DIRS = frozenset({
     ".git", ".venv", "venv", ".tox", ".eggs", ".pytest_cache", ".mypy_cache",
     "node_modules", "__pycache__", "dist", "build", "target",
 })
 
-# Path prefixes (repo-relative, forward-slash) skipped by the CONTENT scan
-# only — the filename scan still applies. These directories commonly contain
-# literal pattern matches as test fixtures, regex definitions, or documented
-# examples (NOT real secrets), so blanket-skipping them keeps the false-
-# positive rate manageable. Real secrets in these locations would also be
-# committed to source control, which is a separate problem the user should
-# notice via code review long before our preflight matters.
-#
-# `.claude/reviews/` is a special case: review artifacts are generated text
-# that may legitimately quote literal secret patterns (from the methodology
-# prompt's example regex). Skip those for content scan but NOT
-# `.claude/settings.local.json` and friends.
-_SCAN_SKIP_CONTENT_PREFIXES = (
-    "tests/", "test/", "__tests__/",
-    ".github/",
-    "docs/",
-    "examples/", "example/",
-    "fixtures/",
-    ".claude/reviews/",
-    ".claude/paper-review/",  # if present, agent-generated review artifacts
-)
-
-# Canonical secret-content regex — mirrors the patterns in
-# .claude/commands/ai-review-local.md Step 3b (the pre-upload diff scan) so
-# the codex preflight uses the same definition of "secret content" as the
-# api-backend scan. Detects:
-#   - AWS access key IDs (AKIA prefix)
-#   - GitHub tokens (ghp_, gho_)
-#   - OpenAI API keys (sk-)
-#   - Common assignment patterns: api_key=, secret_key=, password=, token=
-#   - Bearer tokens
-#   - PRIVATE_KEY identifiers
-SECRET_CONTENT_PATTERN = re.compile(
-    r"AKIA[A-Z0-9]{16}"
-    r"|ghp_[A-Za-z0-9]{36}"
-    r"|sk-[A-Za-z0-9]{48}"
-    r"|gho_[A-Za-z0-9]{36}"
-    r"|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy][\t ]*[=:]"
-    r"|[Ss][Ee][Cc][Rr][Ee][Tt][_-]?[Kk][Ee][Yy][\t ]*[=:]"
-    r"|[Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd][\t ]*[=:]"
-    r"|[Pp][Rr][Ii][Vv][Aa][Tt][Ee][_-]?[Kk][Ee][Yy]"
-    r"|[Bb][Ee][Aa][Rr][Ee][Rr][\t ]+[A-Za-z0-9_-]+"
-    r"|[Tt][Oo][Kk][Ee][Nn][\t ]*[=:]"
-)
-
-# File-size cap for content scan (skip files >1MB — typically binaries or
-# generated assets, not human-authored code where secrets would be).
-_SCAN_MAX_FILE_BYTES = 1_000_000
-
-# Suffixes worth content-scanning. Skip binary/asset/generated formats where
-# false positives are common and real secrets are not how-people-store-them.
-_SCAN_CONTENT_SUFFIXES = (
-    ".py", ".js", ".ts", ".jsx", ".tsx", ".rs", ".go", ".rb", ".java",
-    ".sh", ".bash", ".zsh", ".fish",
-    ".yml", ".yaml", ".json", ".toml", ".ini", ".cfg", ".conf", ".config",
-    ".env", ".envrc",
-    ".txt", ".md", ".rst",
-    ".sql", ".graphql",
-    ".html", ".xml",
-)
-
-
-def _list_files_for_scan(repo_root: str) -> "list[str]":
-    """Return repo-relative paths of files to scan for sensitive patterns.
-
-    Uses os.walk with `_SCAN_SKIP_DIRS` pruning — NOT `git ls-files
-    --exclude-standard`, which excludes gitignored content. The vast majority
-    of real-world `.env` files ARE gitignored (it's the universally-recommended
-    pattern), so a gitignore-aware scan would systematically miss the exact
-    files we care about. The skip-dirs list covers the noise-source cases
-    (`.venv`, `node_modules`, `__pycache__`, etc.) without losing the
-    gitignored secrets we need to catch.
-    """
-    files: "list[str]" = []
-    for dirpath, dirnames, filenames in os.walk(repo_root):
-        dirnames[:] = [d for d in dirnames if d not in _SCAN_SKIP_DIRS]
-        for fn in filenames:
-            full = os.path.join(dirpath, fn)
-            files.append(os.path.relpath(full, repo_root))
-    return files
-
 
 def _scan_sensitive_files(repo_root: str) -> "list[str]":
     """Recursively scan repo for sensitive-pattern filenames.
 
-    Match is against basename via fnmatch; safe-suffix variants (.example,
-    .sample, .template, .dist) are excluded so e.g. `.env.example` doesn't
-    trigger. The walk skips heavy/noise directories (`.venv`, `node_modules`,
-    `__pycache__`, etc. — see `_SCAN_SKIP_DIRS`) but does NOT respect
-    .gitignore — gitignored `.env` files are exactly what we want to catch.
+    Walk skips heavy dirs (`.venv`, `node_modules`, etc.) but does NOT
+    respect .gitignore — gitignored `.env` files are precisely what users
+    might want to know about. Match is case-insensitive (Linux/CI). Safe
+    template variants (`.env.example` etc.) are excluded.
+
+    This is informational only — the caller prints a notice and continues.
+    There is no abort gate; see the design note above.
     """
     import fnmatch
 
     found: "list[str]" = []
-    for rel_path in _list_files_for_scan(repo_root):
-        # Match case-insensitively: case-sensitive filesystems (Linux, CI)
-        # treat `.ENV`/`Credentials.JSON`/`PRIVATE.PEM` as distinct from
-        # `.env`/`credentials.json`/`private.pem`, so a case-sensitive
-        # match would let capitalized variants slip past the gate.
-        basename_lc = os.path.basename(rel_path).lower()
-        # Skip safe variants like .env.example, secrets.yml.template
-        if any(basename_lc.endswith(suffix) for suffix in SENSITIVE_FILE_SAFE_SUFFIXES):
-            continue
-        for pat in SENSITIVE_FILE_PATTERNS:
-            if fnmatch.fnmatch(basename_lc, pat):
-                found.append(rel_path)
-                break
+    for dirpath, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [d for d in dirnames if d not in _SCAN_SKIP_DIRS]
+        for fn in filenames:
+            basename_lc = fn.lower()
+            if any(basename_lc.endswith(s) for s in SENSITIVE_FILE_SAFE_SUFFIXES):
+                continue
+            for pat in SENSITIVE_FILE_PATTERNS:
+                if fnmatch.fnmatch(basename_lc, pat):
+                    full = os.path.join(dirpath, fn)
+                    found.append(os.path.relpath(full, repo_root))
+                    break
     return sorted(set(found))
 
 
-def _scan_sensitive_content(repo_root: str) -> "list[str]":
-    """Recursively scan repo file contents for the canonical secret-content
-    regex (mirrors `.claude/commands/ai-review-local.md` Step 3b's pattern).
-
-    Catches secrets stored under innocuous filenames — e.g. an API key in
-    `notes.txt` or `config.yml` — that the basename scan in
-    `_scan_sensitive_files()` would miss.
-
-    Scope limits to keep runtime + false-positive count manageable:
-      - File suffixes in `_SCAN_CONTENT_SUFFIXES` only (skip binaries / assets)
-      - Files > `_SCAN_MAX_FILE_BYTES` are skipped (likely binaries / generated)
-      - Same skip-dir set as `_scan_sensitive_files()`
-      - Same gitignored-files-included posture (we want to catch `.env`)
-
-    Returns repo-relative paths of files containing at least one match.
+def _print_sensitive_notice(repo_root: str, found: "list[str]") -> None:
+    """Print a stderr block listing detected sensitive filenames before
+    invoking codex. Always non-blocking — codex still runs. Users who don't
+    want the surface can CTRL-C, use --backend api, or sanitize the tree.
     """
-    found: "list[str]" = []
-    for rel_path in _list_files_for_scan(repo_root):
-        # Suffix check is case-insensitive — `MAIN.PY`/`Config.YML` etc.
-        # should still be content-scanned on case-sensitive filesystems.
-        if not rel_path.lower().endswith(_SCAN_CONTENT_SUFFIXES):
-            continue
-        # Skip content scan for path prefixes that commonly hold literal
-        # pattern matches as fixtures / regex definitions / examples (not
-        # real secrets). Filename scan still applies to these dirs.
-        normalized = rel_path.replace(os.sep, "/")
-        if any(normalized.startswith(p) for p in _SCAN_SKIP_CONTENT_PREFIXES):
-            continue
-        full_path = os.path.join(repo_root, rel_path)
-        try:
-            if os.path.getsize(full_path) > _SCAN_MAX_FILE_BYTES:
-                continue
-        except OSError:
-            continue
-        try:
-            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
-                content = f.read()
-        except (OSError, UnicodeDecodeError):
-            continue
-        if SECRET_CONTENT_PATTERN.search(content):
-            found.append(rel_path)
-    return sorted(set(found))
-
-
-def _preflight_codex_secrets(repo_root: str) -> "list[str]":
-    """Combined REPO-FILE preflight: returns unique repo-relative paths
-    flagged by EITHER the filename scan OR the content scan. Empty list =
-    clean repo, safe to invoke codex (modulo prompt-artifact scan)."""
-    return sorted(set(
-        _scan_sensitive_files(repo_root) + _scan_sensitive_content(repo_root)
-    ))
-
-
-def _scan_prompt_artifacts(
-    diff_text: str,
-    previous_review: "str | None",
-    delta_diff_text: "str | None",
-    changed_files_text: str,
-    delta_changed_files_text: "str | None",
-) -> "list[str]":
-    """Scan the prompt-bound inputs that go into the codex prompt body via
-    stdin. These flow to Codex regardless of what's in the repo, so the
-    repo-file scan alone misses them. Specifically catches:
-
-      - Secret content in the diff body (e.g. a reverted commit that
-        deleted a `.env` — repo is clean now but the diff contains the
-        secret)
-      - Secret content in the previous review (re-review mode: a prior
-        review that quoted a real secret as a finding)
-      - Secret content in the delta-diff body (same as diff)
-      - Sensitive basenames in changed-files / delta-changed-files (e.g.
-        a deleted/renamed `.env` that no longer exists on disk but the
-        change is in the diff)
-
-    Returns a list of synthetic descriptors like "[diff body]" / "[previous
-    review]" / "[changed-files: .env]" — these aren't real paths but render
-    cleanly in the abort message and let users locate the source.
-    """
-    import fnmatch
-
-    findings: "list[str]" = []
-
-    if SECRET_CONTENT_PATTERN.search(diff_text or ""):
-        findings.append("[diff body]")
-    if previous_review and SECRET_CONTENT_PATTERN.search(previous_review):
-        findings.append("[previous review]")
-    if delta_diff_text and SECRET_CONTENT_PATTERN.search(delta_diff_text):
-        findings.append("[delta diff body]")
-
-    # Filename scan over changed-files lists. Each line is a `git diff
-    # --name-status` entry:
-    #   M\tfoo.py
-    #   D\tconfig/.env
-    #   R100\told/.env\tnew/file.txt    (rename — TWO paths)
-    #   C100\told/.env\tnew/copy.txt    (copy — TWO paths)
-    # We must scan EACH path independently so an old-sensitive→new-safe
-    # rename still aborts (the diff body still contains the old file's
-    # content, and the rename target may incorporate it).
-    def _scan_changed_files(text: str, label: str) -> None:
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            fields = line.split("\t")
-            # First field is the status code (M/A/D/R*/C*/T/...); the
-            # remaining fields are 1+ paths.
-            paths = fields[1:] if len(fields) > 1 else fields[:1]
-            for path in paths:
-                if not path:
-                    continue
-                basename_lc = os.path.basename(path).lower()
-                if any(
-                    basename_lc.endswith(suffix)
-                    for suffix in SENSITIVE_FILE_SAFE_SUFFIXES
-                ):
-                    continue
-                for pat in SENSITIVE_FILE_PATTERNS:
-                    if fnmatch.fnmatch(basename_lc, pat):
-                        findings.append(f"[{label}: {path}]")
-                        break
-
-    _scan_changed_files(changed_files_text or "", "changed-files")
-    if delta_changed_files_text:
-        _scan_changed_files(delta_changed_files_text, "delta-changed-files")
-
-    return findings
-
-
-def _print_sensitive_warning(
-    repo_root: str, found: "list[str]", abort: bool
-) -> None:
-    """Print a stderr block describing the sensitive files found and the
-    chosen disposition (abort vs continue-with-allow-secrets)."""
+    if not found:
+        return
     print("", file=sys.stderr)
-    print("=" * 64, file=sys.stderr)
-    header = "ABORT" if abort else "WARNING"
+    print("-" * 64, file=sys.stderr)
     print(
-        f"{header}: codex backend has read access to your entire repo via",
+        f"Note: codex backend has read access to your repo via --cd {repo_root}.",
         file=sys.stderr,
     )
-    print(f"  --cd {repo_root}", file=sys.stderr)
     print(
-        f"Detected {len(found)} potentially sensitive file(s) "
-        "(recursive scan: filename patterns + content secret-regex; "
-        "includes gitignored files):",
+        f"Detected {len(found)} file(s) with sensitive-looking names:",
         file=sys.stderr,
     )
-    for f in found[:20]:
+    for f in found[:10]:
         print(f"  - {f}", file=sys.stderr)
-    if len(found) > 20:
-        print(f"  ... and {len(found) - 20} more", file=sys.stderr)
-    print("", file=sys.stderr)
-    if abort:
-        print("Codex will NOT be invoked. Options:", file=sys.stderr)
-        print(
-            "  - re-run with --allow-secrets to opt in (Codex CAN read these "
-            "files)",
-            file=sys.stderr,
-        )
-        print(
-            "  - use --backend api (only diff content sent — stays out of "
-            "Codex's surface)",
-            file=sys.stderr,
-        )
-        print(
-            "  - run from a sanitized worktree without these files",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            "Continuing because --allow-secrets was passed. Codex's "
-            "read-only sandbox cannot exfiltrate via writes/network beyond "
-            "the OpenAI API, but its reasoning may incorporate or reference "
-            "the contents.",
-            file=sys.stderr,
-        )
-    print("=" * 64, file=sys.stderr)
+    if len(found) > 10:
+        print(f"  ... and {len(found) - 10} more", file=sys.stderr)
+    print(
+        "Codex CAN read these. If unintentional, CTRL-C and use --backend api "
+        "or run from a sanitized worktree.",
+        file=sys.stderr,
+    )
+    print("-" * 64, file=sys.stderr)
     print("", file=sys.stderr)
 
 
@@ -1844,8 +1610,9 @@ def main() -> None:
             "Run local AI code review. Two backends: codex (agentic CLI, "
             "matches CI quality) or api (single-shot OpenAI Responses API). "
             "Default --backend auto picks codex if installed and logged in, "
-            "else api. Codex backend runs a sensitive-file + content-secret "
-            "preflight before invoking; pass --allow-secrets to override."
+            "else api. Codex backend prints a stderr notice if obvious "
+            "sensitive-filename patterns (.env, id_rsa, *.pem, ...) are "
+            "present in the repo — non-blocking; mind what's in the tree."
         )
     )
     parser.add_argument(
@@ -1952,20 +1719,6 @@ def main() -> None:
             "logged in, else fall back to api. `codex`: agentic, matches CI "
             "quality, requires `codex` CLI + `codex login`. `api`: single-shot "
             "OpenAI Responses API, faster and cheaper but less thorough."
-        ),
-    )
-    parser.add_argument(
-        "--allow-secrets",
-        action="store_true",
-        default=False,
-        help=(
-            "Codex backend only. By default, the script aborts before "
-            "invoking codex if it detects potentially sensitive files in the "
-            "repo (.env, *.pem, id_rsa, secrets.*, etc., plus content "
-            "secret-regex; recursive scan including gitignored files). "
-            "Pass this flag to acknowledge the surface and proceed anyway. "
-            "Codex CAN read those files inside its agentic loop (under the "
-            "read-only sandbox)."
         ),
     )
     parser.add_argument(
@@ -2315,31 +2068,12 @@ def main() -> None:
 
     if backend == "codex":
         codex_repo_root = args.repo_root or os.getcwd()
-        # Two preflight layers — both must be clean (or --allow-secrets):
-        #  1. Repo-file scan: catches secrets reachable via Codex's --cd
-        #     read surface, even if not in the prompt
-        #  2. Prompt-artifact scan: catches secrets in the diff body,
-        #     previous review, or changed-files list — these go to Codex
-        #     via stdin regardless of what's in the repo (e.g. a reverted
-        #     commit deleting a .env shows the secret in the diff body
-        #     but the repo is clean)
-        sensitive_files = _preflight_codex_secrets(codex_repo_root)
-        sensitive_prompt = _scan_prompt_artifacts(
-            diff_text=diff_text,
-            previous_review=previous_review,
-            delta_diff_text=delta_diff_text,
-            changed_files_text=changed_files_text,
-            delta_changed_files_text=delta_changed_files_text,
+        # Surface obvious sensitive filenames (notice-only, non-blocking).
+        # See the SENSITIVE_FILE_PATTERNS comment block for the rationale on
+        # why this is a notice and not an enforcement gate.
+        _print_sensitive_notice(
+            codex_repo_root, _scan_sensitive_files(codex_repo_root)
         )
-        all_sensitive = sensitive_files + sensitive_prompt
-        if all_sensitive:
-            _print_sensitive_warning(
-                codex_repo_root,
-                all_sensitive,
-                abort=not args.allow_secrets,
-            )
-            if not args.allow_secrets:
-                sys.exit(1)
         review_content, usage = call_codex(
             prompt=prompt,
             model=args.model,
