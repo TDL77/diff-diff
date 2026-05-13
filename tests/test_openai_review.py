@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
@@ -1833,6 +1834,408 @@ class TestWorkflowCommentPosting:
             assert signal in workflow_text, (
                 f"Expected rerun-set signal {signal!r} not found in workflow YAML"
             )
+
+
+class TestBackendDetection:
+    """`_detect_backend` resolves the user-requested backend ('auto', 'codex',
+    'api') against installed-codex + auth-file presence. Uses monkeypatch on
+    the loaded review_mod's shutil.which + an inert CODEX_AUTH_PATH."""
+
+    @pytest.fixture
+    def patched(self, monkeypatch, tmp_path, review_mod):
+        """Provide controllable codex-on-PATH and auth.json-exists state."""
+        fake_auth = tmp_path / "auth.json"
+        monkeypatch.setattr(review_mod, "CODEX_AUTH_PATH", str(fake_auth))
+        return {"auth": fake_auth, "monkeypatch": monkeypatch, "mod": review_mod}
+
+    def _set_codex_present(self, patched, present: bool):
+        patched["monkeypatch"].setattr(
+            patched["mod"].shutil,
+            "which",
+            lambda cmd: "/fake/path/codex" if (cmd == "codex" and present) else None,
+        )
+
+    def test_auto_with_codex_and_auth(self, patched, review_mod):
+        self._set_codex_present(patched, True)
+        patched["auth"].write_text("{}")
+        assert review_mod._detect_backend("auto") == "codex"
+
+    def test_auto_no_codex(self, patched, review_mod):
+        self._set_codex_present(patched, False)
+        patched["auth"].write_text("{}")
+        assert review_mod._detect_backend("auto") == "api"
+
+    def test_auto_no_auth(self, patched, review_mod):
+        self._set_codex_present(patched, True)
+        # Don't create auth.json
+        assert review_mod._detect_backend("auto") == "api"
+
+    def test_explicit_codex_with_auth(self, patched, review_mod):
+        """Explicit `--backend codex` requires both the binary AND auth.json
+        — without auth, codex would fail late (subprocess) with a confusing
+        error; the explicit-request path now fails fast with actionable text."""
+        self._set_codex_present(patched, True)
+        patched["auth"].write_text("{}")  # auth present
+        assert review_mod._detect_backend("codex") == "codex"
+
+    def test_explicit_api(self, patched, review_mod):
+        self._set_codex_present(patched, True)
+        patched["auth"].write_text("{}")
+        # Even with codex available, explicit api wins
+        assert review_mod._detect_backend("api") == "api"
+
+    def test_explicit_codex_errors_when_codex_missing(self, patched, review_mod):
+        self._set_codex_present(patched, False)
+        with pytest.raises(RuntimeError, match="codex.*not installed"):
+            review_mod._detect_backend("codex")
+
+    def test_explicit_codex_errors_when_auth_missing(self, patched, review_mod):
+        """Codex installed but `codex login` not done — fast-fail with a
+        clear message instead of degrading into a confusing subprocess
+        error inside `codex exec`."""
+        self._set_codex_present(patched, True)
+        # Don't write auth.json
+        with pytest.raises(RuntimeError, match="no codex auth found"):
+            review_mod._detect_backend("codex")
+
+
+class TestBuildCodexCmd:
+    """`_build_codex_cmd` constructs the argv for `codex exec`. The literal
+    config-key tokens are pinned because Codex silently ignores unknown `-c`
+    keys (verified against codex 0.130.0); a typo here ships a backend that
+    runs at default effort while claiming CI parity."""
+
+    def test_argv_structure(self, review_mod):
+        cmd = review_mod._build_codex_cmd(
+            model="gpt-5.4", repo_root="/repo", output_path="/tmp/out.md"
+        )
+        assert cmd[0] == "codex"
+        assert cmd[1] == "exec"
+
+    def test_pins_model(self, review_mod):
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/r", "/o")
+        i = cmd.index("--model")
+        assert cmd[i + 1] == "gpt-5.4"
+
+    def test_pins_sandbox_read_only(self, review_mod):
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/r", "/o")
+        i = cmd.index("--sandbox")
+        assert cmd[i + 1] == "read-only"
+
+    def test_pins_reasoning_xhigh_with_correct_key(self, review_mod):
+        """The literal token `model_reasoning_effort=xhigh` must appear in
+        argv. Codex silently ignores unknown -c keys, so a typo (e.g.
+        `reasoning_effort=xhigh`) would produce a backend running at default
+        effort while claiming CI parity. Pin the full token to catch this."""
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/r", "/o")
+        assert "model_reasoning_effort=xhigh" in cmd
+
+    def test_passes_repo_root_to_cd(self, review_mod):
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/the/repo", "/o")
+        i = cmd.index("--cd")
+        assert cmd[i + 1] == "/the/repo"
+
+    def test_passes_output_path(self, review_mod):
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/r", "/the/out.md")
+        i = cmd.index("-o")
+        assert cmd[i + 1] == "/the/out.md"
+
+    def test_no_positional_prompt_in_argv(self, review_mod):
+        """Prompt must be passed via stdin, never positional. The argv must
+        end at the last flag pair — no trailing positional."""
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/r", "/o")
+        assert cmd[-2:] == ["-o", "/o"]
+
+
+class TestCallCodex:
+    """`call_codex` invokes the codex subprocess, streams stderr, and reads
+    the output file. Subprocess + file IO are mocked."""
+
+    @pytest.fixture
+    def fake_subprocess(self, monkeypatch, tmp_path, review_mod):
+        """Replace subprocess.Popen with a recorder that simulates a
+        successful codex run by writing canned content to the -o path."""
+        captured = {}
+
+        class FakeStdin:
+            def write(self, x):
+                captured["stdin"] = captured.get("stdin", "") + x
+
+            def close(self):
+                pass
+
+        class FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                captured["kwargs"] = kwargs
+                # Find -o path in argv and write canned output to it
+                if "-o" in cmd:
+                    out_path = cmd[cmd.index("-o") + 1]
+                    with open(out_path, "w") as f:
+                        f.write(captured.get("output", "## Review\n\n✅ Looks good"))
+                self.returncode = captured.get("returncode", 0)
+                self.stdin = FakeStdin()
+                # Inert pipes — _tee thread reads empty
+                import io as _io
+                self.stdout = _io.StringIO("")
+                self.stderr = _io.StringIO(captured.get("stderr_text", ""))
+
+            def wait(self):
+                return self.returncode
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(review_mod.subprocess, "Popen", FakePopen)
+        return captured
+
+    def test_command_construction_e2e(self, review_mod, fake_subprocess):
+        review_mod.call_codex("prompt content", "gpt-5.4", "/r")
+        cmd = fake_subprocess["cmd"]
+        assert cmd[0] == "codex"
+        assert cmd[1] == "exec"
+        assert "model_reasoning_effort=xhigh" in cmd
+
+    def test_passes_prompt_via_stdin(self, review_mod, fake_subprocess):
+        review_mod.call_codex("hello prompt", "gpt-5.4", "/r")
+        # Captured stdin in fake — verify the prompt was written
+        stdin_kwargs = fake_subprocess["kwargs"].get("stdin")
+        # subprocess.PIPE must be requested (so stdin is a real pipe)
+        import subprocess as _sp
+        assert stdin_kwargs == _sp.PIPE
+
+    def test_reads_output_file(self, review_mod, fake_subprocess):
+        fake_subprocess["output"] = "## Custom Review\n\nP1: foo"
+        content, usage = review_mod.call_codex("p", "gpt-5.4", "/r")
+        assert content == "## Custom Review\n\nP1: foo"
+
+    def test_returns_codex_backend_in_usage(self, review_mod, fake_subprocess):
+        _, usage = review_mod.call_codex("p", "gpt-5.4", "/r")
+        assert usage["backend"] == "codex"
+        assert usage["input_tokens"] is None
+        assert usage["output_tokens"] is None
+
+    def test_nonzero_exit_raises_with_stderr(self, review_mod, fake_subprocess):
+        fake_subprocess["returncode"] = 1
+        fake_subprocess["stderr_text"] = "auth failure: token expired\n"
+        with pytest.raises(RuntimeError, match="codex exec failed"):
+            review_mod.call_codex("p", "gpt-5.4", "/r")
+
+    def test_empty_output_file_raises(self, review_mod, fake_subprocess):
+        fake_subprocess["output"] = ""
+        with pytest.raises(RuntimeError, match="produced no output"):
+            review_mod.call_codex("p", "gpt-5.4", "/r")
+
+    def test_broken_pipe_on_stdin_does_not_raise_pipe_error(
+        self, review_mod, monkeypatch, tmp_path
+    ):
+        """If codex exits before consuming stdin, the stdin.write/close raises
+        BrokenPipeError. We catch it and let the existing returncode != 0 path
+        surface the real cause via stderr — otherwise users get a raw pipe
+        traceback that hides codex's actual error."""
+        captured = {}
+
+        class BrokenStdin:
+            def write(self, x):
+                raise BrokenPipeError("stdin closed early")
+
+            def close(self):
+                pass
+
+        class FakePopenBrokenPipe:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                # Write canned non-empty output anyway (codex may have written
+                # before the early-exit; we exercise the BrokenPipe path
+                # then a non-zero exit).
+                if "-o" in cmd:
+                    out_path = cmd[cmd.index("-o") + 1]
+                    with open(out_path, "w") as f:
+                        f.write("partial")
+                self.returncode = 2
+                self.stdin = BrokenStdin()
+                import io as _io
+                self.stdout = _io.StringIO("")
+                self.stderr = _io.StringIO("auth failed: invalid token\n")
+
+            def wait(self):
+                return self.returncode
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(review_mod.subprocess, "Popen", FakePopenBrokenPipe)
+        # Should NOT raise BrokenPipeError; should raise RuntimeError with
+        # codex's stderr instead.
+        with pytest.raises(RuntimeError, match="codex exec failed"):
+            review_mod.call_codex("p", "gpt-5.4", "/r")
+
+
+class TestCodexBackendDocConsistency:
+    """The skill doc must enumerate the backend choices that the script
+    actually accepts, and explain the codex install + auth requirement."""
+
+    def test_skill_doc_mentions_backend_flag(self):
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc.read_text()
+        assert "--backend" in text
+        # All three values must be documented
+        assert "auto" in text
+        assert "codex" in text
+        assert "api" in text
+
+    def test_skill_doc_mentions_codex_install(self):
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc.read_text()
+        # Either install command must be documented
+        assert "brew install --cask codex" in text or "@openai/codex" in text
+        assert "codex login" in text
+
+    def test_skill_doc_documents_codex_surface_area(self):
+        """Skill doc must explain that codex backend exposes the full repo
+        read-surface (not just the diff). Required so users opting into
+        codex understand what files are reachable beyond what's pre-scanned."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc.read_text()
+        assert "Surface area" in text or "read access to your entire repo" in text or "read any file under the repo root" in text
+
+    def test_skill_step5_command_template_forwards_backend(self):
+        """Regression: the Step-5 invocation MUST pass --backend through to
+        the script. Without this, /ai-review-local --backend codex (or api)
+        is silently ignored — the script's parsed --backend always defaults
+        to 'auto'. This is the exact 'incomplete parameter propagation'
+        anti-pattern; pin the template."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc.read_text()
+        # The Step 5 command template must contain the --backend flag,
+        # forwarded as a shell variable substitution.
+        assert "--backend " in text and "$backend" in text, (
+            "Step 5 command template must forward --backend to the script "
+            "(use `--backend \"$backend\"`); otherwise users' explicit "
+            "--backend selection is dropped."
+        )
+
+
+class TestSensitiveFileNotice:
+    """`_scan_sensitive_files` recursively scans the repo for sensitive-pattern
+    filenames (notice-only — no abort gate). `_print_sensitive_notice` prints
+    a one-off stderr block before invoking codex.
+
+    Scope is intentionally narrow: this is informational surfacing of obvious
+    secret-bearing filenames, NOT an enforcement gate. The codex backend's
+    repo-wide read surface is intrinsic to using `codex` as an agentic
+    reviewer; users who authenticated `codex login` already accept that
+    surface. Real secret prevention belongs at source-of-secret (gitignore,
+    code review), not at codex-invocation."""
+
+    def test_finds_dotenv_at_root(self, tmp_path, review_mod):
+        (tmp_path / ".env").write_text("SECRET=hunter2")
+        assert ".env" in review_mod._scan_sensitive_files(str(tmp_path))
+
+    def test_finds_secrets_in_subdir(self, tmp_path, review_mod):
+        """Recursive scan catches secrets in subdirectories, not just root."""
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / ".env").write_text("X=1")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert any(".env" in p for p in found)
+
+    def test_finds_pem_glob(self, tmp_path, review_mod):
+        (tmp_path / "private.pem").write_text("-----BEGIN PRIVATE KEY-----")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert "private.pem" in found
+
+    def test_finds_id_rsa(self, tmp_path, review_mod):
+        (tmp_path / "id_rsa").write_text("-----BEGIN RSA-----")
+        assert "id_rsa" in review_mod._scan_sensitive_files(str(tmp_path))
+
+    def test_excludes_safe_template_variants(self, tmp_path, review_mod):
+        """`.env.example`, `.env.sample`, `.env.template` are template files
+        and routinely committed; must NOT trigger."""
+        (tmp_path / ".env.example").write_text("KEY=your-key-here")
+        (tmp_path / ".env.sample").write_text("X=Y")
+        (tmp_path / ".env.template").write_text("X=Y")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert ".env.example" not in found
+        assert ".env.sample" not in found
+        assert ".env.template" not in found
+
+    def test_filename_match_is_case_insensitive(self, tmp_path, review_mod):
+        """Case-sensitive filesystems (Linux, CI) treat `.ENV` as distinct
+        from `.env`."""
+        (tmp_path / ".ENV").write_text("X=1")
+        (tmp_path / "PRIVATE.PEM").write_text("-----BEGIN-----")
+        (tmp_path / "ID_RSA").write_text("-----BEGIN RSA-----")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert ".ENV" in found
+        assert "PRIVATE.PEM" in found
+        assert "ID_RSA" in found
+
+    def test_skips_heavy_dirs(self, tmp_path, review_mod):
+        """The walk skips `.venv`, `node_modules`, `__pycache__` etc. so
+        vendored test fixtures don't show up as noise."""
+        (tmp_path / ".venv" / "lib").mkdir(parents=True)
+        (tmp_path / ".venv" / "lib" / "id_rsa").write_text("vendored fixture")
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / ".env").write_text("vendored fixture")
+        # A real one at the root SHOULD still appear
+        (tmp_path / ".env").write_text("X=1")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert ".env" in found
+        assert not any(".venv" in p for p in found)
+        assert not any("node_modules" in p for p in found)
+
+    def test_clean_repo_returns_empty(self, tmp_path, review_mod):
+        (tmp_path / "README.md").write_text("# repo")
+        (tmp_path / "src").mkdir()
+        assert review_mod._scan_sensitive_files(str(tmp_path)) == []
+
+    def test_notice_prints_when_files_present(
+        self, tmp_path, review_mod, capsys
+    ):
+        review_mod._print_sensitive_notice(
+            str(tmp_path), [".env", "config/secrets.yml"]
+        )
+        err = capsys.readouterr().err
+        assert "Note:" in err
+        assert ".env" in err
+        assert "config/secrets.yml" in err
+        assert "--backend api" in err  # mitigation suggested
+
+    def test_notice_silent_on_empty_findings(
+        self, tmp_path, review_mod, capsys
+    ):
+        review_mod._print_sensitive_notice(str(tmp_path), [])
+        assert capsys.readouterr().err == ""
+
+    def test_notice_caps_output_at_10_files(
+        self, tmp_path, review_mod, capsys
+    ):
+        many = [f"file{i}.pem" for i in range(25)]
+        review_mod._print_sensitive_notice(str(tmp_path), many)
+        err = capsys.readouterr().err
+        assert "and 15 more" in err
 
 
 class TestExtractResponseText:
