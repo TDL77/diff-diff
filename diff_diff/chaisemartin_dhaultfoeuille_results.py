@@ -1887,9 +1887,13 @@ class ChaisemartinDHaultfoeuilleResults:
                             "cband_upper": ph_cband[1] if ph_cband else np.nan,
                             "cumulated_effect": np.nan,
                             "cumulated_se": np.nan,
-                            # Heterogeneity is forward-only (R doesn't ship
-                            # per-path predict_het on placebos); placebo
-                            # rows always emit NaN here.
+                            # Heterogeneity is forward-only in this release.
+                            # Per-path placebo heterogeneity is not exposed
+                            # yet; R may emit placebo het rows under
+                            # did_multiplegt_dyn(..., by_path, predict_het)
+                            # but R-parity for that surface has not been
+                            # validated, so we emit NaN on placebo rows
+                            # rather than claim parity. See REGISTRY note.
                             "het_beta": np.nan,
                             "het_se": np.nan,
                             "het_t_stat": np.nan,
