@@ -1425,25 +1425,37 @@ def _scan_prompt_artifacts(
     if delta_diff_text and SECRET_CONTENT_PATTERN.search(delta_diff_text):
         findings.append("[delta diff body]")
 
-    # Filename scan over changed-files lists. Each line is a name-status
-    # entry like "M\tfoo.py" or "D\tconfig/.env"; extract the path column.
+    # Filename scan over changed-files lists. Each line is a `git diff
+    # --name-status` entry:
+    #   M\tfoo.py
+    #   D\tconfig/.env
+    #   R100\told/.env\tnew/file.txt    (rename — TWO paths)
+    #   C100\told/.env\tnew/copy.txt    (copy — TWO paths)
+    # We must scan EACH path independently so an old-sensitive→new-safe
+    # rename still aborts (the diff body still contains the old file's
+    # content, and the rename target may incorporate it).
     def _scan_changed_files(text: str, label: str) -> None:
         for line in text.splitlines():
             line = line.strip()
             if not line:
                 continue
-            parts = line.split("\t", 1) if "\t" in line else line.split(None, 1)
-            path = parts[1] if len(parts) > 1 else parts[0]
-            basename_lc = os.path.basename(path).lower()
-            if any(
-                basename_lc.endswith(suffix)
-                for suffix in SENSITIVE_FILE_SAFE_SUFFIXES
-            ):
-                continue
-            for pat in SENSITIVE_FILE_PATTERNS:
-                if fnmatch.fnmatch(basename_lc, pat):
-                    findings.append(f"[{label}: {path}]")
-                    break
+            fields = line.split("\t")
+            # First field is the status code (M/A/D/R*/C*/T/...); the
+            # remaining fields are 1+ paths.
+            paths = fields[1:] if len(fields) > 1 else fields[:1]
+            for path in paths:
+                if not path:
+                    continue
+                basename_lc = os.path.basename(path).lower()
+                if any(
+                    basename_lc.endswith(suffix)
+                    for suffix in SENSITIVE_FILE_SAFE_SUFFIXES
+                ):
+                    continue
+                for pat in SENSITIVE_FILE_PATTERNS:
+                    if fnmatch.fnmatch(basename_lc, pat):
+                        findings.append(f"[{label}: {path}]")
+                        break
 
     _scan_changed_files(changed_files_text or "", "changed-files")
     if delta_changed_files_text:

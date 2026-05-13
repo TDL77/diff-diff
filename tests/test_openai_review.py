@@ -2424,6 +2424,58 @@ class TestScanPromptArtifacts:
         )
         assert result == []
 
+    def test_changed_files_rename_old_sensitive_new_safe(self, review_mod):
+        """`git diff --name-status` rename lines have TWO paths:
+        `R100\\told\\tnew`. If the OLD path is sensitive (e.g. config/.env
+        renamed to config/renamed.txt), the diff body still contains the
+        old file's contents — must abort. Earlier parser only inspected
+        the combined post-first-tab substring, missing this case."""
+        result = review_mod._scan_prompt_artifacts(
+            diff_text="",
+            previous_review=None,
+            delta_diff_text=None,
+            changed_files_text="R100\tconfig/.env\tconfig/renamed.txt",
+            delta_changed_files_text=None,
+        )
+        assert any(".env" in r for r in result), (
+            f"Expected sensitive OLD path to be detected; got: {result}"
+        )
+
+    def test_changed_files_copy_old_sensitive_new_safe(self, review_mod):
+        """`C100\\told\\tnew` copy lines have the same structure as rename
+        lines — both paths must be scanned."""
+        result = review_mod._scan_prompt_artifacts(
+            diff_text="",
+            previous_review=None,
+            delta_diff_text=None,
+            changed_files_text="C100\tconfig/.env\tconfig/copy.txt",
+            delta_changed_files_text=None,
+        )
+        assert any(".env" in r for r in result)
+
+    def test_changed_files_rename_new_path_also_scanned(self, review_mod):
+        """If the NEW path of a rename is sensitive (someone renamed
+        config.txt → .env), that also triggers."""
+        result = review_mod._scan_prompt_artifacts(
+            diff_text="",
+            previous_review=None,
+            delta_diff_text=None,
+            changed_files_text="R100\tconfig/old.txt\tconfig/.env",
+            delta_changed_files_text=None,
+        )
+        assert any(".env" in r for r in result)
+
+    def test_delta_changed_files_rename_also_scanned(self, review_mod):
+        """Same logic applies to delta_changed_files_text."""
+        result = review_mod._scan_prompt_artifacts(
+            diff_text="",
+            previous_review=None,
+            delta_diff_text=None,
+            changed_files_text="",
+            delta_changed_files_text="R100\tconfig/.env\tconfig/safe.txt",
+        )
+        assert any(".env" in r for r in result)
+
     def test_clean_inputs_return_empty(self, review_mod):
         result = review_mod._scan_prompt_artifacts(
             diff_text="--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-x\n+y\n",
@@ -2864,6 +2916,24 @@ class TestMainCodexSecretGate:
         assert "WARNING" in captured.err
         assert "ABORT" not in captured.err
         assert gate_env["codex_calls"]["called"]
+
+    def test_aborts_on_renamed_sensitive_file_in_changed_files(
+        self, gate_env, review_mod, capsys
+    ):
+        """`R100\\told_sensitive\\tnew_safe` rename: old path was a .env,
+        new is a safe rename. The diff body still contains the old
+        file's contents → must abort."""
+        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
+        gate_env["files"].write_text(
+            "R100\tconfig/.env\tconfig/renamed.txt\n"
+        )
+        with pytest.raises(SystemExit) as exc:
+            self._run(gate_env, review_mod)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "ABORT" in captured.err
+        assert ".env" in captured.err
+        assert not gate_env["codex_calls"]["called"]
 
 
 class TestExtractResponseText:
