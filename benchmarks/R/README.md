@@ -56,13 +56,29 @@ CI passes without R. The 64 internal tests (`TestConleyKernels`,
 
 ## Fixtures
 
-Three haversine fixtures stress different scales / geographic ranges:
+Six fixtures total: three cross-sectional (Phase 1) and three panel
+fixtures with `lag_cutoff > 0` (Phase 2, block-decomposed Conley).
+
+**Cross-sectional** (`build_fixture`, `lag_cutoff=0`):
 
 | Fixture | n | k | Cutoff | Stress test |
 |---|---|---|---|---|
 | `small_haversine` | 50 | 2 | 500 km | Small-n, simple regressor |
-| `dense_haversine` | 200 | 3 | 1000 km | Dense panel, 2 covariates, large cutoff |
-| `lat_lon_realistic` | 300 | 3 | 200 km | Continental US lat/lon range, 200km cutoff |
+| `dense_haversine` | 200 | 3 | 1000 km | Dense, 2 covariates, large cutoff |
+| `lat_lon_realistic` | 300 | 3 | 200 km | Continental US lat/lon range |
+
+**Panel block-decomposed** (`build_panel_fixture`, `lag_cutoff > 0`):
+
+| Fixture | n_units × T | k | Cutoff | Lag | Stress test |
+|---|---|---|---|---|---|
+| `panel_haversine_lag1` | 60 × 3 | 2 | 500 km | 1 | Short panel, 1-period serial |
+| `panel_haversine_lag2` | 80 × 5 | 3 | 1000 km | 2 | Longer panel, 2-period serial |
+| `panel_lat_lon_realistic_lag1` | 100 × 4 | 3 | 200 km | 1 | Continental US, 1-period serial |
+
+Each unit's `(lat, lon)` is time-invariant within the panel fixtures; the
+block-decomposed sandwich (within-period spatial + within-unit Bartlett
+serial) is independent of `lag_cutoff` for within-period contributions
+and matches R `conleyreg::time_dist.cpp` for the serial component.
 
 The euclidean code path (`conley_metric="euclidean"`) is verified
 internally against `scipy.spatial.distance.cdist` in

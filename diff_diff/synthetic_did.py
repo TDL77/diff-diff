@@ -188,9 +188,17 @@ class SyntheticDiD(DifferenceInDifferences):
         conley_cutoff_km: Optional[float] = None,
         conley_metric: Optional[str] = None,
         conley_kernel: Optional[str] = None,
+        conley_lag_cutoff: Optional[int] = None,
     ):
         if vcov_type == "conley" or any(
-            v is not None for v in (conley_coords, conley_cutoff_km, conley_metric, conley_kernel)
+            v is not None
+            for v in (
+                conley_coords,
+                conley_cutoff_km,
+                conley_metric,
+                conley_kernel,
+                conley_lag_cutoff,
+            )
         ):
             raise TypeError(
                 "SyntheticDiD does not yet support vcov_type='conley' or any "
@@ -2728,6 +2736,7 @@ class SyntheticDiD(DifferenceInDifferences):
             "conley_cutoff_km": None,
             "conley_metric": None,
             "conley_kernel": None,
+            "conley_lag_cutoff": None,
         }
 
     def set_params(self, **params) -> "SyntheticDiD":
@@ -2748,7 +2757,13 @@ class SyntheticDiD(DifferenceInDifferences):
         # Reject Conley kwargs / non-None vcov_type before any mutation —
         # mirrors __init__'s contract. Empty/None values are permitted so
         # round-tripping get_params() back through set_params() is a no-op.
-        _conley_keys = ("conley_coords", "conley_cutoff_km", "conley_metric", "conley_kernel")
+        _conley_keys = (
+            "conley_coords",
+            "conley_cutoff_km",
+            "conley_metric",
+            "conley_kernel",
+            "conley_lag_cutoff",
+        )
         if params.get("vcov_type") is not None and params["vcov_type"] != "conley":
             raise TypeError(
                 f"SyntheticDiD does not accept vcov_type={params['vcov_type']!r}. "

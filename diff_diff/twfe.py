@@ -157,24 +157,43 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 "the full projection."
             )
 
-        # Reject Conley on TWFE entirely. TWFE is intrinsically a multi-
-        # period panel estimator; cross-sectional Conley does not apply
-        # (same rationale as DifferenceInDifferences.fit's panel guard:
-        # same-unit cross-time pairs have d_ij=0 -> K=1, which together
-        # with within-transformed residuals that sum to zero per unit
-        # produces an anti-correlated cancellation, not the documented
-        # cross-sectional Conley meat). Phase 1 supports Conley only via
-        # direct compute_robust_vcov on a single-period design; Phase 2
-        # will add a documented space-time HAC (Driscoll-Kraay product
-        # kernel + sparse k-d-tree fast path).
+        # Phase 2 panel block-decomposed Conley (matches R conleyreg).
+        # FWL composability: the within-transformed scores S = X_demeaned *
+        # residuals_demeaned form the same meat as the full-dummy expansion,
+        # so passing the demeaned X / residuals to compute_conley_vcov along
+        # with the original (un-demeaned) time / unit vectors and coords
+        # yields the correct block-decomposed sandwich.
         if self.vcov_type == "conley":
-            raise NotImplementedError(
-                "TwoWayFixedEffects(vcov_type='conley') is deferred to "
-                "Phase 2 (space-time product kernel / Driscoll-Kraay). "
-                "Phase 1 supports cross-sectional Conley only via direct "
-                "compute_robust_vcov on a single-period design; "
-                "TwoWayFixedEffects is intrinsically a multi-period panel."
-            )
+            if self.conley_lag_cutoff is None:
+                raise ValueError(
+                    "TwoWayFixedEffects(vcov_type='conley') requires "
+                    "conley_lag_cutoff (non-negative int; 0 means spatial-"
+                    "within-period only, no serial component). See R "
+                    "conleyreg's `lag_cutoff` argument for the convention."
+                )
+            if self.conley_coords is None or self.conley_cutoff_km is None:
+                raise ValueError(
+                    "TwoWayFixedEffects(vcov_type='conley') requires "
+                    "conley_coords=(lat_col, lon_col) and "
+                    "conley_cutoff_km on the constructor."
+                )
+            if self.cluster is not None:
+                raise NotImplementedError(
+                    "TwoWayFixedEffects(vcov_type='conley', cluster=...) "
+                    "is not supported: the combined spatial-kernel + cluster "
+                    "indicator product kernel is deferred to a follow-up PR "
+                    "(see TODO.md). Use vcov_type='hc1' with cluster= for "
+                    "cluster-robust without spatial HAC, or drop cluster= "
+                    "for panel-Conley alone."
+                )
+            if self.inference == "wild_bootstrap":
+                raise NotImplementedError(
+                    "TwoWayFixedEffects(vcov_type='conley', "
+                    "inference='wild_bootstrap') is not supported: the "
+                    "wild bootstrap is a separate inference path that does "
+                    "not consume the analytical Conley sandwich. Use "
+                    "inference='analytical' for Conley SEs."
+                )
 
         # Check for staggered treatment timing and warn if detected
         self._check_staggered_treatment(data, treatment, time, unit)
@@ -332,16 +351,50 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         # single source of truth.
         _fit_vcov_type = self._resolve_effective_vcov_type(survey_cluster_ids)
 
+        # Phase 2 panel-Conley: build coord array + row-aligned time/unit
+        # vectors from the original (un-demeaned) data. FWL composability:
+        # within-transformed X already encodes the FE; the meat is computed
+        # on demeaned scores but the kernel grid uses the original space
+        # (coords) and time/unit indexing.
+        if _fit_vcov_type == "conley":
+            _conley_coords_arr: Optional[np.ndarray] = np.column_stack(
+                [
+                    data[self.conley_coords[0]].values.astype(np.float64),
+                    data[self.conley_coords[1]].values.astype(np.float64),
+                ]
+            )
+            _conley_time_arr: Optional[np.ndarray] = data[time].values.astype(np.float64)
+            _conley_unit_arr: Optional[np.ndarray] = data[unit].values
+            # vcov_type="conley" + cluster_ids raises at the linalg validator
+            # (combined kernel deferred). TWFE's auto-cluster would force that
+            # path; drop the cluster on the Conley path. The user's explicit
+            # cluster also conflicts and is rejected upstream.
+            _conley_cluster_override = None
+        else:
+            _conley_coords_arr = None
+            _conley_time_arr = None
+            _conley_unit_arr = None
+            _conley_cluster_override = (
+                survey_cluster_ids if self.inference != "wild_bootstrap" else None
+            )
+
         if self.rank_deficient_action == "error":
             reg = LinearRegression(
                 include_intercept=False,
-                cluster_ids=survey_cluster_ids if self.inference != "wild_bootstrap" else None,
+                cluster_ids=_conley_cluster_override,
                 alpha=self.alpha,
                 rank_deficient_action="error",
                 weights=survey_weights,
                 weight_type=survey_weight_type,
                 survey_design=_lr_survey_twfe,
                 vcov_type=_fit_vcov_type,
+                conley_coords=_conley_coords_arr,
+                conley_cutoff_km=self.conley_cutoff_km,
+                conley_metric=self.conley_metric,
+                conley_kernel=self.conley_kernel,
+                conley_time=_conley_time_arr,
+                conley_unit=_conley_unit_arr,
+                conley_lag_cutoff=self.conley_lag_cutoff,
             ).fit(X, y, df_adjustment=df_adjustment)
         else:
             # Suppress generic warning, TWFE provides context-specific messages below
@@ -349,15 +402,20 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 warnings.filterwarnings("ignore", message="Rank-deficient design matrix")
                 reg = LinearRegression(
                     include_intercept=False,
-                    cluster_ids=(
-                        survey_cluster_ids if self.inference != "wild_bootstrap" else None
-                    ),
+                    cluster_ids=_conley_cluster_override,
                     alpha=self.alpha,
                     rank_deficient_action="silent",
                     weights=survey_weights,
                     weight_type=survey_weight_type,
                     survey_design=_lr_survey_twfe,
                     vcov_type=_fit_vcov_type,
+                    conley_coords=_conley_coords_arr,
+                    conley_cutoff_km=self.conley_cutoff_km,
+                    conley_metric=self.conley_metric,
+                    conley_kernel=self.conley_kernel,
+                    conley_time=_conley_time_arr,
+                    conley_unit=_conley_unit_arr,
+                    conley_lag_cutoff=self.conley_lag_cutoff,
                 ).fit(X, y, df_adjustment=df_adjustment)
 
         coefficients = reg.coefficients_
