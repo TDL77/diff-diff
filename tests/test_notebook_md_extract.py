@@ -136,6 +136,85 @@ def test_html_only_display_data_is_omitted(tmp_path):
     assert "**Output:**" not in rendered
 
 
+def test_html_plus_text_plain_display_data_renders_text_plain(tmp_path):
+    """Real-world `display(df)` from pandas emits BOTH `text/html` (the rich
+    table) and `text/plain` (the repr-style fallback). The extractor's
+    shared `execute_result | display_data` branch reads `text/plain`
+    specifically, so the plain-text repr must render even when html is
+    co-emitted. Locks the positive-render gap that the html-only and
+    image-only omission tests don't cover (a regression in the shared
+    branch could silently drop display_data plain-text rendering without
+    failing the omission tests)."""
+    nb = _minimal_nb_with_cells(
+        [
+            {
+                "cell_type": "code",
+                "metadata": {},
+                "execution_count": 1,
+                "source": "display(df)",
+                "outputs": [
+                    {
+                        "output_type": "display_data",
+                        "data": {
+                            "text/html": "<table><tr><td>1</td></tr></table>",
+                            "text/plain": "   col1\n0     1",
+                        },
+                        "metadata": {},
+                    }
+                ],
+            }
+        ]
+    )
+    nb_path = tmp_path / "html_plus_plain.ipynb"
+    nb_path.write_text(json.dumps(nb))
+
+    rendered = _load_extractor().extract(nb_path)
+    # Plain-text repr renders.
+    assert "**Output:**" in rendered
+    assert "col1" in rendered
+    assert "0     1" in rendered
+    # HTML form is still dropped (we never render rich text/html).
+    assert "<table>" not in rendered
+    assert "<td>" not in rendered
+
+
+def test_image_plus_text_plain_display_data_renders_text_plain(tmp_path):
+    """Real-world matplotlib `display()` (or seaborn-style) emits BOTH
+    `image/png` (the chart) and `text/plain` (e.g., a `<Figure ...>` repr).
+    The image is intentionally dropped (base64 noise has no review value),
+    but the plain-text repr must still render via the shared branch.
+    Locks the positive-render path for the image-with-fallback case."""
+    nb = _minimal_nb_with_cells(
+        [
+            {
+                "cell_type": "code",
+                "metadata": {},
+                "execution_count": 1,
+                "source": "fig, ax = plt.subplots(); ax.plot([1,2,3]); display(fig)",
+                "outputs": [
+                    {
+                        "output_type": "display_data",
+                        "data": {
+                            "image/png": "iVBORw0KGgoAAAANSUhEUg==",
+                            "text/plain": "<Figure size 640x480 with 1 Axes>",
+                        },
+                        "metadata": {},
+                    }
+                ],
+            }
+        ]
+    )
+    nb_path = tmp_path / "image_plus_plain.ipynb"
+    nb_path.write_text(json.dumps(nb))
+
+    rendered = _load_extractor().extract(nb_path)
+    # Plain-text repr renders.
+    assert "**Output:**" in rendered
+    assert "<Figure size 640x480 with 1 Axes>" in rendered
+    # Image base64 is still dropped.
+    assert "iVBORw0KGgo" not in rendered
+
+
 def test_image_png_display_data_is_omitted(tmp_path):
     nb = _minimal_nb_with_cells(
         [
