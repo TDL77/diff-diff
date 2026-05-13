@@ -5923,10 +5923,24 @@ def _compute_path_effects(
       ``U_l_path`` is the per-group IF with switcher contributions zeroed
       for groups not in the path (control contributions and cohort
       structure unchanged).
-    - Plug-in SE via ``_plugin_se(U_centered_path, divisor=N_l_path)``
-      after cohort-recentering with the ORIGINAL cohort structure. This
-      mirrors how joiners_se / leavers_se use their respective counts as
-      the divisor and preserve the full cohort structure.
+    - SE depends on ``obs_survey_info``:
+
+      * Non-survey (``obs_survey_info is None``): plug-in SE via
+        ``_plugin_se(U_centered_path, divisor=N_l_path)`` after cohort-
+        recentering with the ORIGINAL cohort structure. This mirrors how
+        joiners_se / leavers_se use their respective counts as the
+        divisor and preserve the full cohort structure.
+      * Survey (``obs_survey_info is not None``): the path-restricted
+        per-period IF is built and routed through
+        ``_survey_se_from_group_if`` (analytical Binder TSL with the
+        cell-period allocator; replicate-weight designs use the same
+        cell allocator unconditionally). Under replicate weights every
+        per-(path, l) fit appends ``n_valid`` to
+        ``replicate_n_valid_list`` so the final ``df_survey`` reflects
+        all per-path fits; the post-call ``_refresh_path_inference``
+        re-runs ``safe_inference`` on every populated entry so the
+        stored ``t_stat`` / ``p_value`` / ``conf_int`` use the final
+        ``df_survey`` rather than the compute-time snapshot.
 
     Returns an empty dict ``{}`` when ``by_path`` was requested but no
     switcher group has a complete ``[F_g - 1, F_g - 1 + L_max]`` window
@@ -6286,9 +6300,20 @@ def _compute_path_placebos(
     and cohort-id pipeline but loops over backward horizons (lag
     ``l = 1..L_max``) using ``_compute_per_group_if_placebo_horizon``
     with the new ``switcher_subset_mask`` parameter to zero out switcher
-    contributions for groups not in the selected path. SE is the
-    cohort-recentered plug-in with path-specific divisor
-    ``N^{pl}_{l, path}`` (joiners/leavers IF precedent applied backward).
+    contributions for groups not in the selected path. SE depends on
+    ``obs_survey_info`` exactly like ``_compute_path_effects``:
+
+    * Non-survey: cohort-recentered plug-in with path-specific divisor
+      ``N^{pl}_{l, path}`` (joiners/leavers IF precedent applied
+      backward).
+    * Survey: the path-restricted per-period IF is routed through
+      ``_survey_se_from_group_if`` (analytical Binder TSL cell-period
+      allocator; replicate-weight designs use the cell allocator
+      unconditionally). Under replicate weights, every per-(path, lag)
+      fit appends ``n_valid`` to ``replicate_n_valid_list``, and the
+      shared post-call ``_refresh_path_inference`` re-runs
+      ``safe_inference`` on every populated entry so the stored
+      inference fields use the final ``df_survey``.
 
     Inner-dict keys are **negative** ints (-l for lag l) to match the
     overall ``placebo_event_study`` convention, so a unified
