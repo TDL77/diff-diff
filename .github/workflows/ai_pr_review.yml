@@ -278,40 +278,53 @@ jobs:
               # PR that touches many tutorials could still concatenate well
               # past the Codex prompt budget once the unified diff,
               # REGISTRY, PR title/body, and previous-review block are
-              # added. Cap aggregate prose at 800000 chars (~200K tokens);
-              # if exceeded, stop appending and emit a truncation marker
-              # explaining which notebooks were omitted.
+              # added. Cap aggregate prose at 800000 chars (~200K tokens) as
+              # a HARD bound: pre-extract each candidate to a temp file,
+              # test current+candidate against the cap, and append only if
+              # the sum stays within budget. Omitted notebooks are tracked
+              # in a bash array (NOT a space-delimited string) so paths
+              # containing spaces / glob chars survive the truncation
+              # marker iteration with their literal content intact.
               AGGREGATE_CAP=800000
               NB_TRUNCATED=false
-              NB_OMITTED=""
+              NB_OMITTED=()
               while IFS= read -r -d '' nb; do
                 if [ -f "$nb" ]; then
-                  CURRENT_SIZE=$(wc -c < /tmp/notebook-prose.md 2>/dev/null || echo 0)
-                  if [ "$CURRENT_SIZE" -ge "$AGGREGATE_CAP" ]; then
-                    NB_TRUNCATED=true
-                    NB_OMITTED="$NB_OMITTED $nb"
-                    continue
-                  fi
+                  # Pre-extract candidate; compute CURRENT + CANDIDATE
+                  # sizes BEFORE deciding to append, so we never overshoot
+                  # by a single notebook (~200K) the way a check-before-
+                  # append-without-pre-extract would.
+                  : > /tmp/notebook-candidate.md
                   {
                     echo ""
                     echo "--- $nb ---"
                     python3 /tmp/notebook_md_extract.py --input "$nb" \
                         --max-output-chars 20000 --max-total-chars 200000 \
                       || echo "(extraction failed for $nb)"
-                  } >> /tmp/notebook-prose.md
+                  } > /tmp/notebook-candidate.md
+                  CURRENT_SIZE=$(wc -c < /tmp/notebook-prose.md 2>/dev/null || echo 0)
+                  CANDIDATE_SIZE=$(wc -c < /tmp/notebook-candidate.md 2>/dev/null || echo 0)
+                  if [ "$((CURRENT_SIZE + CANDIDATE_SIZE))" -le "$AGGREGATE_CAP" ]; then
+                    cat /tmp/notebook-candidate.md >> /tmp/notebook-prose.md
+                  else
+                    NB_TRUNCATED=true
+                    NB_OMITTED+=("$nb")
+                  fi
                 fi
               done < <(git --no-pager diff --name-only -z "$BASE_SHA" "$HEAD_SHA" \
                 -- 'docs/tutorials/*.ipynb' 2>/dev/null || true)
+              rm -f /tmp/notebook-candidate.md
               if [ "$NB_TRUNCATED" = "true" ]; then
                 # Append a truncation marker INSIDE the prose file (before
                 # the sanitization pass) so it gets the same close-tag
-                # escaping as the rest of the body.
+                # escaping as the rest of the body. Array iteration with
+                # explicit quoting preserves paths with spaces/glob chars.
                 {
                   echo ""
                   echo "--- AGGREGATE TRUNCATION ---"
                   echo "Aggregate prose cap ($AGGREGATE_CAP chars) reached;"
                   echo "remaining notebooks omitted:"
-                  for omitted in $NB_OMITTED; do
+                  for omitted in "${NB_OMITTED[@]}"; do
                     echo "  - $omitted"
                   done
                 } >> /tmp/notebook-prose.md

@@ -1939,29 +1939,43 @@ class TestWorkflowPromptHardening:
         """The per-notebook `--max-total-chars 200000` cap bounds one
         tutorial, but a PR touching many tutorials could still concatenate
         well past the Codex prompt budget. The steady-state loop MUST
-        enforce an aggregate cap, stop appending once exceeded, and emit
-        an in-prose truncation marker listing omitted notebooks.
+        enforce an aggregate cap as a HARD bound (pre-extract + check
+        CURRENT+CANDIDATE before append, not check-then-append-blindly),
+        stop appending once the sum would exceed the cap, and emit an
+        in-prose truncation marker listing omitted notebooks.
 
-        Locked here per PR #423 R3 P2 ("notebook extraction has no
-        cumulative cap across multi-notebook PRs")."""
+        Locks two regressions:
+          - PR #423 R3 P2 ("notebook extraction has no cumulative cap").
+          - PR #423 R4 P2 ("aggregate cap is soft — checks CURRENT_SIZE
+            BEFORE append-without-pre-extract, can overshoot by ~200K").
+        Also locks PR #423 R4 P3 (NB_OMITTED must use a bash array, not
+        a space-delimited string, so paths with spaces survive intact).
+        """
         assert _SCRIPT_PATH is not None
         repo_root = _SCRIPT_PATH.parent.parent.parent
         wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
         if not wf.exists():
             pytest.skip("workflow not found")
         text = wf.read_text()
-        # Aggregate cap variable must be defined and used in a per-iter
-        # size check before append.
+        # Aggregate cap variable must be defined.
         assert "AGGREGATE_CAP=" in text, (
             "Steady-state branch must define an aggregate prose cap "
             "variable (AGGREGATE_CAP=...) so multi-notebook PRs can't "
             "exceed the Codex prompt budget."
         )
-        # Per-iter size check via wc -c before appending another notebook.
-        assert "wc -c < /tmp/notebook-prose.md" in text, (
-            "Aggregate cap enforcement requires checking the current size "
-            "of /tmp/notebook-prose.md (via `wc -c`) before each append. "
-            "Missing this check means the cap variable is decorative."
+        # HARD bound: pre-extract to a candidate temp file, then check the
+        # sum CURRENT+CANDIDATE against the cap BEFORE deciding to append.
+        # A check-then-append-blindly form can overshoot by ~one notebook.
+        assert "/tmp/notebook-candidate.md" in text, (
+            "Aggregate cap must be HARD-bounded: extract each candidate "
+            "to /tmp/notebook-candidate.md FIRST, then test "
+            "CURRENT+CANDIDATE against the cap. A check-without-pre-"
+            "extract form overshoots by up to one notebook (~200K chars)."
+        )
+        assert "CURRENT_SIZE + CANDIDATE_SIZE" in text, (
+            "Aggregate cap test must compare CURRENT_SIZE + CANDIDATE_SIZE "
+            "to AGGREGATE_CAP. Either operand missing means the cap can "
+            "be overshot."
         )
         # Truncation must be tracked + reported in-prose, not silently
         # discarded.
@@ -1974,6 +1988,23 @@ class TestWorkflowPromptHardening:
             "include an explicit `--- AGGREGATE TRUNCATION ---` marker "
             "listing omitted notebooks; silent omission would recreate "
             "the notebook-blind-spot this PR is meant to close."
+        )
+        # NB_OMITTED must be a bash array (not a space-delimited string)
+        # so paths with spaces / glob chars survive the marker iteration.
+        assert "NB_OMITTED=()" in text, (
+            "NB_OMITTED must be initialized as a bash array (`NB_OMITTED=()`); "
+            "a space-delimited string mangles paths containing spaces or "
+            "glob characters when iterated unquoted."
+        )
+        assert 'NB_OMITTED+=("$nb")' in text, (
+            "Omitted paths must be appended via array push "
+            "(`NB_OMITTED+=(\"$nb\")`) with explicit double-quoting to "
+            "preserve literal path content."
+        )
+        assert '"${NB_OMITTED[@]}"' in text, (
+            "Truncation marker must iterate NB_OMITTED via quoted array "
+            "expansion (`for omitted in \"${NB_OMITTED[@]}\"; do`) to "
+            "survive paths with whitespace."
         )
 
 
