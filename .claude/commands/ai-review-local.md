@@ -111,8 +111,15 @@ This skill does not modify source code files. It may:
 - Create/update review artifacts in `.claude/reviews/` (gitignored)
 - Write temporary files to `/tmp/` (cleaned up in Step 8)
 
-Step 5 makes a single external API call to OpenAI. Step 3b runs a secret scan
-before any data is sent externally.
+Step 5 invokes the chosen backend:
+- **api backend**: single external HTTP call to OpenAI Responses API. Step 3b/3c
+  run the canonical pre-upload secret scan before any data is sent.
+- **codex backend**: spawns `codex exec` as a subprocess, which talks to
+  OpenAI iteratively under a read-only sandbox. The script runs its own
+  recursive sensitive-file + content-secret preflight before invoking codex
+  (aborts unless `--allow-secrets` is passed); the api-backend's Step 3b/3c
+  scans don't apply because Codex's read surface is the whole repo, not just
+  the diff.
 
 ## Instructions
 

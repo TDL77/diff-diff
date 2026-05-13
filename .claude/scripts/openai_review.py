@@ -1,31 +1,44 @@
 #!/usr/bin/env python3
-"""Local AI code review using OpenAI Responses API.
+"""Local AI code review with two backends: Codex CLI (agentic) or OpenAI
+Responses API (single-shot).
 
-Compiles a review prompt from the project's review criteria, methodology registry,
-and code diffs, then sends it to the OpenAI API for structured feedback.
+Compiles a review prompt from the project's review criteria, methodology
+registry, and code diffs, then dispatches to either backend (auto-detected
+or selected via --backend).
 
 Uses only Python stdlib — no external dependencies required.
 
 Skill/Script Contract:
-    This script is called by the /ai-review-local skill (.claude/commands/ai-review-local.md).
-    Responsibilities are divided as follows:
+    This script is called by the /ai-review-local skill
+    (.claude/commands/ai-review-local.md). Responsibilities are divided as
+    follows:
 
     Skill (caller) handles:
     - Git operations: committing changes, generating diffs, determining base branch
-    - Secret scanning: runs canonical patterns BEFORE calling this script
+    - Pre-upload secret scanning for the api backend (Step 3b/3c) — diff
+      content + api-uploaded full files
     - Re-review state: copies previous review file before invoking
     - User interaction: displaying results, offering next steps
     - Cleanup: removing temp files
 
     Script (this file) handles:
+    - Backend resolution: --backend auto|codex|api (auto picks codex if
+      installed + logged in, else api)
     - Prompt compilation: reading criteria, registry, diff; adapting framing
     - Registry section extraction: mapping changed files to REGISTRY.md sections
-    - OpenAI API call: authentication, request, error handling, timeout
+    - Codex preflight (codex backend only): recursive sensitive-file +
+      content-secret scan; aborts unless --allow-secrets is passed
+    - Backend dispatch: subprocess `codex exec` (codex backend) OR HTTP call
+      to OpenAI Responses API (api backend)
     - Output: writing review markdown to --output path
     - Review state: reading/writing review-state.json (finding tracking across rounds)
-    - Cost estimation: token counting and pricing lookup
+    - Cost estimation: token counting and pricing lookup (api backend only;
+      codex doesn't expose token counts)
 
-    The script does NOT perform secret scanning. The skill must scan before calling.
+    The api backend's pre-upload secret scanning is owned by the skill
+    (Step 3b/3c, before this script runs). The codex backend's preflight is
+    owned by this script (it must scan before invoking `codex exec`, which
+    can read any file under --cd).
 """
 
 import argparse
@@ -1202,10 +1215,15 @@ SENSITIVE_FILE_SAFE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 # vendored/generated dirs that often contain test fixtures matching the
 # sensitive-filename or content patterns; including them would bury real
 # matches in noise without adding signal.
+#
+# IMPORTANT: do NOT skip `.claude` here. `.claude/settings.local.json` is
+# explicitly gitignored and a likely place for users to keep API keys / OAuth
+# tokens. Skipping the whole subtree would let those slip past the codex
+# preflight. Only the auto-generated `.claude/reviews/` subpath is excluded
+# from CONTENT scan via `_SCAN_SKIP_CONTENT_PREFIXES` below.
 _SCAN_SKIP_DIRS = frozenset({
     ".git", ".venv", "venv", ".tox", ".eggs", ".pytest_cache", ".mypy_cache",
     "node_modules", "__pycache__", "dist", "build", "target",
-    ".claude",  # local review artifacts (.claude/reviews/) + tooling
 })
 
 # Path prefixes (repo-relative, forward-slash) skipped by the CONTENT scan
@@ -1215,12 +1233,19 @@ _SCAN_SKIP_DIRS = frozenset({
 # positive rate manageable. Real secrets in these locations would also be
 # committed to source control, which is a separate problem the user should
 # notice via code review long before our preflight matters.
+#
+# `.claude/reviews/` is a special case: review artifacts are generated text
+# that may legitimately quote literal secret patterns (from the methodology
+# prompt's example regex). Skip those for content scan but NOT
+# `.claude/settings.local.json` and friends.
 _SCAN_SKIP_CONTENT_PREFIXES = (
     "tests/", "test/", "__tests__/",
     ".github/",
     "docs/",
     "examples/", "example/",
     "fixtures/",
+    ".claude/reviews/",
+    ".claude/paper-review/",  # if present, agent-generated review artifacts
 )
 
 # Canonical secret-content regex — mirrors the patterns in
@@ -1728,7 +1753,13 @@ def _read_file(path: str, label: str) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Run local AI code review via OpenAI Responses API."
+        description=(
+            "Run local AI code review. Two backends: codex (agentic CLI, "
+            "matches CI quality) or api (single-shot OpenAI Responses API). "
+            "Default --backend auto picks codex if installed and logged in, "
+            "else api. Codex backend runs a sensitive-file + content-secret "
+            "preflight before invoking; pass --allow-secrets to override."
+        )
     )
     parser.add_argument(
         "--review-criteria",

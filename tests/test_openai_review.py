@@ -2343,6 +2343,33 @@ class TestSensitiveContentScan:
         )
         assert review_mod._scan_sensitive_content(str(tmp_path)) == []
 
+    def test_dot_claude_settings_local_is_scanned(self, tmp_path, review_mod):
+        """Regression: `.claude/settings.local.json` is gitignored and is a
+        likely place for users to keep API keys / OAuth tokens. The walk
+        must NOT skip the `.claude/` subtree wholesale (an earlier version
+        added it to _SCAN_SKIP_DIRS, which would let those slip past the
+        codex preflight)."""
+        (tmp_path / ".claude").mkdir()
+        (tmp_path / ".claude" / "settings.local.json").write_text(
+            '{"openai_api_key": "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+        )
+        found = review_mod._scan_sensitive_content(str(tmp_path))
+        assert any(
+            "settings.local.json" in p for p in found
+        ), f"Expected settings.local.json to trigger; got: {found}"
+
+    def test_content_scan_skips_dot_claude_reviews(self, tmp_path, review_mod):
+        """`.claude/reviews/` contains agent-generated review markdown that
+        may quote literal secret-pattern strings from the methodology
+        prompt's example regex. Skip those for content scan to avoid false
+        positives — but `.claude/settings.local.json` is NOT skipped (see
+        above)."""
+        (tmp_path / ".claude" / "reviews").mkdir(parents=True)
+        (tmp_path / ".claude" / "reviews" / "local-review-latest.md").write_text(
+            "Example finding: api_key=found in source"
+        )
+        assert review_mod._scan_sensitive_content(str(tmp_path)) == []
+
 
 class TestMainBackendDispatch:
     """Integration tests for main() that drive the codex / api branches and
