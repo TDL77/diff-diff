@@ -260,9 +260,9 @@ jobs:
           # the prompt within input budget. Fail-soft per notebook: a
           # malformed one degrades to a placeholder line rather than killing
           # the AI review job.
+          CHANGED_NB=$(git --no-pager diff --name-only "$BASE_SHA" "$HEAD_SHA" \
+            -- 'docs/tutorials/*.ipynb' 2>/dev/null || true)
           if [ -f /tmp/notebook_md_extract.py ]; then
-            CHANGED_NB=$(git --no-pager diff --name-only "$BASE_SHA" "$HEAD_SHA" \
-              -- 'docs/tutorials/*.ipynb' 2>/dev/null || true)
             if [ -n "$CHANGED_NB" ]; then
               : > /tmp/notebook-prose.md
               while IFS= read -r nb; do
@@ -295,6 +295,27 @@ jobs:
                 echo "</notebook-prose>"
               } >> "$PROMPT"
             fi
+          elif [ -n "$CHANGED_NB" ]; then
+            # Bootstrap-skip path: the trusted extractor does not yet exist
+            # on BASE_SHA (one-shot for the PR that introduces it), but the
+            # PR touches tutorial notebooks. Emit an in-prompt placeholder
+            # so the reviewer knows prose extraction was intentionally
+            # skipped (vs silently absent).
+            {
+              echo ""
+              echo "<notebook-prose untrusted=\"true\">"
+              echo "Tutorial notebook prose extraction was SKIPPED for this run:"
+              echo "the notebook extractor (tools/notebook_md_extract.py) does"
+              echo "not yet exist on BASE_SHA. This is the one-shot bootstrap"
+              echo "state for the PR that introduces the extractor;"
+              echo "subsequent tutorial-touching PRs after that PR merges will"
+              echo "see full prose."
+              echo ""
+              echo "Changed tutorial files (raw .ipynb JSON is excluded from"
+              echo "the unified diff above; review the diff directly if needed):"
+              printf '%s\n' "$CHANGED_NB"
+              echo "</notebook-prose>"
+            } >> "$PROMPT"
           fi
 
       - name: Run Codex

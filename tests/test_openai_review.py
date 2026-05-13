@@ -1754,6 +1754,33 @@ class TestWorkflowPromptHardening:
         assert "&lt;/pr-body&gt;" in text
         assert "&lt;/previous-ai-review-output&gt;" in text
 
+    def test_workflow_wraps_notebook_prose_with_untrusted_attr(self):
+        """Tutorial notebook prose extracted from changed .ipynb files is
+        PR-controlled and must be wrapped in <notebook-prose untrusted="true">
+        — same pattern as <pr-title>/<pr-body>/<previous-ai-review-output>."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
+        if not wf.exists():
+            pytest.skip("workflow not found")
+        text = wf.read_text()
+        # Shell uses backslash-escaped quotes inside the YAML literal block.
+        assert r'<notebook-prose untrusted=\"true\">' in text
+        assert "</notebook-prose>" in text
+
+    def test_workflow_sanitizes_notebook_prose_closing_tag(self):
+        """Notebook content is PR-controlled — adversarial markdown
+        containing literal </notebook-prose> must be escaped so the
+        wrapper cannot be closed early. Mirrors the pr-body /
+        previous-ai-review-output sanitization."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
+        if not wf.exists():
+            pytest.skip("workflow not found")
+        text = wf.read_text()
+        assert "&lt;/notebook-prose&gt;" in text
+
 
 class TestWorkflowCommentPosting:
     """The workflow has TWO rerun-detection gates that must agree:
