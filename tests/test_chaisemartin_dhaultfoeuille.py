@@ -10574,6 +10574,134 @@ class TestByPathHeterogeneity:
                         f"path={path} l={l_h}: replicate SE non-finite"
                     )
 
+        # Verify the final df_survey is actually USED to refresh the
+        # inference fields on path_heterogeneity_effects (not the
+        # compute-time snapshot). Pick the first finite entry, recompute
+        # safe_inference at the final df, and require the stored fields
+        # to match. Anti-regression for the dedicated refresh loop at
+        # chaisemartin_dhaultfoeuille.py R2 P1b: a regression in that
+        # loop would leave stale t_stat / p_value / conf_int derived
+        # from an earlier (likely larger) df.
+        from diff_diff.utils import safe_inference
+
+        df_final = res.survey_metadata.df_survey
+        checked = False
+        for path, horizons in res.path_heterogeneity_effects.items():
+            for l_h, vals in horizons.items():
+                if vals["n_obs"] >= 3 and np.isfinite(vals["se"]):
+                    expected_t, expected_p, expected_ci = safe_inference(
+                        vals["beta"], vals["se"], df=df_final
+                    )
+                    assert vals["t_stat"] == pytest.approx(
+                        expected_t, rel=1e-12, nan_ok=True
+                    ), (
+                        f"path={path} l={l_h}: t_stat not refreshed at "
+                        f"df={df_final} (have {vals['t_stat']}, expected "
+                        f"{expected_t})"
+                    )
+                    assert vals["p_value"] == pytest.approx(
+                        expected_p, rel=1e-12, nan_ok=True
+                    ), (
+                        f"path={path} l={l_h}: p_value not refreshed at "
+                        f"df={df_final} (have {vals['p_value']}, expected "
+                        f"{expected_p})"
+                    )
+                    assert vals["conf_int"][0] == pytest.approx(
+                        expected_ci[0], rel=1e-12, nan_ok=True
+                    )
+                    assert vals["conf_int"][1] == pytest.approx(
+                        expected_ci[1], rel=1e-12, nan_ok=True
+                    )
+                    checked = True
+                    break
+            if checked:
+                break
+        assert checked, (
+            "Expected at least one finite (path, l) entry to refresh-"
+            "check; fixture is degenerate."
+        )
+
+    @pytest.mark.slow
+    def test_paths_of_interest_heterogeneity_survey_design_analytical(self):
+        """Mirror of the by_path+heterogeneity+survey_design analytical
+        path using paths_of_interest. Anti-regression: the docs claim
+        both selectors compose with heterogeneity under survey_design,
+        but the existing TestByPathHeterogeneity survey tests only
+        exercise by_path=. This test pins the reciprocal selector under
+        analytical Binder TSL.
+        """
+        from diff_diff.survey import SurveyDesign
+
+        df = self._by_path_het_data_with_survey()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        # Three observed paths in the fixture; pick two in non-frequency
+        # order so we can verify selector ordering is preserved.
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 0), (0, 1, 1, 1)],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+                heterogeneity="het_x",
+                survey_design=sd,
+            )
+        assert res.path_heterogeneity_effects, (
+            "paths_of_interest + heterogeneity + survey_design must "
+            "populate path_heterogeneity_effects"
+        )
+        # Selector keys are preserved in the user-specified order
+        # (not frequency-ranked like by_path).
+        keys = list(res.path_heterogeneity_effects.keys())
+        assert keys == [(0, 1, 1, 0), (0, 1, 1, 1)], (
+            f"paths_of_interest order not preserved: got {keys}"
+        )
+        # Every populated (path, l) entry yields finite analytical SE.
+        for path, horizons in res.path_heterogeneity_effects.items():
+            for l_h, vals in horizons.items():
+                if vals["n_obs"] >= 3:
+                    assert np.isfinite(vals["se"]), (
+                        f"path={path} l={l_h}: analytical survey SE "
+                        f"non-finite under paths_of_interest"
+                    )
+
+    @pytest.mark.slow
+    def test_paths_of_interest_heterogeneity_survey_n_bootstrap_gate(self):
+        """The by_path + survey_design + n_bootstrap > 0 gate (PR #408)
+        also fires under paths_of_interest + heterogeneity. Anti-
+        regression: the multiplier-bootstrap-survey gate must apply to
+        both selectors.
+        """
+        from diff_diff.survey import SurveyDesign
+
+        df = self._by_path_het_data_with_survey()
+        sd = SurveyDesign(weights="survey_weights", strata="strata", psu="psu")
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1)],
+            n_bootstrap=10,
+            seed=1,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with pytest.raises(NotImplementedError, match="multiplier"):
+                est.fit(
+                    df,
+                    outcome="outcome",
+                    group="group",
+                    time="period",
+                    treatment="treatment",
+                    L_max=3,
+                    heterogeneity="het_x",
+                    survey_design=sd,
+                )
+
     @pytest.mark.slow
     def test_survey_design_plus_n_bootstrap_with_heterogeneity_still_raises(
         self,
