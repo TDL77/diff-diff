@@ -1381,12 +1381,75 @@ def _scan_sensitive_content(repo_root: str) -> "list[str]":
 
 
 def _preflight_codex_secrets(repo_root: str) -> "list[str]":
-    """Combined preflight: returns unique repo-relative paths flagged by
-    EITHER the filename scan OR the content scan. Empty list = clean repo,
-    safe to invoke codex without `--allow-secrets`."""
+    """Combined REPO-FILE preflight: returns unique repo-relative paths
+    flagged by EITHER the filename scan OR the content scan. Empty list =
+    clean repo, safe to invoke codex (modulo prompt-artifact scan)."""
     return sorted(set(
         _scan_sensitive_files(repo_root) + _scan_sensitive_content(repo_root)
     ))
+
+
+def _scan_prompt_artifacts(
+    diff_text: str,
+    previous_review: "str | None",
+    delta_diff_text: "str | None",
+    changed_files_text: str,
+    delta_changed_files_text: "str | None",
+) -> "list[str]":
+    """Scan the prompt-bound inputs that go into the codex prompt body via
+    stdin. These flow to Codex regardless of what's in the repo, so the
+    repo-file scan alone misses them. Specifically catches:
+
+      - Secret content in the diff body (e.g. a reverted commit that
+        deleted a `.env` — repo is clean now but the diff contains the
+        secret)
+      - Secret content in the previous review (re-review mode: a prior
+        review that quoted a real secret as a finding)
+      - Secret content in the delta-diff body (same as diff)
+      - Sensitive basenames in changed-files / delta-changed-files (e.g.
+        a deleted/renamed `.env` that no longer exists on disk but the
+        change is in the diff)
+
+    Returns a list of synthetic descriptors like "[diff body]" / "[previous
+    review]" / "[changed-files: .env]" — these aren't real paths but render
+    cleanly in the abort message and let users locate the source.
+    """
+    import fnmatch
+
+    findings: "list[str]" = []
+
+    if SECRET_CONTENT_PATTERN.search(diff_text or ""):
+        findings.append("[diff body]")
+    if previous_review and SECRET_CONTENT_PATTERN.search(previous_review):
+        findings.append("[previous review]")
+    if delta_diff_text and SECRET_CONTENT_PATTERN.search(delta_diff_text):
+        findings.append("[delta diff body]")
+
+    # Filename scan over changed-files lists. Each line is a name-status
+    # entry like "M\tfoo.py" or "D\tconfig/.env"; extract the path column.
+    def _scan_changed_files(text: str, label: str) -> None:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split("\t", 1) if "\t" in line else line.split(None, 1)
+            path = parts[1] if len(parts) > 1 else parts[0]
+            basename_lc = os.path.basename(path).lower()
+            if any(
+                basename_lc.endswith(suffix)
+                for suffix in SENSITIVE_FILE_SAFE_SUFFIXES
+            ):
+                continue
+            for pat in SENSITIVE_FILE_PATTERNS:
+                if fnmatch.fnmatch(basename_lc, pat):
+                    findings.append(f"[{label}: {path}]")
+                    break
+
+    _scan_changed_files(changed_files_text or "", "changed-files")
+    if delta_changed_files_text:
+        _scan_changed_files(delta_changed_files_text, "delta-changed-files")
+
+    return findings
 
 
 def _print_sensitive_warning(
@@ -2240,10 +2303,28 @@ def main() -> None:
 
     if backend == "codex":
         codex_repo_root = args.repo_root or os.getcwd()
-        sensitive = _preflight_codex_secrets(codex_repo_root)
-        if sensitive:
+        # Two preflight layers — both must be clean (or --allow-secrets):
+        #  1. Repo-file scan: catches secrets reachable via Codex's --cd
+        #     read surface, even if not in the prompt
+        #  2. Prompt-artifact scan: catches secrets in the diff body,
+        #     previous review, or changed-files list — these go to Codex
+        #     via stdin regardless of what's in the repo (e.g. a reverted
+        #     commit deleting a .env shows the secret in the diff body
+        #     but the repo is clean)
+        sensitive_files = _preflight_codex_secrets(codex_repo_root)
+        sensitive_prompt = _scan_prompt_artifacts(
+            diff_text=diff_text,
+            previous_review=previous_review,
+            delta_diff_text=delta_diff_text,
+            changed_files_text=changed_files_text,
+            delta_changed_files_text=delta_changed_files_text,
+        )
+        all_sensitive = sensitive_files + sensitive_prompt
+        if all_sensitive:
             _print_sensitive_warning(
-                codex_repo_root, sensitive, abort=not args.allow_secrets
+                codex_repo_root,
+                all_sensitive,
+                abort=not args.allow_secrets,
             )
             if not args.allow_secrets:
                 sys.exit(1)

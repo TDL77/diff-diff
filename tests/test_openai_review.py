@@ -2346,6 +2346,94 @@ class TestSensitiveContentScan:
         result = review_mod._preflight_codex_secrets(str(tmp_path))
         assert result.count(".env") == 1
 
+
+class TestScanPromptArtifacts:
+    """`_scan_prompt_artifacts` covers secrets that go to Codex via the
+    prompt body (stdin), not the repo file system. Catches:
+      - Secrets in diff body (e.g. reverted .env deletion)
+      - Secrets in previous review (re-review mode)
+      - Secrets in delta-diff body
+      - Sensitive basenames in changed-files / delta-changed-files lists"""
+
+    def test_diff_body_secret_flagged(self, review_mod):
+        diff = (
+            "diff --git a/notes b/notes\n"
+            "@@ -0,0 +1 @@\n"
+            "+AKIAIOSFODNN7EXAMPLE\n"
+        )
+        result = review_mod._scan_prompt_artifacts(
+            diff_text=diff,
+            previous_review=None,
+            delta_diff_text=None,
+            changed_files_text="A\tnotes",
+            delta_changed_files_text=None,
+        )
+        assert "[diff body]" in result
+
+    def test_previous_review_secret_flagged(self, review_mod):
+        prior = "Found AKIAIOSFODNN7EXAMPLE in line 4 of config.py"
+        result = review_mod._scan_prompt_artifacts(
+            diff_text="",
+            previous_review=prior,
+            delta_diff_text=None,
+            changed_files_text="",
+            delta_changed_files_text=None,
+        )
+        assert "[previous review]" in result
+
+    def test_delta_diff_body_secret_flagged(self, review_mod):
+        delta = "+ password = 'hunter2'\n"
+        result = review_mod._scan_prompt_artifacts(
+            diff_text="",
+            previous_review=None,
+            delta_diff_text=delta,
+            changed_files_text="",
+            delta_changed_files_text=None,
+        )
+        assert "[delta diff body]" in result
+
+    def test_changed_files_sensitive_basename_flagged(self, review_mod):
+        """A deleted/renamed `.env` shows up in the file-status list even if
+        not on disk anymore. Must still abort."""
+        result = review_mod._scan_prompt_artifacts(
+            diff_text="",
+            previous_review=None,
+            delta_diff_text=None,
+            changed_files_text="D\tconfig/.env\nM\tfoo.py",
+            delta_changed_files_text=None,
+        )
+        assert any(".env" in r for r in result)
+
+    def test_changed_files_case_insensitive(self, review_mod):
+        result = review_mod._scan_prompt_artifacts(
+            diff_text="",
+            previous_review=None,
+            delta_diff_text=None,
+            changed_files_text="D\tconfig/.ENV",
+            delta_changed_files_text=None,
+        )
+        assert any(".ENV" in r for r in result)
+
+    def test_changed_files_skips_safe_variants(self, review_mod):
+        result = review_mod._scan_prompt_artifacts(
+            diff_text="",
+            previous_review=None,
+            delta_diff_text=None,
+            changed_files_text="A\t.env.example\nA\t.env.template",
+            delta_changed_files_text=None,
+        )
+        assert result == []
+
+    def test_clean_inputs_return_empty(self, review_mod):
+        result = review_mod._scan_prompt_artifacts(
+            diff_text="--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-x\n+y\n",
+            previous_review="No findings.",
+            delta_diff_text=None,
+            changed_files_text="M\tfoo.py",
+            delta_changed_files_text=None,
+        )
+        assert result == []
+
     def test_content_scan_skips_tests_dir(self, tmp_path, review_mod):
         """Test files commonly contain literal pattern matches as fixtures
         for the secret-detection regex itself; content scan must skip them.
@@ -2702,6 +2790,79 @@ class TestMainCodexSecretGate:
         captured = capsys.readouterr()
         assert "ABORT" not in captured.err
         assert "WARNING" not in captured.err
+        assert gate_env["codex_calls"]["called"]
+
+    def test_aborts_on_secret_in_previous_review(
+        self, gate_env, review_mod, capsys
+    ):
+        """Re-review mode: if prior review contains a secret, the prompt
+        carries it to Codex via stdin even with a clean repo. Must abort."""
+        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
+        # Stage a previous-review file that contains a secret
+        prev = gate_env["tmp_path"] / "prev.md"
+        prev.write_text("Found AKIAIOSFODNN7EXAMPLE in line 4")
+        with pytest.raises(SystemExit) as exc:
+            self._run(gate_env, review_mod, previous_review=str(prev))
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "ABORT" in captured.err
+        assert "[previous review]" in captured.err
+        assert not gate_env["codex_calls"]["called"]
+
+    def test_aborts_on_secret_in_diff_body_clean_repo(
+        self, gate_env, review_mod, capsys
+    ):
+        """Reverted commit deleting `.env`: diff body has the secret, repo
+        is now clean. Must abort."""
+        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
+        # Overwrite the diff with one that contains a secret
+        gate_env["diff"].write_text(
+            "diff --git a/.env b/.env\n"
+            "deleted file mode 100644\n"
+            "index abc..0000000\n"
+            "--- a/.env\n"
+            "+++ /dev/null\n"
+            "@@ -1 +0,0 @@\n"
+            "-AKIAIOSFODNN7EXAMPLE\n"
+        )
+        with pytest.raises(SystemExit) as exc:
+            self._run(gate_env, review_mod)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "ABORT" in captured.err
+        assert "[diff body]" in captured.err
+        assert not gate_env["codex_calls"]["called"]
+
+    def test_aborts_on_sensitive_filename_in_changed_files(
+        self, gate_env, review_mod, capsys
+    ):
+        """Deleted `.env` shows up in changed-files list even if not on
+        disk. Must abort."""
+        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
+        gate_env["files"].write_text("D\tconfig/.env\nM\tfoo.py\n")
+        with pytest.raises(SystemExit) as exc:
+            self._run(gate_env, review_mod)
+        assert exc.value.code == 1
+        captured = capsys.readouterr()
+        assert "ABORT" in captured.err
+        assert ".env" in captured.err
+        assert not gate_env["codex_calls"]["called"]
+
+    def test_allow_secrets_overrides_prompt_artifact_gate(
+        self, gate_env, review_mod, capsys
+    ):
+        """--allow-secrets bypass also covers prompt-artifact findings."""
+        (gate_env["tmp_path"] / "README.md").write_text("# clean repo")
+        prev = gate_env["tmp_path"] / "prev.md"
+        prev.write_text("Found AKIAIOSFODNN7EXAMPLE in line 4")
+        self._run(
+            gate_env, review_mod,
+            previous_review=str(prev),
+            allow_secrets=True,
+        )
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert "ABORT" not in captured.err
         assert gate_env["codex_calls"]["called"]
 
 

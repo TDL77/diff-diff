@@ -37,8 +37,9 @@ Notes:
 - `--context` and `--token-budget` are ignored under the codex backend (Codex
   chooses what to load on its own); the script warns if you pass them.
 - **Surface area + abort-by-default**: under the codex backend, Codex can read
-  any file under the repo root via `--cd`, not just the staged diff. Before
-  invoking codex, the script runs a recursive preflight scan with TWO checks:
+  any file under the repo root via `--cd`, AND consumes the compiled prompt
+  (criteria + diff + previous review + changed-files list) via stdin. Before
+  invoking codex, the script runs a preflight scan with TWO layers:
 
   1. **Filename patterns**: `.env`, `.env.local`, `id_rsa`, `*.pem`, `*.key`,
      `secrets.{yml,yaml,json}`, `.netrc`, `.npmrc`, `.pypirc`, etc. Safe
@@ -67,7 +68,19 @@ Notes:
   filenames are still scanned. Both scans include gitignored files —
   gitignored `.env` files are exactly what we want to catch.
 
-  If either scan finds matches, codex is **NOT invoked** and the script
+  Layer 2 — **prompt-artifact scan**: applies the same content secret-regex
+  to the diff body, the optional delta-diff body, and the previous-review
+  text (re-review mode), and applies the filename pattern set to entries
+  in the changed-files list / delta-changed-files list. Catches secrets
+  that go to Codex via stdin even when the repo on disk is clean — for
+  example a reverted commit deleting a `.env` (the diff body still
+  contains the secret), or a deleted/renamed sensitive file that no longer
+  exists but appears in the file-status list.
+
+  All matching is case-insensitive (Linux + CI are case-sensitive
+  filesystems where `.ENV` would otherwise slip past `.env`).
+
+  If EITHER layer finds matches, codex is **NOT invoked** and the script
   exits 1 unless you pass `--allow-secrets` to acknowledge the surface.
   This is enforcement, not just a warning.
 
