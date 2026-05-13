@@ -2008,6 +2008,72 @@ class TestWorkflowPromptHardening:
         )
 
 
+class TestRustTestWorkflowPathFilter:
+    """The hardening tests in TestWorkflowPromptHardening +
+    TestAdaptReviewCriteria + TestWorkflowContract validate three
+    AI-review surfaces:
+      - `.github/workflows/ai_pr_review.yml`
+      - `.github/codex/prompts/pr_review.md`
+      - `.claude/scripts/openai_review.py`
+
+    But the CI workflow that ACTUALLY runs them (`rust-test.yml`) only
+    triggers on the changed files in its `paths:` filter. Without those
+    three surfaces in the filter, a workflow-only or prompt-only edit
+    silently bypasses the test suite — exactly the gap a hardening test
+    should NOT have.
+
+    Locks the regression that surfaced as PR #423 R7 P3
+    ("workflow path filters don't include the AI-review surfaces; future
+    workflow/prompt-only regressions can bypass the test suite")."""
+
+    REQUIRED_PATHS = (
+        ".github/workflows/ai_pr_review.yml",
+        ".github/codex/prompts/pr_review.md",
+        ".claude/scripts/openai_review.py",
+    )
+
+    @pytest.fixture(scope="class")
+    def workflow_paths(self):
+        if _SCRIPT_PATH is None:
+            pytest.skip("Could not resolve script path")
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        wf = repo_root / ".github" / "workflows" / "rust-test.yml"
+        if not wf.exists():
+            pytest.skip("rust-test.yml not found")
+        text = wf.read_text()
+
+        # Extract the `push.paths:` and `pull_request.paths:` lists.
+        # Both must contain each REQUIRED_PATHS entry — a future edit that
+        # removes from one and not the other would still bypass tests on
+        # one of the two trigger paths.
+        push_section = text.split("push:", 1)[1].split("pull_request:", 1)[0]
+        pr_section = text.split("pull_request:", 1)[1]
+        return push_section, pr_section
+
+    def test_rust_test_yml_push_filter_covers_ai_review_surfaces(self, workflow_paths):
+        push_section, _ = workflow_paths
+        for path in self.REQUIRED_PATHS:
+            assert path in push_section, (
+                f"rust-test.yml `push.paths:` filter must include "
+                f"{path!r} so a workflow-only / prompt-only / script-only "
+                f"edit triggers the hardening test suite that covers it. "
+                f"Missing this path means TestWorkflowPromptHardening / "
+                f"TestAdaptReviewCriteria / TestWorkflowContract can't "
+                f"catch regressions on this surface."
+            )
+
+    def test_rust_test_yml_pr_filter_covers_ai_review_surfaces(self, workflow_paths):
+        _, pr_section = workflow_paths
+        for path in self.REQUIRED_PATHS:
+            assert path in pr_section, (
+                f"rust-test.yml `pull_request.paths:` filter must include "
+                f"{path!r} (same rationale as push.paths). PR-level "
+                f"coverage matters most: a PR that ONLY edits the workflow "
+                f"or prompt would skip the hardening tests entirely."
+            )
+
+
 class TestWorkflowCommentPosting:
     """The workflow has TWO rerun-detection gates that must agree:
       1. YAML `IS_RERUN` env in the prompt-build step — controls whether

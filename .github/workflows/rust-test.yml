@@ -13,6 +13,15 @@ on:
       - 'tools/**'
       - 'pyproject.toml'
       - '.github/workflows/rust-test.yml'
+      # The AI-review surfaces below are tested by
+      # tests/test_openai_review.py (TestWorkflowPromptHardening,
+      # TestAdaptReviewCriteria, etc.). Without these path filters, a
+      # workflow-only or prompt-only edit would bypass the hardening
+      # suite that's specifically designed to catch regressions on these
+      # files. Locked by TestRustTestWorkflowPathFilter.
+      - '.github/workflows/ai_pr_review.yml'
+      - '.github/codex/prompts/pr_review.md'
+      - '.claude/scripts/openai_review.py'
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled]
@@ -24,6 +33,9 @@ on:
       - 'tools/**'
       - 'pyproject.toml'
       - '.github/workflows/rust-test.yml'
+      - '.github/workflows/ai_pr_review.yml'
+      - '.github/codex/prompts/pr_review.md'
+      - '.claude/scripts/openai_review.py'
 
 permissions:
   contents: read
