@@ -1835,6 +1835,217 @@ class TestWorkflowCommentPosting:
             )
 
 
+class TestBackendDetection:
+    """`_detect_backend` resolves the user-requested backend ('auto', 'codex',
+    'api') against installed-codex + auth-file presence. Uses monkeypatch on
+    the loaded review_mod's shutil.which + an inert CODEX_AUTH_PATH."""
+
+    @pytest.fixture
+    def patched(self, monkeypatch, tmp_path, review_mod):
+        """Provide controllable codex-on-PATH and auth.json-exists state."""
+        fake_auth = tmp_path / "auth.json"
+        monkeypatch.setattr(review_mod, "CODEX_AUTH_PATH", str(fake_auth))
+        return {"auth": fake_auth, "monkeypatch": monkeypatch, "mod": review_mod}
+
+    def _set_codex_present(self, patched, present: bool):
+        patched["monkeypatch"].setattr(
+            patched["mod"].shutil,
+            "which",
+            lambda cmd: "/fake/path/codex" if (cmd == "codex" and present) else None,
+        )
+
+    def test_auto_with_codex_and_auth(self, patched, review_mod):
+        self._set_codex_present(patched, True)
+        patched["auth"].write_text("{}")
+        assert review_mod._detect_backend("auto") == "codex"
+
+    def test_auto_no_codex(self, patched, review_mod):
+        self._set_codex_present(patched, False)
+        patched["auth"].write_text("{}")
+        assert review_mod._detect_backend("auto") == "api"
+
+    def test_auto_no_auth(self, patched, review_mod):
+        self._set_codex_present(patched, True)
+        # Don't create auth.json
+        assert review_mod._detect_backend("auto") == "api"
+
+    def test_explicit_codex(self, patched, review_mod):
+        self._set_codex_present(patched, True)
+        # auth.json existence is NOT checked when explicitly requested
+        assert review_mod._detect_backend("codex") == "codex"
+
+    def test_explicit_api(self, patched, review_mod):
+        self._set_codex_present(patched, True)
+        patched["auth"].write_text("{}")
+        # Even with codex available, explicit api wins
+        assert review_mod._detect_backend("api") == "api"
+
+    def test_explicit_codex_errors_when_codex_missing(self, patched, review_mod):
+        self._set_codex_present(patched, False)
+        with pytest.raises(RuntimeError, match="codex.*not installed"):
+            review_mod._detect_backend("codex")
+
+
+class TestBuildCodexCmd:
+    """`_build_codex_cmd` constructs the argv for `codex exec`. The literal
+    config-key tokens are pinned because Codex silently ignores unknown `-c`
+    keys (verified against codex 0.130.0); a typo here ships a backend that
+    runs at default effort while claiming CI parity."""
+
+    def test_argv_structure(self, review_mod):
+        cmd = review_mod._build_codex_cmd(
+            model="gpt-5.4", repo_root="/repo", output_path="/tmp/out.md"
+        )
+        assert cmd[0] == "codex"
+        assert cmd[1] == "exec"
+
+    def test_pins_model(self, review_mod):
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/r", "/o")
+        i = cmd.index("--model")
+        assert cmd[i + 1] == "gpt-5.4"
+
+    def test_pins_sandbox_read_only(self, review_mod):
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/r", "/o")
+        i = cmd.index("--sandbox")
+        assert cmd[i + 1] == "read-only"
+
+    def test_pins_reasoning_xhigh_with_correct_key(self, review_mod):
+        """The literal token `model_reasoning_effort=xhigh` must appear in
+        argv. Codex silently ignores unknown -c keys, so a typo (e.g.
+        `reasoning_effort=xhigh`) would produce a backend running at default
+        effort while claiming CI parity. Pin the full token to catch this."""
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/r", "/o")
+        assert "model_reasoning_effort=xhigh" in cmd
+
+    def test_passes_repo_root_to_cd(self, review_mod):
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/the/repo", "/o")
+        i = cmd.index("--cd")
+        assert cmd[i + 1] == "/the/repo"
+
+    def test_passes_output_path(self, review_mod):
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/r", "/the/out.md")
+        i = cmd.index("-o")
+        assert cmd[i + 1] == "/the/out.md"
+
+    def test_no_positional_prompt_in_argv(self, review_mod):
+        """Prompt must be passed via stdin, never positional. The argv must
+        end at the last flag pair — no trailing positional."""
+        cmd = review_mod._build_codex_cmd("gpt-5.4", "/r", "/o")
+        assert cmd[-2:] == ["-o", "/o"]
+
+
+class TestCallCodex:
+    """`call_codex` invokes the codex subprocess, streams stderr, and reads
+    the output file. Subprocess + file IO are mocked."""
+
+    @pytest.fixture
+    def fake_subprocess(self, monkeypatch, tmp_path, review_mod):
+        """Replace subprocess.Popen with a recorder that simulates a
+        successful codex run by writing canned content to the -o path."""
+        captured = {}
+
+        class FakeStdin:
+            def write(self, x):
+                captured["stdin"] = captured.get("stdin", "") + x
+
+            def close(self):
+                pass
+
+        class FakePopen:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                captured["kwargs"] = kwargs
+                # Find -o path in argv and write canned output to it
+                if "-o" in cmd:
+                    out_path = cmd[cmd.index("-o") + 1]
+                    with open(out_path, "w") as f:
+                        f.write(captured.get("output", "## Review\n\n✅ Looks good"))
+                self.returncode = captured.get("returncode", 0)
+                self.stdin = FakeStdin()
+                # Inert pipes — _tee thread reads empty
+                import io as _io
+                self.stdout = _io.StringIO("")
+                self.stderr = _io.StringIO(captured.get("stderr_text", ""))
+
+            def wait(self):
+                return self.returncode
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(review_mod.subprocess, "Popen", FakePopen)
+        return captured
+
+    def test_command_construction_e2e(self, review_mod, fake_subprocess):
+        review_mod.call_codex("prompt content", "gpt-5.4", "/r")
+        cmd = fake_subprocess["cmd"]
+        assert cmd[0] == "codex"
+        assert cmd[1] == "exec"
+        assert "model_reasoning_effort=xhigh" in cmd
+
+    def test_passes_prompt_via_stdin(self, review_mod, fake_subprocess):
+        review_mod.call_codex("hello prompt", "gpt-5.4", "/r")
+        # Captured stdin in fake — verify the prompt was written
+        stdin_kwargs = fake_subprocess["kwargs"].get("stdin")
+        # subprocess.PIPE must be requested (so stdin is a real pipe)
+        import subprocess as _sp
+        assert stdin_kwargs == _sp.PIPE
+
+    def test_reads_output_file(self, review_mod, fake_subprocess):
+        fake_subprocess["output"] = "## Custom Review\n\nP1: foo"
+        content, usage = review_mod.call_codex("p", "gpt-5.4", "/r")
+        assert content == "## Custom Review\n\nP1: foo"
+
+    def test_returns_codex_backend_in_usage(self, review_mod, fake_subprocess):
+        _, usage = review_mod.call_codex("p", "gpt-5.4", "/r")
+        assert usage["backend"] == "codex"
+        assert usage["input_tokens"] is None
+        assert usage["output_tokens"] is None
+
+    def test_nonzero_exit_raises_with_stderr(self, review_mod, fake_subprocess):
+        fake_subprocess["returncode"] = 1
+        fake_subprocess["stderr_text"] = "auth failure: token expired\n"
+        with pytest.raises(RuntimeError, match="codex exec failed"):
+            review_mod.call_codex("p", "gpt-5.4", "/r")
+
+    def test_empty_output_file_raises(self, review_mod, fake_subprocess):
+        fake_subprocess["output"] = ""
+        with pytest.raises(RuntimeError, match="produced no output"):
+            review_mod.call_codex("p", "gpt-5.4", "/r")
+
+
+class TestCodexBackendDocConsistency:
+    """The skill doc must enumerate the backend choices that the script
+    actually accepts, and explain the codex install + auth requirement."""
+
+    def test_skill_doc_mentions_backend_flag(self):
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc.read_text()
+        assert "--backend" in text
+        # All three values must be documented
+        assert "auto" in text
+        assert "codex" in text
+        assert "api" in text
+
+    def test_skill_doc_mentions_codex_install(self):
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc.read_text()
+        # Either install command must be documented
+        assert "brew install --cask codex" in text or "@openai/codex" in text
+        assert "codex login" in text
+
+
 class TestExtractResponseText:
     def test_prefers_output_text_field(self, review_mod):
         result = {"output_text": "Direct text.", "output": []}

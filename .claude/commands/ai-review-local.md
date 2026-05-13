@@ -1,35 +1,74 @@
 ---
-description: Run AI code review locally using OpenAI API before opening a PR
-argument-hint: "[--context minimal|standard|deep] [--include-files <files>] [--token-budget <n>] [--force-fresh] [--full-registry] [--model <model>] [--timeout <seconds>] [--dry-run]"
+description: Run AI code review locally using Codex CLI or OpenAI API before opening a PR
+argument-hint: "[--backend auto|codex|api] [--context minimal|standard|deep] [--include-files <files>] [--token-budget <n>] [--force-fresh] [--full-registry] [--model <model>] [--timeout <seconds>] [--dry-run]"
 ---
 
 # Local AI Code Review
 
-Run a structured code review using the OpenAI Responses API. Reviews changes
+Run a structured code review using either the **Codex CLI** (agentic, matches CI
+quality) or the **OpenAI Responses API** (single-shot, faster). Reviews changes
 against the same methodology criteria used by the CI reviewer, but adapted for local
 pre-PR use. Designed for iterative review/revision cycles before submitting a PR.
+
+## Backend selection
+
+Two backends are supported:
+
+| Backend | Latency | Cost | Quality |
+|---|---|---|---|
+| `api` (`gpt-5.4`) | 30-60s | $0.05-0.50/run, metered via `OPENAI_API_KEY` | Single-shot — won't grep, can't load files on its own initiative |
+| `codex` (any auth) | 3-15 min | depends on your `codex login` mode (subscription vs API key) — see codex docs | Agentic — matches CI Codex reviewer, can grep / load files / multi-turn |
+
+Choose with `--backend {auto,codex,api}` (default `auto`):
+
+- **`auto`**: pick `codex` if the `codex` CLI is installed AND `~/.codex/auth.json`
+  exists (i.e. `codex login` has been completed); otherwise fall back to `api`.
+- **`codex`**: requires `codex` CLI installed (`brew install --cask codex` or
+  `npm install -g @openai/codex`) and `codex login` completed.
+- **`api`**: requires `OPENAI_API_KEY` env var. Fast iteration mode.
+
+Notes:
+- `codex` uses `--sandbox read-only`, which permits shell command execution
+  (`rg`, `grep`, `git diff`) inside Codex's agentic loop — the "read-only" name
+  refers to filesystem writes and network access, not shell exec. This is what
+  enables the agentic audits.
+- Long Codex runs (3-15 min) can be cancelled with CTRL-C; the partial output is
+  cleaned up automatically.
+- `--context` and `--token-budget` are ignored under the codex backend (Codex
+  chooses what to load on its own); the script warns if you pass them.
 
 ## Arguments
 
 `$ARGUMENTS` may contain optional flags:
-- `--context {minimal,standard,deep}`: Context depth (default: `standard`)
+- `--backend {auto,codex,api}`: Reviewer backend (default: `auto`). See above.
+- `--context {minimal,standard,deep}`: Context depth (default: `standard`).
+  *Api backend only.*
   - `minimal`: Diff only (original behavior)
   - `standard`: Diff + full contents of changed `diff_diff/` source files
   - `deep`: Standard + import-graph expansion (files imported by changed files)
 - `--include-files <file1,file2,...>`: Extra files to include as read-only context
-  (filenames resolve under `diff_diff/`, or use paths relative to repo root)
+  (filenames resolve under `diff_diff/`, or use paths relative to repo root).
+  *Api backend only.*
 - `--token-budget <n>`: Max estimated input tokens before dropping import-context
   files (default: 200000). Changed source files are always included regardless of budget.
+  *Api backend only.*
 - `--force-fresh`: Skip delta-diff mode, run a full fresh review even if previous state exists
 - `--full-registry`: Include the entire REGISTRY.md instead of selective sections
-- `--model <name>`: Override the OpenAI model (default: `gpt-5.4`)
-- `--timeout <seconds>`: HTTP request timeout. If omitted, defaults to 900 for reasoning models (gpt-5.4, *-pro, o1/o3/o4) and 300 otherwise.
+- `--model <name>`: Override the model (default: `gpt-5.4`). Applies to both backends.
+- `--timeout <seconds>`: HTTP request timeout. If omitted, defaults to 900 for reasoning models (gpt-5.4, *-pro, o1/o3/o4) and 300 otherwise. *Api backend only.*
 - `--dry-run`: Print the compiled prompt without calling the API
 
-**Reasoning models** (`gpt-5.4-pro`, `o3`, `o4-mini`, etc.): Reviews may take 10-15
-minutes. For deep reviews with reasoning models, combine `--token-budget` with `--model`:
+**Reasoning models** (`gpt-5.4-pro`, `o3`, `o4-mini`, etc.) on the api backend:
+Reviews may take 10-15 minutes. For deep reviews with reasoning models, combine
+`--token-budget` with `--model`:
 ```
-/ai-review-local --model gpt-5.4-pro --token-budget 500000 --context deep
+/ai-review-local --backend api --model gpt-5.4-pro --token-budget 500000 --context deep
+```
+
+**Codex backend** for CI-quality review:
+```
+/ai-review-local --backend codex
+# or just `/ai-review-local` if codex is installed + logged in (auto-detects)
 ```
 
 ## Constraints
@@ -55,21 +94,36 @@ requires no arguments.
 Run these checks in parallel:
 
 ```bash
-# Check API key is set (never echo/log the actual value)
+# Check api-backend key is set (only required if backend resolves to api)
 test -n "$OPENAI_API_KEY" && echo "API key: set" || echo "API key: MISSING"
+
+# Check codex backend availability (auto-detect)
+which codex >/dev/null 2>&1 && test -f ~/.codex/auth.json \
+  && echo "Codex: installed + logged in" \
+  || echo "Codex: not available (install + run 'codex login' to enable)"
 
 # Check script exists
 test -f .claude/scripts/openai_review.py && echo "Script: found" || echo "Script: MISSING"
 ```
 
-If the API key is missing (and not `--dry-run`):
-```
-Error: OPENAI_API_KEY is not set.
+The script resolves the backend itself (`auto` picks codex if available, else
+api). The OpenAI API key is only required when the resolved backend is `api`.
 
-To set it up:
-1. Get a key from https://platform.openai.com/api-keys
-2. Add to your shell: echo 'export OPENAI_API_KEY=sk-...' >> ~/.zshrc
-3. Reload: source ~/.zshrc
+If the resolved backend will be `api` (no codex available, or `--backend api`)
+and the key is missing (and not `--dry-run`):
+```
+Error: OPENAI_API_KEY is not set (required for api backend).
+
+Options:
+1. Install + log in to codex (matches CI quality):
+   brew install --cask codex
+   codex login
+   (then run /ai-review-local — auto-detect picks codex)
+
+2. Set up an API key:
+   Get a key from https://platform.openai.com/api-keys
+   echo 'export OPENAI_API_KEY=sk-...' >> ~/.zshrc
+   source ~/.zshrc
 ```
 
 If the script is missing:
@@ -445,17 +499,23 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
 ## Examples
 
 ```bash
-# Standard review of current branch vs main (default: full source file context)
+# Auto-detect backend (codex if installed + logged in, else api). Default flow.
 /ai-review-local
 
-# Review with minimal context (diff only, original behavior)
-/ai-review-local --context minimal
+# Force the agentic codex backend (matches CI quality)
+/ai-review-local --backend codex
 
-# Review with deep context (changed files + imported files)
-/ai-review-local --context deep
+# Force the fast api backend (single-shot, $0.05-0.50/run)
+/ai-review-local --backend api
 
-# Include specific files as extra context
-/ai-review-local --include-files linalg.py,utils.py
+# Api backend, minimal context (diff only)
+/ai-review-local --backend api --context minimal
+
+# Api backend, deep context (changed files + imported files)
+/ai-review-local --backend api --context deep
+
+# Api backend, extra context files
+/ai-review-local --backend api --include-files linalg.py,utils.py
 
 # Preview the compiled prompt without calling the API
 /ai-review-local --dry-run
@@ -463,14 +523,11 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
 # Force a fresh review (ignore previous review state)
 /ai-review-local --force-fresh
 
-# Use a different model with full registry
-/ai-review-local --model gpt-4.1 --full-registry
+# Different model with full registry
+/ai-review-local --backend api --model gpt-4.1 --full-registry
 
-# Deep review with reasoning model (may take 10-15 minutes)
-/ai-review-local --model gpt-5.4-pro --token-budget 500000 --context deep
-
-# Limit token budget for faster/cheaper reviews
-/ai-review-local --token-budget 100000
+# Deep api review with reasoning model (10-15 min)
+/ai-review-local --backend api --model gpt-5.4-pro --token-budget 500000 --context deep
 ```
 
 ## Notes

@@ -31,10 +31,15 @@ Skill/Script Contract:
 import argparse
 import ast
 import datetime
+import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
+import threading
 import urllib.error
 import urllib.request
 
@@ -1148,6 +1153,160 @@ def _resolve_timeout(timeout: "int | None", model: str) -> int:
     return REASONING_TIMEOUT if _is_reasoning_model(model) else DEFAULT_TIMEOUT
 
 
+# ---------------------------------------------------------------------------
+# Backend selection (codex CLI vs OpenAI Responses API)
+# ---------------------------------------------------------------------------
+
+CODEX_AUTH_PATH = os.path.expanduser("~/.codex/auth.json")
+
+
+def _detect_backend(requested: str) -> str:
+    """Resolve the backend to use given the user-requested value.
+
+    `requested` is one of {"auto", "codex", "api"}. Returns "codex" or "api".
+
+    For "auto": pick "codex" iff `codex` is on PATH AND `~/.codex/auth.json`
+    exists (the latter indicates `codex login` has been completed). Otherwise
+    fall back to "api". The auth.json existence check distinguishes "codex
+    installed but never authenticated" from "codex installed and configured";
+    it does NOT distinguish subscription-vs-API-key auth, since both modes
+    write the same file.
+    """
+    if requested == "codex":
+        if shutil.which("codex") is None:
+            raise RuntimeError(
+                "--backend codex requested but `codex` is not installed. "
+                "Install via `brew install --cask codex` or "
+                "`npm install -g @openai/codex`, then run `codex login`."
+            )
+        return "codex"
+    if requested == "api":
+        return "api"
+    # auto
+    if shutil.which("codex") and os.path.exists(CODEX_AUTH_PATH):
+        return "codex"
+    return "api"
+
+
+def _build_codex_cmd(
+    model: str, repo_root: str, output_path: str
+) -> "list[str]":
+    """Construct the argv for `codex exec`.
+
+    Pinned to match the CI Codex action's invocation (gpt-5.4 + xhigh effort +
+    read-only sandbox) so local reviews give CI-equivalent quality.
+
+    NOTE: the effort key MUST be `model_reasoning_effort`, not
+    `reasoning_effort`. Codex silently ignores unknown `-c` keys (verified
+    against codex 0.130.0); the wrong key produces "reasoning effort: none"
+    while the right key produces "reasoning effort: xhigh".
+    """
+    return [
+        "codex",
+        "exec",
+        "--model",
+        model,
+        "-c",
+        "model_reasoning_effort=xhigh",
+        "--sandbox",
+        "read-only",
+        "--cd",
+        repo_root,
+        "-o",
+        output_path,
+    ]
+
+
+def call_codex(
+    prompt: str, model: str, repo_root: str
+) -> "tuple[str, dict]":
+    """Invoke `codex exec` agentically; return (review_markdown, usage_dict).
+
+    Prompt is piped via stdin (avoids ARG_MAX edge cases for compiled prompts
+    that can hit hundreds of KB). Codex writes its final message to a tempfile
+    via `-o`; we read it back and return the content.
+
+    Codex's stderr (session events: file reads, tool calls, progress) is
+    streamed to the user's stderr in real time AND captured for error
+    reporting on non-zero exit. Codex's stdout (when not using --json) is
+    typically empty for `exec`; we forward it to user stderr just in case.
+
+    Raises RuntimeError on non-zero exit or empty output. Cleans up the
+    tempfile in `finally`, including on KeyboardInterrupt (which propagates
+    after best-effort termination).
+    """
+    fd, tmp_path = tempfile.mkstemp(suffix=".md", prefix="codex-review-")
+    os.close(fd)
+    try:
+        cmd = _build_codex_cmd(model, repo_root, tmp_path)
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        # Send prompt via stdin and close so codex sees EOF.
+        assert proc.stdin is not None
+        proc.stdin.write(prompt)
+        proc.stdin.close()
+
+        stderr_buf = io.StringIO()
+
+        def _tee(pipe, also_to=None):
+            for line in iter(pipe.readline, ""):
+                sys.stderr.write(line)
+                sys.stderr.flush()
+                if also_to is not None:
+                    also_to.write(line)
+            pipe.close()
+
+        assert proc.stdout is not None and proc.stderr is not None
+        stdout_thread = threading.Thread(
+            target=_tee, args=(proc.stdout,), daemon=True
+        )
+        stderr_thread = threading.Thread(
+            target=_tee, args=(proc.stderr, stderr_buf), daemon=True
+        )
+        stdout_thread.start()
+        stderr_thread.start()
+
+        try:
+            proc.wait()
+        except KeyboardInterrupt:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+            raise
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
+
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"codex exec failed (exit {proc.returncode}):\n"
+                f"{stderr_buf.getvalue()}"
+            )
+        if not os.path.exists(tmp_path) or os.path.getsize(tmp_path) == 0:
+            raise RuntimeError(
+                f"codex produced no output at {tmp_path}\n"
+                f"stderr:\n{stderr_buf.getvalue()}"
+            )
+        with open(tmp_path) as f:
+            content = f.read()
+        return content, {
+            "backend": "codex",
+            "input_tokens": None,
+            "output_tokens": None,
+        }
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
 def estimate_tokens(text: str) -> int:
     """Rough token estimate (~4 chars per token). May vary +/- 50% for code."""
     return len(text) // 4
@@ -1393,9 +1552,21 @@ def main() -> None:
         type=int,
         default=None,
         help=(
-            f"HTTP request timeout in seconds. If omitted, defaults to "
-            f"{REASONING_TIMEOUT} for reasoning models (gpt-5.4, *-pro, "
-            f"o1/o3/o4) and {DEFAULT_TIMEOUT} otherwise."
+            f"HTTP request timeout in seconds (api backend only). If omitted, "
+            f"defaults to {REASONING_TIMEOUT} for reasoning models (gpt-5.4, "
+            f"*-pro, o1/o3/o4) and {DEFAULT_TIMEOUT} otherwise. Ignored under "
+            f"--backend codex (codex manages its own time budget)."
+        ),
+    )
+    parser.add_argument(
+        "--backend",
+        choices=("auto", "codex", "api"),
+        default="auto",
+        help=(
+            "Reviewer backend. `auto` (default): use codex if installed and "
+            "logged in, else fall back to api. `codex`: agentic, matches CI "
+            "quality, requires `codex` CLI + `codex login`. `api`: single-shot "
+            "OpenAI Responses API, faster and cheaper but less thorough."
         ),
     )
     parser.add_argument(
@@ -1426,17 +1597,52 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    # Resolve backend FIRST — the rest of validation (and downstream behavior)
+    # depends on which backend will run. Notably, --context / --include-files /
+    # --token-budget are only meaningful for the api backend; under codex,
+    # Codex chooses what to load on its own.
+    try:
+        backend = _detect_backend(args.backend)
+    except RuntimeError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     # Post-parse validation
-    if args.context != "minimal" and not args.repo_root:
+    # --repo-root requirement only applies to api backend's source-file
+    # preloading; codex ignores --context entirely and falls back to
+    # `os.getcwd()` for --cd if --repo-root is omitted.
+    if backend == "api" and args.context != "minimal" and not args.repo_root:
         parser.error(
-            "--repo-root is required when --context is 'standard' or 'deep'"
+            "--repo-root is required when --context is 'standard' or 'deep' "
+            "(api backend)"
         )
     if args.review_state and not args.commit_sha:
         parser.error("--commit-sha is required when --review-state is set")
 
-    # Validate API key (unless dry-run)
+    if backend == "codex":
+        # Codex chooses what files to load on its own; the script's --context
+        # preloading, --include-files staging, and --token-budget pruning are
+        # all wasted under codex (just bloat the prompt). Warn so users notice
+        # the flag mismatch.
+        ignored = []
+        if args.context != "minimal":
+            ignored.append(f"--context {args.context}")
+        if args.include_files:
+            ignored.append(f"--include-files {args.include_files}")
+        if args.token_budget != DEFAULT_TOKEN_BUDGET:
+            ignored.append(f"--token-budget {args.token_budget}")
+        if ignored:
+            print(
+                f"Note: codex backend ignores {', '.join(ignored)} "
+                "(Codex chooses what to load on its own).",
+                file=sys.stderr,
+            )
+
+    # Validate API key (api backend only; codex uses its own auth via
+    # `codex login` / ~/.codex/auth.json). Always required for dry-run too,
+    # so cost estimates work.
     api_key = os.environ.get("OPENAI_API_KEY", "")
-    if not args.dry_run and not api_key:
+    if backend == "api" and not args.dry_run and not api_key:
         print(
             "Error: OPENAI_API_KEY environment variable is not set.\n"
             "Add it to your shell profile:\n"
@@ -1509,7 +1715,7 @@ def main() -> None:
     source_files_text = None
     import_context_text = None
 
-    if args.context in ("standard", "deep") and args.repo_root:
+    if backend == "api" and args.context in ("standard", "deep") and args.repo_root:
         # In delta mode, scope source/import context to delta files only
         context_files_text = (
             delta_changed_files_text
@@ -1529,8 +1735,10 @@ def main() -> None:
                     import_paths, args.repo_root, role="import-context"
                 )
 
-    # Handle --include-files (confined to repo root for security)
-    if args.include_files and args.repo_root:
+    # Handle --include-files (api backend only; codex loads its own files
+    # and would just see the staged content as redundant prompt bloat).
+    # Confined to repo root for security.
+    if backend == "api" and args.include_files and args.repo_root:
         repo_root_real = os.path.realpath(args.repo_root)
         extra_paths: list[str] = []
         for name in args.include_files.split(","):
@@ -1610,18 +1818,21 @@ def main() -> None:
 
     # Apply budget: source files are always included (sticky);
     # only import-context files are dropped when over budget.
-    source_files_text, import_context_text, dropped = apply_token_budget(
-        mandatory_tokens=mandatory_est,
-        source_files_text=source_files_text,
-        import_context_text=import_context_text,
-        budget=args.token_budget,
-    )
-    if dropped:
-        print(
-            f"Warning: Token budget exceeded. Dropped import context files: "
-            f"{', '.join(dropped)}",
-            file=sys.stderr,
+    # Skip under codex backend — there's no preloaded source/import content
+    # to budget against, and codex manages its own context window.
+    if backend == "api":
+        source_files_text, import_context_text, dropped = apply_token_budget(
+            mandatory_tokens=mandatory_est,
+            source_files_text=source_files_text,
+            import_context_text=import_context_text,
+            budget=args.token_budget,
         )
+        if dropped:
+            print(
+                f"Warning: Token budget exceeded. Dropped import context files: "
+                f"{', '.join(dropped)}",
+                file=sys.stderr,
+            )
 
     # --- Compile prompt ---
     prompt = compile_prompt(
@@ -1654,8 +1865,9 @@ def main() -> None:
     if args.dry_run:
         print(prompt)
         print(f"\n--- Dry run ---", file=sys.stderr)
+        print(f"Backend: {backend}", file=sys.stderr)
         print(f"Estimated input tokens: ~{est_tokens:,}", file=sys.stderr)
-        if cost_str:
+        if backend == "api" and cost_str:
             print(f"Estimated cost: {cost_str}", file=sys.stderr)
         print(f"Model: {args.model}", file=sys.stderr)
         print(f"Context: {args.context}", file=sys.stderr)
@@ -1665,21 +1877,44 @@ def main() -> None:
             print("Mode: Delta-diff (changes since last review)", file=sys.stderr)
         sys.exit(0)
 
-    # Call OpenAI API
-    args.timeout = _resolve_timeout(args.timeout, args.model)
-    print(f"Sending review to {args.model} (timeout={args.timeout}s)...", file=sys.stderr)
-    print(f"Estimated input tokens: ~{est_tokens:,}", file=sys.stderr)
-    if cost_str:
-        print(f"Estimated cost: {cost_str}", file=sys.stderr)
+    # Dispatch on backend.
+    if backend == "codex":
+        print(
+            f"Using codex backend (auth.json detected at {CODEX_AUTH_PATH}); "
+            f"sending to {args.model} via `codex exec`...",
+            file=sys.stderr,
+        )
+        print(
+            "Note: cost depends on your `codex login` mode (subscription vs "
+            "API key). See codex docs.",
+            file=sys.stderr,
+        )
+    else:
+        args.timeout = _resolve_timeout(args.timeout, args.model)
+        print(
+            f"Using api backend; sending review to {args.model} "
+            f"(timeout={args.timeout}s)...",
+            file=sys.stderr,
+        )
+        print(f"Estimated input tokens: ~{est_tokens:,}", file=sys.stderr)
+        if cost_str:
+            print(f"Estimated cost: {cost_str}", file=sys.stderr)
     print(f"Context: {args.context}", file=sys.stderr)
     if previous_review:
         print("Mode: Re-review (previous review included)", file=sys.stderr)
     if delta_diff_text:
         print("Mode: Delta-diff (changes since last review)", file=sys.stderr)
 
-    review_content, usage = call_openai(
-        prompt, args.model, api_key, timeout=args.timeout
-    )
+    if backend == "codex":
+        review_content, usage = call_codex(
+            prompt=prompt,
+            model=args.model,
+            repo_root=args.repo_root or os.getcwd(),
+        )
+    else:
+        review_content, usage = call_openai(
+            prompt, args.model, api_key, timeout=args.timeout
+        )
 
     # Write review output
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
@@ -1723,13 +1958,14 @@ def main() -> None:
             )
 
     # Print completion summary with actual usage
-    actual_input = usage.get("input_tokens", 0)
-    actual_output = usage.get("output_tokens", 0)
-    actual_cost = estimate_cost(actual_input, actual_output, args.model)
+    actual_input = usage.get("input_tokens") or 0
+    actual_output = usage.get("output_tokens") or 0
 
     print(f"\nAI Review complete.", file=sys.stderr)
+    print(f"Backend: {usage.get('backend', backend)}", file=sys.stderr)
     print(f"Model: {args.model}", file=sys.stderr)
     if actual_input:
+        actual_cost = estimate_cost(actual_input, actual_output, args.model)
         print(
             f"Actual tokens: {actual_input:,} input, "
             f"{actual_output:,} output",
@@ -1746,6 +1982,7 @@ def main() -> None:
         if actual_cost:
             print(f"Actual cost: {actual_cost}", file=sys.stderr)
     else:
+        # Codex backend doesn't expose token counts; print the prompt estimate.
         print(f"Estimated input tokens: ~{est_tokens:,}", file=sys.stderr)
     print(f"Output saved to: {args.output}", file=sys.stderr)
 
