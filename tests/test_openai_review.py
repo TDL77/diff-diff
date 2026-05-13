@@ -1870,9 +1870,12 @@ class TestBackendDetection:
         # Don't create auth.json
         assert review_mod._detect_backend("auto") == "api"
 
-    def test_explicit_codex(self, patched, review_mod):
+    def test_explicit_codex_with_auth(self, patched, review_mod):
+        """Explicit `--backend codex` requires both the binary AND auth.json
+        — without auth, codex would fail late (subprocess) with a confusing
+        error; the explicit-request path now fails fast with actionable text."""
         self._set_codex_present(patched, True)
-        # auth.json existence is NOT checked when explicitly requested
+        patched["auth"].write_text("{}")  # auth present
         assert review_mod._detect_backend("codex") == "codex"
 
     def test_explicit_api(self, patched, review_mod):
@@ -1884,6 +1887,15 @@ class TestBackendDetection:
     def test_explicit_codex_errors_when_codex_missing(self, patched, review_mod):
         self._set_codex_present(patched, False)
         with pytest.raises(RuntimeError, match="codex.*not installed"):
+            review_mod._detect_backend("codex")
+
+    def test_explicit_codex_errors_when_auth_missing(self, patched, review_mod):
+        """Codex installed but `codex login` not done — fast-fail with a
+        clear message instead of degrading into a confusing subprocess
+        error inside `codex exec`."""
+        self._set_codex_present(patched, True)
+        # Don't write auth.json
+        with pytest.raises(RuntimeError, match="no codex auth found"):
             review_mod._detect_backend("codex")
 
 

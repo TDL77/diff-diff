@@ -58,9 +58,14 @@ Notes:
      definitions, or doc examples. Filename scan still applies to those
      dirs (so a real `.env` checked into `tests/` would still be caught).
 
-  Heavy dirs (`.venv`, `node_modules`, `__pycache__`, `.claude`, etc.) are
-  skipped to avoid vendored test fixtures. Both scans include gitignored
-  files — gitignored `.env` files are exactly what we want to catch.
+  Heavy dirs (`.venv`, `node_modules`, `__pycache__`, etc.) are skipped from
+  the walk to avoid vendored test fixtures. The `.claude/` subtree is NOT
+  skipped wholesale — `.claude/settings.local.json` (gitignored, common
+  place for OAuth tokens) is content-scanned. Only `.claude/reviews/` and
+  `.claude/paper-review/` (agent-generated review artifacts that may quote
+  literal pattern strings) are excluded from the content scan; their
+  filenames are still scanned. Both scans include gitignored files —
+  gitignored `.env` files are exactly what we want to catch.
 
   If either scan finds matches, codex is **NOT invoked** and the script
   exits 1 unless you pass `--allow-secrets` to acknowledge the surface.
@@ -89,7 +94,8 @@ Notes:
 - `--full-registry`: Include the entire REGISTRY.md instead of selective sections
 - `--model <name>`: Override the model (default: `gpt-5.4`). Applies to both backends.
 - `--timeout <seconds>`: HTTP request timeout. If omitted, defaults to 900 for reasoning models (gpt-5.4, *-pro, o1/o3/o4) and 300 otherwise. *Api backend only.*
-- `--dry-run`: Print the compiled prompt without calling the API
+- `--dry-run`: Print the compiled prompt without invoking the chosen backend
+  (no API call, no codex subprocess)
 
 **Reasoning models** (`gpt-5.4-pro`, `o3`, `o4-mini`, etc.) on the api backend:
 Reviews may take 10-15 minutes. For deep reviews with reasoning models, combine
@@ -126,7 +132,8 @@ Step 5 invokes the chosen backend:
 ### Step 1: Parse Arguments
 
 Parse `$ARGUMENTS` for the optional flags listed above. All flags are optional —
-the default behavior (standard context, selective registry, gpt-5.4, live API call)
+the default behavior (auto-detect backend, standard context for api or
+agentic loading for codex, selective registry, gpt-5.4)
 requires no arguments.
 
 ### Step 2: Validate Prerequisites
@@ -566,7 +573,7 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
 # Api backend, extra context files
 /ai-review-local --backend api --include-files linalg.py,utils.py
 
-# Preview the compiled prompt without calling the API
+# Preview the compiled prompt without invoking the chosen backend
 /ai-review-local --dry-run
 
 # Force a fresh review (ignore previous review state)

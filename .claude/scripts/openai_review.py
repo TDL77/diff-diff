@@ -1454,6 +1454,12 @@ def _detect_backend(requested: str) -> str:
                 "Install via `brew install --cask codex` or "
                 "`npm install -g @openai/codex`, then run `codex login`."
             )
+        if not os.path.exists(CODEX_AUTH_PATH):
+            raise RuntimeError(
+                f"--backend codex requested but no codex auth found at "
+                f"{CODEX_AUTH_PATH}. Run `codex login` first (subscription "
+                f"or API key)."
+            )
         return "codex"
     if requested == "api":
         return "api"
@@ -1809,7 +1815,10 @@ def main() -> None:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print compiled prompt to stdout without calling the API",
+        help=(
+            "Print compiled prompt to stdout without invoking the chosen "
+            "backend (no api call, no codex subprocess)"
+        ),
     )
     # New arguments
     parser.add_argument(
@@ -1822,7 +1831,12 @@ def main() -> None:
     parser.add_argument(
         "--repo-root",
         default=None,
-        help="Repository root directory (required unless --context minimal)",
+        help=(
+            "Repository root directory. Api backend: required when --context "
+            "is 'standard' or 'deep' (used for source-file preloading). Codex "
+            "backend: optional — falls back to os.getcwd() and is passed to "
+            "`codex exec --cd`."
+        ),
     )
     parser.add_argument(
         "--include-files",
@@ -2183,8 +2197,17 @@ def main() -> None:
 
     # Dispatch on backend.
     if backend == "codex":
+        # Only mention auth.json if it actually exists. Auto-mode requires it
+        # to pick codex; explicit `--backend codex` now also requires it (see
+        # _detect_backend) — but defensive check here prevents misleading log
+        # if either invariant ever loosens.
+        auth_note = (
+            f" (auth.json detected at {CODEX_AUTH_PATH})"
+            if os.path.exists(CODEX_AUTH_PATH)
+            else ""
+        )
         print(
-            f"Using codex backend (auth.json detected at {CODEX_AUTH_PATH}); "
+            f"Using codex backend{auth_note}; "
             f"sending to {args.model} via `codex exec`...",
             file=sys.stderr,
         )
