@@ -1,6 +1,6 @@
 ---
 description: Run AI code review locally using Codex CLI or OpenAI API before opening a PR
-argument-hint: "[--backend auto|codex|api] [--context minimal|standard|deep] [--include-files <files>] [--token-budget <n>] [--force-fresh] [--full-registry] [--model <model>] [--timeout <seconds>] [--dry-run]"
+argument-hint: "[--backend auto|codex|api] [--allow-secrets] [--context minimal|standard|deep] [--include-files <files>] [--token-budget <n>] [--force-fresh] [--full-registry] [--model <model>] [--timeout <seconds>] [--dry-run]"
 ---
 
 # Local AI Code Review
@@ -36,18 +36,26 @@ Notes:
   cleaned up automatically.
 - `--context` and `--token-budget` are ignored under the codex backend (Codex
   chooses what to load on its own); the script warns if you pass them.
-- **Surface area**: under the codex backend, Codex can read any file under the
-  repo root via `--cd`, not just the staged diff. This is the same surface that
-  any direct invocation of `codex` itself would have, but worth knowing: the
-  Step 3b pre-upload secret scan only covers diff content, NOT files Codex may
-  load on its own. If your repo contains sensitive files outside the diff
-  (e.g. `.env`, local credentials), prefer `--backend api` or run the codex
-  backend from a sanitized worktree.
+- **Surface area + abort-by-default**: under the codex backend, Codex can read
+  any file under the repo root via `--cd`, not just the staged diff. Before
+  invoking codex, the script runs a recursive sensitive-file scan for patterns
+  like `.env`, `.env.local`, `id_rsa`, `*.pem`, `*.key`,
+  `secrets.{yml,yaml,json}`, `.netrc`, `.npmrc`, `.pypirc`. Common safe
+  variants (`.env.example`, `.env.sample`, `.env.template`) are excluded.
+  Heavy directories (`.venv`, `node_modules`, `__pycache__`, etc.) are
+  skipped to avoid vendored test fixtures. The scan does NOT respect
+  `.gitignore` — gitignored `.env` files are exactly what we want to catch.
+  If any matches exist, codex is **NOT invoked** and the script exits 1
+  unless you pass `--allow-secrets` to acknowledge the surface. This is
+  enforcement, not just a warning.
 
 ## Arguments
 
 `$ARGUMENTS` may contain optional flags:
 - `--backend {auto,codex,api}`: Reviewer backend (default: `auto`). See above.
+- `--allow-secrets`: Codex backend only. By default, the script aborts before
+  invoking codex if it detects sensitive files anywhere under the repo root
+  (gitignore-aware recursive scan). Pass this flag to acknowledge and proceed.
 - `--context {minimal,standard,deep}`: Context depth (default: `standard`).
   *Api backend only.*
   - `minimal`: Diff only (original behavior)
@@ -389,6 +397,7 @@ python3 .claude/scripts/openai_review.py \
     [--include-files "$include_files"] \
     [--token-budget "$token_budget"] \
     [--full-registry] \
+    [--allow-secrets] \
     [--model <model>] \
     [--timeout <seconds>] \
     [--dry-run]

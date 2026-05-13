@@ -2017,6 +2017,53 @@ class TestCallCodex:
         with pytest.raises(RuntimeError, match="produced no output"):
             review_mod.call_codex("p", "gpt-5.4", "/r")
 
+    def test_broken_pipe_on_stdin_does_not_raise_pipe_error(
+        self, review_mod, monkeypatch, tmp_path
+    ):
+        """If codex exits before consuming stdin, the stdin.write/close raises
+        BrokenPipeError. We catch it and let the existing returncode != 0 path
+        surface the real cause via stderr — otherwise users get a raw pipe
+        traceback that hides codex's actual error."""
+        captured = {}
+
+        class BrokenStdin:
+            def write(self, x):
+                raise BrokenPipeError("stdin closed early")
+
+            def close(self):
+                pass
+
+        class FakePopenBrokenPipe:
+            def __init__(self, cmd, **kwargs):
+                captured["cmd"] = cmd
+                # Write canned non-empty output anyway (codex may have written
+                # before the early-exit; we exercise the BrokenPipe path
+                # then a non-zero exit).
+                if "-o" in cmd:
+                    out_path = cmd[cmd.index("-o") + 1]
+                    with open(out_path, "w") as f:
+                        f.write("partial")
+                self.returncode = 2
+                self.stdin = BrokenStdin()
+                import io as _io
+                self.stdout = _io.StringIO("")
+                self.stderr = _io.StringIO("auth failed: invalid token\n")
+
+            def wait(self):
+                return self.returncode
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(review_mod.subprocess, "Popen", FakePopenBrokenPipe)
+        # Should NOT raise BrokenPipeError; should raise RuntimeError with
+        # codex's stderr instead.
+        with pytest.raises(RuntimeError, match="codex exec failed"):
+            review_mod.call_codex("p", "gpt-5.4", "/r")
+
 
 class TestCodexBackendDocConsistency:
     """The skill doc must enumerate the backend choices that the script
@@ -2080,12 +2127,24 @@ class TestCodexBackendDocConsistency:
 
 
 class TestSensitiveFileScan:
-    """`_scan_sensitive_files` + `_warn_on_sensitive_files` surface the codex
-    backend's broader read-surface to the user before invoking codex."""
+    """`_scan_sensitive_files` recursively scans the repo for sensitive-pattern
+    filenames (gitignore-aware via git ls-files; falls back to os.walk).
+    `_print_sensitive_warning` formats the stderr block for the abort and
+    --allow-secrets-continue paths."""
 
-    def test_finds_dotenv(self, tmp_path, review_mod):
+    def test_finds_dotenv_at_root(self, tmp_path, review_mod):
         (tmp_path / ".env").write_text("SECRET=hunter2")
         assert ".env" in review_mod._scan_sensitive_files(str(tmp_path))
+
+    def test_finds_secrets_in_subdir(self, tmp_path, review_mod):
+        """Recursive scan must catch secrets in subdirectories, not just root."""
+        (tmp_path / "config").mkdir()
+        (tmp_path / "config" / ".env").write_text("X=1")
+        (tmp_path / "deploy" / "k8s").mkdir(parents=True)
+        (tmp_path / "deploy" / "k8s" / "secrets.yml").write_text("apiKey: abc")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert any("config/.env" in p or "config\\.env" in p for p in found)
+        assert any("secrets.yml" in p for p in found)
 
     def test_finds_pem_glob(self, tmp_path, review_mod):
         (tmp_path / "private.pem").write_text("-----BEGIN PRIVATE KEY-----")
@@ -2108,32 +2167,73 @@ class TestSensitiveFileScan:
         assert ".env.local" in found
         assert ".env.production" in found
 
-    def test_ignores_directories_named_like_secrets(self, tmp_path, review_mod):
-        (tmp_path / "credentials").mkdir()
-        # The function checks isfile(); a directory named "credentials"
-        # should not show up.
-        assert "credentials" not in review_mod._scan_sensitive_files(str(tmp_path))
+    def test_excludes_safe_variants(self, tmp_path, review_mod):
+        """`.env.example`, `.env.sample`, `.env.template` are template files
+        and routinely committed; must NOT trigger the scan (false positives
+        would force --allow-secrets unnecessarily)."""
+        (tmp_path / ".env.example").write_text("KEY=your-key-here")
+        (tmp_path / ".env.sample").write_text("X=Y")
+        (tmp_path / ".env.template").write_text("X=Y")
+        (tmp_path / "secrets.yml.example").write_text("key: value")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert ".env.example" not in found
+        assert ".env.sample" not in found
+        assert ".env.template" not in found
+        assert "secrets.yml.example" not in found
 
     def test_clean_repo_returns_empty(self, tmp_path, review_mod):
         (tmp_path / "README.md").write_text("# repo")
         (tmp_path / "src").mkdir()
         assert review_mod._scan_sensitive_files(str(tmp_path)) == []
 
-    def test_warning_prints_when_sensitive_files_present(
+    def test_skips_skip_dirs_in_fallback(self, tmp_path, review_mod):
+        """The os.walk fallback (when not in a git repo) must skip .venv etc.
+        Otherwise scanning would include vendored libs that legitimately
+        contain test fixtures named id_rsa, secret.pem, etc."""
+        # tmp_path is not a git repo so we hit the os.walk path
+        (tmp_path / ".venv" / "lib").mkdir(parents=True)
+        (tmp_path / ".venv" / "lib" / "id_rsa").write_text("test fixture")
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / ".env").write_text("test fixture")
+        # A real one at the root SHOULD still be found
+        (tmp_path / "id_rsa").write_text("real key")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert "id_rsa" in found
+        # Skip-dir matches must NOT appear
+        assert not any(".venv" in p for p in found)
+        assert not any("node_modules" in p for p in found)
+
+    def test_warning_prints_with_abort_header(
         self, tmp_path, review_mod, capsys
     ):
-        (tmp_path / ".env").write_text("X=1")
-        review_mod._warn_on_sensitive_files(str(tmp_path))
+        review_mod._print_sensitive_warning(
+            str(tmp_path), [".env", "config/secrets.yml"], abort=True
+        )
         err = capsys.readouterr().err
-        assert "WARNING" in err
+        assert "ABORT" in err
         assert ".env" in err
+        assert "config/secrets.yml" in err
+        assert "--allow-secrets" in err
         assert "--backend api" in err  # mitigation suggested
 
-    def test_warning_silent_on_clean_repo(self, tmp_path, review_mod, capsys):
-        (tmp_path / "README.md").write_text("ok")
-        review_mod._warn_on_sensitive_files(str(tmp_path))
+    def test_warning_prints_with_warning_header_when_not_aborting(
+        self, tmp_path, review_mod, capsys
+    ):
+        review_mod._print_sensitive_warning(
+            str(tmp_path), [".env"], abort=False
+        )
         err = capsys.readouterr().err
-        assert err == ""
+        assert "WARNING" in err
+        assert "ABORT" not in err
+        assert "--allow-secrets was passed" in err
+
+    def test_warning_caps_output_at_20_files(
+        self, tmp_path, review_mod, capsys
+    ):
+        many = [f"file{i}.pem" for i in range(50)]
+        review_mod._print_sensitive_warning(str(tmp_path), many, abort=True)
+        err = capsys.readouterr().err
+        assert "and 30 more" in err
 
 
 class TestMainBackendDispatch:

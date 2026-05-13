@@ -1159,15 +1159,21 @@ def _resolve_timeout(timeout: "int | None", model: str) -> int:
 
 CODEX_AUTH_PATH = os.path.expanduser("~/.codex/auth.json")
 
-# Filenames at the repo root that commonly hold secrets. The codex backend's
-# read-only sandbox lets Codex read any file under --cd, so before invoking it
-# we surface a loud stderr warning naming any of these that exist. Not
-# enforcement (no abort) — but makes the broader read surface visible so users
-# who didn't realize can CTRL-C and switch to --backend api or a sanitized
-# worktree.
+# Filenames that commonly hold secrets. The codex backend's read-only sandbox
+# lets Codex read any file under --cd, so before invoking it we recursively
+# scan the repo for these patterns. If any are found, codex is NOT invoked
+# unless `--allow-secrets` is passed (explicit user opt-in).
+#
+# Patterns are matched against basename only via fnmatch. Common safe
+# variants (.env.example, .env.sample, .env.template) are explicitly excluded
+# below.
 SENSITIVE_FILE_PATTERNS = (
     ".env",
-    ".env.*",
+    ".env.local",
+    ".env.production",
+    ".env.development",
+    ".env.staging",
+    ".env.test",
     ".envrc",
     "secrets.yml",
     "secrets.yaml",
@@ -1188,53 +1194,108 @@ SENSITIVE_FILE_PATTERNS = (
     "*.pfx",
 )
 
+# Filename suffixes that look sensitive but are typically safe (templates /
+# examples). Excluded from sensitive-file matches.
+SENSITIVE_FILE_SAFE_SUFFIXES = (".example", ".sample", ".template", ".dist")
+
+# Directories to skip during fallback os.walk scan (when not in a git repo).
+_SCAN_SKIP_DIRS = frozenset({
+    ".git", ".venv", "venv", ".tox", ".eggs", ".pytest_cache", ".mypy_cache",
+    "node_modules", "__pycache__", "dist", "build", "target",
+})
+
+
+def _list_files_for_scan(repo_root: str) -> "list[str]":
+    """Return repo-relative paths of files to scan for sensitive patterns.
+
+    Uses os.walk with `_SCAN_SKIP_DIRS` pruning — NOT `git ls-files
+    --exclude-standard`, which excludes gitignored content. The vast majority
+    of real-world `.env` files ARE gitignored (it's the universally-recommended
+    pattern), so a gitignore-aware scan would systematically miss the exact
+    files we care about. The skip-dirs list covers the noise-source cases
+    (`.venv`, `node_modules`, `__pycache__`, etc.) without losing the
+    gitignored secrets we need to catch.
+    """
+    files: "list[str]" = []
+    for dirpath, dirnames, filenames in os.walk(repo_root):
+        dirnames[:] = [d for d in dirnames if d not in _SCAN_SKIP_DIRS]
+        for fn in filenames:
+            full = os.path.join(dirpath, fn)
+            files.append(os.path.relpath(full, repo_root))
+    return files
+
 
 def _scan_sensitive_files(repo_root: str) -> "list[str]":
-    """Return paths (relative to repo_root) of likely-sensitive files at the
-    top level. Scans only the repo root — subdirectory traversal would slow
-    large repos and the most common leak vectors live at the top.
+    """Recursively scan repo for sensitive-pattern filenames.
+
+    Match is against basename via fnmatch; safe-suffix variants (.example,
+    .sample, .template, .dist) are excluded so e.g. `.env.example` doesn't
+    trigger. The walk skips heavy/noise directories (`.venv`, `node_modules`,
+    `__pycache__`, etc. — see `_SCAN_SKIP_DIRS`) but does NOT respect
+    .gitignore — gitignored `.env` files are exactly what we want to catch.
     """
-    import glob
+    import fnmatch
 
     found: "list[str]" = []
-    for pattern in SENSITIVE_FILE_PATTERNS:
-        for match in glob.glob(os.path.join(repo_root, pattern)):
-            if os.path.isfile(match):
-                found.append(os.path.relpath(match, repo_root))
-    # Stable order for deterministic output / tests
+    for rel_path in _list_files_for_scan(repo_root):
+        basename = os.path.basename(rel_path)
+        # Skip safe variants like .env.example, secrets.yml.template
+        if any(basename.endswith(suffix) for suffix in SENSITIVE_FILE_SAFE_SUFFIXES):
+            continue
+        for pat in SENSITIVE_FILE_PATTERNS:
+            if fnmatch.fnmatch(basename, pat):
+                found.append(rel_path)
+                break
     return sorted(set(found))
 
 
-def _warn_on_sensitive_files(repo_root: str) -> None:
-    """Print a loud stderr warning if sensitive files exist at repo root.
-
-    Called before `call_codex()` so the user sees the surface before the run
-    starts and can CTRL-C if needed. Not blocking — just informational
-    enforcement-lite, paired with the skill doc's surface-area note.
-    """
-    found = _scan_sensitive_files(repo_root)
-    if not found:
-        return
+def _print_sensitive_warning(
+    repo_root: str, found: "list[str]", abort: bool
+) -> None:
+    """Print a stderr block describing the sensitive files found and the
+    chosen disposition (abort vs continue-with-allow-secrets)."""
     print("", file=sys.stderr)
     print("=" * 64, file=sys.stderr)
+    header = "ABORT" if abort else "WARNING"
     print(
-        "WARNING: codex backend has read access to your entire repo via",
+        f"{header}: codex backend has read access to your entire repo via",
         file=sys.stderr,
     )
     print(f"  --cd {repo_root}", file=sys.stderr)
     print(
-        "Detected potentially sensitive files at the repo root:",
+        f"Detected {len(found)} potentially sensitive file(s) "
+        "(recursive scan, includes gitignored files):",
         file=sys.stderr,
     )
-    for f in found:
+    for f in found[:20]:
         print(f"  - {f}", file=sys.stderr)
-    print(
-        "These are NOT staged in the prompt or pre-scanned, but Codex CAN read",
-        file=sys.stderr,
-    )
-    print("them if it chooses to. If unintentional, abort with CTRL-C and:", file=sys.stderr)
-    print("  - use --backend api (only diff content sent), or", file=sys.stderr)
-    print("  - run from a sanitized worktree without these files.", file=sys.stderr)
+    if len(found) > 20:
+        print(f"  ... and {len(found) - 20} more", file=sys.stderr)
+    print("", file=sys.stderr)
+    if abort:
+        print("Codex will NOT be invoked. Options:", file=sys.stderr)
+        print(
+            "  - re-run with --allow-secrets to opt in (Codex CAN read these "
+            "files)",
+            file=sys.stderr,
+        )
+        print(
+            "  - use --backend api (only diff content sent — stays out of "
+            "Codex's surface)",
+            file=sys.stderr,
+        )
+        print(
+            "  - run from a sanitized worktree without these files",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "Continuing because --allow-secrets was passed. Codex's "
+            "read-only sandbox cannot exfiltrate via writes/network beyond "
+            "the OpenAI API, but its reasoning may incorporate or reference "
+            "the contents.",
+            file=sys.stderr,
+        )
     print("=" * 64, file=sys.stderr)
     print("", file=sys.stderr)
 
@@ -1325,10 +1386,19 @@ def call_codex(
             stderr=subprocess.PIPE,
             text=True,
         )
-        # Send prompt via stdin and close so codex sees EOF.
+        # Send prompt via stdin and close so codex sees EOF. If codex exits
+        # before consuming all of stdin (auth error, immediate sandbox abort,
+        # etc.), the write or close raises BrokenPipeError. Swallow it here so
+        # the run-time error path below produces a clean RuntimeError with
+        # codex's stderr instead of a raw pipe traceback.
         assert proc.stdin is not None
-        proc.stdin.write(prompt)
-        proc.stdin.close()
+        try:
+            proc.stdin.write(prompt)
+            proc.stdin.close()
+        except BrokenPipeError:
+            # Codex closed stdin early; the cause will be in proc.stderr,
+            # which the wait+stderr_buf path below surfaces.
+            pass
 
         stderr_buf = io.StringIO()
 
@@ -1646,6 +1716,19 @@ def main() -> None:
             "logged in, else fall back to api. `codex`: agentic, matches CI "
             "quality, requires `codex` CLI + `codex login`. `api`: single-shot "
             "OpenAI Responses API, faster and cheaper but less thorough."
+        ),
+    )
+    parser.add_argument(
+        "--allow-secrets",
+        action="store_true",
+        default=False,
+        help=(
+            "Codex backend only. By default, the script aborts before "
+            "invoking codex if it detects potentially sensitive files in the "
+            "repo (.env, *.pem, id_rsa, secrets.*, etc.; gitignore-aware). "
+            "Pass this flag to acknowledge the surface and proceed anyway. "
+            "Codex CAN read those files inside its agentic loop (under the "
+            "read-only sandbox)."
         ),
     )
     parser.add_argument(
@@ -1986,7 +2069,13 @@ def main() -> None:
 
     if backend == "codex":
         codex_repo_root = args.repo_root or os.getcwd()
-        _warn_on_sensitive_files(codex_repo_root)
+        sensitive = _scan_sensitive_files(codex_repo_root)
+        if sensitive:
+            _print_sensitive_warning(
+                codex_repo_root, sensitive, abort=not args.allow_secrets
+            )
+            if not args.allow_secrets:
+                sys.exit(1)
         review_content, usage = call_codex(
             prompt=prompt,
             model=args.model,
