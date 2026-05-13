@@ -2248,6 +2248,30 @@ class TestSensitiveFileScan:
         err = capsys.readouterr().err
         assert "and 30 more" in err
 
+    def test_filename_match_is_case_insensitive(self, tmp_path, review_mod):
+        """Case-sensitive filesystems (Linux, CI) treat .ENV as distinct
+        from .env. The match must lowercase before comparing or capitalized
+        variants slip past the abort gate."""
+        (tmp_path / ".ENV").write_text("X=1")
+        (tmp_path / "Credentials.JSON").write_text("{}")
+        (tmp_path / "PRIVATE.PEM").write_text("-----BEGIN-----")
+        (tmp_path / "ID_RSA").write_text("-----BEGIN RSA-----")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert ".ENV" in found
+        assert "Credentials.JSON" in found
+        assert "PRIVATE.PEM" in found
+        assert "ID_RSA" in found
+
+    def test_safe_suffix_exclusion_is_case_insensitive(
+        self, tmp_path, review_mod
+    ):
+        """`.ENV.EXAMPLE` is a template variant just like `.env.example`."""
+        (tmp_path / ".ENV.EXAMPLE").write_text("KEY=your-key")
+        (tmp_path / ".env.SAMPLE").write_text("X=Y")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert ".ENV.EXAMPLE" not in found
+        assert ".env.SAMPLE" not in found
+
 
 class TestSensitiveContentScan:
     """`_scan_sensitive_content` catches secrets stored under innocuous
@@ -2369,6 +2393,18 @@ class TestSensitiveContentScan:
         assert any(
             "settings.local.json" in p for p in found
         ), f"Expected settings.local.json to trigger; got: {found}"
+
+    def test_content_scan_suffix_check_is_case_insensitive(
+        self, tmp_path, review_mod
+    ):
+        """Files with uppercase suffixes (`.PY`, `.YML`, `.MD`) must still
+        be content-scanned. Without case-insensitive suffix check, secrets
+        in capitalized-extension files would slip past."""
+        (tmp_path / "main.PY").write_text("api_key = 'AKIAIOSFODNN7EXAMPLE'")
+        (tmp_path / "config.YML").write_text("token: ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        found = review_mod._scan_sensitive_content(str(tmp_path))
+        assert "main.PY" in found
+        assert "config.YML" in found
 
     def test_content_scan_skips_dot_claude_reviews(self, tmp_path, review_mod):
         """`.claude/reviews/` contains agent-generated review markdown that

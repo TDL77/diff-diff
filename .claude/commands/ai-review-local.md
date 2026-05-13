@@ -452,7 +452,8 @@ generated in Step 4 and is NOT passed to the script.
 - After the background command completes, continue to Step 6
 
 If `--dry-run`: display the prompt output and stop. Report the estimated token count,
-cost estimate, and model that would be used.
+backend, and model that would be used. Cost estimate is shown only for the api
+backend (codex doesn't expose token counts up front).
 
 If the script exits non-zero, display the error output and stop.
 
@@ -591,20 +592,24 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
 - This skill does NOT modify source files — it only generates temp files and
   review artifacts in `.claude/reviews/` (which is gitignored). It may also
   create a commit if there are uncommitted changes (Step 3).
-- **Context levels**: By default (`standard`), the full contents of changed
-  `diff_diff/` source files are sent alongside the diff. This catches "sins of
-  omission" — code that should have changed but wasn't (e.g., a wrapper missing
-  a new parameter). Use `--context deep` to also include files imported by
-  changed files as read-only reference.
+- **Context levels** (api backend): By default (`standard`), the full contents
+  of changed `diff_diff/` source files are sent alongside the diff. This catches
+  "sins of omission" — code that should have changed but wasn't (e.g., a wrapper
+  missing a new parameter). Use `--context deep` to also include files imported
+  by changed files as read-only reference. Codex backend ignores `--context`
+  (it loads files agentically as needed).
 - **Delta-diff re-review**: When `review-state.json` exists from a previous run,
   the script automatically generates a delta diff (changes since the last reviewed
   commit) and focuses the reviewer on those changes. The full branch diff is
-  included as reference context. Use `--force-fresh` to bypass this.
+  included as reference context. Use `--force-fresh` to bypass this. Applies to
+  both backends.
 - **Finding tracking**: The script writes structured findings to `review-state.json`
   after each review. On re-review, previous findings are shown in a table with
   their status (open/addressed), enabling the reviewer to focus on what changed.
-- **Cost visibility**: The script shows estimated cost before the API call and
-  actual cost (from the API response) after completion.
+- **Cost visibility** (api backend): The script shows estimated cost before the
+  API call and actual cost (from the API response) after completion. Codex
+  backend doesn't expose token counts; cost depends on your `codex login` mode
+  (subscription unmetered within plan, API key metered).
 - Re-review mode activates automatically when a previous review exists in
   `.claude/reviews/local-review-latest.md`
 - The review criteria are adapted from `.github/codex/prompts/pr_review.md` (same
@@ -612,10 +617,17 @@ runs `--force-fresh` or when a rebase invalidates the tracked commit.
   code-change review rather than PR review
 - The CI review (Codex action with full repo access) remains the authoritative final
   check — local review is a fast first pass to catch most issues early
-- **Data transmission**: In non-dry-run mode, this skill transmits the unified diff,
-  changed-file metadata, full source file contents (in standard/deep mode),
-  import-context files (in deep mode), selected methodology registry text, and
-  prior review context (if present) to OpenAI via the Responses API.
-  Use `--dry-run` to preview exactly what would be sent.
+- **Data transmission**: In non-dry-run mode:
+  - **api backend**: this skill transmits the unified diff, changed-file
+    metadata, full source file contents (in standard/deep mode), import-context
+    files (in deep mode), selected methodology registry text, and prior review
+    context (if present) to OpenAI via the Responses API.
+  - **codex backend**: the compiled prompt (criteria + diff + previous review)
+    is piped to `codex exec`'s stdin, and Codex itself reads additional repo
+    files agentically (read-only sandbox) and talks to OpenAI iteratively. The
+    secret preflight (filename + content scan) gates this path; see "Surface
+    area + abort-by-default" above.
+
+  Use `--dry-run` to preview the compiled prompt without invoking either backend.
 - This skill pairs naturally with the iterative workflow:
   `/ai-review-local` -> address findings -> `/ai-review-local` -> `/submit-pr`

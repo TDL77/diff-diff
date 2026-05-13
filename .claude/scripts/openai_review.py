@@ -1321,12 +1321,16 @@ def _scan_sensitive_files(repo_root: str) -> "list[str]":
 
     found: "list[str]" = []
     for rel_path in _list_files_for_scan(repo_root):
-        basename = os.path.basename(rel_path)
+        # Match case-insensitively: case-sensitive filesystems (Linux, CI)
+        # treat `.ENV`/`Credentials.JSON`/`PRIVATE.PEM` as distinct from
+        # `.env`/`credentials.json`/`private.pem`, so a case-sensitive
+        # match would let capitalized variants slip past the gate.
+        basename_lc = os.path.basename(rel_path).lower()
         # Skip safe variants like .env.example, secrets.yml.template
-        if any(basename.endswith(suffix) for suffix in SENSITIVE_FILE_SAFE_SUFFIXES):
+        if any(basename_lc.endswith(suffix) for suffix in SENSITIVE_FILE_SAFE_SUFFIXES):
             continue
         for pat in SENSITIVE_FILE_PATTERNS:
-            if fnmatch.fnmatch(basename, pat):
+            if fnmatch.fnmatch(basename_lc, pat):
                 found.append(rel_path)
                 break
     return sorted(set(found))
@@ -1350,7 +1354,9 @@ def _scan_sensitive_content(repo_root: str) -> "list[str]":
     """
     found: "list[str]" = []
     for rel_path in _list_files_for_scan(repo_root):
-        if not rel_path.endswith(_SCAN_CONTENT_SUFFIXES):
+        # Suffix check is case-insensitive — `MAIN.PY`/`Config.YML` etc.
+        # should still be content-scanned on case-sensitive filesystems.
+        if not rel_path.lower().endswith(_SCAN_CONTENT_SUFFIXES):
             continue
         # Skip content scan for path prefixes that commonly hold literal
         # pattern matches as fixtures / regex definitions / examples (not
