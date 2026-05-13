@@ -201,6 +201,10 @@ def test_overall_qug_fails_to_reject(overall_report):
     # T statistic = D_(1) / (D_(2) - D_(1)) is fully deterministic.
     assert round(overall_report.qug.t_stat, 2) == 3.86, overall_report.qug.t_stat
     assert round(overall_report.qug.critical_value, 1) == 19.0, overall_report.qug.critical_value
+    # Closed-form p-value `1 / (1 + T)` under Theorem 4's Exp/Exp limit
+    # law is equally deterministic; the notebook output quotes 0.2059
+    # so pin it directly so prose drift surfaces.
+    assert round(overall_report.qug.p_value, 4) == 0.2059, overall_report.qug.p_value
 
 
 def test_overall_stute_fails_to_reject(overall_report):
@@ -252,6 +256,8 @@ def test_event_study_qug_matches_overall(event_study_report, overall_report):
     F)."""
     assert event_study_report.qug.reject is overall_report.qug.reject
     assert round(event_study_report.qug.t_stat, 4) == round(overall_report.qug.t_stat, 4)
+    # The QUG p-value is also deterministic and must match across paths.
+    assert round(event_study_report.qug.p_value, 4) == round(overall_report.qug.p_value, 4)
 
 
 def test_event_study_pretrends_horizons_correct(event_study_report):
@@ -337,6 +343,9 @@ def test_yatchew_side_panel_linearity_passes(yatchew_side_panel_inputs):
     assert res.null_form == "linearity"
     assert round(res.t_stat_hr, 2) == 0.02, res.t_stat_hr
     assert round(res.sigma2_lin, 2) == 6.53, res.sigma2_lin
+    # Closed-form 1-sided normal p-value is deterministic; the notebook
+    # output quotes 0.4917, pin it so prose drift surfaces.
+    assert round(res.p_value, 4) == 0.4917, res.p_value
 
 
 def test_yatchew_side_panel_mean_independence_passes(yatchew_side_panel_inputs):
@@ -350,6 +359,9 @@ def test_yatchew_side_panel_mean_independence_passes(yatchew_side_panel_inputs):
     assert res_mi.null_form == "mean_independence"
     assert round(res_mi.t_stat_hr, 2) == 0.55, res_mi.t_stat_hr
     assert round(res_mi.sigma2_lin, 2) == 7.01, res_mi.sigma2_lin
+    # Closed-form 1-sided normal p-value is deterministic; the notebook
+    # output quotes 0.2899, pin it so prose drift surfaces.
+    assert round(res_mi.p_value, 4) == 0.2899, res_mi.p_value
     # Pedagogical claim from Section 5: stricter null -> larger sigma2_lin.
     assert res_mi.sigma2_lin > res_lin.sigma2_lin
     # And the differencing variance (sigma2_diff) is shared across modes.
