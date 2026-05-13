@@ -1159,6 +1159,85 @@ def _resolve_timeout(timeout: "int | None", model: str) -> int:
 
 CODEX_AUTH_PATH = os.path.expanduser("~/.codex/auth.json")
 
+# Filenames at the repo root that commonly hold secrets. The codex backend's
+# read-only sandbox lets Codex read any file under --cd, so before invoking it
+# we surface a loud stderr warning naming any of these that exist. Not
+# enforcement (no abort) — but makes the broader read surface visible so users
+# who didn't realize can CTRL-C and switch to --backend api or a sanitized
+# worktree.
+SENSITIVE_FILE_PATTERNS = (
+    ".env",
+    ".env.*",
+    ".envrc",
+    "secrets.yml",
+    "secrets.yaml",
+    "secrets.json",
+    "credentials",
+    "credentials.json",
+    "credentials.yaml",
+    ".npmrc",
+    ".pypirc",
+    ".netrc",
+    "id_rsa",
+    "id_ed25519",
+    "id_ecdsa",
+    "id_dsa",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.pfx",
+)
+
+
+def _scan_sensitive_files(repo_root: str) -> "list[str]":
+    """Return paths (relative to repo_root) of likely-sensitive files at the
+    top level. Scans only the repo root — subdirectory traversal would slow
+    large repos and the most common leak vectors live at the top.
+    """
+    import glob
+
+    found: "list[str]" = []
+    for pattern in SENSITIVE_FILE_PATTERNS:
+        for match in glob.glob(os.path.join(repo_root, pattern)):
+            if os.path.isfile(match):
+                found.append(os.path.relpath(match, repo_root))
+    # Stable order for deterministic output / tests
+    return sorted(set(found))
+
+
+def _warn_on_sensitive_files(repo_root: str) -> None:
+    """Print a loud stderr warning if sensitive files exist at repo root.
+
+    Called before `call_codex()` so the user sees the surface before the run
+    starts and can CTRL-C if needed. Not blocking — just informational
+    enforcement-lite, paired with the skill doc's surface-area note.
+    """
+    found = _scan_sensitive_files(repo_root)
+    if not found:
+        return
+    print("", file=sys.stderr)
+    print("=" * 64, file=sys.stderr)
+    print(
+        "WARNING: codex backend has read access to your entire repo via",
+        file=sys.stderr,
+    )
+    print(f"  --cd {repo_root}", file=sys.stderr)
+    print(
+        "Detected potentially sensitive files at the repo root:",
+        file=sys.stderr,
+    )
+    for f in found:
+        print(f"  - {f}", file=sys.stderr)
+    print(
+        "These are NOT staged in the prompt or pre-scanned, but Codex CAN read",
+        file=sys.stderr,
+    )
+    print("them if it chooses to. If unintentional, abort with CTRL-C and:", file=sys.stderr)
+    print("  - use --backend api (only diff content sent), or", file=sys.stderr)
+    print("  - run from a sanitized worktree without these files.", file=sys.stderr)
+    print("=" * 64, file=sys.stderr)
+    print("", file=sys.stderr)
+
 
 def _detect_backend(requested: str) -> str:
     """Resolve the backend to use given the user-requested value.
@@ -1906,10 +1985,12 @@ def main() -> None:
         print("Mode: Delta-diff (changes since last review)", file=sys.stderr)
 
     if backend == "codex":
+        codex_repo_root = args.repo_root or os.getcwd()
+        _warn_on_sensitive_files(codex_repo_root)
         review_content, usage = call_codex(
             prompt=prompt,
             model=args.model,
-            repo_root=args.repo_root or os.getcwd(),
+            repo_root=codex_repo_root,
         )
     else:
         review_content, usage = call_openai(

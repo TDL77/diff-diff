@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import subprocess
+import sys
 
 import pytest
 
@@ -2045,6 +2046,18 @@ class TestCodexBackendDocConsistency:
         assert "brew install --cask codex" in text or "@openai/codex" in text
         assert "codex login" in text
 
+    def test_skill_doc_documents_codex_surface_area(self):
+        """Skill doc must explain that codex backend exposes the full repo
+        read-surface (not just the diff). Required so users opting into
+        codex understand what files are reachable beyond what's pre-scanned."""
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        doc = repo_root / ".claude" / "commands" / "ai-review-local.md"
+        if not doc.exists():
+            pytest.skip("ai-review-local.md not found")
+        text = doc.read_text()
+        assert "Surface area" in text or "read access to your entire repo" in text or "read any file under the repo root" in text
+
     def test_skill_step5_command_template_forwards_backend(self):
         """Regression: the Step-5 invocation MUST pass --backend through to
         the script. Without this, /ai-review-local --backend codex (or api)
@@ -2064,6 +2077,229 @@ class TestCodexBackendDocConsistency:
             "(use `--backend \"$backend\"`); otherwise users' explicit "
             "--backend selection is dropped."
         )
+
+
+class TestSensitiveFileScan:
+    """`_scan_sensitive_files` + `_warn_on_sensitive_files` surface the codex
+    backend's broader read-surface to the user before invoking codex."""
+
+    def test_finds_dotenv(self, tmp_path, review_mod):
+        (tmp_path / ".env").write_text("SECRET=hunter2")
+        assert ".env" in review_mod._scan_sensitive_files(str(tmp_path))
+
+    def test_finds_pem_glob(self, tmp_path, review_mod):
+        (tmp_path / "private.pem").write_text("-----BEGIN PRIVATE KEY-----")
+        (tmp_path / "server.key").write_text("key-data")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert "private.pem" in found
+        assert "server.key" in found
+
+    def test_finds_ssh_key_names(self, tmp_path, review_mod):
+        (tmp_path / "id_rsa").write_text("-----BEGIN RSA-----")
+        (tmp_path / "id_ed25519").write_text("-----BEGIN OPENSSH-----")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert "id_rsa" in found
+        assert "id_ed25519" in found
+
+    def test_finds_dotenv_variants(self, tmp_path, review_mod):
+        (tmp_path / ".env.local").write_text("X=1")
+        (tmp_path / ".env.production").write_text("Y=2")
+        found = review_mod._scan_sensitive_files(str(tmp_path))
+        assert ".env.local" in found
+        assert ".env.production" in found
+
+    def test_ignores_directories_named_like_secrets(self, tmp_path, review_mod):
+        (tmp_path / "credentials").mkdir()
+        # The function checks isfile(); a directory named "credentials"
+        # should not show up.
+        assert "credentials" not in review_mod._scan_sensitive_files(str(tmp_path))
+
+    def test_clean_repo_returns_empty(self, tmp_path, review_mod):
+        (tmp_path / "README.md").write_text("# repo")
+        (tmp_path / "src").mkdir()
+        assert review_mod._scan_sensitive_files(str(tmp_path)) == []
+
+    def test_warning_prints_when_sensitive_files_present(
+        self, tmp_path, review_mod, capsys
+    ):
+        (tmp_path / ".env").write_text("X=1")
+        review_mod._warn_on_sensitive_files(str(tmp_path))
+        err = capsys.readouterr().err
+        assert "WARNING" in err
+        assert ".env" in err
+        assert "--backend api" in err  # mitigation suggested
+
+    def test_warning_silent_on_clean_repo(self, tmp_path, review_mod, capsys):
+        (tmp_path / "README.md").write_text("ok")
+        review_mod._warn_on_sensitive_files(str(tmp_path))
+        err = capsys.readouterr().err
+        assert err == ""
+
+
+class TestMainBackendDispatch:
+    """Integration tests for main() that drive the codex / api branches and
+    assert backend-aware control flow:
+
+      1. --backend codex skips the --repo-root requirement
+         (was an api-only check, fixed in this PR)
+      2. --backend codex skips --include-files staging
+         (Codex chooses files itself, fixed in this PR)
+      3. --backend api preserves the existing requirement + loading
+
+    Uses --dry-run so main() exits before the actual backend invocation;
+    the validation + gating logic runs FIRST so dry-run is sufficient."""
+
+    @pytest.fixture
+    def main_env(self, tmp_path, monkeypatch, review_mod):
+        """Set up minimal inputs for main() invocations."""
+        criteria = tmp_path / "criteria.md"
+        criteria.write_text(
+            "You are an automated PR reviewer for a causal inference library.\n"
+            "Standard methodology criteria here.\n"
+        )
+        registry = tmp_path / "registry.md"
+        registry.write_text("# Methodology Registry\n")
+        diff = tmp_path / "diff.patch"
+        diff.write_text("--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n")
+        files = tmp_path / "files.txt"
+        files.write_text("M\tfoo.py\n")
+        output = tmp_path / "review.md"
+
+        # Stub out OPENAI_API_KEY so api-backend dry-runs don't error
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-for-tests")
+
+        # Track whether source-file loading helpers were called
+        load_calls = {"read_source_files": 0, "expand_import_graph": 0}
+        orig_read = review_mod.read_source_files
+        orig_expand = review_mod.expand_import_graph
+
+        def spy_read(*a, **kw):
+            load_calls["read_source_files"] += 1
+            return orig_read(*a, **kw)
+
+        def spy_expand(*a, **kw):
+            load_calls["expand_import_graph"] += 1
+            return orig_expand(*a, **kw)
+
+        monkeypatch.setattr(review_mod, "read_source_files", spy_read)
+        monkeypatch.setattr(review_mod, "expand_import_graph", spy_expand)
+
+        return {
+            "tmp_path": tmp_path,
+            "criteria": criteria,
+            "registry": registry,
+            "diff": diff,
+            "files": files,
+            "output": output,
+            "load_calls": load_calls,
+            "monkeypatch": monkeypatch,
+        }
+
+    def _run_main(self, env, review_mod, **flags):
+        """Invoke review_mod.main() with the given flags, capturing SystemExit."""
+        argv = [
+            "openai_review.py",
+            "--review-criteria", str(env["criteria"]),
+            "--registry", str(env["registry"]),
+            "--diff", str(env["diff"]),
+            "--changed-files", str(env["files"]),
+            "--output", str(env["output"]),
+            "--dry-run",
+        ]
+        for k, v in flags.items():
+            argv.append(f"--{k.replace('_', '-')}")
+            if v is not None:
+                argv.append(str(v))
+        env["monkeypatch"].setattr(sys, "argv", argv)
+        return review_mod.main()
+
+    def test_codex_backend_skips_repo_root_requirement(
+        self, main_env, review_mod
+    ):
+        """--backend codex --context standard must NOT require --repo-root.
+        Regression for the R0 P1 (validation order)."""
+        # Stub _detect_backend to avoid depending on real codex install state
+        main_env["monkeypatch"].setattr(
+            review_mod, "_detect_backend", lambda r: "codex"
+        )
+        # No --repo-root passed; with --context standard this would error
+        # under api but should succeed under codex.
+        with pytest.raises(SystemExit) as exc:
+            self._run_main(
+                main_env,
+                review_mod,
+                backend="codex",
+                context="standard",
+            )
+        assert exc.value.code == 0  # dry-run exits 0
+
+    def test_codex_backend_skips_include_files_loading(
+        self, main_env, review_mod
+    ):
+        """--backend codex --include-files X must NOT call read_source_files.
+        Regression for the R0 P1 (--include-files staging gate)."""
+        main_env["monkeypatch"].setattr(
+            review_mod, "_detect_backend", lambda r: "codex"
+        )
+        # Create a file that --include-files would resolve to
+        (main_env["tmp_path"] / "diff_diff").mkdir(exist_ok=True)
+        (main_env["tmp_path"] / "diff_diff" / "foo.py").write_text("x = 1")
+        with pytest.raises(SystemExit) as exc:
+            self._run_main(
+                main_env,
+                review_mod,
+                backend="codex",
+                context="minimal",
+                include_files="foo.py",
+                repo_root=str(main_env["tmp_path"]),
+            )
+        assert exc.value.code == 0
+        # Crucially: no source-file loading happened
+        assert main_env["load_calls"]["read_source_files"] == 0
+        assert main_env["load_calls"]["expand_import_graph"] == 0
+
+    def test_api_backend_still_enforces_repo_root_for_standard_context(
+        self, main_env, review_mod, capsys
+    ):
+        """--backend api --context standard without --repo-root still errors.
+        Regression for backward compatibility — the api-backend validation
+        must remain intact even after the codex-backend carve-out."""
+        main_env["monkeypatch"].setattr(
+            review_mod, "_detect_backend", lambda r: "api"
+        )
+        with pytest.raises(SystemExit) as exc:
+            self._run_main(
+                main_env,
+                review_mod,
+                backend="api",
+                context="standard",
+            )
+        assert exc.value.code != 0  # parser.error → exit code 2
+        captured = capsys.readouterr()
+        assert "--repo-root is required" in captured.err
+
+    def test_api_backend_still_loads_include_files(
+        self, main_env, review_mod
+    ):
+        """--backend api --include-files X with --repo-root must still call
+        read_source_files (existing api behavior preserved)."""
+        main_env["monkeypatch"].setattr(
+            review_mod, "_detect_backend", lambda r: "api"
+        )
+        (main_env["tmp_path"] / "diff_diff").mkdir(exist_ok=True)
+        (main_env["tmp_path"] / "diff_diff" / "foo.py").write_text("x = 1")
+        with pytest.raises(SystemExit) as exc:
+            self._run_main(
+                main_env,
+                review_mod,
+                backend="api",
+                context="minimal",
+                include_files="foo.py",
+                repo_root=str(main_env["tmp_path"]),
+            )
+        assert exc.value.code == 0
+        # api backend with --include-files MUST have called read_source_files
+        assert main_env["load_calls"]["read_source_files"] >= 1
 
 
 class TestExtractResponseText:
