@@ -413,6 +413,22 @@ class DifferenceInDifferences:
                     "conley_coords=(lat_col, lon_col) and conley_cutoff_km "
                     "on the constructor."
                 )
+            # Validate conley_coords is a 2-element tuple/list of strings
+            # and both columns exist on `data`. Without these guards, a
+            # malformed tuple or missing column fell through to an opaque
+            # IndexError / pandas KeyError downstream. Codex CI R2 P1.
+            if (
+                not isinstance(self.conley_coords, (tuple, list))
+                or len(self.conley_coords) != 2
+                or not all(isinstance(c, str) for c in self.conley_coords)
+            ):
+                raise ValueError(
+                    "conley_coords must be a 2-element tuple/list of column "
+                    f"names (lat_col, lon_col); got {self.conley_coords!r}."
+                )
+            for _coord_col in self.conley_coords:
+                if _coord_col not in data.columns:
+                    raise ValueError(f"conley_coords column '{_coord_col}' not found in data.")
             if survey_design is not None:
                 raise NotImplementedError(
                     "DifferenceInDifferences(vcov_type='conley') + survey_design "

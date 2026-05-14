@@ -1099,6 +1099,61 @@ class TestConleyEstimatorIntegration:
                 unit="missing_unit",
             )
 
+    def test_did_conley_unknown_coord_column_raises(self, two_period_panel):
+        """vcov_type='conley' with `conley_coords=(<absent>, <col>)` raises
+        a clear estimator-level ValueError before downstream column access.
+        Codex CI R2 P1."""
+        from diff_diff import DifferenceInDifferences
+
+        with pytest.raises(ValueError, match="conley_coords column 'missing_lat' not found"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("missing_lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+            )
+
+    def test_did_conley_malformed_coord_tuple_raises(self, two_period_panel):
+        """vcov_type='conley' with a malformed conley_coords (wrong arity or
+        non-string elements) raises ValueError before downstream access.
+        Codex CI R2 P1."""
+        from diff_diff import DifferenceInDifferences
+
+        # Wrong arity (1-element tuple)
+        with pytest.raises(ValueError, match="2-element tuple/list of column"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat",),  # type: ignore[arg-type]
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+            )
+        # Non-string element
+        with pytest.raises(ValueError, match="2-element tuple/list of column"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat", 0),  # type: ignore[arg-type]
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+            )
+
     def test_did_conley_missing_lag_cutoff_raises(self, two_period_panel):
         """vcov_type='conley' without conley_lag_cutoff raises ValueError."""
         from diff_diff import DifferenceInDifferences
