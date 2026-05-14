@@ -2674,8 +2674,10 @@ class TestWorkflowDoesNotExecutePRHeadCode:
 
     FORBIDDEN_EXECUTION_PATTERNS = (
         "pip install",
+        "pip3 install",
         "pytest",
         "npm install",
+        "npm ci",
         "yarn install",
         "cargo run",
         "cargo test",
@@ -2706,42 +2708,121 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             pytest.skip("workflow not found")
         return wf.read_text()
 
+    @staticmethod
+    def _extract_all_run_content(workflow_text):
+        """Extract `run:` field content across ALL three GitHub Actions
+        scalar styles so the forbidden-pattern scan is fail-closed:
+
+        1. Literal block scalar:  `run: |` / `run: |-` / `run: |+`
+        2. Folded block scalar:   `run: >` / `run: >-` / `run: >+`
+        3. Inline scalar:         `run: <single-line-command>`
+
+        Returns a list of (label, content) tuples for error reporting.
+        Without inline-scalar coverage, `run: pytest` would bypass the
+        scan entirely (P1 from PR #436 R1)."""
+        import re
+
+        results = []
+
+        # Block scalars (literal `|` and folded `>`, optional chomping).
+        # Body lines are indented relative to the `run:` key; we accept
+        # 8+ spaces (next-step boundary is `      - ` at 6 spaces).
+        block_re = re.compile(
+            r"^\s+run:\s*[|>][-+]?\s*\n((?:^(?:[ ]{8,}|\s*$).*\n?)*)",
+            re.MULTILINE,
+        )
+        for i, body in enumerate(block_re.findall(workflow_text)):
+            results.append((f"run-block #{i}", body))
+
+        # Inline scalars: `run: <cmd>` on a single line, where <cmd>
+        # does NOT start with `|` or `>` (those are block-scalar
+        # markers). Negative lookahead handles `run:|` (rare) too.
+        inline_re = re.compile(
+            r"^\s+run:[ \t]+(?![|>])([^\n]+)$",
+            re.MULTILINE,
+        )
+        for i, line in enumerate(inline_re.findall(workflow_text)):
+            results.append((f"run-inline #{i}", line))
+
+        return results
+
     def test_workflow_run_blocks_have_no_forbidden_execution_patterns(
         self, workflow_text
     ):
         """If this fails, the CodeQL #14 dismissal is invalid. Either
         remove the offending step or restructure per the dismissed plan
         (checkout BASE_SHA only + git show for PR-head)."""
-        import re
-
-        # Match every `run: |` block's body. The body is the indented
-        # content following `run: |` until the next step (next `      - `
-        # at 6-space indent) or end of file. Body lines are at 10+ space
-        # indent (the `run: |` itself is at 8-space step-property indent;
-        # block scalars indent further).
-        run_block_re = re.compile(
-            r"^\s+run:\s*\|\s*\n((?:^(?:[ ]{8,}|\s*$).*\n?)*)",
-            re.MULTILINE,
+        run_contents = self._extract_all_run_content(workflow_text)
+        assert run_contents, (
+            "No `run:` content found — extraction broke. The workflow "
+            "must contain at least the resolve-pr's downstream run "
+            "blocks; if extraction returns empty, the regex needs fixing."
         )
-        run_blocks = run_block_re.findall(workflow_text)
-        assert run_blocks, "No `run:` blocks found — extraction regex broke"
 
         violations = []
-        for i, block in enumerate(run_blocks):
+        for label, content in run_contents:
             for pattern in self.FORBIDDEN_EXECUTION_PATTERNS:
-                if pattern in block:
+                if pattern in content:
                     snippet = next(
-                        (line for line in block.splitlines() if pattern in line),
-                        "",
+                        (
+                            line
+                            for line in content.splitlines()
+                            if pattern in line
+                        ),
+                        content.strip()[:120],
                     ).strip()
                     violations.append(
-                        f"run-block #{i}: forbidden pattern {pattern!r} in: {snippet}"
+                        f"{label}: forbidden pattern {pattern!r} in: {snippet}"
                     )
         assert not violations, (
             "CodeQL #14 dismissal invalidated by forbidden execution "
-            "patterns in workflow run blocks:\n" + "\n".join(violations)
+            "patterns in workflow `run:` content:\n" + "\n".join(violations)
             + "\nSee `.github/workflows/ai_pr_review.yml` comment block "
             "above the resolve-pr step for context."
+        )
+
+    def test_workflow_no_python_file_execution_against_workspace(
+        self, workflow_text
+    ):
+        """`python3 <path>.py` invocations against workspace-relative
+        paths execute PR-head Python file bytes — invalidating the
+        dismissal. Inline scripts (`python3 -c '...'`) and module
+        invocations (`python3 -m foo`) don't capture .py tokens, so
+        they're naturally excluded. /tmp/-prefixed paths are SAFE
+        because they're staged from BASE_SHA via `git show`."""
+        import re
+
+        run_contents = self._extract_all_run_content(workflow_text)
+        assert run_contents, "No `run:` content extracted"
+
+        # Match `python` or `python3` followed by whitespace then a
+        # token ending in `.py`. Captures the full path token. We
+        # only flag captures that don't start with `/tmp/`.
+        py_exec_re = re.compile(r"\bpython3?\s+(\S+\.py)\b")
+
+        violations = []
+        for label, content in run_contents:
+            for path in py_exec_re.findall(content):
+                if path.startswith("/tmp/"):
+                    continue
+                # Find the line for the snippet
+                snippet = next(
+                    (
+                        line
+                        for line in content.splitlines()
+                        if path in line and "python" in line
+                    ),
+                    content.strip()[:120],
+                ).strip()
+                violations.append(
+                    f"{label}: workspace-relative python file execution "
+                    f"{path!r} in: {snippet}"
+                )
+        assert not violations, (
+            "CodeQL #14 dismissal invalidated by workspace-relative "
+            "python file execution. These would execute PR-head bytes; "
+            "use /tmp/-prefixed paths (BASE-staged via `git show`) "
+            "instead.\n" + "\n".join(violations)
         )
 
     def test_workflow_dismissal_comment_block_present(self, workflow_text):
@@ -2759,6 +2840,58 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         assert "TestWorkflowDoesNotExecutePRHeadCode" in workflow_text, (
             "Workflow comment must reference this guard test by name so "
             "future maintainers can find it."
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Dismissal-invariant pins. The comment block above the resolve-pr
+    # step claims four invariants hold; the guard test above only pins
+    # invariant #1's "no execution" half. The tests below pin the
+    # remaining structural invariants. If any of these tests fails, the
+    # CodeQL #14 dismissal is invalid for the same reason a forbidden
+    # execution pattern would invalidate it.
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_workflow_codex_step_uses_read_only_sandbox(self, workflow_text):
+        """Invariant #1 (other half): Codex action runs sandbox: read-only.
+        If a future edit relaxes this to workspace-write or
+        danger-full-access, Codex could write or execute PR-head bytes
+        — the dismissal premise breaks."""
+        assert "sandbox: read-only" in workflow_text, (
+            "Codex step must use `sandbox: read-only` per the dismissal "
+            "rationale (comment block above resolve-pr step). Without "
+            "read-only sandbox, Codex can write or execute PR-head "
+            "content and the CodeQL #14 dismissal is invalid."
+        )
+
+    def test_workflow_resolve_pr_sets_head_sha_from_api(self, workflow_text):
+        """Invariant #4: head_sha is API-pinned in the resolve-pr step.
+        If a future edit reads head_sha from the event payload (which
+        is mutable for issue_comment events) instead of the API, the
+        TOCTOU window grows."""
+        assert 'core.setOutput("head_sha", pr.data.head.sha)' in workflow_text, (
+            "resolve-pr step must pin `head_sha` from the API "
+            "(`pr.data.head.sha`), not from the event payload. See "
+            "dismissal rationale invariant #4 in the workflow comment "
+            "block above the resolve-pr step."
+        )
+
+    def test_workflow_comment_triggers_require_author_association(
+        self, workflow_text
+    ):
+        """Invariant #3: comment-triggered events (issue_comment,
+        pull_request_review_comment) require author_association in
+        OWNER/MEMBER/COLLABORATOR. If a future edit drops or weakens
+        this gate, random commenters could trigger the workflow."""
+        assert "github.event.comment.author_association == 'OWNER'" in workflow_text
+        assert "github.event.comment.author_association == 'MEMBER'" in workflow_text
+        assert (
+            "github.event.comment.author_association == 'COLLABORATOR'"
+            in workflow_text
+        ), (
+            "Comment-triggered events must check author_association is "
+            "OWNER/MEMBER/COLLABORATOR per dismissal invariant #3. "
+            "Without this gate, any GitHub user commenting on a PR "
+            "could trigger the workflow with secrets in scope."
         )
 
 
