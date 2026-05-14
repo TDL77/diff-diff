@@ -5470,10 +5470,20 @@ class TestStuteStratifiedSurveyBootstrap:
       survey-aware; verdict carries the C0 deferral substring.
     - Trivial-stratum reduction: ``SurveyDesign(strata="all_ones")``
       ≡ ``SurveyDesign(strata=None)`` at atol=1e-12.
-    - Calibration-shift direction pin: non-strata Stute p-values
-      shifted vs pre-PR (the existing path was under-corrected by
-      sqrt(n_psu/(n_psu-1))). Direction is locked here so a future
-      revert of the centering would be caught.
+    - Non-strata calibration-shift end-to-end smoke: finite + range
+      check that the non-strata Stute path runs after the
+      single-implicit-stratum centering lands. A direction-pin via
+      pre-PR baseline capture was considered but is redundant with
+      the helper-level bit-parity regression at atol=1e-14 (which
+      catches any revert of apply_stratum_centering's algebra) AND
+      the call-site wiring regression below (which catches
+      disconnection of the helper from the Stute call sites).
+    - Stute call-site wiring regression: monkey-patches
+      ``apply_stratum_centering`` and asserts both Stute call sites
+      (``stute_test`` at had_pretests.py:1985,
+      ``stute_joint_pretest`` at :3312) invoke it with psu_axis=1.
+      Catches the disconnection case the helper bit-parity test
+      cannot.
     - MC oracle consistency (``@pytest.mark.slow``): empirical Type
       I error under a stratified null DGP at α=0.05 sits in
       [0.0, 0.10] (3σ at 200 draws).
