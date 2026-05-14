@@ -156,6 +156,13 @@ def _validate_and_aggregate_to_cells(
         ``fit()`` time, not here at aggregation time — this helper
         accepts continuous ``d_gt`` cell means and lets ``fit()`` decide
         whether the integer-only contract applies.
+
+        Under the survey-weighted path (``weights`` is not ``None``),
+        zero-weight rows are pre-filtered before any NaN / coercion /
+        within-cell validation per the ``SurveyDesign.subpopulation()``
+        out-of-sample contract — invalid values in zero-weight rows
+        therefore do NOT raise. NaN / coercion / within-cell checks
+        still apply to all positive-weight rows.
     """
     # 1. Required columns
     missing = [c for c in (outcome, group, time, treatment) if c not in data.columns]
