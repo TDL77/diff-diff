@@ -1124,6 +1124,54 @@ class TestConleyEstimatorIntegration:
         np.testing.assert_allclose(res_did.att, res_mpd.att, atol=1e-10)
         np.testing.assert_allclose(res_did.se, res_mpd.se, atol=1e-10)
 
+    def test_did_conley_with_absorb_uses_raw_time_labels(self, two_period_panel, monkeypatch):
+        """DiD + Conley + absorb=[<unit>] must feed the Conley helper the
+        ORIGINAL time/unit/coord columns from `data`, not the absorb-demeaned
+        `working_data` (in which time has been residualized to floats).
+        Otherwise the within-period spatial sandwich silently partitions on
+        per-unit demeaned floats instead of the true pre/post periods.
+        Codex Wave A R1 P0 #2.
+        """
+        import diff_diff.linalg as linalg_module
+        from diff_diff import DifferenceInDifferences
+
+        df = two_period_panel.copy()
+        captured: dict = {"time_arg": None, "unit_arg": None}
+        orig = linalg_module._compute_conley_vcov
+
+        def _spy(*args, **kwargs):
+            captured["time_arg"] = kwargs.get("time")
+            captured["unit_arg"] = kwargs.get("unit")
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(linalg_module, "_compute_conley_vcov", _spy)
+        DifferenceInDifferences(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
+            absorb=["unit"],
+        )
+        assert captured["time_arg"] is not None
+        # Raw labels are integer 0/1 (the binary post-treatment indicator);
+        # demeaned values would be floats from absorb's within-unit
+        # demeaning. np.unique on raw labels yields exactly 2 distinct
+        # values; on demeaned floats it would yield ~n_units distinct.
+        time_arg = np.asarray(captured["time_arg"])
+        uniques = np.unique(time_arg)
+        assert len(uniques) == 2, (
+            f"Expected 2 unique time labels (raw 0/1), got {len(uniques)}: "
+            f"{uniques[:5]} — absorb is leaking demeaned time into the "
+            "Conley helper."
+        )
+        assert set(uniques.tolist()) == {0, 1}, f"Expected raw integer labels 0/1, got {uniques}"
+
     def test_multi_period_did_with_conley_panel(self):
         """Phase 2 MultiPeriodDiD + vcov_type='conley' uses the block-decomposed
         sandwich (matches R conleyreg). Verifies that finite SEs are produced
@@ -2630,6 +2678,88 @@ class TestConleySparse:
         meat_dense = S.T @ K @ S
         meat_sparse = _compute_spatial_bartlett_meat_sparse(S, coords, cutoff, "haversine")
         np.testing.assert_allclose(meat_sparse, meat_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_haversine_cutoff_above_half_earth_circumference(self):
+        """Sparse haversine path with conley_cutoff_km > π·R_earth (~20,015 km)
+        must include all geometrically eligible pairs. Without the arc-radians
+        clamp, the chord-radius formula 2·sin(arc/2) shrinks for arc > π and
+        the kd-tree silently drops pairs that still have positive Bartlett
+        weight. The dense path saturates at π·R via _haversine_km's clip;
+        the sparse path matches via the clamp. Codex Wave A R1 P0 #1.
+        """
+        rng = np.random.default_rng(seed=101)
+        n = 200
+        lats = rng.uniform(-90.0, 90.0, size=n)
+        lons = rng.uniform(-180.0, 180.0, size=n)
+        coords = np.column_stack([lats, lons])
+        X = np.column_stack([np.ones(n), rng.standard_normal(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 2.0, -0.5]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        # Cutoff well above half-Earth circumference (~20,015 km). Without
+        # the clamp, the sparse path drops antipodal pairs and the meat
+        # diverges from the dense path.
+        cutoff_km = 25_000.0  # > π·R_earth ≈ 20015 km
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff_km,
+            "haversine",
+            "bartlett",
+            bread,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff_km,
+            "haversine",
+            "bartlett",
+            bread,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_haversine_cutoff_at_exactly_half_earth_circumference(self):
+        """Cutoff = π·R_earth: chord radius = 2 (sphere diameter); all
+        pairs are included. Bartlett at u=1 returns 0, so the antipodal
+        pair contributes zero — but pairs at all other distances
+        contribute. Sparse and dense paths must agree."""
+        rng = np.random.default_rng(seed=103)
+        n = 150
+        lats = rng.uniform(-90.0, 90.0, size=n)
+        lons = rng.uniform(-180.0, 180.0, size=n)
+        coords = np.column_stack([lats, lons])
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5]) + rng.standard_normal(n) * 0.5
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        cutoff_km = float(np.pi * _CONLEY_EARTH_RADIUS_KM)  # ≈ 20015.16 km
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff_km,
+            "haversine",
+            "bartlett",
+            bread,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff_km,
+            "haversine",
+            "bartlett",
+            bread,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
 
     def test_panel_block_decomposed_sparse_matches_dense(self):
         """Panel block-decomposed sandwich produces the same vcov whether

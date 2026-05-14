@@ -298,11 +298,19 @@ def _compute_spatial_bartlett_meat_sparse(
                 np.sin(lat_r),
             ]
         )
-        # Chord on the unit sphere matching arc-length cutoff_km.
-        # Multiply by (1 + 1e-12) to absorb chord-projection float roundoff
-        # so that pairs whose arc-distance is just under cutoff aren't
-        # excluded by a chord-roundoff false-negative in the kd-tree query.
-        chord_radius = 2.0 * np.sin(cutoff / (2.0 * _CONLEY_EARTH_RADIUS_KM))
+        # Chord on the unit sphere matching arc-length cutoff_km. Clamp the
+        # arc to π radians (half-Earth circumference) before computing the
+        # chord: the function `arc -> 2 sin(arc/2)` is monotonically
+        # increasing only on [0, π] and reaches its global max of 2 (the
+        # unit-sphere diameter) at arc = π. Without the clamp, cutoffs
+        # above π·R (~20,015 km) would compute a SMALLER chord radius than
+        # at cutoff = π·R and silently drop antipodal pairs that still have
+        # positive Bartlett weight. The dense path saturates at π·R via
+        # `_haversine_km`'s `np.clip(a, 0, 1)` (arcsin caps at π/2), so the
+        # clamp mirrors that saturation. The 1+1e-12 epsilon then absorbs
+        # chord-projection float roundoff at sub-cutoff distances.
+        arc_radians = min(cutoff / _CONLEY_EARTH_RADIUS_KM, np.pi)
+        chord_radius = 2.0 * np.sin(arc_radians / 2.0)
         chord_radius *= 1.0 + 1e-12
         tree = cKDTree(xyz)
         neighbors = tree.query_ball_tree(tree, r=chord_radius, p=2.0)

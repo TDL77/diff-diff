@@ -1290,9 +1290,13 @@ def compute_robust_vcov(
       bandwidth). Two operating modes: cross-sectional (default) and panel
       block-decomposed (pass the three co-required kwargs ``conley_time`` /
       ``conley_unit`` / ``conley_lag_cutoff``, matching R ``conleyreg`` with
-      ``lag_cutoff > 0``). Combining with ``cluster_ids`` or ``weights``
-      raises ``NotImplementedError`` (combined spatial-cluster kernel and
-      Bertanha-Imbens weighted-Conley deferred to follow-up PRs).
+      ``lag_cutoff > 0``). Combining with ``cluster_ids`` applies the
+      combined spatial + cluster product kernel
+      ``K_total[i, j] = K_space(d_ij/h) · 1{c_i = c_j}`` (Wave A #119; on
+      the panel path the cluster must be constant within each unit across
+      periods). Combining with ``weights`` still raises
+      ``NotImplementedError`` (Bertanha-Imbens 2014 weighted-Conley
+      deferred to a follow-up PR).
 
     Parameters
     ----------
@@ -2485,13 +2489,15 @@ class LinearRegression:
         pass the three co-required kwargs ``conley_time`` / ``conley_unit`` /
         ``conley_lag_cutoff``). Requires ``conley_coords`` (n × 2 array) and
         a positive ``conley_cutoff_km``. Combining ``vcov_type="conley"``
-        with ``cluster_ids``, ``weights``, or ``survey_design`` raises
-        ``NotImplementedError`` (combined spatial-cluster kernel +
-        Bertanha-Imbens weighted-Conley deferred to follow-up PRs). The
-        panel DiD estimator rejects at fit-time (DiD.fit() has no unit
-        column declaration; use MultiPeriodDiD or TwoWayFixedEffects, which
-        thread their `unit`/`time` columns into the block-decomposed
-        sandwich via ``conley_lag_cutoff`` on the constructor).
+        with ``cluster_ids`` applies the combined spatial + cluster product
+        kernel (Wave A #119; cluster must be constant within each unit on
+        the panel path). Combining with ``weights`` / ``survey_design``
+        still raises ``NotImplementedError`` (Bertanha-Imbens 2014
+        weighted-Conley deferred to a follow-up PR). The DiD / MPD / TWFE
+        estimators all support panel Conley by passing ``unit`` at fit-time
+        (DiD as a fit-time kwarg; MPD/TWFE via the existing ``unit``
+        argument), threading ``conley_time`` / ``conley_unit`` into the
+        block-decomposed sandwich.
     conley_coords : ndarray of shape (n, 2), optional
         Required when ``vcov_type="conley"``. Two-column array of
         ``[lat, lon]`` (degrees, for ``conley_metric="haversine"``) or
