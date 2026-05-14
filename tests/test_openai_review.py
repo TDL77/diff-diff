@@ -2603,23 +2603,65 @@ class TestWorkflowForkSkip:
         )
 
     def test_workflow_post_resolve_steps_gated_on_is_fork(self, workflow_text):
-        """All steps that run AFTER resolve-pr (and could touch untrusted
-        PR contents) must have `if: steps.pr.outputs.is_fork == 'false'`.
+        """Every step in the `review` job that runs AFTER the `resolve-pr`
+        step must include `steps.pr.outputs.is_fork == 'false'` in its
+        `if:` clause.
 
-        Count derivation: 7 gated steps total — 2 checkouts (closed PR
-        path, open PR path) + Pre-fetch base SHA + Fetch previous AI
-        review + Build review prompt + Run Codex + Post PR comment.
-        Adding a new step that handles PR contents must extend this
-        count.
+        Per CodeQL alerts #11/#12, no step that could touch untrusted PR
+        contents (or run while OPENAI_API_KEY is in scope) may execute
+        on a fork PR. The resolve-pr step itself only API-fetches PR
+        metadata via GITHUB_TOKEN — safe to run before the gate is
+        computed. Every step after must be gated.
 
-        Allow ≥7 to also count incidental references in code comments
-        (e.g. the JS doc comment in the resolve-pr step itself)."""
-        count = workflow_text.count("is_fork == 'false'")
-        assert count >= 7, (
-            f"Expected at least 7 occurrences of `is_fork == 'false'` (one "
-            f"per gated post-resolve step); found {count}. A new step that "
-            f"reads PR contents must also be gated to keep CodeQL alerts "
-            f"#11/#12 closed."
+        The earlier (PR #427 R0) version of this test counted the string
+        `is_fork == 'false'` globally with `>= 7`, which had two false-
+        negative modes:
+          (a) a real gate could be removed — string count drops 8→7,
+              still passes
+          (b) a new ungated post-resolve step could be added — gate
+              count stays at 7, total step count grows, passes
+
+        This rewrite (R1, addressing the reviewer's P3) anchors on:
+          - `^        if:` at 8-space indent (the step-property indent
+            level for the review job's nested `if:` keys), excluding
+            the JS doc comment inside the resolve-pr step's `script: |`
+            block which would not match this anchor
+          - `^      - (name|uses):` at 6-space indent (step-list-item
+            indent), counting every step in the job
+
+        Then asserts `gated_steps == total_steps - 1` (resolve-pr is the
+        only legitimately ungated step). Catches both failure modes
+        above."""
+        import re
+
+        # `if:` lines at step-property indent (8 spaces) containing the
+        # gate. Allows combined conditions like
+        # `if: steps.pr.outputs.state == 'open' && steps.pr.outputs.is_fork == 'false'`.
+        gate_re = re.compile(
+            r"^        if:.*is_fork == 'false'", re.MULTILINE
+        )
+        gates = gate_re.findall(workflow_text)
+
+        # All step starts in the review job (`      - name:` or
+        # `      - uses:` at 6-space indent).
+        step_start_re = re.compile(
+            r"^      - (?:name|uses):", re.MULTILINE
+        )
+        steps = step_start_re.findall(workflow_text)
+
+        # The resolve-pr step is the only ungated step (it sets the
+        # output that all subsequent steps gate on).
+        expected_gates = len(steps) - 1
+        assert len(gates) == expected_gates, (
+            f"Fork-skip gate invariant violated: found {len(gates)} "
+            f"gated step(s) but {len(steps)} total step(s) in the "
+            f"`review` job — expected exactly {expected_gates} gates "
+            f"(every step except resolve-pr must include "
+            f"`is_fork == 'false'` in its `if:`). Either a gate was "
+            f"removed or a new post-resolve step was added without one. "
+            f"Per CodeQL alerts #11/#12, every post-resolve step must "
+            f"be gated to prevent untrusted-checkout execution on fork "
+            f"PRs."
         )
 
 
