@@ -1891,20 +1891,27 @@ inference = reg.get_inference(coef_index)  # -> InferenceResult
 ### Conley Spatial HAC Standard Errors
 
 Conley (1999) spatial heteroskedasticity-and-autocorrelation-consistent standard
-errors. Use when residuals are spatially correlated (geo experiments, regional
-shocks, common-supplier effects). **Phase 1 supports cross-sectional Conley only**,
-via direct `compute_robust_vcov` / `LinearRegression` on a single-period design.
-**Panel estimators (`DifferenceInDifferences`, `TwoWayFixedEffects`,
-`MultiPeriodDiD`) reject `vcov_type="conley"` at fit-time** with
-`NotImplementedError`: cross-sectional Conley over `(unit, time)` rows would
-treat same-unit cross-time pairs as `d_ij = 0 → K = 1`, mishandling the
-space-time HAC. Practitioners pre-collapse to per-unit first-differences and
-call `compute_robust_vcov` directly. Phase 2 will add the space-time product
-kernel (Driscoll-Kraay) and lift the panel rejection.
+errors. Use when residuals are spatially (and optionally temporally) correlated
+(geo experiments, regional shocks, common-supplier effects). Two operating
+modes:
+
+- **Cross-sectional:** Direct `compute_robust_vcov` / `LinearRegression` on
+  a single-period design.
+- **Panel block-decomposed** (matches R `conleyreg` with `lag_cutoff > 0`):
+  `MultiPeriodDiD` / `TwoWayFixedEffects` with `vcov_type="conley"` and
+  `conley_lag_cutoff=<int>`. The sandwich sums within-period spatial pairs
+  plus within-unit Bartlett serial pairs (excluding lag=0 to avoid
+  double-counting); NOT a multiplicative product kernel.
+
+**`DifferenceInDifferences(vcov_type="conley")` raises `NotImplementedError`**
+with a redirect to `MultiPeriodDiD` / `TwoWayFixedEffects`: DiD.fit() has
+no `unit` column declaration, but the block-decomposed sandwich requires
+unit membership for the per-unit serial sum.
 
 ```python
 import numpy as np
 from diff_diff.linalg import LinearRegression
+from diff_diff import MultiPeriodDiD, TwoWayFixedEffects
 
 # Cross-sectional design: 1 row per unit, n × 2 lat/lon coords.
 reg = LinearRegression(
@@ -1916,11 +1923,61 @@ reg = LinearRegression(
     conley_kernel="bartlett",            # or "uniform"
 ).fit(X, y)
 se = np.sqrt(np.diag(reg.vcov_))
+
+# Panel design: TWFE with within-unit Bartlett serial HAC.
+# TWFE's `time` column is intrinsically a binary post indicator
+# (treatment * time interaction); only numeric encodings are supported on
+# this surface. `conley_lag_cutoff=1` includes the cross-period pair under
+# the Bartlett taper. For multi-period panels, use MultiPeriodDiD.
+res = TwoWayFixedEffects(
+    vcov_type="conley",
+    conley_coords=("lat", "lon"),        # column names on `data`
+    conley_cutoff_km=500.0,
+    conley_lag_cutoff=1,                 # within-unit Bartlett, lag 1 panel period
+).fit(data, outcome="y", treatment="treated", time="post", unit="unit_id")
+
+# Panel design: MultiPeriodDiD with multi-period time.
+# MultiPeriodDiD builds period dummies (NOT a treated * time product), so
+# `time` can be any orderable encoding — int years (2020, 2021, ...),
+# YYYYMM (202012, 202101, ...), datetime64, pd.Period, strings.
+# `_compute_conley_vcov` normalizes time to dense codes 0..T-1 internally,
+# so `conley_lag_cutoff` always counts panel periods regardless of label.
+mp_res = MultiPeriodDiD(
+    vcov_type="conley",
+    conley_coords=("lat", "lon"),
+    conley_cutoff_km=200.0,
+    conley_lag_cutoff=2,                 # within-unit Bartlett up to 2 panel periods
+).fit(data, outcome="y", treatment="treated", time="period",
+      post_periods=[2, 3], unit="unit_id")
 ```
 
-**Variance estimator:**
+**Note on `conley_lag_cutoff` semantics:** the lag is counted in **panel
+periods** (number of distinct sorted values in the `time` column), NOT in
+raw-label differences. Internally, time labels are normalized to dense codes
+`0..T-1` via `np.unique(return_inverse=True)`. For example, MultiPeriodDiD
+with `time` values `(2020, 2021, 2022)` and `(202012, 202101, 202102)` both
+produce the same codes `(0, 1, 2)` and the same lag matrix. **TWFE caveat:**
+the time-label normalization runs inside `_compute_conley_vcov`, but TWFE's
+own design step `_treatment_post = treated * time` requires numeric `time`;
+non-numeric labels (datetime64, pd.Period, strings) are TWFE-incompatible
+end-to-end. Use MultiPeriodDiD if you need datetime/Period/string time
+labels. **Deviation from R `conleyreg`:** R uses raw `time` values directly
+in the lag computation, which silently mishandles non-dense encodings.
+diff-diff is the more robust default; for bit-exact R parity, pass `time`
+as a dense integer index.
+
+**Variance estimator — cross-sectional:**
 
     Var̂(β) = (X'X)^{-1} · ( Σ_{i,j} K(d_ij / h) · X_i ε_i ε_j X_j' ) · (X'X)^{-1}
+
+**Variance estimator — panel block-decomposed (matches R `conleyreg`):**
+
+    XeeX_spatial = Σ_t  Σ_{i,j∈units}    K_space(d_ij/h)             · X_{i,t} ε_{i,t} ε_{j,t} X_{j,t}'
+    XeeX_serial  = Σ_u  Σ_{|t-s|≤L,t≠s}  (1 - |t-s|/(L+1))           · X_{u,t} ε_{u,t} ε_{u,s} X_{u,s}'
+    Var̂(β)       = (X'X)^{-1} · ( XeeX_spatial + XeeX_serial ) · (X'X)^{-1}
+
+The temporal kernel is hardcoded Bartlett-style regardless of `conley_kernel`
+(matches `conleyreg::time_dist.cpp`).
 
 **Kernels:**
 - `"bartlett"` (default): `K(u) = max(0, 1 - |u|)` on pairwise distance `d_ij/h`. The radial 1-D form, matching R `conleyreg` / Stata `acreg`. Conley 1999's explicit PSD-guaranteed Bartlett formula (Eq 3.14) is the 2-D **separable product** window on a lattice; the 1-D radial specialization that diff-diff implements is a practitioner convention and is not formally PSD-guaranteed.
@@ -1938,16 +1995,21 @@ recommends a sensitivity grid (e.g., 50, 100, 200, 500 km) and reporting the
 SE range.
 
 **Restrictions in this release:**
-- Panel estimators (`DifferenceInDifferences`, `TwoWayFixedEffects`, `MultiPeriodDiD`) `+ vcov_type="conley"` → `NotImplementedError` at fit-time. Phase 2 adds the space-time product kernel.
-- `LinearRegression(vcov_type="conley", cluster_ids=...)` → `NotImplementedError` (combined kernel deferred to Phase 2).
-- `LinearRegression(vcov_type="conley", weights=...)` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up).
+- `DifferenceInDifferences(vcov_type="conley")` → `NotImplementedError` (no `unit` declaration on `DiD.fit()`; use `MultiPeriodDiD` / `TwoWayFixedEffects`).
+- `MultiPeriodDiD` / `TwoWayFixedEffects` `+ vcov_type="conley"` without `conley_lag_cutoff` → `ValueError` (no defensible default; explicit user choice required).
+- `MultiPeriodDiD` `+ vcov_type="conley"` without `unit=` at fit-time → `ValueError`.
+- `TwoWayFixedEffects(vcov_type="conley", cluster=...)` → `NotImplementedError` (combined spatial + cluster kernel deferred). Auto-cluster on the Conley path is silently dropped.
+- `TwoWayFixedEffects(vcov_type="conley", inference="wild_bootstrap")` → `NotImplementedError`.
 - `SyntheticDiD(vcov_type="conley")` → `TypeError` (uses bootstrap, not analytical sandwich).
-- `n > 20_000` emits a `UserWarning` about O(n²) distance-matrix memory.
+- Any-mode `vcov_type="conley"` `+ cluster_ids=` / `weights=` / `survey_design=` on `LinearRegression` / `compute_robust_vcov` → `NotImplementedError` (combined kernel + Bertanha-Imbens 2014 weighted-Conley deferred to follow-up PRs).
+- `n > 20_000` emits a `UserWarning` about O(n²) distance-matrix memory; sparse k-d-tree fast path is a follow-up.
 
 **Parity:** matches R `conleyreg` (Düsterhöft 2021, CRAN v0.1.9) to ≤ 1e-6
-on three benchmark fixtures in
-`benchmarks/data/r_conleyreg_conley_golden.json`. Earth radius 6371.01 km
-matches conleyreg.
+on six benchmark fixtures in
+`benchmarks/data/r_conleyreg_conley_golden.json`: three cross-sectional and
+three panel fixtures with `lag_cutoff > 0` (`panel_haversine_lag1`,
+`panel_haversine_lag2`, `panel_lat_lon_realistic_lag1`). Earth radius
+6371.01 km matches conleyreg.
 
 ## Rust Backend
 

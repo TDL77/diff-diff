@@ -16,8 +16,10 @@ suppressPackageStartupMessages({
 
 EARTH_RADIUS_KM <- 6371.01  # matches diff-diff and conleyreg
 
-# Build one fixture entry for the JSON. Calls conleyreg, extracts the vcov,
-# packs everything in the schema diff-diff's TestConleyParityR expects.
+# Build one cross-sectional fixture entry for the JSON. Calls conleyreg with
+# lag_cutoff=0 on a singleton-time panel (which collapses to the Phase 1
+# cross-sectional sandwich), extracts the vcov, packs everything in the
+# schema diff-diff's TestConleyParityR expects.
 build_fixture <- function(seed, n, k, metric, cutoff_km, kernel,
                           lat_range, lon_range) {
   set.seed(seed)
@@ -75,6 +77,67 @@ build_fixture <- function(seed, n, k, metric, cutoff_km, kernel,
   )
 }
 
+# Build one Phase 2 panel fixture (block-decomposed Conley + per-unit
+# Bartlett temporal HAC). conleyreg(lag_cutoff > 0) is the parity benchmark.
+# Each unit has a time-invariant (lat, lon) and observations across T periods.
+build_panel_fixture <- function(seed, n_units, T_periods, k, cutoff_km, kernel,
+                                lag_cutoff, lat_range, lon_range) {
+  set.seed(seed)
+  lat_unit <- runif(n_units, lat_range[1], lat_range[2])
+  lon_unit <- runif(n_units, lon_range[1], lon_range[2])
+  unit <- rep(seq_len(n_units), each = T_periods)
+  time <- rep(seq_len(T_periods), times = n_units)
+  lat <- lat_unit[unit]
+  lon <- lon_unit[unit]
+  n <- n_units * T_periods
+  df <- data.frame(unit = unit, time = time, lat = lat, lon = lon)
+  for (j in seq_len(k - 1)) df[[paste0("x", j)]] <- rnorm(n)
+  betas <- c(1.0, seq(0.5, 2.0, length.out = k - 1))
+  df$y <- betas[1] +
+    rowSums(sapply(seq_len(k - 1), function(j) betas[j + 1] * df[[paste0("x", j)]])) +
+    rnorm(n, sd = 0.5)
+
+  formula_str <- if (k == 2) "y ~ x1" else
+    paste0("y ~ ", paste(paste0("x", seq_len(k - 1)), collapse = " + "))
+  V <- conleyreg(
+    formula    = as.formula(formula_str),
+    data       = df,
+    dist_cutoff = cutoff_km,
+    unit       = "unit",
+    time       = "time",
+    lat        = "lat",
+    lon        = "lon",
+    kernel     = kernel,
+    lag_cutoff = lag_cutoff,
+    dist_comp  = "spherical",
+    verbose    = FALSE,
+    vcov       = TRUE
+  )
+  V <- unname(as.matrix(V))
+
+  X <- cbind(1, as.matrix(df[, paste0("x", seq_len(k - 1)), drop = FALSE]))
+  coords_mat <- as.matrix(df[, c("lat", "lon")])
+  list(
+    x = as.vector(t(X)),
+    x_shape = c(nrow(X), ncol(X)),
+    y = df$y,
+    coords = as.vector(t(coords_mat)),
+    coords_shape = c(n, 2),
+    unit = df$unit,
+    time = df$time,
+    metric = "haversine",
+    cutoff_km = cutoff_km,
+    kernel = kernel,
+    lag_cutoff = lag_cutoff,
+    vcov = as.vector(t(V)),
+    vcov_shape = dim(V),
+    n = n,
+    k = ncol(X),
+    n_units = n_units,
+    T_periods = T_periods
+  )
+}
+
 out <- list(
   meta = list(
     generated_at = format(Sys.Date(), "%Y-%m-%d"),
@@ -100,6 +163,24 @@ out <- list(
   lat_lon_realistic = build_fixture(
     seed = 314, n = 300, k = 3, metric = "haversine", cutoff_km = 200,
     kernel = "bartlett", lat_range = c(25, 50), lon_range = c(-125, -65)
+  ),
+  # Phase 2 panel fixtures: lag_cutoff > 0 exercises the block-decomposed
+  # sandwich (within-period spatial + within-unit Bartlett serial). Each
+  # unit's location is time-invariant.
+  panel_haversine_lag1 = build_panel_fixture(
+    seed = 1001, n_units = 60, T_periods = 3, k = 2,
+    cutoff_km = 500, kernel = "bartlett", lag_cutoff = 1,
+    lat_range = c(-30, 30), lon_range = c(-100, 100)
+  ),
+  panel_haversine_lag2 = build_panel_fixture(
+    seed = 1002, n_units = 80, T_periods = 5, k = 3,
+    cutoff_km = 1000, kernel = "bartlett", lag_cutoff = 2,
+    lat_range = c(-45, 45), lon_range = c(-150, 150)
+  ),
+  panel_lat_lon_realistic_lag1 = build_panel_fixture(
+    seed = 1003, n_units = 100, T_periods = 4, k = 3,
+    cutoff_km = 200, kernel = "bartlett", lag_cutoff = 1,
+    lat_range = c(25, 50), lon_range = c(-125, -65)
   )
 )
 

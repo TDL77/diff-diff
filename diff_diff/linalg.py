@@ -364,6 +364,9 @@ def solve_ols(
     conley_cutoff_km: Optional[float] = ...,
     conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
+    conley_time: Optional[np.ndarray] = ...,
+    conley_unit: Optional[np.ndarray] = ...,
+    conley_lag_cutoff: Optional[int] = ...,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]: ...
 
 
@@ -386,6 +389,9 @@ def solve_ols(
     conley_cutoff_km: Optional[float] = ...,
     conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
+    conley_time: Optional[np.ndarray] = ...,
+    conley_unit: Optional[np.ndarray] = ...,
+    conley_lag_cutoff: Optional[int] = ...,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]: ...
 
 
@@ -408,6 +414,9 @@ def solve_ols(
     conley_cutoff_km: Optional[float] = ...,
     conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
+    conley_time: Optional[np.ndarray] = ...,
+    conley_unit: Optional[np.ndarray] = ...,
+    conley_lag_cutoff: Optional[int] = ...,
 ) -> Union[
     Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]],
     Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]],
@@ -466,6 +475,9 @@ def solve_ols(
     conley_cutoff_km: Optional[float] = None,
     conley_metric: ConleyMetric = "haversine",
     conley_kernel: str = "bartlett",
+    conley_time: Optional[np.ndarray] = None,
+    conley_unit: Optional[np.ndarray] = None,
+    conley_lag_cutoff: Optional[int] = None,
 ) -> Union[
     Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]],
     Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]],
@@ -533,10 +545,13 @@ def solve_ols(
         - ``"conley"``: Conley (1999) spatial-HAC sandwich. Requires
           ``conley_coords`` (n × 2 array) and ``conley_cutoff_km`` (positive
           bandwidth, no default per Conley 1999 Section 5's sensitivity-grid
-          recommendation). Combining with ``cluster_ids`` or ``weights``
-          raises ``NotImplementedError`` (combined product kernel + Bertanha-
-          Imbens 2014 weighted-Conley deferred to Phase 2+). Cross-sectional
-          one-way only.
+          recommendation). Two operating modes: cross-sectional (single-period
+          design or pooled cross-section) and panel block-decomposed (matches
+          R ``conleyreg`` with ``lag_cutoff > 0``); switch by passing the
+          three co-required kwargs ``conley_time`` / ``conley_unit`` /
+          ``conley_lag_cutoff``. Combining with ``cluster_ids`` or ``weights``
+          raises ``NotImplementedError`` (combined spatial-cluster kernel +
+          Bertanha-Imbens 2014 weighted-Conley deferred to follow-up PRs).
     conley_coords : ndarray of shape (n, 2), optional
         Required when ``vcov_type="conley"``. Two-column array of
         ``[lat, lon]`` (degrees, for ``conley_metric="haversine"``) or
@@ -645,6 +660,19 @@ def solve_ols(
                 "Clean your data or set check_finite=False to skip this check."
             )
 
+    # Front-door Conley-specific validation. Runs BEFORE the routing/backend
+    # branching so `return_vcov=False` cannot bypass the conley+weights /
+    # conley+cluster_ids guards. Conley needs this because survey-replicate
+    # paths in MultiPeriodDiD pass `return_vcov=False` + `weights=survey_w`
+    # and would otherwise silently return survey SEs under a Conley request.
+    # The full `_validate_vcov_args` is NOT called here because other vcov
+    # types (e.g. `hc2_bm` + replicate weights) intentionally fall through
+    # to the survey-vcov path with the analytical validator skipped — that
+    # legacy contract is preserved.
+    if vcov_type == "conley":
+        if cluster_ids is not None or weights is not None:
+            _validate_vcov_args(vcov_type, cluster_ids, weights)
+
     # WLS transformation: apply sqrt(w) scaling to X and y
     # This happens BEFORE routing to Rust or NumPy backends — they receive
     # pre-transformed X_w, y_w and solve standard OLS.
@@ -698,6 +726,9 @@ def solve_ols(
                 conley_cutoff_km=conley_cutoff_km,
                 conley_metric=conley_metric,
                 conley_kernel=conley_kernel,
+                conley_time=conley_time,
+                conley_unit=conley_unit,
+                conley_lag_cutoff=conley_lag_cutoff,
             )
     else:
         # Check for rank deficiency using fast pivoted QR decomposition.
@@ -751,6 +782,9 @@ def solve_ols(
                 conley_cutoff_km=conley_cutoff_km,
                 conley_metric=conley_metric,
                 conley_kernel=conley_kernel,
+                conley_time=conley_time,
+                conley_unit=conley_unit,
+                conley_lag_cutoff=conley_lag_cutoff,
             )
 
     # Back-transform residuals and compute weighted vcov on original-scale data.
@@ -787,6 +821,9 @@ def solve_ols(
                         conley_cutoff_km=conley_cutoff_km,
                         conley_metric=conley_metric,
                         conley_kernel=conley_kernel,
+                        conley_time=conley_time,
+                        conley_unit=conley_unit,
+                        conley_lag_cutoff=conley_lag_cutoff,
                     )
                     vcov_out = _expand_vcov_with_nan(vcov_reduced, _original_X.shape[1], kept_cols)
                 else:
@@ -803,6 +840,9 @@ def solve_ols(
                     conley_cutoff_km=conley_cutoff_km,
                     conley_metric=conley_metric,
                     conley_kernel=conley_kernel,
+                    conley_time=conley_time,
+                    conley_unit=conley_unit,
+                    conley_lag_cutoff=conley_lag_cutoff,
                 )
 
         if return_fitted:
@@ -830,6 +870,9 @@ def _solve_ols_numpy(
     conley_cutoff_km: Optional[float] = ...,
     conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
+    conley_time: Optional[np.ndarray] = ...,
+    conley_unit: Optional[np.ndarray] = ...,
+    conley_lag_cutoff: Optional[int] = ...,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]: ...
 
 
@@ -850,6 +893,9 @@ def _solve_ols_numpy(
     conley_cutoff_km: Optional[float] = ...,
     conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
+    conley_time: Optional[np.ndarray] = ...,
+    conley_unit: Optional[np.ndarray] = ...,
+    conley_lag_cutoff: Optional[int] = ...,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]]: ...
 
 
@@ -870,6 +916,9 @@ def _solve_ols_numpy(
     conley_cutoff_km: Optional[float] = ...,
     conley_metric: ConleyMetric = ...,
     conley_kernel: str = ...,
+    conley_time: Optional[np.ndarray] = ...,
+    conley_unit: Optional[np.ndarray] = ...,
+    conley_lag_cutoff: Optional[int] = ...,
 ) -> Union[
     Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]],
     Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]],
@@ -892,6 +941,9 @@ def _solve_ols_numpy(
     conley_cutoff_km: Optional[float] = None,
     conley_metric: ConleyMetric = "haversine",
     conley_kernel: str = "bartlett",
+    conley_time: Optional[np.ndarray] = None,
+    conley_unit: Optional[np.ndarray] = None,
+    conley_lag_cutoff: Optional[int] = None,
 ) -> Union[
     Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]],
     Tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]],
@@ -1003,6 +1055,9 @@ def _solve_ols_numpy(
                 conley_cutoff_km=conley_cutoff_km,
                 conley_metric=conley_metric,
                 conley_kernel=conley_kernel,
+                conley_time=conley_time,
+                conley_unit=conley_unit,
+                conley_lag_cutoff=conley_lag_cutoff,
             )
             vcov = _expand_vcov_with_nan(vcov_reduced, k, kept_cols)
     else:
@@ -1026,6 +1081,9 @@ def _solve_ols_numpy(
                 conley_cutoff_km=conley_cutoff_km,
                 conley_metric=conley_metric,
                 conley_kernel=conley_kernel,
+                conley_time=conley_time,
+                conley_unit=conley_unit,
+                conley_lag_cutoff=conley_lag_cutoff,
             )
 
     if return_fitted:
@@ -1112,16 +1170,16 @@ def _validate_vcov_args(
             "Bell-McCaffrey. Tracked in TODO.md."
         )
     if vcov_type == "conley":
-        # Conley + cluster_ids (combined product kernel) and Conley + weights
-        # (Bertanha-Imbens 2014) are deferred to Phase 2+. TwoWayFixedEffects
-        # has its own earlier raise at twfe.py with a TWFE-specific message;
-        # this is the fallback path for DifferenceInDifferences and
-        # MultiPeriodDiD callers (and direct compute_robust_vcov use).
+        # Conley + cluster_ids (combined spatial-cluster kernel) and Conley +
+        # weights (Bertanha-Imbens 2014) are deferred to follow-up PRs.
+        # TwoWayFixedEffects has its own earlier raise at twfe.py with a
+        # TWFE-specific message; this is the fallback path for
+        # MultiPeriodDiD callers and direct compute_robust_vcov use.
         if cluster_ids is not None:
             raise NotImplementedError(
-                "vcov_type='conley' with cluster_ids is a Phase 2+ follow-up "
-                "(combined product kernel). Use vcov_type='hc1' for cluster-"
-                "robust without spatial HAC, or drop cluster= for Conley."
+                "vcov_type='conley' with cluster_ids is a follow-up "
+                "(combined spatial-cluster kernel). Use vcov_type='hc1' for "
+                "cluster-robust without spatial HAC, or drop cluster= for Conley."
             )
         if weights is not None:
             raise NotImplementedError(
@@ -1202,6 +1260,9 @@ def compute_robust_vcov(
     conley_cutoff_km: Optional[float] = None,
     conley_metric: ConleyMetric = "haversine",
     conley_kernel: str = "bartlett",
+    conley_time: Optional[np.ndarray] = None,
+    conley_unit: Optional[np.ndarray] = None,
+    conley_lag_cutoff: Optional[int] = None,
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
     Compute variance-covariance matrix under one of five `vcov_type` variants.
@@ -1229,10 +1290,12 @@ def compute_robust_vcov(
       raises ``NotImplementedError``.
     - ``"conley"``: spatial HAC sandwich (Conley 1999 Eq 4.2). Requires
       ``conley_coords`` (n×2 array) and ``conley_cutoff_km`` (positive
-      bandwidth). Cross-sectional one-way only in this release; combining
-      with ``cluster_ids`` or ``weights`` raises ``NotImplementedError``
-      (combined product kernel and Bertanha-Imbens-style weighted Conley
-      are deferred to Phase 2+).
+      bandwidth). Two operating modes: cross-sectional (default) and panel
+      block-decomposed (pass the three co-required kwargs ``conley_time`` /
+      ``conley_unit`` / ``conley_lag_cutoff``, matching R ``conleyreg`` with
+      ``lag_cutoff > 0``). Combining with ``cluster_ids`` or ``weights``
+      raises ``NotImplementedError`` (combined spatial-cluster kernel and
+      Bertanha-Imbens weighted-Conley deferred to follow-up PRs).
 
     Parameters
     ----------
@@ -1359,6 +1422,9 @@ def compute_robust_vcov(
                     conley_cutoff_km=conley_cutoff_km,
                     conley_metric=conley_metric,
                     conley_kernel=conley_kernel,
+                    conley_time=conley_time,
+                    conley_unit=conley_unit,
+                    conley_lag_cutoff=conley_lag_cutoff,
                 )
             raise
 
@@ -1375,6 +1441,9 @@ def compute_robust_vcov(
         conley_cutoff_km=conley_cutoff_km,
         conley_metric=conley_metric,
         conley_kernel=conley_kernel,
+        conley_time=conley_time,
+        conley_unit=conley_unit,
+        conley_lag_cutoff=conley_lag_cutoff,
     )
 
 
@@ -1649,6 +1718,9 @@ def _compute_robust_vcov_numpy(
     conley_cutoff_km: Optional[float] = None,
     conley_metric: ConleyMetric = "haversine",
     conley_kernel: str = "bartlett",
+    conley_time: Optional[np.ndarray] = None,
+    conley_unit: Optional[np.ndarray] = None,
+    conley_lag_cutoff: Optional[int] = None,
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
     NumPy fallback implementation of compute_robust_vcov.
@@ -1687,15 +1759,23 @@ def _compute_robust_vcov_numpy(
             n_eff = int(np.count_nonzero(weights > 0))
 
     # ------------------------------------------------------------------
-    # Conley (1999) spatial HAC. Cross-sectional only in this release;
-    # the validator above already raised on conley + cluster_ids and
-    # conley + weights.
+    # Conley (1999) spatial HAC. Cross-sectional (Phase 1) when no time/unit
+    # is supplied; panel block-decomposed form (matches R conleyreg with
+    # lag_cutoff > 0) when all three of conley_time / conley_unit /
+    # conley_lag_cutoff are supplied. The validator above already raised
+    # on conley + cluster_ids and conley + weights.
     # ------------------------------------------------------------------
     if vcov_type == "conley":
-        _validate_conley_kwargs(conley_coords, conley_cutoff_km, conley_metric, conley_kernel, n)
-        # Validator coerces None to a clean array; helper accepts the user's
-        # input directly (np.asarray inside _compute_conley_vcov is a no-op
-        # for already-validated arrays).
+        _validate_conley_kwargs(
+            conley_coords,
+            conley_cutoff_km,
+            conley_metric,
+            conley_kernel,
+            n,
+            time=conley_time,
+            unit=conley_unit,
+            lag_cutoff=conley_lag_cutoff,
+        )
         vcov = _compute_conley_vcov(
             X,
             residuals,
@@ -1704,6 +1784,9 @@ def _compute_robust_vcov_numpy(
             conley_metric,
             conley_kernel,
             bread_matrix,
+            time=conley_time,
+            unit=conley_unit,
+            lag_cutoff=conley_lag_cutoff,
         )
         if return_dof:
             return vcov, np.full(k, n_eff - k, dtype=np.float64)
@@ -2394,15 +2477,20 @@ class LinearRegression:
         sandwich, the class stores per-coefficient BM Satterthwaite DOF
         (``self._bm_dof``) and threads it into ``get_inference``.
 
-        For ``"conley"`` (Conley 1999 spatial-HAC) the supported Phase 1
-        path is the cross-sectional `LinearRegression` / `compute_robust_vcov`
-        surface; requires ``conley_coords`` (n × 2 array) and a positive
-        ``conley_cutoff_km``. Combining ``vcov_type="conley"`` with
-        ``cluster_ids``, ``weights``, or ``survey_design`` raises
-        ``NotImplementedError`` (combined product kernel + Bertanha-Imbens
-        2014 weighted-Conley deferred to Phase 2+). The panel DiD /
-        MultiPeriodDiD / TwoWayFixedEffects estimators reject
-        ``vcov_type="conley"`` at fit-time entirely in Phase 1.
+        For ``"conley"`` (Conley 1999 spatial-HAC) two operating modes are
+        supported on the `LinearRegression` / `compute_robust_vcov` surface:
+        cross-sectional (single-period or pooled cross-section) and panel
+        block-decomposed (matches R ``conleyreg`` with ``lag_cutoff > 0``;
+        pass the three co-required kwargs ``conley_time`` / ``conley_unit`` /
+        ``conley_lag_cutoff``). Requires ``conley_coords`` (n × 2 array) and
+        a positive ``conley_cutoff_km``. Combining ``vcov_type="conley"``
+        with ``cluster_ids``, ``weights``, or ``survey_design`` raises
+        ``NotImplementedError`` (combined spatial-cluster kernel +
+        Bertanha-Imbens weighted-Conley deferred to follow-up PRs). The
+        panel DiD estimator rejects at fit-time (DiD.fit() has no unit
+        column declaration; use MultiPeriodDiD or TwoWayFixedEffects, which
+        thread their `unit`/`time` columns into the block-decomposed
+        sandwich via ``conley_lag_cutoff`` on the constructor).
     conley_coords : ndarray of shape (n, 2), optional
         Required when ``vcov_type="conley"``. Two-column array of
         ``[lat, lon]`` (degrees, for ``conley_metric="haversine"``) or
@@ -2487,6 +2575,9 @@ class LinearRegression:
         conley_cutoff_km: Optional[float] = None,
         conley_metric: ConleyMetric = "haversine",
         conley_kernel: str = "bartlett",
+        conley_time: Optional[np.ndarray] = None,
+        conley_unit: Optional[np.ndarray] = None,
+        conley_lag_cutoff: Optional[int] = None,
     ):
         self.include_intercept = include_intercept
         self.robust = robust
@@ -2500,6 +2591,12 @@ class LinearRegression:
         self.conley_cutoff_km = conley_cutoff_km
         self.conley_metric = conley_metric
         self.conley_kernel = conley_kernel
+        # Phase 2 panel block-decomposed Conley kwargs. All three are
+        # three-way co-required at fit-time when supplied; all None preserves
+        # the Phase 1 cross-sectional path.
+        self.conley_time = conley_time
+        self.conley_unit = conley_unit
+        self.conley_lag_cutoff = conley_lag_cutoff
         # Resolve vcov_type from the legacy `robust` alias via the shared helper.
         self.vcov_type = resolve_vcov_type(robust, vcov_type)
         # Preserve the raw constructor arg (possibly None) so `fit()` can
@@ -2688,6 +2785,9 @@ class LinearRegression:
                 conley_cutoff_km=self.conley_cutoff_km,
                 conley_metric=self.conley_metric,
                 conley_kernel=self.conley_kernel,
+                conley_time=self.conley_time,
+                conley_unit=self.conley_unit,
+                conley_lag_cutoff=self.conley_lag_cutoff,
             )
             # For hc2_bm, compute per-coefficient Bell-McCaffrey DOF. Both
             # the one-way HC2+BM case and the cluster CR2 case are supported;
