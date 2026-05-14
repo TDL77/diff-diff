@@ -2131,15 +2131,41 @@ def _make_multi_period_panel(
 def _fit_es(est, *args, **kwargs) -> HeterogeneousAdoptionDiDEventStudyResults:
     """Fit and return a narrowed event-study result type.
 
-    The public ``fit()`` is annotated to return the single-period
-    ``HeterogeneousAdoptionDiDResults`` (the common case). When
-    ``aggregate="event_study"`` is requested, the runtime return is
-    ``HeterogeneousAdoptionDiDEventStudyResults``; this helper narrows the
-    type for the test body via ``typing.cast``.
+    The public ``fit()`` is annotated to return a union over the
+    single-period ``HeterogeneousAdoptionDiDResults`` and the multi-
+    period ``HeterogeneousAdoptionDiDEventStudyResults``, matching its
+    runtime polymorphism on ``aggregate``. When ``aggregate="event_study"``
+    is requested, this helper narrows the union to the event-study
+    branch for the test body via ``typing.cast``.
     """
     kwargs.setdefault("aggregate", "event_study")
     result = est.fit(*args, **kwargs)
     return cast(HeterogeneousAdoptionDiDEventStudyResults, result)
+
+
+class TestFitReturnAnnotation:
+    """Pin the source-level return annotation on ``HeterogeneousAdoptionDiD.fit``.
+
+    The annotation MUST be a union over the single-period and event-study
+    result classes — narrowing one branch out silently would make the
+    static type contract diverge from the runtime polymorphism on
+    ``aggregate``.
+    """
+
+    def test_fit_return_annotation_is_union_of_result_classes(self):
+        import typing
+
+        hints = typing.get_type_hints(HeterogeneousAdoptionDiD.fit)
+        ret = hints.get("return")
+        args = set(typing.get_args(ret))
+        expected = {
+            HeterogeneousAdoptionDiDResults,
+            HeterogeneousAdoptionDiDEventStudyResults,
+        }
+        assert args == expected, (
+            "HeterogeneousAdoptionDiD.fit return annotation drifted; "
+            f"expected union of {expected}, got args={args} (ret={ret!r})."
+        )
 
 
 class TestEventStudySmoke:

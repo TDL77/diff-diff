@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -352,10 +352,11 @@ class HeterogeneousAdoptionDiDResults:
     ``"pweight"`` (continuous, weighted-robust CCT 2014 under the
     ``weights=`` shortcut), ``"survey_binder_tsl"`` (continuous, Binder
     1983 TSL with PSU/strata/FPC under ``survey_design=SurveyDesign(...)``),
-    ``"pweight_2sls"`` (mass-point, weighted 2SLS HC1/CR1 sandwich
-    under the ``weights=`` shortcut), or ``"survey_binder_tsl_2sls"``
-    (mass-point, Binder 1983 TSL under ``survey_design=``). ``None`` on
-    unweighted fits. Orthogonal to ``survey_metadata`` which is the
+    ``"pweight_2sls"`` (mass-point + ``weights=``; label applied
+    uniformly across vcov families — classical / HC1 / CR1 — on the
+    weighted 2SLS path, with the actual sandwich resolved via
+    ``vcov_type``), or ``"survey_binder_tsl_2sls"`` (mass-point, Binder
+    1983 TSL under ``survey_design=``). ``None`` on unweighted fits. Orthogonal to ``survey_metadata`` which is the
     repo-standard :class:`diff_diff.survey.SurveyMetadata` shared with
     downstream report/diagnostic consumers (no HAD-specific leakage)."""
     effective_dose_mean: Optional[float] = None
@@ -490,10 +491,11 @@ class HeterogeneousAdoptionDiDResults:
           ``"pweight"`` (continuous, weighted-robust CCT 2014 under
           ``weights=``), ``"survey_binder_tsl"`` (continuous, Binder
           1983 TSL under ``survey_design=``), ``"pweight_2sls"``
-          (mass-point, weighted 2SLS HC1/CR1 sandwich under ``weights=``),
-          or ``"survey_binder_tsl_2sls"`` (mass-point, Binder 1983 TSL
-          under ``survey_design=``). See the field docstring above for
-          the full contract.
+          (mass-point + ``weights=``; label applied uniformly across
+          vcov families — classical / HC1 / CR1 — with the sandwich
+          resolved via ``vcov_type``), or ``"survey_binder_tsl_2sls"``
+          (mass-point, Binder 1983 TSL under ``survey_design=``). See
+          the field docstring above for the full contract.
         - ``effective_dose_mean``: weighted denominator used by the
           beta-scale rescaling - weighted ``mean(D)`` on
           ``continuous_at_zero``, weighted ``mean(D - d_lower)`` on
@@ -2823,7 +2825,7 @@ class HeterogeneousAdoptionDiD:
         *,
         survey_design: Any = None,
         trends_lin: bool = False,
-    ) -> HeterogeneousAdoptionDiDResults:
+    ) -> Union[HeterogeneousAdoptionDiDResults, HeterogeneousAdoptionDiDEventStudyResults]:
         """Fit the HAD estimator.
 
         ``aggregate="overall"`` (default) fits on a two-period panel and
@@ -2944,6 +2946,13 @@ class HeterogeneousAdoptionDiD:
         Returns
         -------
         HeterogeneousAdoptionDiDResults
+            When ``aggregate="overall"`` (the default; two-period only):
+            single-period WAS estimate plus shared metadata.
+        HeterogeneousAdoptionDiDEventStudyResults
+            When ``aggregate="event_study"`` (multi-period panel; on
+            staggered panels auto-filters to the last cohort plus
+            never-treated): per-event-time WAS estimates with per-
+            horizon arrays.
         """
         # ---- aggregate / survey_design / survey / weights validation ----
         if aggregate not in _VALID_AGGREGATES:
@@ -3040,12 +3049,11 @@ class HeterogeneousAdoptionDiD:
 
         # Dispatch the event-study path to a dedicated method so the
         # single-period path stays unchanged (Phase 2a contract preserved).
-        # Note: event_study returns HeterogeneousAdoptionDiDEventStudyResults
-        # (distinct type from the overall path's HeterogeneousAdoptionDiDResults);
-        # the static return-type annotation reflects the common "overall" case
-        # to keep Phase 2a call-sites type-clean. Users explicitly passing
-        # aggregate="event_study" should annotate the result as
-        # HeterogeneousAdoptionDiDEventStudyResults.
+        # The static return-type annotation on `fit()` is
+        # Union[HeterogeneousAdoptionDiDResults,
+        # HeterogeneousAdoptionDiDEventStudyResults]; callers should
+        # narrow via isinstance (or by the aggregate they passed) to
+        # access aggregate-specific fields.
         if aggregate == "event_study":
             return self._fit_event_study(  # type: ignore[return-value]
                 data=data,

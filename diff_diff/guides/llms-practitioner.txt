@@ -158,14 +158,32 @@ Is this a triple-difference (DDD) design? (Two criteria: e.g., policy + eligibil
 |-- YES, staggered timing:       StaggeredTripleDifference (SDDD)
 |
 Is treatment continuous (doses/intensities)?
-|-- YES, panel has never-treated units (some units with first_treat == 0,
-|        i.e. dose == 0 throughout): ContinuousDiD (CDiD) for per-dose
-|        ATT(d) / ACRT(d) dose-response curves
-|-- YES, no never-treated units (universal rollout — every unit treated
-|        at some positive dose): HeterogeneousAdoptionDiD (HAD) for
-|        Weighted Average Slope (WAS) at the dose support boundary.
-|        HAD is also compatible with a small never-treated share if
-|        the WAS estimand is what you want.
+Route by ESTIMAND first, not by whether never-treated units happen
+to be present (HAD remains valid with a small never-treated share;
+see REGISTRY HeterogeneousAdoptionDiD edge cases):
+|-- Target estimand is per-dose ATT(d) / ACRT(d) curves (you want
+|        the dose-response function): ContinuousDiD (CDiD). Requires
+|        a non-empty untreated comparison group — i.e. some units
+|        with dose == 0 throughout, encoded as either first_treat == 0
+|        or first_treat == inf (ContinuousDiD normalizes inf -> 0).
+|        No never-treated units present -> ContinuousDiD's
+|        identification fails.
+|-- Target estimand is Weighted Average Slope (WAS) at the dose
+|        support boundary (you want a single scalar slope from dose
+|        variation across units): HeterogeneousAdoptionDiD (HAD).
+|        HAD works under universal rollout (every unit treated at
+|        some positive dose) AND under panels that include a small
+|        never-treated share — the never-treated units are retained
+|        as controls and do not break HAD's identification (paper
+|        Appendix B.2; REGISTRY edge cases). Panel-shape contract
+|        is load-bearing on HAD: aggregate='overall' (the default)
+|        is two-period only and hard-rejects multi-period panels;
+|        multi-period panels MUST set aggregate='event_study'. On
+|        STAGGERED multi-cohort panels HAD's event-study path auto-
+|        filters to the last cohort + never-treated (Appendix B.2)
+|        and the estimand becomes last-cohort-only WAS — use
+|        ChaisemartinDHaultfoeuille if full multi-cohort staggered
+|        support under continuous treatment is required.
 |
 Is treatment adoption staggered (multiple cohorts, different timing)?
 |-- YES: Do NOT use plain TWFE. Use one of:

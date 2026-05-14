@@ -731,20 +731,55 @@ def _handle_continuous(results: Any):
             label="Switch to HeterogeneousAdoptionDiD if no untreated units",
             why=(
                 "ContinuousDiD's identification assumes a never-treated "
-                "comparison group exists (units with dose = 0). When every "
-                "unit is treated at some positive dose level — a universal "
-                "rollout where treatment varies in intensity, not status — "
-                "use HeterogeneousAdoptionDiD instead. HAD identifies a "
-                "Weighted Average Slope (WAS) at the dose support boundary "
-                "by leveraging dose variation across units."
+                "comparison group exists (units with dose = 0, encoded as "
+                "either `first_treat = 0` or `first_treat = inf`; ContinuousDiD "
+                "normalizes `inf -> 0` internally). When every unit is treated "
+                "at some positive dose level - a universal rollout where "
+                "treatment varies in intensity, not status - use "
+                "HeterogeneousAdoptionDiD instead. HAD identifies a Weighted "
+                "Average Slope (WAS) at the dose support boundary by leveraging "
+                "dose variation across units. HAD's contract is panel-shape "
+                "dependent: `aggregate='overall'` (the default) is two-period "
+                "only and hard-rejects multi-period panels at fit time; "
+                "multi-period panels MUST set `aggregate='event_study'`. "
+                "Additionally, on staggered (multi-cohort) panels the event-"
+                "study path auto-filters to the LAST treatment cohort + never-"
+                "treated units (paper Appendix B.2) and the estimand becomes "
+                "last-cohort-only WAS rather than a full multi-cohort average; "
+                "use `ChaisemartinDHaultfoeuille` if full multi-cohort staggered "
+                "support under continuous treatment is required."
             ),
             code=(
-                "# If your panel has no units with first_treat == 0, switch:\n"
+                "# HAD requires a REALIZED per-period dose column (zero\n"
+                "# pre-switch, positive from switch onward) - DIFFERENT\n"
+                "# from ContinuousDiD's time-invariant per-unit dose.\n"
+                "# Re-prepare the panel into a HAD-shaped panel before\n"
+                "# the fit; do NOT reuse the ContinuousDiD-shaped panel.\n"
+                "# HAD's first_treat encoding is also stricter than\n"
+                "# ContinuousDiD's: HAD requires never-treated units to\n"
+                "# have first_treat = 0 (not inf or NaN); recode before\n"
+                "# fit. HAD raises ValueError on any first_treat value\n"
+                "# outside {0, t_post} for the two-period path.\n"
+                "import numpy as np\n"
                 "from diff_diff import HeterogeneousAdoptionDiD\n"
+                "data_had_2p = data_had_2p.assign(\n"
+                "    first_treat=data_had_2p['first_treat'].replace(\n"
+                "        {np.inf: 0}))\n"
+                "data_had_mp = data_had_mp.assign(\n"
+                "    first_treat=data_had_mp['first_treat'].replace(\n"
+                "        {np.inf: 0}))\n"
                 "had = HeterogeneousAdoptionDiD()\n"
+                "# Two-period panel (single cohort or 2 periods):\n"
                 "had_results = had.fit(\n"
-                "    data, outcome_col='y', unit_col='unit',\n"
-                "    time_col='t', dose_col='d', first_treat_col='first_treat')"
+                "    data_had_2p, outcome_col='y', unit_col='unit',\n"
+                "    time_col='t', dose_col='d', first_treat_col='first_treat')\n"
+                "\n"
+                "# Multi-period panel: must set aggregate='event_study'\n"
+                "# (on staggered panels this is auto-last-cohort-only WAS)\n"
+                "had_es = had.fit(\n"
+                "    data_had_mp, outcome_col='y', unit_col='unit',\n"
+                "    time_col='t', dose_col='d', first_treat_col='first_treat',\n"
+                "    aggregate='event_study')"
             ),
             step_name="estimator_selection",
         ),
@@ -847,10 +882,15 @@ def _handle_bacon(results: Any):
 def _handle_had(results: Any):
     """HeterogeneousAdoptionDiD single-period guidance.
 
-    Five Baker et al. steps (3, 4, 6, 7, 8). HAD's design absence is
-    "no untreated unit" - comparison comes from dose variation across
-    units, not from an untreated holdout. Treatment varies in intensity,
-    not in status.
+    Five Baker et al. steps (3, 4, 6, 7, 8). HAD's identifying
+    comparison comes from dose VARIATION across units rather than
+    from a never-treated holdout: treatment varies in intensity,
+    not in status. Never-treated units may still be present in the
+    panel and are retained as controls without breaking HAD's
+    identification (REGISTRY HeterogeneousAdoptionDiD edge cases);
+    the WAS-vs-ATT(d) distinction is the actual differentiator
+    between HAD and ContinuousDiD, not untreated-unit presence
+    alone.
     """
     steps = [
         _step(
@@ -910,24 +950,39 @@ def _handle_had(results: Any):
                 "HAD targets WAS (Weighted Average Slope) at the dose "
                 "support boundary. If you specifically want per-dose "
                 "ATT(d) / ACRT(d) dose-response curves AND your panel "
-                "has never-treated controls (units with first_treat == 0), "
-                "ContinuousDiD is the alternative — different estimand, "
-                "and ContinuousDiD's identification requires never-treated "
-                "controls. HAD itself remains valid even with a small "
-                "share of never-treated units (paper compatibility; see "
-                "REGISTRY § HeterogeneousAdoptionDiD edge cases — "
-                "Garrett et al. 2020 retained 12 untreated counties out "
-                "of 2,954). The choice is about estimand, not about "
-                "whether untreated units exist."
+                "has never-treated controls (units with dose == 0 "
+                "throughout, encoded as either first_treat == 0 or "
+                "first_treat == inf; ContinuousDiD normalizes inf -> 0 "
+                "internally), ContinuousDiD is the alternative — "
+                "different estimand, and ContinuousDiD's identification "
+                "requires never-treated controls. HAD itself remains "
+                "valid even with a small share of never-treated units "
+                "(paper compatibility; see REGISTRY § "
+                "HeterogeneousAdoptionDiD edge cases — Garrett et al. "
+                "2020 retained 12 untreated counties out of 2,954). The "
+                "choice is about estimand, not about whether untreated "
+                "units exist. NOTE: HAD and ContinuousDiD require "
+                "DIFFERENT dose-column encodings — HAD uses the "
+                "realized per-period dose (zero pre-switch, positive "
+                "from switch onward) while ContinuousDiD requires a "
+                "time-invariant per-unit dose column (the front-door "
+                "check rejects within-unit dose variation). Re-prepare "
+                "the panel into a unit-level dose summary before the "
+                "ContinuousDiD fit; do NOT reuse the HAD-shaped panel "
+                "directly."
             ),
             code=(
                 "# HAD reports WAS at the dose support boundary.\n"
                 "# If you instead want per-dose ATT(d)/ACRT(d) dose-response\n"
                 "# curves AND the panel has never-treated controls:\n"
                 "from diff_diff import ContinuousDiD\n"
+                "# ContinuousDiD requires a TIME-INVARIANT per-unit dose; HAD\n"
+                "# uses realized per-period dose. Re-prepare the panel\n"
+                "# (e.g. collapse each unit's positive dose to one value) and\n"
+                "# pass it as `data_cdid` with the time-invariant `dose_col`.\n"
                 "cdid = ContinuousDiD()\n"
                 "cdid_results = cdid.fit(\n"
-                "    data, outcome='y', unit='unit', time='t',\n"
+                "    data_cdid, outcome='y', unit='unit', time='t',\n"
                 "    first_treat='first_treat', dose='d',\n"
                 "    aggregate='dose')"
             ),
@@ -960,13 +1015,21 @@ def _handle_had(results: Any):
                 "per-event-time WAS estimates instead of a single scalar. "
                 "Reveals whether dose response grows, decays, or stabilizes "
                 "across post-treatment horizons. Pre-period placebos serve "
-                "as a parallel-trends sanity check."
+                "as a parallel-trends sanity check. NOTE: this handler is "
+                "the single-period HAD handler, so the upstream fit was "
+                "two-period-only (`aggregate='overall'` hard-rejects more "
+                "than two periods at `had.py:980-987`). Use a distinct "
+                "multi-period panel `data_mp` for this step - the same "
+                "panel that the upstream fit ran on will not satisfy "
+                "the event-study path's period-count requirement."
             ),
             code=(
                 "from diff_diff import HeterogeneousAdoptionDiD\n"
+                "# Requires a distinct multi-period panel - the upstream\n"
+                "# two-period panel was already consumed by `aggregate='overall'`.\n"
                 "est = HeterogeneousAdoptionDiD()\n"
                 "es = est.fit(\n"
-                "    data, outcome_col='y', unit_col='unit',\n"
+                "    data_mp, outcome_col='y', unit_col='unit',\n"
                 "    time_col='t', dose_col='d',\n"
                 "    first_treat_col='first_treat',\n"
                 "    aggregate='event_study')"
@@ -1008,9 +1071,12 @@ def _handle_had(results: Any):
 def _handle_had_event_study(results: Any):
     """HeterogeneousAdoptionDiD event-study guidance.
 
-    Five Baker et al. steps (3, 4, 6, 7, 8). Same framing convention as
-    _handle_had: "no untreated unit", dose variation, treatment varies
-    in intensity not status.
+    Five Baker et al. steps (3, 4, 6, 7, 8). Same framing convention
+    as _handle_had: identifying comparison comes from dose variation
+    across units, treatment varies in intensity not status, and
+    never-treated units may still be present in the panel without
+    breaking HAD's identification - the WAS-vs-ATT(d) distinction
+    is the actual differentiator between HAD and ContinuousDiD.
     """
     steps = [
         _step(
@@ -1063,24 +1129,46 @@ def _handle_had_event_study(results: Any):
                 "HAD targets per-event-time WAS at the dose support "
                 "boundary. If you instead want per-dose ATT(d) / ACRT(d) "
                 "dose-response curves AND your panel has never-treated "
-                "controls, ContinuousDiD(aggregate='eventstudy') is the "
-                "alternative — different estimand, requires never-treated. "
-                "HAD itself remains valid even with a small share of "
-                "never-treated units (paper compatibility); on staggered "
-                "panels HAD's last-cohort filter explicitly RETAINS "
-                "never-treated units as the untreated-group comparison "
-                "(paper Appendix B.2). The choice is about estimand."
+                "controls (units with dose == 0 throughout, encoded as "
+                "either first_treat == 0 or first_treat == inf; "
+                "ContinuousDiD normalizes inf -> 0 internally), "
+                "ContinuousDiD is the alternative — different estimand, "
+                "requires never-treated. Two ContinuousDiD aggregation "
+                "surfaces are relevant and distinct: `aggregate='dose'` "
+                "(the default) produces the per-dose ATT(d) / ACRT(d) "
+                "curves on `results.dose_response_att` / "
+                "`results.dose_response_acrt`; `aggregate='eventstudy'` "
+                "produces a binarized event-study of `att_glob` on "
+                "`results.event_study_effects` (NOT per-dose by horizon). "
+                "Pick the aggregation that matches the estimand you "
+                "actually want. HAD itself remains valid even with a "
+                "small share of never-treated units (paper compatibility); "
+                "on staggered panels HAD's last-cohort filter explicitly "
+                "RETAINS never-treated units as the untreated-group "
+                "comparison (paper Appendix B.2). The choice between HAD "
+                "and ContinuousDiD is about estimand. NOTE: HAD and "
+                "ContinuousDiD require DIFFERENT dose-column encodings — "
+                "HAD uses the realized per-period dose while ContinuousDiD "
+                "requires a TIME-INVARIANT per-unit dose; re-prepare the "
+                "panel into a unit-level dose summary before the "
+                "ContinuousDiD fit, do NOT reuse the HAD-shaped panel."
             ),
             code=(
                 "# HAD reports per-event-time WAS at the dose boundary.\n"
-                "# If you instead want per-dose ATT(d)/ACRT(d) event-study\n"
-                "# curves AND the panel has never-treated controls:\n"
+                "# For per-dose ATT(d)/ACRT(d) curves, use ContinuousDiD with\n"
+                "# the DEFAULT aggregate='dose' (NOT 'eventstudy' - that gives\n"
+                "# binarized event-study of att_glob, not per-dose curves).\n"
                 "from diff_diff import ContinuousDiD\n"
+                "# ContinuousDiD requires a TIME-INVARIANT per-unit dose.\n"
+                "# Re-prepare the panel (e.g. collapse each unit's positive\n"
+                "# dose to one value) and pass it as `data_cdid`.\n"
                 "cdid = ContinuousDiD()\n"
-                "cdid_es = cdid.fit(\n"
-                "    data, outcome='y', unit='unit', time='t',\n"
+                "cdid_res = cdid.fit(\n"
+                "    data_cdid, outcome='y', unit='unit', time='t',\n"
                 "    first_treat='first_treat', dose='d',\n"
-                "    aggregate='eventstudy')"
+                "    aggregate='dose')\n"
+                "# Per-dose curves live here:\n"
+                "#   cdid_res.dose_response_att / .dose_response_acrt"
             ),
             step_name="estimator_selection",
         ),

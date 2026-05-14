@@ -627,7 +627,7 @@ had.fit(
     cband: bool = True,                        # Simultaneous (sup-t) confidence bands on weighted event-study fits
     *,
     survey_design: SurveyDesign | None = None, # Canonical survey-design kwarg (weights, strata, PSU, FPC)
-    trends_lin: bool = False,                  # Eq 17 linear-trend detrending (event-study; mutually exclusive with survey_design)
+    trends_lin: bool = False,                  # Eq 17 linear-trend detrending. Requires aggregate="event_study"; needs F>=3 (pre-period depth) for the regression; rejects ALL weighting entry paths (survey_design= / survey= / weights= all raise NotImplementedError under trends_lin).
 ) -> HeterogeneousAdoptionDiDResults | HeterogeneousAdoptionDiDEventStudyResults
 ```
 
@@ -663,7 +663,7 @@ es = est.fit(data_mp, outcome_col='y', unit_col='unit',
 
 **Staggered panels.** On multi-cohort panels with `aggregate="event_study"`, `fit()` auto-filters to the last treatment cohort plus never-treated units (paper Appendix B.2) and emits a `UserWarning` naming kept/dropped counts. The estimand is then a **last-cohort-only WAS**, not a multi-cohort average. For full multi-cohort staggered support, see `ChaisemartinDHaultfoeuille`.
 
-**Mass-point + survey constraint.** When fitting `design="mass_point"` with `survey_design=` (or the deprecated `survey=` alias), `vcov_type="hc1"` (or `robust=True`) is required: the survey path composes the standard error via Binder-TSL on the HC1-scale influence function, so the default classical sandwich path raises `NotImplementedError`. Passing `vcov_type="hc1"` is a safe default on weighted survey examples since `vcov_type` is unused on the continuous designs (CCT-2014 robust SE is the only formula there).
+**Mass-point + survey constraint.** When fitting `design="mass_point"` with `survey_design=` (or the deprecated `survey=` alias), `vcov_type="hc1"` (or `robust=True`) is required: the survey path composes the standard error via Binder-TSL on the HC1-scale influence function, so the default classical sandwich path raises `NotImplementedError`. The same HC1 requirement also fires on the `weights=` shortcut when `aggregate="event_study"` AND `cband=True`: the per-horizon IF matrix is HC1-scale and the sup-t bootstrap normalizes by it, so mixing in a classical analytical SE would produce inconsistent variance families. Classical vcov is allowed on `weights=` + `aggregate="overall"` and on `weights=` + `aggregate="event_study"` + `cband=False`. Passing `vcov_type="hc1"` is a safe default on weighted survey + sup-t examples since `vcov_type` is unused on the continuous designs (CCT-2014 robust SE is the only formula there).
 
 ### StackedDiD
 
@@ -1259,7 +1259,7 @@ Single-period results container for `HeterogeneousAdoptionDiD`. The table below 
 | `survey_metadata` | `SurveyMetadata | None` | Repo-standard survey metadata when `survey_design=` / `weights=` is supplied |
 | `bandwidth_diagnostics` | `BandwidthResult | None` | MSE-DPI selector output (continuous designs); `None` on `mass_point` |
 | `bias_corrected_fit` | `BiasCorrectedFit | None` | Phase 1c bias-corrected local-linear fit object (continuous designs); `None` on `mass_point` |
-| `variance_formula` | `str | None` | HAD-specific SE label on weighted fits, populated on BOTH continuous and mass-point designs: `"pweight"` (continuous, CCT 2014 weighted-robust on the `weights=` shortcut), `"survey_binder_tsl"` (continuous, Binder 1983 TSL on the `survey_design=` path), `"pweight_2sls"` (mass-point, weighted 2SLS HC1 / CR1 sandwich on the `weights=` shortcut), or `"survey_binder_tsl_2sls"` (mass-point, Binder 1983 TSL on the `survey_design=` path). `None` on unweighted fits |
+| `variance_formula` | `str | None` | HAD-specific SE label on weighted fits, populated on BOTH continuous and mass-point designs: `"pweight"` (continuous, CCT 2014 weighted-robust on the `weights=` shortcut), `"survey_binder_tsl"` (continuous, Binder 1983 TSL on the `survey_design=` path), `"pweight_2sls"` (mass-point + `weights=`; label is applied uniformly across vcov families — classical / HC1 / CR1 — on the weighted 2SLS path, with the actual sandwich resolved via `vcov_type`), or `"survey_binder_tsl_2sls"` (mass-point, Binder 1983 TSL on the `survey_design=` path). `None` on unweighted fits |
 | `effective_dose_mean` | `float | None` | Weighted denominator used by the β̂-scale rescaling, populated on weighted fits across all designs: weighted `mean(d)` (`continuous_at_zero`), weighted `mean(d − d_lower)` (`continuous_near_d_lower`), or weighted Wald-IV dose gap `mean(d | Z=1, w) − mean(d | Z=0, w)` (`mass_point`). `None` on unweighted fits |
 
 **Methods:** `summary()`, `print_summary()`, `to_dict()`, `to_dataframe()`
@@ -1292,8 +1292,8 @@ Per-horizon event-study results container for `HeterogeneousAdoptionDiD` with `a
 | `bandwidth_diagnostics` | `list[BandwidthResult | None] | None` | Per-horizon MSE-DPI selector output (continuous designs); `None` on `mass_point`; entries can be `None` on degenerate horizons |
 | `bias_corrected_fit` | `list[BiasCorrectedFit | None] | None` | Per-horizon Phase 1c bias-corrected local-linear fit objects; `None` on `mass_point`; entries can be `None` on degenerate horizons |
 | `filter_info` | `dict | None` | Staggered last-cohort auto-filter metadata (`F_last`, `n_kept`, `n_dropped`, `dropped_cohorts`); `None` when no filter applied |
-| `variance_formula` | `str | None` | Per-horizon variance family label |
-| `effective_dose_mean` | `float | None` | Weighted denominator |
+| `variance_formula` | `str | None` | HAD-specific SE label applied UNIFORMLY across all horizons, populated on BOTH continuous and mass-point designs: `"pweight"` (continuous, CCT 2014 weighted-robust on the `weights=` shortcut), `"survey_binder_tsl"` (continuous, Binder 1983 TSL on the `survey_design=` path), `"pweight_2sls"` (mass-point + `weights=`; label applied uniformly across vcov families — classical / HC1 / CR1 — on the weighted 2SLS path, with the actual sandwich resolved via `vcov_type`), or `"survey_binder_tsl_2sls"` (mass-point, Binder 1983 TSL on the `survey_design=` path). `None` on unweighted fits |
+| `effective_dose_mean` | `float | None` | Weighted denominator used by the β̂-scale rescaling, populated on weighted fits across all designs: weighted `sum(w·d)/sum(w)` (`continuous_at_zero`), weighted `sum(w·(d − d_lower))/sum(w)` (`continuous_near_d_lower`), or weighted Wald-IV dose gap (`mass_point`). Scalar (not per-horizon) because the β̂-scale denominator is computed once on the fit sample. `None` on unweighted fits |
 | `cband_low` | `np.ndarray | None` | Simultaneous (sup-t) band lower bounds; `None` on unweighted fits or when `cband=False` |
 | `cband_high` | `np.ndarray | None` | Simultaneous (sup-t) band upper bounds |
 | `cband_crit_value` | `float | None` | Sup-t critical value used for the simultaneous band |

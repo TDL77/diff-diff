@@ -518,6 +518,55 @@ class TestLLMsFullHADCoverage:
         else:
             pytest.fail("effective_dose_mean row not found in HAD results table")
 
+    def test_llms_full_had_event_study_mirrors_weighted_metadata_semantics(self):
+        # R9 P1 (Documentation/Tests): the event-study results table at
+        # ### HeterogeneousAdoptionDiDEventStudyResults must enumerate the
+        # SAME four variance_formula labels and the SAME mass-point /
+        # Wald-IV semantics for effective_dose_mean as the single-period
+        # table; the event-study fit path populates these fields with the
+        # same labels (had.py:639-648 for variance_formula,
+        # had.py:721-734 for effective_dose_mean). Without parallel
+        # coverage, agents reading the guide on an event-study fit
+        # cannot identify the inference family.
+        text = get_llm_guide("full")
+        es_start = text.index("### HeterogeneousAdoptionDiDEventStudyResults")
+        # End at the next top-level result section (### TROPResults is the
+        # next entry after the HAD event-study block per llms-full.txt).
+        es_end = text.index("### TROPResults", es_start)
+        es_block = text[es_start:es_end]
+        for line in es_block.splitlines():
+            if line.startswith("| `variance_formula`"):
+                for label in (
+                    "pweight",
+                    "survey_binder_tsl",
+                    "pweight_2sls",
+                    "survey_binder_tsl_2sls",
+                ):
+                    assert label in line, (
+                        f"event-study variance_formula row must enumerate "
+                        f"{label!r} (event-study path applies the same "
+                        f"label uniformly across horizons per had.py:639-648). "
+                        f"Line: {line!r}"
+                    )
+                break
+        else:
+            pytest.fail(
+                "event-study variance_formula row not found in HAD event-study results table"
+            )
+        for line in es_block.splitlines():
+            if line.startswith("| `effective_dose_mean`"):
+                assert "mass_point" in line or "Wald-IV" in line or "mass-point" in line, (
+                    f"event-study effective_dose_mean row must mention "
+                    f"mass-point Wald-IV semantics (event-study path "
+                    f"populates the same denominator per had.py:721-734). "
+                    f"Line: {line!r}"
+                )
+                break
+        else:
+            pytest.fail(
+                "event-study effective_dose_mean row not found in HAD event-study results table"
+            )
+
     def test_llms_practitioner_step_4_distinguishes_had_from_continuous(self):
         # The official practitioner workflow guide (returned by
         # get_llm_guide("practitioner")) routes continuous treatments. It
@@ -545,6 +594,37 @@ class TestLLMsFullHADCoverage:
             "practitioner guide Step 4 must describe the never-treated / "
             "universal-rollout distinction that drives the HAD vs "
             "ContinuousDiD routing."
+        )
+
+    def test_llms_practitioner_step_4_continuous_routes_estimand_first(self):
+        """The continuous-treatment branch must route by ESTIMAND first
+        (WAS vs ATT(d)/ACRT(d)), NOT by untreated-unit presence alone.
+        Per REGISTRY HeterogeneousAdoptionDiD edge cases, HAD remains
+        valid with a small never-treated share; the actual differentiator
+        is the target estimand. Pre-pilot-402 the decision tree routed
+        any panel with never-treated units to ContinuousDiD, which
+        misroutes WAS-target practitioners on panels that happen to
+        include a never-treated share.
+        """
+        text = get_llm_guide("practitioner")
+        s4_start = text.index("## Step 4: Choose Estimation Method")
+        s5_start = text.index("## Step ", s4_start + 1)
+        s4_block = text[s4_start:s5_start].lower()
+        # The estimand-first framing must appear: both estimand labels
+        # must be on the routing side (left of -> arrows), not just
+        # buried inside a single estimator's description.
+        assert "target estimand" in s4_block or "route by estimand" in s4_block, (
+            "Step 4 continuous-treatment branch must use explicit "
+            "estimand-first routing language ('target estimand', "
+            "'route by estimand') so the WAS vs ATT(d) choice "
+            "comes first, not 'never-treated present?'."
+        )
+        # And the WAS-with-small-never-treated-share compatibility
+        # must be stated explicitly so HAD's edge case isn't masked.
+        assert "small never-treated share" in s4_block, (
+            "Step 4 must explicitly note that HAD remains valid "
+            "with a small never-treated share; otherwise readers "
+            "will route HAD-appropriate WAS panels to ContinuousDiD."
         )
 
     def test_llms_full_had_pretests_documents_earlier_pre_period_precondition(self):
