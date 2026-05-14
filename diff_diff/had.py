@@ -2086,6 +2086,7 @@ def _sup_t_multiplier_bootstrap(
         caller.
     """
     from diff_diff.bootstrap_utils import (
+        apply_stratum_centering,
         generate_bootstrap_weights_batch,
         generate_survey_multiplier_weights_batch,
     )
@@ -2171,39 +2172,13 @@ def _sup_t_multiplier_bootstrap(
             # Each unit is its own PSU (psu_ids = np.arange(n_units)).
             Psi_psu = influence_matrix.copy()
 
-        if resolved_survey.strata is not None:
-            strata = np.asarray(resolved_survey.strata)
-            # Build PSU -> stratum map (strata constant-within-PSU by
-            # SurveyDesign.resolve contract).
-            psu_stratum = np.empty(n_psu, dtype=strata.dtype)
-            if resolved_survey.psu is not None:
-                seen = np.zeros(n_psu, dtype=bool)
-                unit_psu = np.asarray(resolved_survey.psu)
-                for i in range(n_units):
-                    col = psu_id_to_col[int(unit_psu[i])]
-                    if not seen[col]:
-                        psu_stratum[col] = strata[i]
-                        seen[col] = True
-            else:
-                psu_stratum = strata.copy()
-
-            for h in np.unique(psu_stratum):
-                mask_h = psu_stratum == h
-                n_h = int(mask_h.sum())
-                if n_h < 2:
-                    # Singleton / empty stratum contributes 0 variance
-                    # regardless; the helper's lonely-PSU logic already
-                    # zeros those multipliers. Skip centering to avoid
-                    # a divide-by-zero on sqrt(n_h / (n_h - 1)).
-                    continue
-                Psi_psu[mask_h] -= Psi_psu[mask_h].mean(axis=0, keepdims=True)
-                Psi_psu[mask_h] *= np.sqrt(n_h / (n_h - 1))
-        else:
-            # Single implicit stratum — demean across all PSUs, scale by
-            # sqrt(n_psu / (n_psu - 1)).
-            if n_psu >= 2:
-                Psi_psu -= Psi_psu.mean(axis=0, keepdims=True)
-                Psi_psu *= np.sqrt(n_psu / (n_psu - 1))
+        # Stratum centering + Bessel rescale on the PSU-aggregated
+        # influence tensor. Shared with the HAD Stute survey-bootstrap
+        # family (had_pretests.stute_test / stute_joint_pretest) which
+        # applies the same algebra to PSU multipliers instead — see
+        # ``apply_stratum_centering`` docstring and REGISTRY
+        # § "Note (Stute stratified survey-bootstrap calibration)".
+        apply_stratum_centering(Psi_psu, resolved_survey, psu_ids, psu_axis=0)
 
         # PSU-level perturbations: (B, H) = (B, n_psu) @ (n_psu, H).
         # No (1/n) prefactor — Psi_psu_scaled is already on the θ̂-scale
