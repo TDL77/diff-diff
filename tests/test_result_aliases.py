@@ -99,6 +99,46 @@ def _required_init_kwargs(cls, overrides):
     return kwargs
 
 
+def test_required_init_kwargs_handles_default_factory_and_tuple_dispatch():
+    """Pin the two `_required_init_kwargs()` fixes from PR #437 R2 directly.
+
+    The helper had two latent bugs masked by the specific fields exercised
+    by the alias tests: factory-only required fields were pre-filled (so
+    the factory never ran), and the type-dispatch checked ``"float"``
+    before ``"Tuple"`` (so ``Tuple[float, float]`` annotations matched the
+    scalar branch). Both fixes are exercised here against a small local
+    dataclass so the contract stays pinned independent of production
+    result-dataclass shape.
+    """
+    from dataclasses import dataclass, field
+    from typing import Tuple
+
+    @dataclass
+    class _Probe:
+        # Required, must be filled with a tuple sentinel — NOT 0.0 — even
+        # though "float" appears in the annotation as a substring.
+        ci: Tuple[float, float]
+        # default_factory-backed: must be OMITTED from kwargs so the
+        # factory runs at construction time.
+        items: list = field(default_factory=list)
+        # default-valued: must also be omitted from kwargs.
+        x: float = 1.5
+
+    kwargs = _required_init_kwargs(_Probe, overrides={})
+    assert kwargs == {"ci": (0.0, 0.0)}, (
+        f"_required_init_kwargs() must (a) supply a tuple sentinel for "
+        f"Tuple[float, float] required fields (not a scalar 0.0), and "
+        f"(b) omit default_factory / default fields so the dataclass "
+        f"applies them at construction time. Got: {kwargs!r}"
+    )
+    # Round-trip: instance construction must succeed and the factory
+    # must have produced an empty list (not been displaced by a sentinel).
+    inst = _Probe(**kwargs)
+    assert inst.ci == (0.0, 0.0)
+    assert inst.items == []
+    assert inst.x == 1.5
+
+
 def _assert_pattern_b_aliases(res, *, att, se, t_stat, p_value, conf_int):
     """Pattern B: 5 flat aliases mapping to the overall_* canonical fields."""
     assert _alias_equal(res.att, att), f"att alias != overall_att ({res.att} vs {att})"
