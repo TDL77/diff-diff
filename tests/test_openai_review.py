@@ -2894,53 +2894,140 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             + "\n".join(violations)
         )
 
+    BUILD_PROMPT_STEP_NAME = "Build review prompt with PR context + diff"
+
     def test_workflow_allowlisted_tmp_python_executions_have_base_sha_staging(
         self, workflow_text
     ):
         """Each entry in ALLOWED_TMP_PYTHON_EXECUTIONS must correspond
         to an EXACT `git show "${BASE_SHA}":<source> > <tmp-path>`
-        staging command in the same workflow. This is what makes /tmp
-        execution safe: the file content comes from BASE (trusted),
-        not PR head.
+        staging command IN THE BUILD-PROMPT STEP'S BODY (not anywhere
+        in the workflow), AND the python execution of <tmp-path> must
+        come AFTER the staging line, AND no intervening `cp`, `mv`,
+        `tee`, or output redirect may overwrite <tmp-path> between
+        them. This is what makes /tmp execution safe: the file content
+        comes from BASE (trusted), not PR head, and stays that way
+        until execution.
 
         R2 fix for PR #436: introduced as a separate assertion.
-        R3 fix for PR #436: prior version asserted independent
-        substring presence (`"BASE_SHA" in text and "> <path>" in
-        text`), which would pass even if a future edit replaced the
-        staging with `cp diff_diff/foo.py /tmp/...` while leaving
-        unrelated `BASE_SHA` references elsewhere in the workflow.
-        Now uses a regex anchored to the exact command form, with the
-        base source explicitly paired in ALLOWED_TMP_PYTHON_EXECUTIONS."""
+        R3 fix: pinned exact staging command (regex), not independent
+        substrings.
+        R4 fix: scope to the build-prompt step's body (was searching
+        raw workflow_text — a comment or echo of the literal command
+        could satisfy the assertion). Add ordering check (python exec
+        after staging) and overwrite check (no cp/mv/tee/redirect to
+        tmp_path between staging and execution)."""
         import re
 
+        build_block = self._extract_step_block(
+            workflow_text, self.BUILD_PROMPT_STEP_NAME
+        )
+        assert build_block is not None, (
+            f"Could not find `- name: {self.BUILD_PROMPT_STEP_NAME}` "
+            f"step block. The build-prompt step is where /tmp staging "
+            f"and python execution happen; without it the dismissal "
+            f"premise is moot."
+        )
+
+        # Strip shell comment lines so a `# git show ...` comment
+        # cannot satisfy the staging assertion. We don't strip
+        # mid-line `#` because that would corrupt URLs / regex
+        # patterns; lines starting with `#` (after whitespace) are
+        # the typical shell-comment form.
+        body_lines = build_block.splitlines()
+        non_comment_lines = [
+            (i, line) for i, line in enumerate(body_lines)
+            if not line.lstrip().startswith("#")
+        ]
+
         for tmp_path, base_source in self.ALLOWED_TMP_PYTHON_EXECUTIONS.items():
-            # Match the full staging command — must appear as a single
-            # contiguous shell command (no newlines between tokens).
-            # Use `[ \t]+` (NOT `\s+`, which would match newlines and
-            # let the regex span unrelated lines) for inter-token
-            # whitespace. Allows arbitrary leading prefix (`if`,
-            # leading whitespace, etc.) and arbitrary trailing content
-            # (`2>/dev/null; then`, etc.) so long as the exact
-            # `git show "${BASE_SHA}":<source> > <tmp-path>` token
-            # sequence appears on one line.
+            # Pattern A: the exact BASE_SHA staging command, anchored
+            # to line-start (after optional indent and optional shell
+            # control prefix like `if`/`then`/`&&`/`||`). The anchor
+            # prevents an `echo "git show ${BASE_SHA}:..."` line from
+            # satisfying the staging check by accident — an echo line
+            # starts with `echo`, not `git`, so it won't match.
+            # `[ \t]+` (NOT `\s+`) so the regex can't span newlines.
             staging_re = re.compile(
+                r'^[ \t]*(?:(?:if|then|else|elif|do|&&|\|\|)[ \t]+)?'
                 r'git[ \t]+show[ \t]+"\$\{BASE_SHA\}":'
                 + re.escape(base_source)
                 + r'[ \t]+>[ \t]+'
                 + re.escape(tmp_path)
                 + r'\b',
             )
-            assert staging_re.search(workflow_text), (
-                f"ALLOWED_TMP_PYTHON_EXECUTIONS[{tmp_path!r}] = "
-                f"{base_source!r} requires an EXACT staging command in "
-                f"the workflow on a single line:\n  "
-                f'git show "${{BASE_SHA}}":{base_source} > {tmp_path}\n'
-                f"Found no matching line. Either add the exact staging "
-                f"command, fix the source-path mapping, or remove the "
-                f"entry from the allowlist (in which case the "
-                f"python-execution test will fail any /tmp use of this "
-                f"path, forcing structural review)."
+            # Pattern B: python execution of this tmp_path.
+            py_exec_re = re.compile(
+                r'\bpython3?[ \t]+' + re.escape(tmp_path) + r'\b',
             )
+            # Pattern C: any non-staging write to tmp_path that would
+            # overwrite the BASE-staged content. Matches:
+            #   > <path>     (truncate redirect)
+            #   >> <path>    (append redirect)
+            #   cp <src> <path>
+            #   mv <src> <path>
+            #   tee [-a] <path>
+            # We exclude lines that match pattern A (the staging line
+            # itself uses `>`, which would otherwise self-flag).
+            overwrite_re = re.compile(
+                r'(?:'
+                r'>>?[ \t]*' + re.escape(tmp_path) + r'\b'
+                r'|cp[ \t]+\S+[ \t]+' + re.escape(tmp_path) + r'\b'
+                r'|mv[ \t]+\S+[ \t]+' + re.escape(tmp_path) + r'\b'
+                r'|tee[ \t]+(?:-a[ \t]+)?' + re.escape(tmp_path) + r'\b'
+                r')',
+            )
+
+            staging_indices = []
+            py_exec_indices = []
+            overwrite_indices = []
+            for i, line in non_comment_lines:
+                is_staging = bool(staging_re.search(line))
+                if is_staging:
+                    staging_indices.append(i)
+                if py_exec_re.search(line):
+                    py_exec_indices.append(i)
+                if overwrite_re.search(line) and not is_staging:
+                    overwrite_indices.append(i)
+
+            assert staging_indices, (
+                f"ALLOWED_TMP_PYTHON_EXECUTIONS[{tmp_path!r}] = "
+                f"{base_source!r}: expected an EXACT staging command in "
+                f"the `{self.BUILD_PROMPT_STEP_NAME}` step:\n  "
+                f'git show "${{BASE_SHA}}":{base_source} > {tmp_path}\n'
+                f"Found no matching non-comment line in step body."
+            )
+            assert py_exec_indices, (
+                f"ALLOWED_TMP_PYTHON_EXECUTIONS[{tmp_path!r}] declared "
+                f"but no `python3 {tmp_path}` invocation found in the "
+                f"build-prompt step. If you're staging this path "
+                f"without executing it, remove the allowlist entry."
+            )
+            for py_idx in py_exec_indices:
+                prior_stagings = [s for s in staging_indices if s < py_idx]
+                assert prior_stagings, (
+                    f"python execution at line {py_idx} of build-prompt "
+                    f"step body has NO prior BASE_SHA staging command "
+                    f"for {tmp_path!r}. Staging must precede execution "
+                    f"so the executed file content is BASE-anchored."
+                )
+                latest_staging = max(prior_stagings)
+                intervening = [
+                    w
+                    for w in overwrite_indices
+                    if latest_staging < w < py_idx
+                ]
+                if intervening:
+                    snippets = [body_lines[w].strip() for w in intervening]
+                    raise AssertionError(
+                        f"{tmp_path!r} is overwritten between BASE_SHA "
+                        f"staging (build-prompt body line {latest_staging}) "
+                        f"and python execution (line {py_idx}) by:\n"
+                        + "\n".join(snippets)
+                        + f"\nThis would replace the trusted BASE-staged "
+                        f"content with arbitrary bytes before execution, "
+                        f"invalidating the dismissal."
+                    )
 
     def test_workflow_dismissal_comment_block_present(self, workflow_text):
         """The comment block that documents the #14 dismissal must stay
