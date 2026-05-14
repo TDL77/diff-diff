@@ -3185,7 +3185,8 @@ metrics (`"haversine"`, `"euclidean"`) satisfy this by construction.
 - `MultiPeriodDiD` / `DifferenceInDifferences` `(vcov_type="conley")` without `unit=` at fit-time → `ValueError`.
 - `TwoWayFixedEffects(vcov_type="conley", cluster=<col>)` is supported (Wave A #119): combined spatial + cluster product kernel applies. The cluster must be time-invariant within each unit on the panel path (validator-enforced). TWFE's default auto-cluster is silently dropped on the Conley path; explicit cluster is required to opt in.
 - `DifferenceInDifferences(vcov_type="conley", cluster=<col>)`: combined kernel applies; same time-invariance contract on the panel path. DiD has no auto-cluster, so the cluster choice is fully explicit.
-- `TwoWayFixedEffects(vcov_type="conley", inference="wild_bootstrap")` / `DifferenceInDifferences(vcov_type="conley", inference="wild_bootstrap")` → `NotImplementedError`.
+- `DifferenceInDifferences` / `MultiPeriodDiD` / `TwoWayFixedEffects` `(vcov_type="conley", inference="wild_bootstrap")` → `NotImplementedError`. (MPD's pre-Conley analytical-fallback `UserWarning` is suppressed when `vcov_type="conley"` so the user gets one consistent error message.)
+- `DifferenceInDifferences` / `MultiPeriodDiD` / `TwoWayFixedEffects` `(vcov_type="conley")` + `survey_design=` → `NotImplementedError` at the estimator level (deferred to Bertanha-Imbens 2014 weighted-Conley follow-up).
 - `SyntheticDiD(vcov_type="conley")` → `TypeError` (SyntheticDiD uses bootstrap/jackknife/placebo variance, not the analytical sandwich; tracked in TODO.md).
 - Any-mode `vcov_type="conley"` `+ weights=` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up).
 - Panel path: partial `conley_time` / `conley_unit` / `conley_lag_cutoff` (not all three set) → `ValueError` at validator.

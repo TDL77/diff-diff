@@ -1259,6 +1259,62 @@ class TestConleyEstimatorIntegration:
                 conley_lag_cutoff=1,
             ).fit(df, outcome="y", treatment="treated", time="time", unit="unit")
 
+    def test_mpd_conley_wild_bootstrap_raises_without_warning(self):
+        """MPD + Conley + inference='wild_bootstrap' raises NotImplementedError
+        cleanly. The pre-Conley analytical-fallback UserWarning is suppressed
+        on this combination so the user gets one consistent error message
+        instead of "warn then raise". Codex CI R11 P3 #1.
+        """
+        import pandas as _pd
+
+        from diff_diff import MultiPeriodDiD
+
+        rng = np.random.default_rng(seed=211)
+        rows = []
+        for u in range(8):
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            for t in range(3):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": rng.standard_normal(),
+                        "treated": int(u >= 4),
+                        "lat": lat,
+                        "lon": lon,
+                    }
+                )
+        df = _pd.DataFrame(rows)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            with pytest.raises(NotImplementedError, match="wild_bootstrap"):
+                MultiPeriodDiD(
+                    vcov_type="conley",
+                    inference="wild_bootstrap",
+                    conley_coords=("lat", "lon"),
+                    conley_cutoff_km=2000.0,
+                    conley_lag_cutoff=1,
+                ).fit(
+                    df,
+                    outcome="y",
+                    treatment="treated",
+                    time="time",
+                    unit="unit",
+                    post_periods=[1, 2],
+                    reference_period=0,
+                )
+            fallback_warnings = [
+                msg
+                for msg in w
+                if "falling back to analytical" in str(msg.message)
+                or "Wild bootstrap inference is not yet supported" in str(msg.message)
+            ]
+            assert len(fallback_warnings) == 0, (
+                "Got the analytical-fallback warning on a Conley fit that will "
+                "raise NotImplementedError — contradictory guidance."
+            )
+
     def test_did_conley_malformed_coord_tuple_raises(self, two_period_panel):
         """vcov_type='conley' with a malformed conley_coords (wrong arity or
         non-string elements) raises ValueError before downstream access.

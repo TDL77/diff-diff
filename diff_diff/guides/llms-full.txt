@@ -2023,8 +2023,8 @@ SE range.
 - `DifferenceInDifferences` / `MultiPeriodDiD` / `TwoWayFixedEffects` `+ vcov_type="conley"` without `conley_lag_cutoff` → `ValueError` (no defensible default; explicit user choice required).
 - `DifferenceInDifferences` / `MultiPeriodDiD` `+ vcov_type="conley"` without `unit=` at fit-time → `ValueError`.
 - Combining `vcov_type="conley"` with explicit `cluster=<col>` applies the combined spatial + cluster product kernel (Wave A #119). On the panel path the cluster must be constant within each unit across periods (validator raises `ValueError` otherwise). TWFE's default auto-cluster on the Conley path is silently dropped; users opt into the combined kernel explicitly.
-- `TwoWayFixedEffects` / `DifferenceInDifferences` `(vcov_type="conley", inference="wild_bootstrap")` → `NotImplementedError` (wild bootstrap does not consume the analytical sandwich).
-- `DifferenceInDifferences(vcov_type="conley")` + `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 follow-up).
+- `DifferenceInDifferences` / `MultiPeriodDiD` / `TwoWayFixedEffects` `(vcov_type="conley", inference="wild_bootstrap")` → `NotImplementedError` (wild bootstrap does not consume the analytical sandwich).
+- `DifferenceInDifferences` / `MultiPeriodDiD` / `TwoWayFixedEffects` `(vcov_type="conley")` + `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 follow-up).
 - `SyntheticDiD(vcov_type="conley")` → `TypeError` (uses bootstrap, not analytical sandwich).
 - Any-mode `vcov_type="conley"` `+ weights=` / `survey_design=` on `LinearRegression` / `compute_robust_vcov` → `NotImplementedError` (Bertanha-Imbens 2014 weighted-Conley deferred to follow-up PR).
 - A sparse k-d-tree fast path auto-activates for `n > 5_000` with `conley_kernel="bartlett"` AND `conley_metric` in `{"haversine", "euclidean"}` (Wave A #120); callable metrics and uniform kernel fall back to the dense path. `n > 20_000` with the dense fallback still emits a memory-OOM `UserWarning`.

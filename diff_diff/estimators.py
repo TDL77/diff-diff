@@ -1249,9 +1249,14 @@ class MultiPeriodDiD(DifferenceInDifferences):
             If required parameters are missing or data validation fails.
         """
         # Fall back to analytical inference if wild bootstrap requested
-        # (must happen before _resolve_survey_for_fit which rejects bootstrap+survey)
+        # (must happen before _resolve_survey_for_fit which rejects bootstrap+survey).
+        # SKIP the warning on the Conley path — the Conley validator below
+        # raises NotImplementedError for wild_bootstrap + Conley, so emitting
+        # the analytical-fallback warning first would produce contradictory
+        # guidance on the same call (warn "falling back" + raise "not
+        # supported"). The Conley raise takes precedence. Codex CI R11 P3.
         effective_inference = self.inference
-        if self.inference == "wild_bootstrap":
+        if self.inference == "wild_bootstrap" and self.vcov_type != "conley":
             warnings.warn(
                 "Wild bootstrap inference is not yet supported for MultiPeriodDiD. "
                 "Using analytical inference instead.",
