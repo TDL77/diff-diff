@@ -2672,31 +2672,41 @@ class TestWorkflowDoesNotExecutePRHeadCode:
     that the workflow CHECKS OUT PR-head content but is valid only
     while the workflow does not EXECUTE that content."""
 
-    FORBIDDEN_EXECUTION_PATTERNS = (
-        "pip install",
-        "pip3 install",
-        "pytest",
-        "npm install",
-        "npm ci",
-        "yarn install",
-        "cargo run",
-        "cargo test",
-        "make ",
-        "./configure",
-        "bundle exec",
-        "rake ",
-        "go test",
-        "go run",
-        "maturin develop",
-        "maturin build",
-        "poetry install",
-        "poetry run",
-        "pdm install",
-        "pdm run",
-        "uv sync",
-        "uv run",
-        "tox",
-        "setup.py",
+    # Word-boundary regexes (label, pattern). Using regex with `\b`
+    # boundaries instead of substring matches catches command tokens
+    # cleanly: `\bmake\b` matches `make` AND `make build` but not
+    # `bookmaker`. R2 fix for PR #436: prior `"make "` substring missed
+    # bare `run: make` invocations.
+    FORBIDDEN_COMMAND_REGEXES = (
+        ("pip install", r"\bpip3?\s+install\b"),
+        ("pytest", r"\bpytest\b"),
+        ("npm install/ci", r"\bnpm\s+(install|ci)\b"),
+        ("yarn install", r"\byarn\s+install\b"),
+        ("cargo run/test", r"\bcargo\s+(run|test)\b"),
+        ("make", r"\bmake\b"),
+        ("./configure", r"\./configure\b"),
+        ("bundle exec", r"\bbundle\s+exec\b"),
+        ("rake", r"\brake\b"),
+        ("go run/test", r"\bgo\s+(test|run)\b"),
+        ("maturin develop/build", r"\bmaturin\s+(develop|build)\b"),
+        ("poetry install/run", r"\bpoetry\s+(install|run)\b"),
+        ("pdm install/run", r"\bpdm\s+(install|run)\b"),
+        ("uv sync/run", r"\buv\s+(sync|run)\b"),
+        ("tox", r"\btox\b"),
+        ("setup.py", r"\bsetup\.py\b"),
+    )
+
+    # Explicit allowlist of /tmp/<file>.py paths that the workflow
+    # legitimately executes. Each entry MUST be staged from BASE_SHA
+    # via `git show "${BASE_SHA}":<path> > /tmp/<file>.py` in the same
+    # workflow run; the staging-existence test below verifies this.
+    # Adding to this list requires both adding the path here AND
+    # confirming the staging command exists in the workflow YAML.
+    # R2 fix for PR #436: prior blanket /tmp/ whitelist let any
+    # `python3 /tmp/<anything>.py` pass even if a future edit
+    # `cp`-staged a PR-head file to /tmp first.
+    ALLOWED_TMP_PYTHON_EXECUTIONS = (
+        "/tmp/notebook_md_extract.py",
     )
 
     @pytest.fixture
@@ -2746,12 +2756,54 @@ class TestWorkflowDoesNotExecutePRHeadCode:
 
         return results
 
+    @staticmethod
+    def _extract_step_block(workflow_text, step_name):
+        """Extract a step's full YAML block by `name:` value.
+
+        Matches `      - name: <step_name>` at 6-space indent and
+        captures lines through the next `      - ` (next step's
+        list-item marker) or end of file. Returns the captured text
+        or None if not found.
+
+        Used by step-scoped invariant tests (R2 fix for PR #436):
+        global substring assertions can be satisfied by stray
+        occurrences in comment blocks; step-scoped extraction proves
+        the invariant holds in the actual step that needs it."""
+        import re
+
+        pattern = re.compile(
+            rf"^      - name:\s*{re.escape(step_name)}\s*\n"
+            r"((?:[ ]{8,}.*\n|[ ]*\n)*)",
+            re.MULTILINE,
+        )
+        m = pattern.search(workflow_text)
+        return m.group(0) if m else None
+
+    @staticmethod
+    def _extract_open_pr_checkout_block(workflow_text):
+        """Extract the open-PR `actions/checkout` step (the one whose
+        `if:` includes `state == 'open'`) — there are TWO checkout
+        steps; this discriminates by the if-condition. Returns the
+        captured block or None if not found."""
+        import re
+
+        pattern = re.compile(
+            r"^      - uses: actions/checkout@\S+\s*\n"
+            r"        if: [^\n]*state == 'open'[^\n]*\n"
+            r"((?:[ ]{8,}.*\n|[ ]*\n)*)",
+            re.MULTILINE,
+        )
+        m = pattern.search(workflow_text)
+        return m.group(0) if m else None
+
     def test_workflow_run_blocks_have_no_forbidden_execution_patterns(
         self, workflow_text
     ):
         """If this fails, the CodeQL #14 dismissal is invalid. Either
         remove the offending step or restructure per the dismissed plan
         (checkout BASE_SHA only + git show for PR-head)."""
+        import re
+
         run_contents = self._extract_all_run_content(workflow_text)
         assert run_contents, (
             "No `run:` content found — extraction broke. The workflow "
@@ -2761,18 +2813,21 @@ class TestWorkflowDoesNotExecutePRHeadCode:
 
         violations = []
         for label, content in run_contents:
-            for pattern in self.FORBIDDEN_EXECUTION_PATTERNS:
-                if pattern in content:
+            for cmd_label, regex in self.FORBIDDEN_COMMAND_REGEXES:
+                cmd_re = re.compile(regex)
+                if cmd_re.search(content):
+                    match_obj = cmd_re.search(content)
                     snippet = next(
                         (
                             line
                             for line in content.splitlines()
-                            if pattern in line
+                            if cmd_re.search(line)
                         ),
-                        content.strip()[:120],
+                        match_obj.group(0)[:120] if match_obj else "",
                     ).strip()
                     violations.append(
-                        f"{label}: forbidden pattern {pattern!r} in: {snippet}"
+                        f"{label}: forbidden command {cmd_label!r} "
+                        f"(regex {regex!r}) in: {snippet}"
                     )
         assert not violations, (
             "CodeQL #14 dismissal invalidated by forbidden execution "
@@ -2781,31 +2836,34 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             "above the resolve-pr step for context."
         )
 
-    def test_workflow_no_python_file_execution_against_workspace(
+    def test_workflow_python_file_execution_uses_only_allowlisted_paths(
         self, workflow_text
     ):
-        """`python3 <path>.py` invocations against workspace-relative
-        paths execute PR-head Python file bytes — invalidating the
-        dismissal. Inline scripts (`python3 -c '...'`) and module
-        invocations (`python3 -m foo`) don't capture .py tokens, so
-        they're naturally excluded. /tmp/-prefixed paths are SAFE
-        because they're staged from BASE_SHA via `git show`."""
+        """`python3 <path>.py` invocations against PR-controlled paths
+        execute PR-head Python file bytes — invalidating the dismissal.
+        Inline scripts (`python3 -c '...'`) and module invocations
+        (`python3 -m foo`) don't capture .py tokens, so they're
+        naturally excluded.
+
+        R2 fix for PR #436: replaced blanket `/tmp/` whitelist with
+        an EXPLICIT allowlist (`ALLOWED_TMP_PYTHON_EXECUTIONS`). The
+        prior whitelist let any `python3 /tmp/<anything>.py` pass, so a
+        future edit doing `cp diff_diff/foo.py /tmp/ && python3
+        /tmp/foo.py` would have passed. Now any new /tmp execution must
+        be explicitly added to the allowlist AND have a corresponding
+        BASE_SHA staging command (verified by the sibling test below)."""
         import re
 
         run_contents = self._extract_all_run_content(workflow_text)
         assert run_contents, "No `run:` content extracted"
 
-        # Match `python` or `python3` followed by whitespace then a
-        # token ending in `.py`. Captures the full path token. We
-        # only flag captures that don't start with `/tmp/`.
         py_exec_re = re.compile(r"\bpython3?\s+(\S+\.py)\b")
 
         violations = []
         for label, content in run_contents:
             for path in py_exec_re.findall(content):
-                if path.startswith("/tmp/"):
+                if path in self.ALLOWED_TMP_PYTHON_EXECUTIONS:
                     continue
-                # Find the line for the snippet
                 snippet = next(
                     (
                         line
@@ -2815,15 +2873,45 @@ class TestWorkflowDoesNotExecutePRHeadCode:
                     content.strip()[:120],
                 ).strip()
                 violations.append(
-                    f"{label}: workspace-relative python file execution "
+                    f"{label}: non-allowlisted python file execution "
                     f"{path!r} in: {snippet}"
                 )
         assert not violations, (
-            "CodeQL #14 dismissal invalidated by workspace-relative "
-            "python file execution. These would execute PR-head bytes; "
-            "use /tmp/-prefixed paths (BASE-staged via `git show`) "
-            "instead.\n" + "\n".join(violations)
+            "CodeQL #14 dismissal invalidated by python file execution "
+            "of non-allowlisted paths. Either use a path in "
+            "ALLOWED_TMP_PYTHON_EXECUTIONS (after staging it from "
+            "BASE_SHA via `git show`), refactor to `python3 -c '...'` "
+            "with sanitized env vars, or add the new path to the "
+            "allowlist explicitly with a BASE_SHA staging command.\n"
+            + "\n".join(violations)
         )
+
+    def test_workflow_allowlisted_tmp_python_executions_have_base_sha_staging(
+        self, workflow_text
+    ):
+        """Each entry in ALLOWED_TMP_PYTHON_EXECUTIONS must correspond
+        to a `git show "${BASE_SHA}":<source> > <allowed-path>` staging
+        command in the same workflow. This is what makes /tmp execution
+        safe: the file content comes from BASE (trusted), not PR head.
+
+        R2 fix for PR #436: without this test, a future edit could
+        leave an entry in the allowlist while removing/changing the
+        staging command, silently re-opening the dismissal hole."""
+        for allowed_path in self.ALLOWED_TMP_PYTHON_EXECUTIONS:
+            # The staging command pattern: `git show "${BASE_SHA}":<source>
+            # > <allowed_path>` (or similar redirect form). We require
+            # both `BASE_SHA` AND a redirect to the exact allowed path.
+            redirect = f"> {allowed_path}"
+            assert "BASE_SHA" in workflow_text and redirect in workflow_text, (
+                f"ALLOWED_TMP_PYTHON_EXECUTIONS entry {allowed_path!r} "
+                f"requires a BASE_SHA staging command in the same "
+                f"workflow (`git show \"${{BASE_SHA}}\":<source> > "
+                f"{allowed_path}`). Found BASE_SHA reference: "
+                f"{('BASE_SHA' in workflow_text)!r}; found redirect "
+                f"`{redirect}`: {(redirect in workflow_text)!r}. Either "
+                f"add the staging command or remove the entry from "
+                f"the allowlist."
+            )
 
     def test_workflow_dismissal_comment_block_present(self, workflow_text):
         """The comment block that documents the #14 dismissal must stay
@@ -2855,12 +2943,23 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         """Invariant #1 (other half): Codex action runs sandbox: read-only.
         If a future edit relaxes this to workspace-write or
         danger-full-access, Codex could write or execute PR-head bytes
-        — the dismissal premise breaks."""
-        assert "sandbox: read-only" in workflow_text, (
-            "Codex step must use `sandbox: read-only` per the dismissal "
-            "rationale (comment block above resolve-pr step). Without "
-            "read-only sandbox, Codex can write or execute PR-head "
-            "content and the CodeQL #14 dismissal is invalid."
+        — the dismissal premise breaks.
+
+        R2 fix for PR #436: prior version was a global substring check
+        which the comment block itself satisfied (it contains the
+        literal `sandbox: read-only`). Now scoped to the actual Run
+        Codex step block extracted by name."""
+        codex_block = self._extract_step_block(workflow_text, "Run Codex")
+        assert codex_block is not None, (
+            "Could not find `- name: Run Codex` step block. The "
+            "extraction regex needs updating, or the step was renamed "
+            "(both invalidate the dismissal premise — review)."
+        )
+        assert "sandbox: read-only" in codex_block, (
+            "Run Codex step must include `sandbox: read-only` in its "
+            "`with:` stanza per dismissal rationale invariant #1. "
+            "Without read-only sandbox, Codex can write or execute "
+            "PR-head content and the CodeQL #14 dismissal is invalid."
         )
 
     def test_workflow_resolve_pr_sets_head_sha_from_api(self, workflow_text):
@@ -2868,11 +2967,56 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         If a future edit reads head_sha from the event payload (which
         is mutable for issue_comment events) instead of the API, the
         TOCTOU window grows."""
-        assert 'core.setOutput("head_sha", pr.data.head.sha)' in workflow_text, (
-            "resolve-pr step must pin `head_sha` from the API "
+        resolve_block = self._extract_step_block(
+            workflow_text, "Resolve PR number + metadata"
+        )
+        assert resolve_block is not None, (
+            "Could not find `- name: Resolve PR number + metadata` "
+            "step block."
+        )
+        assert (
+            'core.setOutput("head_sha", pr.data.head.sha)' in resolve_block
+        ), (
+            "Resolve-pr step must pin `head_sha` from the API "
             "(`pr.data.head.sha`), not from the event payload. See "
-            "dismissal rationale invariant #4 in the workflow comment "
-            "block above the resolve-pr step."
+            "dismissal rationale invariant #4."
+        )
+
+    def test_workflow_open_pr_checkout_uses_head_repo_and_head_sha(
+        self, workflow_text
+    ):
+        """Open-PR checkout invariant: must use `repository:
+        head_repo_full_name` + `ref: head_sha` (the API-pinned values
+        from the resolve-pr step). If a future edit drops the
+        repository pin or reads ref from the event payload, the
+        TOCTOU window grows AND the head-repo determination is no
+        longer authoritatively from the API.
+
+        R2 addition for PR #436: invariant was previously implicit
+        (resolve-pr setting head_sha doesn't prove the checkout uses
+        it). This test scopes to the open-PR checkout step
+        specifically (discriminating from the closed-PR checkout via
+        `state == 'open'` in the if-clause)."""
+        checkout_block = self._extract_open_pr_checkout_block(workflow_text)
+        assert checkout_block is not None, (
+            "Could not find the open-PR `actions/checkout` step "
+            "(matched by `if: ... state == 'open' ...`). Either the "
+            "step was removed or the if-condition was rewritten."
+        )
+        assert (
+            "repository: ${{ steps.pr.outputs.head_repo_full_name }}"
+            in checkout_block
+        ), (
+            "Open-PR checkout must pin `repository:` to "
+            "`steps.pr.outputs.head_repo_full_name` (the API-resolved "
+            "head repo). Found checkout block:\n" + checkout_block
+        )
+        assert (
+            "ref: ${{ steps.pr.outputs.head_sha }}" in checkout_block
+        ), (
+            "Open-PR checkout must pin `ref:` to "
+            "`steps.pr.outputs.head_sha` (the API-pinned head SHA). "
+            "Found checkout block:\n" + checkout_block
         )
 
     def test_workflow_comment_triggers_require_author_association(
@@ -2881,18 +3025,55 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         """Invariant #3: comment-triggered events (issue_comment,
         pull_request_review_comment) require author_association in
         OWNER/MEMBER/COLLABORATOR. If a future edit drops or weakens
-        this gate, random commenters could trigger the workflow."""
-        assert "github.event.comment.author_association == 'OWNER'" in workflow_text
-        assert "github.event.comment.author_association == 'MEMBER'" in workflow_text
-        assert (
-            "github.event.comment.author_association == 'COLLABORATOR'"
-            in workflow_text
-        ), (
-            "Comment-triggered events must check author_association is "
-            "OWNER/MEMBER/COLLABORATOR per dismissal invariant #3. "
-            "Without this gate, any GitHub user commenting on a PR "
-            "could trigger the workflow with secrets in scope."
+        this gate in EITHER branch, random commenters could trigger
+        the workflow.
+
+        R2 fix for PR #436: prior version was a global substring
+        check (3 asserts on whole-workflow presence). It would pass
+        if one branch had all three values and the other had none.
+        Now branch-scoped: extract each comment-trigger event's
+        if-section and assert each contains all three values."""
+        import re
+
+        # Extract the workflow-level `if: |` block. The block body is
+        # at 6-space indent; ends at the next non-indented field (e.g.,
+        # `    steps:` at 4-space indent).
+        if_block_re = re.compile(
+            r"^    if:\s*\|\s*\n((?:^      .*\n|^[ ]*\n)*)",
+            re.MULTILINE,
         )
+        if_match = if_block_re.search(workflow_text)
+        assert if_match is not None, (
+            "Could not extract workflow-level `if: |` block. The "
+            "structure changed; review."
+        )
+        if_block = if_match.group(1)
+
+        for trigger in ("issue_comment", "pull_request_review_comment"):
+            marker = f"github.event_name == '{trigger}'"
+            idx = if_block.find(marker)
+            assert idx >= 0, (
+                f"Branch for {trigger!r} not found in workflow `if:` "
+                f"block. Either the trigger was dropped or the "
+                f"comparison form changed."
+            )
+            # Take from the trigger marker to the next `github.event_name ==`
+            # or end of block (whichever comes first).
+            next_idx = if_block.find("github.event_name ==", idx + 1)
+            segment = (
+                if_block[idx:next_idx]
+                if next_idx > idx
+                else if_block[idx:]
+            )
+            for value in ("OWNER", "MEMBER", "COLLABORATOR"):
+                check = f"author_association == '{value}'"
+                assert check in segment, (
+                    f"Branch for {trigger!r} does not check "
+                    f"`{check}`. Without this, the {trigger} branch "
+                    f"would let unauthorized commenters trigger the "
+                    f"workflow with secrets in scope. Branch segment:\n"
+                    + segment
+                )
 
 
 class TestExtractResponseText:
