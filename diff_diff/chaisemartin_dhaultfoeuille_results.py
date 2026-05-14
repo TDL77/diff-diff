@@ -629,8 +629,9 @@ class ChaisemartinDHaultfoeuilleResults:
     # a positive int OR `paths_of_interest` is non-empty AND
     # `n_bootstrap > 0`. The joint band itself is written per-horizon as
     # `cband_conf_int` on `path_effects[path]["horizons"][l]` (mirrors
-    # the OVERALL `event_study_effects[l]["cband_conf_int"]` pattern at
-    # `chaisemartin_dhaultfoeuille.py:2865-2875`). Empty-state contract:
+    # the OVERALL `event_study_effects[l]["cband_conf_int"]` pattern
+    # populated alongside the bootstrap propagation in
+    # `chaisemartin_dhaultfoeuille.py::fit`). Empty-state contract:
     # `None` when not requested (no bootstrap, or both `by_path` and
     # `paths_of_interest` are `None`); `{}` when requested but no path
     # passed both gates (>=2 valid horizons AND a strict majority — more
