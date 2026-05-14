@@ -1394,7 +1394,7 @@ class TestDCDHDynRParityHeterogeneity:
             # NOTE: `p_value` and `conf_int` are NOT pinned to R here. Python's
             # `safe_inference(..., df=None)` uses the normal Z critical value
             # (~1.96 at alpha=0.05); R `did_multiplegt_dyn(..., predict_het)`
-            # uses t-distribution with df = n - k from the WLS regression.
+            # uses t-distribution with df = n - k from the OLS regression.
             # That structural deviation produces ~0.1-2% rtol gaps on CI
             # bounds and p-values - tracked separately rather than masked by
             # a loose parity tolerance. See REGISTRY Phase 3 heterogeneity
