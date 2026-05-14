@@ -1243,6 +1243,51 @@ class TestConleyEstimatorIntegration:
         se_dt = np.sqrt(np.diag(res_dt.vcov))
         np.testing.assert_allclose(se_dt, se_int, atol=1e-10)
 
+    def test_multi_period_did_conley_to_dict_carries_lag_cutoff(self):
+        """Closes Codex re-review round 4 P1 (Maintainability) on MPD:
+        serialized `to_dict()` must include `vcov_type` and
+        `conley_lag_cutoff` so downstream programmatic consumers can tell
+        which Conley variant produced the SEs."""
+        import pandas as pd
+
+        from diff_diff import MultiPeriodDiD
+
+        rng = np.random.default_rng(seed=41)
+        n_units = 10
+        rows = []
+        for u in range(n_units):
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            for t in range(3):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": rng.normal(),
+                        "treated": int(u < 5),
+                        "lat": lat,
+                        "lon": lon,
+                    }
+                )
+        df_mp = pd.DataFrame(rows)
+        res = MultiPeriodDiD(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=2,
+        ).fit(
+            df_mp,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            post_periods=[1, 2],
+            unit="unit",
+            reference_period=0,
+        )
+        d = res.to_dict()
+        assert d["vcov_type"] == "conley"
+        assert d["conley_lag_cutoff"] == 2
+
     def test_multi_period_did_conley_missing_coords_raises(self):
         """MPD + vcov_type='conley' without conley_coords raises a clean
         ValueError instead of a raw TypeError on `self.conley_coords[0]`.
@@ -1420,6 +1465,24 @@ class TestConleyTWFE:
         assert "lag_cutoff=1" in summary
         # The result dataclass also carries the lag for programmatic access.
         assert res.conley_lag_cutoff == 1
+
+    def test_twfe_conley_to_dict_carries_lag_cutoff(self, panel):
+        """Closes Codex re-review round 4 P1 (Maintainability): the
+        serialized `to_dict()` must include `vcov_type` and
+        `conley_lag_cutoff` so downstream programmatic consumers (notebooks,
+        adapters, pipelines) can tell which Conley variant produced the SEs
+        without re-deriving from the summary string."""
+        from diff_diff import TwoWayFixedEffects
+
+        res = TwoWayFixedEffects(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
+        d = res.to_dict()
+        assert d["vcov_type"] == "conley"
+        assert d["conley_lag_cutoff"] == 1
 
     def test_twfe_conley_non_numeric_time_fails(self, panel):
         """TWFE's `_treatment_post = treated * time` design step requires

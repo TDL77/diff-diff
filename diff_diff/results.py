@@ -284,6 +284,14 @@ class DiDResults:
             "r_squared": self.r_squared,
             "inference_method": self.inference_method,
         }
+        # Variance-family metadata: included only when set, so existing
+        # dict consumers see no new keys for non-conley / non-cluster fits.
+        if self.vcov_type is not None:
+            result["vcov_type"] = self.vcov_type
+        if self.cluster_name is not None:
+            result["cluster_name"] = self.cluster_name
+        if self.conley_lag_cutoff is not None:
+            result["conley_lag_cutoff"] = self.conley_lag_cutoff
         if self.n_bootstrap is not None:
             result["n_bootstrap"] = self.n_bootstrap
         if self.n_clusters is not None:
@@ -717,6 +725,14 @@ class MultiPeriodDiDResults:
             "r_squared": self.r_squared,
             "reference_period": self.reference_period,
         }
+        # Variance-family metadata: included only when set, so existing
+        # dict consumers see no new keys for non-conley / non-cluster fits.
+        if self.vcov_type is not None:
+            result["vcov_type"] = self.vcov_type
+        if self.cluster_name is not None:
+            result["cluster_name"] = self.cluster_name
+        if self.conley_lag_cutoff is not None:
+            result["conley_lag_cutoff"] = self.conley_lag_cutoff
 
         # Add period-specific effects
         for period, pe in self.period_effects.items():
