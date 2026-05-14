@@ -164,16 +164,22 @@ class TestConleyDistanceMetrics:
         np.testing.assert_allclose(D, D_scipy, atol=1e-12)
 
     def test_pairwise_distance_callable(self):
-        """A user-supplied callable is dispatched and its output preserved."""
+        """A user-supplied callable is dispatched and its output preserved.
+        Output must satisfy the validator's invariants (zero diagonal, finite,
+        non-negative, symmetric)."""
         coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
 
-        def constant_metric(c1, c2):
+        def constant_offdiag_metric(c1, c2):
             n1 = len(c1)
             n2 = len(c2)
-            return np.full((n1, n2), 5.0)
+            out = np.full((n1, n2), 5.0)
+            np.fill_diagonal(out, 0.0)
+            return out
 
-        D = _pairwise_distance_matrix(coords, constant_metric)
-        np.testing.assert_allclose(D, np.full((3, 3), 5.0))
+        D = _pairwise_distance_matrix(coords, constant_offdiag_metric)
+        expected = np.full((3, 3), 5.0)
+        np.fill_diagonal(expected, 0.0)
+        np.testing.assert_allclose(D, expected)
 
     def test_pairwise_distance_unknown_metric_raises(self):
         """Unknown metric strings raise ValueError from the dispatcher."""
@@ -243,6 +249,43 @@ class TestConleyDistanceMetrics:
 
         with pytest.raises(ValueError, match="asymmetric matrix"):
             _pairwise_distance_matrix(coords, asymmetric_metric)
+
+    def test_callable_metric_nonzero_diagonal_raises(self):
+        """Callable returning a symmetric/finite/non-negative matrix with a
+        positive self-distance still raises, because the Conley sandwich
+        requires d(i, i) = 0 (K(0) = 1 reduces the i=j term to the HC0
+        diagonal X_i ε_i² X_i'). A nonzero self-distance silently attenuates
+        the HC0 contribution by K(d_ii / h) < 1 and misstates Conley SEs.
+        Codex CI R4 P1."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def positive_diagonal_metric(c1, c2):
+            # Symmetric, finite, non-negative — but d(i, i) = 0.5 > 0.
+            n1 = len(c1)
+            n2 = len(c2)
+            out = np.full((n1, n2), 5.0)
+            np.fill_diagonal(out, 0.5)
+            return out
+
+        with pytest.raises(ValueError, match=r"nonzero self-distance"):
+            _pairwise_distance_matrix(coords, positive_diagonal_metric)
+
+    def test_callable_metric_near_zero_diagonal_accepted(self):
+        """Sub-tolerance diagonal (roundoff scale) is accepted, mirroring
+        the symmetry-tolerance contract."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def near_zero_diagonal_metric(c1, c2):
+            n1 = len(c1)
+            n2 = len(c2)
+            out = np.full((n1, n2), 5.0)
+            np.fill_diagonal(out, 0.0)
+            # Diagonal noise well below the 1e-10 tolerance
+            out[0, 0] = 1e-13
+            return out
+
+        D = _pairwise_distance_matrix(coords, near_zero_diagonal_metric)
+        assert D.shape == (3, 3)
 
     def test_callable_metric_non_array_result_raises(self):
         """Callable returning a non-castable result raises a targeted ValueError."""

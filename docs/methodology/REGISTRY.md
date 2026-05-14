@@ -3148,9 +3148,16 @@ validated at the boundary via `_validate_callable_metric_result`:
 3. All entries are finite (NaN/inf raises).
 4. All entries are non-negative (negative distances raise).
 5. Symmetric to within `atol=1e-10` (asymmetric matrix raises).
+6. Zero diagonal: `|d(i, i)| ≤ 1e-10` for all `i` (nonzero diagonal raises).
 
 Each failure produces a `ValueError` naming the violated invariant.
-Sub-tolerance asymmetry (eps-level roundoff) is accepted.
+Sub-tolerance asymmetry (eps-level roundoff) is accepted. The zero-
+diagonal invariant is load-bearing for the Conley sandwich: the
+`i = j` term contributes `K(d_ii / h) · X_i ε_i² X_i'`, which must
+reduce to the HC0 diagonal `X_i ε_i² X_i'` (i.e., `K(0) = 1`). A
+callable with positive self-distance would attenuate the HC0 term
+by `K(d_ii / h) < 1` and silently misstate Conley SEs. Built-in
+metrics (`"haversine"`, `"euclidean"`) satisfy this by construction.
 
 **Edge cases / restrictions:**
 - `DifferenceInDifferences(vcov_type="conley")` is supported (Wave A #118): pass `unit=<col>` to `fit(...)` (NOT on `__init__`; unused unless Conley is set; not part of `get_params()` / `set_params()`).

@@ -118,10 +118,19 @@ def _validate_callable_metric_result(result: object, n: int) -> np.ndarray:
     """Validate the output of a user-supplied callable ``conley_metric``.
 
     A user-supplied distance callable must return an ``(n, n)`` matrix of
-    finite, non-negative, symmetric values; otherwise downstream code
-    produces opaque BLAS errors or silently-wrong vcov estimates. This
-    helper performs all five checks at the boundary and produces a
-    targeted :class:`ValueError` for each failure.
+    finite, non-negative, symmetric values with **zero diagonal**;
+    otherwise downstream code produces opaque BLAS errors or silently-
+    wrong vcov estimates. This helper performs all six checks at the
+    boundary and produces a targeted :class:`ValueError` for each
+    failure.
+
+    The zero-diagonal invariant is load-bearing for the Conley sandwich:
+    the ``i = j`` term contributes ``K(d_ii / h) · X_i ε_i² X_i'``, which
+    must reduce to the HC0 diagonal ``X_i ε_i² X_i'`` (i.e., ``K(0) = 1``).
+    A callable with positive self-distance would attenuate the HC0
+    contribution by ``K(d_ii / h) < 1`` and silently misstate Conley SEs.
+    Built-in metrics (``"haversine"``, ``"euclidean"``) satisfy this by
+    construction.
 
     Returns
     -------
@@ -133,7 +142,8 @@ def _validate_callable_metric_result(result: object, n: int) -> np.ndarray:
     ValueError
         Result cannot cast to ``float64``; shape is not ``(n, n)``;
         contains NaN/inf; contains negative entries; is not symmetric
-        within ``atol=1e-10``.
+        within ``atol=1e-10``; or has any nonzero diagonal entry
+        ``|d(i, i)| > 1e-10``.
     """
     try:
         arr = np.asarray(result, dtype=np.float64)
@@ -163,6 +173,15 @@ def _validate_callable_metric_result(result: object, n: int) -> np.ndarray:
             "conley_metric callable returned an asymmetric matrix; the "
             "distance matrix must satisfy d(i, j) = d(j, i). Max |D - D.T| = "
             f"{asymmetry:.2e}, tolerance 1e-10."
+        )
+    diag_max = float(np.max(np.abs(np.diag(arr)))) if arr.size else 0.0
+    if diag_max > 1e-10:
+        raise ValueError(
+            "conley_metric callable returned a matrix with nonzero self-"
+            "distance on the diagonal; the Conley sandwich requires "
+            "d(i, i) = 0 so the kernel reduces to K(0) = 1 on the HC0 "
+            f"diagonal contribution. Max |diag(D)| = {diag_max:.2e}, "
+            "tolerance 1e-10."
         )
     return arr
 
