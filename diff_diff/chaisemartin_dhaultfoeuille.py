@@ -143,9 +143,16 @@ def _validate_and_aggregate_to_cells(
     Raises
     ------
     ValueError
-        On missing columns, NaN treatment / outcome values, non-numeric
-        treatment / outcome that cannot be coerced, or non-binary raw
-        treatment values.
+        On missing columns; NaN values in the treatment / outcome columns;
+        non-numeric treatment / outcome that cannot be coerced via
+        ``pd.to_numeric``; or within-cell-varying treatment (any
+        ``(group, time)`` cell where ``d_min != d_max``, since fuzzy DiD
+        is out of scope and deferred to a separate dCdH 2018 paper).
+        Integer-coded non-binary treatment (the ``by_path`` /
+        ``paths_of_interest`` requirement) is enforced separately at
+        ``fit()`` time, not here at aggregation time — this helper
+        accepts continuous ``d_gt`` cell means and lets ``fit()`` decide
+        whether the integer-only contract applies.
     """
     # 1. Required columns
     missing = [c for c in (outcome, group, time, treatment) if c not in data.columns]

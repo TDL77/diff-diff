@@ -625,16 +625,16 @@ class ChaisemartinDHaultfoeuilleResults:
     )
     # Per-path joint sup-t simultaneous-band metadata. Keyed by path
     # tuple; each entry holds `{"crit_value", "alpha", "n_bootstrap",
-    # "method", "n_valid_horizons"}`. Populated when `by_path` is a
-    # positive int AND `n_bootstrap > 0`. The joint band itself is
-    # written per-horizon as `cband_conf_int` on
-    # `path_effects[path]["horizons"][l]` (mirrors the OVERALL
-    # `event_study_effects[l]["cband_conf_int"]` pattern at
+    # "method", "n_valid_horizons"}`. Populated when EITHER `by_path` is
+    # a positive int OR `paths_of_interest` is non-empty AND
+    # `n_bootstrap > 0`. The joint band itself is written per-horizon as
+    # `cband_conf_int` on `path_effects[path]["horizons"][l]` (mirrors
+    # the OVERALL `event_study_effects[l]["cband_conf_int"]` pattern at
     # `chaisemartin_dhaultfoeuille.py:2865-2875`). Empty-state contract:
-    # `None` when not requested (no bootstrap or `by_path is None`); `{}`
-    # when requested but no path passed both gates (>=2 valid horizons
-    # AND a strict majority — more than 50% — of finite sup-t draws).
-    # The bands cover joint inference
+    # `None` when not requested (no bootstrap, or both `by_path` and
+    # `paths_of_interest` are `None`); `{}` when requested but no path
+    # passed both gates (>=2 valid horizons AND a strict majority — more
+    # than 50% — of finite sup-t draws). The bands cover joint inference
     # WITHIN a single path across horizons; they do NOT provide
     # simultaneous coverage across paths.
     path_sup_t_bands: Optional[Dict[Tuple[int, ...], Dict[str, Any]]] = field(
