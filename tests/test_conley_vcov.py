@@ -13,8 +13,10 @@ import pytest
 
 from diff_diff.conley import (
     _CONLEY_EARTH_RADIUS_KM,
+    _CONLEY_SPARSE_N_THRESHOLD,
     _bartlett_kernel,
     _compute_conley_vcov,
+    _compute_spatial_bartlett_meat_sparse,
     _haversine_km,
     _pairwise_distance_matrix,
     _uniform_kernel,
@@ -162,21 +164,152 @@ class TestConleyDistanceMetrics:
         np.testing.assert_allclose(D, D_scipy, atol=1e-12)
 
     def test_pairwise_distance_callable(self):
-        """A user-supplied callable is dispatched and its output preserved."""
+        """A user-supplied callable is dispatched and its output preserved.
+        Output must satisfy the validator's invariants (zero diagonal, finite,
+        non-negative, symmetric)."""
         coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
 
-        def constant_metric(c1, c2):
+        def constant_offdiag_metric(c1, c2):
             n1 = len(c1)
             n2 = len(c2)
-            return np.full((n1, n2), 5.0)
+            out = np.full((n1, n2), 5.0)
+            np.fill_diagonal(out, 0.0)
+            return out
 
-        D = _pairwise_distance_matrix(coords, constant_metric)
-        np.testing.assert_allclose(D, np.full((3, 3), 5.0))
+        D = _pairwise_distance_matrix(coords, constant_offdiag_metric)
+        expected = np.full((3, 3), 5.0)
+        np.fill_diagonal(expected, 0.0)
+        np.testing.assert_allclose(D, expected)
 
     def test_pairwise_distance_unknown_metric_raises(self):
         """Unknown metric strings raise ValueError from the dispatcher."""
         with pytest.raises(ValueError, match="conley_metric"):
             _pairwise_distance_matrix(np.zeros((3, 2)), "manhattan")
+
+    def test_callable_metric_wrong_shape_raises(self):
+        """Callable returning a non-(n, n) matrix raises a targeted ValueError."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def wrong_shape_metric(c1, c2):
+            return np.zeros((2, 5))
+
+        with pytest.raises(ValueError, match=r"\(n, n\) distance matrix"):
+            _pairwise_distance_matrix(coords, wrong_shape_metric)
+
+    def test_callable_metric_returns_nan_raises(self):
+        """Callable returning a matrix with NaN raises a targeted ValueError."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def nan_metric(c1, c2):
+            out = np.zeros((3, 3))
+            out[0, 1] = np.nan
+            out[1, 0] = np.nan
+            return out
+
+        with pytest.raises(ValueError, match="non-finite"):
+            _pairwise_distance_matrix(coords, nan_metric)
+
+    def test_callable_metric_returns_inf_raises(self):
+        """Callable returning a matrix with inf raises (same branch as NaN)."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def inf_metric(c1, c2):
+            out = np.zeros((3, 3))
+            out[0, 1] = np.inf
+            out[1, 0] = np.inf
+            return out
+
+        with pytest.raises(ValueError, match="non-finite"):
+            _pairwise_distance_matrix(coords, inf_metric)
+
+    def test_callable_metric_negative_entries_raise(self):
+        """Callable returning a negative distance raises (distances must be
+        non-negative)."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def negative_metric(c1, c2):
+            out = np.full((3, 3), 1.0)
+            out[0, 1] = -0.5
+            out[1, 0] = -0.5
+            np.fill_diagonal(out, 0.0)
+            return out
+
+        with pytest.raises(ValueError, match="negative entries"):
+            _pairwise_distance_matrix(coords, negative_metric)
+
+    def test_callable_metric_asymmetric_raises(self):
+        """Callable returning a non-symmetric matrix raises."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def asymmetric_metric(c1, c2):
+            out = np.zeros((3, 3))
+            out[0, 1] = 1.0
+            out[1, 0] = 2.0
+            return out
+
+        with pytest.raises(ValueError, match="asymmetric matrix"):
+            _pairwise_distance_matrix(coords, asymmetric_metric)
+
+    def test_callable_metric_nonzero_diagonal_raises(self):
+        """Callable returning a symmetric/finite/non-negative matrix with a
+        positive self-distance still raises, because the Conley sandwich
+        requires d(i, i) = 0 (K(0) = 1 reduces the i=j term to the HC0
+        diagonal X_i ε_i² X_i'). A nonzero self-distance silently attenuates
+        the HC0 contribution by K(d_ii / h) < 1 and misstates Conley SEs.
+        Codex CI R4 P1."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def positive_diagonal_metric(c1, c2):
+            # Symmetric, finite, non-negative — but d(i, i) = 0.5 > 0.
+            n1 = len(c1)
+            n2 = len(c2)
+            out = np.full((n1, n2), 5.0)
+            np.fill_diagonal(out, 0.5)
+            return out
+
+        with pytest.raises(ValueError, match=r"nonzero self-distance"):
+            _pairwise_distance_matrix(coords, positive_diagonal_metric)
+
+    def test_callable_metric_near_zero_diagonal_accepted(self):
+        """Sub-tolerance diagonal (roundoff scale) is accepted, mirroring
+        the symmetry-tolerance contract."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def near_zero_diagonal_metric(c1, c2):
+            n1 = len(c1)
+            n2 = len(c2)
+            out = np.full((n1, n2), 5.0)
+            np.fill_diagonal(out, 0.0)
+            # Diagonal noise well below the 1e-10 tolerance
+            out[0, 0] = 1e-13
+            return out
+
+        D = _pairwise_distance_matrix(coords, near_zero_diagonal_metric)
+        assert D.shape == (3, 3)
+
+    def test_callable_metric_non_array_result_raises(self):
+        """Callable returning a non-castable result raises a targeted ValueError."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def non_array_metric(c1, c2):
+            return "not an array"
+
+        with pytest.raises(ValueError, match="cannot be cast"):
+            _pairwise_distance_matrix(coords, non_array_metric)
+
+    def test_callable_metric_near_symmetric_accepted(self):
+        """Sub-tolerance asymmetry (eps-level roundoff) is accepted."""
+        coords = np.array([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]])
+
+        def near_symmetric_metric(c1, c2):
+            out = np.full((3, 3), 5.0)
+            np.fill_diagonal(out, 0.0)
+            # Asymmetry below the 1e-10 tolerance — round-off only
+            out[0, 1] += 1e-13
+            return out
+
+        D = _pairwise_distance_matrix(coords, near_symmetric_metric)
+        assert D.shape == (3, 3)
 
 
 # ---------------------------------------------------------------------------
@@ -779,17 +912,31 @@ class TestConleyValidationDispatch:
 
         assert "conley" in _VALID_VCOV_TYPES
 
-    def test_conley_with_cluster_raises(self, fit_inputs):
+    def test_conley_with_cluster_combined_kernel(self, fit_inputs):
+        """Conley + cluster_ids applies the combined spatial + cluster
+        product kernel; no longer raises. The shipped SE differs from
+        bare Conley because cross-cluster off-diagonals are zeroed out."""
         X, residuals, coords = fit_inputs
-        with pytest.raises(NotImplementedError, match="conley.*cluster_ids"):
-            compute_robust_vcov(
-                X,
-                residuals,
-                cluster_ids=np.arange(len(X)) // 3,
-                vcov_type="conley",
-                conley_coords=coords,
-                conley_cutoff_km=100.0,
-            )
+        cluster_ids = np.arange(len(X)) // 3
+        V_combined = compute_robust_vcov(
+            X,
+            residuals,
+            cluster_ids=cluster_ids,
+            vcov_type="conley",
+            conley_coords=coords,
+            conley_cutoff_km=100.0,
+        )
+        V_bare = compute_robust_vcov(
+            X,
+            residuals,
+            vcov_type="conley",
+            conley_coords=coords,
+            conley_cutoff_km=100.0,
+        )
+        assert V_combined.shape == V_bare.shape
+        # Combined kernel zeros out off-cluster off-diagonals → the meat
+        # (and hence vcov) must differ from bare Conley on the same data.
+        assert not np.allclose(V_combined, V_bare, atol=1e-8)
 
     def test_conley_with_weights_raises(self, fit_inputs):
         X, residuals, coords = fit_inputs
@@ -945,41 +1092,443 @@ class TestConleyEstimatorIntegration:
 
         return pd.DataFrame(rows)
 
-    def test_did_with_conley_raises(self, two_period_panel):
-        """DifferenceInDifferences + vcov_type='conley' is rejected
-        unconditionally. DiD is intrinsically a two-period panel; cross-
-        sectional Conley over (unit, t=0) ∪ (unit, t=1) rows would treat
-        same-unit cross-time pairs as d_ij=0 -> K=1, mishandling the space-
-        time HAC. Phase 2 will add the space-time product kernel; Phase 1's
-        supported Conley path is direct compute_robust_vcov on a single-
-        period design. Closes CI reviewer P1 #1.
-        """
+    def test_did_with_conley_panel_finite_se(self, two_period_panel):
+        """DifferenceInDifferences + vcov_type='conley' + unit + lag_cutoff
+        produces a finite SE on a two-period panel (Wave A #118)."""
         from diff_diff import DifferenceInDifferences
 
         df = two_period_panel.copy()
-        with pytest.raises(NotImplementedError, match="DifferenceInDifferences.*conley"):
-            DifferenceInDifferences(
-                vcov_type="conley",
-                conley_coords=("lat", "lon"),
-                conley_cutoff_km=2000.0,
-            ).fit(df, outcome="y", treatment="treated", time="time")
+        res = DifferenceInDifferences(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, outcome="y", treatment="treated", time="time", unit="unit")
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+        assert res.vcov_type == "conley"
+        assert res.conley_lag_cutoff == 1
 
-    def test_did_with_conley_repeated_coords_raises(self, two_period_panel):
-        """Per CI reviewer P1 #1 recommendation: regression test where
-        coordinates repeat across multiple periods. The fit must reject
-        rather than silently produce wrong SE."""
+    def test_did_conley_missing_unit_raises(self, two_period_panel):
+        """vcov_type='conley' without unit= at fit-time raises ValueError."""
         from diff_diff import DifferenceInDifferences
 
-        # Confirm the fixture has time-invariant coords per unit.
-        coord_var = two_period_panel.groupby("unit")[["lat", "lon"]].nunique()
-        assert (coord_var.values == 1).all(), "Fixture coords must be time-invariant"
-
-        with pytest.raises(NotImplementedError, match="conley"):
+        with pytest.raises(ValueError, match=r"`unit=<column_name>`"):
             DifferenceInDifferences(
                 vcov_type="conley",
                 conley_coords=("lat", "lon"),
                 conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
             ).fit(two_period_panel, outcome="y", treatment="treated", time="time")
+
+    def test_did_conley_unknown_unit_column_raises(self, two_period_panel):
+        """vcov_type='conley' with `unit=<name>` referring to an absent column
+        raises a clear estimator-level ValueError, NOT a raw pandas KeyError.
+        Front-door check mirrors MultiPeriodDiD / TwoWayFixedEffects.
+        Codex CI R1 P1 #1."""
+        from diff_diff import DifferenceInDifferences
+
+        with pytest.raises(ValueError, match="Unit column 'missing_unit' not found"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="missing_unit",
+            )
+
+    def test_did_conley_unknown_coord_column_raises(self, two_period_panel):
+        """vcov_type='conley' with `conley_coords=(<absent>, <col>)` raises
+        a clear estimator-level ValueError before downstream column access.
+        Codex CI R2 P1."""
+        from diff_diff import DifferenceInDifferences
+
+        with pytest.raises(ValueError, match="conley_coords column 'missing_lat' not found"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("missing_lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+            )
+
+    def test_did_conley_unknown_cluster_column_raises(self, two_period_panel):
+        """DiD + Conley + cluster=<missing column> raises a clear estimator-
+        level ValueError before `data[self.cluster]` access (combined-kernel
+        path; codex CI R7 P1)."""
+        from diff_diff import DifferenceInDifferences
+
+        with pytest.raises(ValueError, match="Cluster column 'missing_region' not found"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                cluster="missing_region",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+            )
+
+    def test_mpd_conley_unknown_cluster_column_raises(self):
+        """MPD + Conley + cluster=<missing column> raises a clear estimator-
+        level ValueError before `data[self.cluster]` access (combined-kernel
+        path; codex CI R7 P1)."""
+        import pandas as _pd
+
+        from diff_diff import MultiPeriodDiD
+
+        rng = np.random.default_rng(seed=83)
+        rows = []
+        for u in range(8):
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            for t in range(3):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": rng.standard_normal(),
+                        "treated": int(u >= 4),
+                        "lat": lat,
+                        "lon": lon,
+                    }
+                )
+        df = _pd.DataFrame(rows)
+        with pytest.raises(ValueError, match="Cluster column 'missing_region' not found"):
+            MultiPeriodDiD(
+                vcov_type="conley",
+                cluster="missing_region",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                df,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+                post_periods=[1, 2],
+                reference_period=0,
+            )
+
+    def test_twfe_conley_unknown_cluster_column_raises(self):
+        """TWFE + Conley + cluster=<missing column> raises a clear estimator-
+        level ValueError before `data[self.cluster]` access (combined-kernel
+        path; codex CI R7 P1)."""
+        import pandas as _pd
+
+        from diff_diff import TwoWayFixedEffects
+
+        rng = np.random.default_rng(seed=89)
+        rows = []
+        for u in range(8):
+            lat = rng.uniform(-5, 5)
+            lon = rng.uniform(-5, 5)
+            for t in range(2):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": rng.standard_normal(),
+                        "treated": int(u >= 4),
+                        "lat": lat,
+                        "lon": lon,
+                    }
+                )
+        df = _pd.DataFrame(rows)
+        with pytest.raises(ValueError, match="Cluster column 'missing_region' not found"):
+            TwoWayFixedEffects(
+                vcov_type="conley",
+                cluster="missing_region",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(df, outcome="y", treatment="treated", time="time", unit="unit")
+
+    def test_mpd_conley_wild_bootstrap_raises_without_warning(self):
+        """MPD + Conley + inference='wild_bootstrap' raises NotImplementedError
+        cleanly. The pre-Conley analytical-fallback UserWarning is suppressed
+        on this combination so the user gets one consistent error message
+        instead of "warn then raise". Codex CI R11 P3 #1.
+        """
+        import pandas as _pd
+
+        from diff_diff import MultiPeriodDiD
+
+        rng = np.random.default_rng(seed=211)
+        rows = []
+        for u in range(8):
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            for t in range(3):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": rng.standard_normal(),
+                        "treated": int(u >= 4),
+                        "lat": lat,
+                        "lon": lon,
+                    }
+                )
+        df = _pd.DataFrame(rows)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            with pytest.raises(NotImplementedError, match="wild_bootstrap"):
+                MultiPeriodDiD(
+                    vcov_type="conley",
+                    inference="wild_bootstrap",
+                    conley_coords=("lat", "lon"),
+                    conley_cutoff_km=2000.0,
+                    conley_lag_cutoff=1,
+                ).fit(
+                    df,
+                    outcome="y",
+                    treatment="treated",
+                    time="time",
+                    unit="unit",
+                    post_periods=[1, 2],
+                    reference_period=0,
+                )
+            fallback_warnings = [
+                msg
+                for msg in w
+                if "falling back to analytical" in str(msg.message)
+                or "Wild bootstrap inference is not yet supported" in str(msg.message)
+            ]
+            assert len(fallback_warnings) == 0, (
+                "Got the analytical-fallback warning on a Conley fit that will "
+                "raise NotImplementedError — contradictory guidance."
+            )
+
+    def test_did_conley_malformed_coord_tuple_raises(self, two_period_panel):
+        """vcov_type='conley' with a malformed conley_coords (wrong arity or
+        non-string elements) raises ValueError before downstream access.
+        Codex CI R2 P1."""
+        from diff_diff import DifferenceInDifferences
+
+        # Wrong arity (1-element tuple)
+        with pytest.raises(ValueError, match="2-element tuple/list of column"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat",),  # type: ignore[arg-type]
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+            )
+        # Non-string element
+        with pytest.raises(ValueError, match="2-element tuple/list of column"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat", 0),  # type: ignore[arg-type]
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+            )
+
+    def test_did_conley_missing_lag_cutoff_raises(self, two_period_panel):
+        """vcov_type='conley' without conley_lag_cutoff raises ValueError."""
+        from diff_diff import DifferenceInDifferences
+
+        with pytest.raises(ValueError, match="conley_lag_cutoff"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+            )
+
+    def test_did_conley_matches_mpd_post_periods_1(self, two_period_panel):
+        """DiD + Conley on a 2-period panel matches MultiPeriodDiD with
+        post_periods=[1], reference_period=0 on the same data (locks the
+        DiD wire-up correctness against the already-shipped MPD path)."""
+        from diff_diff import DifferenceInDifferences, MultiPeriodDiD
+
+        df = two_period_panel.copy()
+        kwargs = dict(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        )
+        res_did = DifferenceInDifferences(**kwargs).fit(
+            df, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        res_mpd = MultiPeriodDiD(**kwargs).fit(
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
+            post_periods=[1],
+            reference_period=0,
+        )
+        # MPD reports ATT for the single post period (1)
+        np.testing.assert_allclose(res_did.att, res_mpd.att, atol=1e-10)
+        np.testing.assert_allclose(res_did.se, res_mpd.se, atol=1e-10)
+
+    def test_did_conley_with_absorb_uses_raw_time_labels(self, two_period_panel, monkeypatch):
+        """DiD + Conley + absorb=[<unit>] must feed the Conley helper the
+        ORIGINAL time/unit/coord columns from `data`, not the absorb-demeaned
+        `working_data` (in which time has been residualized to floats).
+        Otherwise the within-period spatial sandwich silently partitions on
+        per-unit demeaned floats instead of the true pre/post periods.
+        Codex Wave A R1 P0 #2.
+        """
+        import diff_diff.linalg as linalg_module
+        from diff_diff import DifferenceInDifferences
+
+        df = two_period_panel.copy()
+        captured: dict = {"time_arg": None, "unit_arg": None}
+        orig = linalg_module._compute_conley_vcov
+
+        def _spy(*args, **kwargs):
+            captured["time_arg"] = kwargs.get("time")
+            captured["unit_arg"] = kwargs.get("unit")
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(linalg_module, "_compute_conley_vcov", _spy)
+        DifferenceInDifferences(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
+            absorb=["unit"],
+        )
+        assert captured["time_arg"] is not None
+        # Raw labels are integer 0/1 (the binary post-treatment indicator);
+        # demeaned values would be floats from absorb's within-unit
+        # demeaning. np.unique on raw labels yields exactly 2 distinct
+        # values; on demeaned floats it would yield ~n_units distinct.
+        time_arg = np.asarray(captured["time_arg"])
+        uniques = np.unique(time_arg)
+        assert len(uniques) == 2, (
+            f"Expected 2 unique time labels (raw 0/1), got {len(uniques)}: "
+            f"{uniques[:5]} — absorb is leaking demeaned time into the "
+            "Conley helper."
+        )
+        assert set(uniques.tolist()) == {0, 1}, f"Expected raw integer labels 0/1, got {uniques}"
+
+    def test_mpd_conley_with_absorb_uses_raw_coords_and_time(self, monkeypatch):
+        """MultiPeriodDiD + Conley + absorb=[<col>] must feed the Conley
+        helper the ORIGINAL coords/time/unit columns from `data`, not the
+        absorb-demeaned `working_data`. If a user lists the `time` column
+        (or coord columns) in `absorb`, working_data has those demeaned and
+        the Conley helper would partition the within-period spatial sandwich
+        on residualized floats. Mirrors the DiD raw-time contract.
+        Codex CI R5 P0.
+        """
+        import pandas as _pd
+
+        import diff_diff.linalg as linalg_module
+        from diff_diff import MultiPeriodDiD
+
+        rng = np.random.default_rng(seed=71)
+        n_units = 10
+        T = 4
+        rows = []
+        for u in range(n_units):
+            treated = u >= n_units // 2
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            for t in range(T):
+                effect = 1.0 if (treated and t >= 2) else 0.0
+                yv = 0.2 * t + effect + rng.normal(0, 0.3)
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": yv,
+                        "treated": int(treated),
+                        "lat": lat,
+                        "lon": lon,
+                    }
+                )
+        df = _pd.DataFrame(rows)
+
+        captured: dict = {"time_arg": None, "unit_arg": None, "coords_arg": None}
+        orig = linalg_module._compute_conley_vcov
+
+        def _spy(*args, **kwargs):
+            captured["time_arg"] = kwargs.get("time")
+            captured["unit_arg"] = kwargs.get("unit")
+            # coords is the 3rd positional arg to _compute_conley_vcov
+            if len(args) >= 3:
+                captured["coords_arg"] = args[2]
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(linalg_module, "_compute_conley_vcov", _spy)
+        MultiPeriodDiD(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
+            post_periods=[2, 3],
+            reference_period=0,
+            absorb=["unit"],
+        )
+        # Raw time labels span exactly 0..T-1 = 4 distinct values; demeaned
+        # absorb would collapse to per-unit means → ~n_units distinct values.
+        time_arg = np.asarray(captured["time_arg"])
+        uniques = np.unique(time_arg)
+        assert len(uniques) == T, (
+            f"Expected {T} unique time labels (raw 0..{T - 1}), got {len(uniques)}: "
+            f"{uniques[:5]} — absorb is leaking demeaned time into the Conley helper."
+        )
+        assert set(uniques.tolist()) == set(range(T))
+        # Raw coords are time-invariant within unit and span n_units distinct
+        # (lat, lon) pairs. If absorb=["unit"] leaked demeaned coords, all
+        # within-unit coord values would collapse to 0 (per-unit mean), giving
+        # only 1 distinct row across all observations.
+        coords_arg = np.asarray(captured["coords_arg"])
+        # Expect n_units distinct (lat, lon) pairs since each unit has its own
+        unique_coords = np.unique(coords_arr_view := coords_arg, axis=0)
+        del coords_arr_view
+        assert len(unique_coords) == n_units, (
+            f"Expected {n_units} unique coord pairs, got {len(unique_coords)} — "
+            "absorb=['unit'] is leaking demeaned coords into the Conley helper."
+        )
 
     def test_multi_period_did_with_conley_panel(self):
         """Phase 2 MultiPeriodDiD + vcov_type='conley' uses the block-decomposed
@@ -1368,20 +1917,31 @@ class TestConleyTWFE:
         assert np.isfinite(res.att), "ATT must be finite"
         assert np.isfinite(res.se) and res.se > 0, "SE must be positive and finite"
 
-    def test_twfe_conley_with_explicit_cluster_raises(self, panel):
-        """TWFE + vcov_type='conley' + explicit cluster=... raises: the combined
-        spatial-kernel + cluster-indicator product kernel is deferred to a
-        follow-up PR. Auto-cluster on the Conley path is silently dropped."""
+    def test_twfe_conley_with_explicit_cluster_combined_kernel(self, panel):
+        """TWFE + vcov_type='conley' + explicit cluster=<col> applies the
+        combined spatial + cluster product kernel. The user-supplied cluster
+        column propagates to ``cluster_name`` (no longer cleared on the
+        Conley path) and a finite SE is produced. Auto-cluster on the
+        Conley path remains silently dropped — the user MUST explicitly
+        opt in to the combined kernel."""
         from diff_diff import TwoWayFixedEffects
 
-        with pytest.raises(NotImplementedError, match="cluster"):
-            TwoWayFixedEffects(
-                vcov_type="conley",
-                cluster="unit",
-                conley_coords=("lat", "lon"),
-                conley_cutoff_km=2000.0,
-                conley_lag_cutoff=1,
-            ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
+        # Add a unit-level region column so the cluster is time-invariant
+        # within unit (the panel block-decomposed validator's contract).
+        panel = panel.copy()
+        panel["region"] = panel["unit"] // 5
+        res = TwoWayFixedEffects(
+            vcov_type="conley",
+            cluster="region",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+        assert res.cluster_name == "region"
+        d = res.to_dict()
+        assert d.get("cluster_name") == "region"
 
     def test_twfe_conley_with_wild_bootstrap_raises(self, panel):
         """vcov_type='conley' + inference='wild_bootstrap' raises: wild bootstrap
@@ -1463,7 +2023,34 @@ class TestConleyTWFE:
         summary = res.summary()
         assert "Conley spatial HAC" in summary
         assert "lag_cutoff=1" in summary
+        # No explicit cluster on this fit → label must NOT advertise the
+        # combined kernel.
+        assert "+ cluster product kernel" not in summary
         # The result dataclass also carries the lag for programmatic access.
+        assert res.conley_lag_cutoff == 1
+
+    def test_twfe_conley_with_cluster_summary_label_names_kernel_and_cluster(self, panel):
+        """When an explicit cluster=<col> is combined with Conley, the
+        summary label must distinguish the combined spatial + cluster
+        product kernel from bare Conley and name the cluster column.
+        Codex CI R3 P3 (Maintainability)."""
+        from diff_diff import TwoWayFixedEffects
+
+        panel = panel.copy()
+        panel["region"] = panel["unit"] // 5  # time-invariant within unit
+        res = TwoWayFixedEffects(
+            vcov_type="conley",
+            cluster="region",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
+        summary = res.summary()
+        assert "Conley spatial HAC" in summary
+        assert "+ cluster product kernel at region" in summary
+        assert "lag_cutoff=1" in summary
+        # Programmatic access via the result dataclass.
+        assert res.cluster_name == "region"
         assert res.conley_lag_cutoff == 1
 
     def test_twfe_conley_to_dict_carries_lag_cutoff(self, panel):
@@ -1613,49 +2200,86 @@ class TestConleyEstimatorValidation:
             }
         )
 
-    def test_did_conley_combinations_all_raise(self, df):
-        """Every DifferenceInDifferences + vcov_type='conley' combination
-        rejects unconditionally (DiD is intrinsically a two-period panel;
-        cross-sectional Conley is unsafe over (unit, time) rows). Asserts
-        the reject regardless of cluster=, absorb=, or missing coords/cutoff.
-        Closes CI reviewer P1 #1.
-        """
+    def test_did_conley_combinations(self, df):
+        """DifferenceInDifferences + vcov_type='conley' validation table:
+        missing coords/cutoff/lag_cutoff/unit each raise ValueError;
+        valid full kwarg set succeeds; survey_design + Conley raises
+        NotImplementedError (Wave A scope: row 121 deferred);
+        wild_bootstrap + Conley raises NotImplementedError."""
         from diff_diff import DifferenceInDifferences
 
-        # cluster + conley
-        with pytest.raises(NotImplementedError, match="conley"):
-            DifferenceInDifferences(
-                vcov_type="conley",
-                cluster="stratum",
-                conley_coords=("lat", "lon"),
-                conley_cutoff_km=100.0,
-            ).fit(df, outcome="y", treatment="treated", time="time")
-        # missing conley_coords
-        with pytest.raises(NotImplementedError, match="conley"):
-            DifferenceInDifferences(
-                vcov_type="conley",
-                conley_cutoff_km=100.0,
-            ).fit(df, outcome="y", treatment="treated", time="time")
         # missing conley_cutoff_km
-        with pytest.raises(NotImplementedError, match="conley"):
+        with pytest.raises(ValueError, match="conley_coords|conley_cutoff_km"):
             DifferenceInDifferences(
                 vcov_type="conley",
                 conley_coords=("lat", "lon"),
-            ).fit(df, outcome="y", treatment="treated", time="time")
-        # unknown coord column (data validation skipped — outer reject fires first)
-        with pytest.raises(NotImplementedError, match="conley"):
-            DifferenceInDifferences(
-                vcov_type="conley",
-                conley_coords=("missing_lat", "lon"),
-                conley_cutoff_km=100.0,
-            ).fit(df, outcome="y", treatment="treated", time="time")
-        # absorb + conley
-        with pytest.raises(NotImplementedError, match="conley"):
+                conley_lag_cutoff=1,
+            ).fit(df, outcome="y", treatment="treated", time="time", unit="unit")
+        # missing conley_lag_cutoff
+        with pytest.raises(ValueError, match="conley_lag_cutoff"):
             DifferenceInDifferences(
                 vcov_type="conley",
                 conley_coords=("lat", "lon"),
                 conley_cutoff_km=100.0,
-            ).fit(df, outcome="y", treatment="treated", time="time", absorb=["unit"])
+            ).fit(df, outcome="y", treatment="treated", time="time", unit="unit")
+        # missing unit
+        with pytest.raises(ValueError, match=r"`unit=<column_name>`"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=100.0,
+                conley_lag_cutoff=1,
+            ).fit(df, outcome="y", treatment="treated", time="time")
+        # Valid full kwarg set does NOT raise (separate fixture in
+        # TestConleyEstimatorIntegration covers the finite-SE assertion;
+        # this fixture's treated/time correlation triggers rank deficiency).
+        DifferenceInDifferences(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=100.0,
+            conley_lag_cutoff=1,
+            rank_deficient_action="silent",
+        ).fit(
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
+        )
+
+    def test_did_conley_with_survey_design_raises(self, df):
+        """DiD + Conley + survey_design raises NotImplementedError (deferred
+        to Wave 2 weighted-Conley)."""
+        from diff_diff import DifferenceInDifferences, SurveyDesign
+
+        with pytest.raises(NotImplementedError, match="conley.*survey_design"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=100.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                df,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+                survey_design=SurveyDesign(strata="stratum"),
+            )
+
+    def test_did_conley_with_wild_bootstrap_raises(self, df):
+        """DiD + Conley + inference='wild_bootstrap' raises."""
+        from diff_diff import DifferenceInDifferences
+
+        with pytest.raises(NotImplementedError, match="wild_bootstrap"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                inference="wild_bootstrap",
+                cluster="unit",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=100.0,
+                conley_lag_cutoff=1,
+            ).fit(df, outcome="y", treatment="treated", time="time", unit="unit")
 
     def test_synthetic_did_conley_raises(self):
         from diff_diff import SyntheticDiD
@@ -2173,3 +2797,1094 @@ class TestConleyPanelHelper:
         delta_bartlett = bread @ (V_bartlett_L2 - V_bartlett_L0) @ bread
         delta_uniform = bread @ (V_uniform_L2 - V_uniform_L0) @ bread
         np.testing.assert_allclose(delta_bartlett, delta_uniform, atol=1e-10)
+
+
+# ---------------------------------------------------------------------------
+# TestConleySparse — sparse k-d-tree fast path (Wave A item #120).
+# ---------------------------------------------------------------------------
+
+
+class TestConleySparse:
+    """Sparse k-d-tree fast path for the spatial Bartlett meat.
+
+    The sparse path is gated by three conditions: total n above the
+    threshold, metric in {"haversine", "euclidean"} (no callable), and
+    kernel == "bartlett". Each of these tests exercises one of the
+    gates plus the bit-identity parity claim vs the dense path.
+    """
+
+    def _euclidean_fixture(self, n=1000, k=3, cutoff=15.0, seed=11):
+        rng = np.random.default_rng(seed)
+        coords = rng.uniform(0.0, 100.0, size=(n, 2))
+        X = np.column_stack([np.ones(n)] + [rng.standard_normal(n) for _ in range(k - 1)])
+        beta = np.linspace(0.5, 2.0, k)
+        y = X @ beta + rng.standard_normal(n) * 0.5
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        return X, residuals, coords, bread, cutoff
+
+    def _haversine_fixture(self, n=1000, k=3, cutoff_km=500.0, seed=13):
+        rng = np.random.default_rng(seed)
+        lats = rng.uniform(-30.0, 30.0, size=n)
+        lons = rng.uniform(-100.0, 100.0, size=n)
+        coords = np.column_stack([lats, lons])
+        X = np.column_stack([np.ones(n)] + [rng.standard_normal(n) for _ in range(k - 1)])
+        beta = np.linspace(0.5, 2.0, k)
+        y = X @ beta + rng.standard_normal(n) * 0.5
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        return X, residuals, coords, bread, cutoff_km
+
+    def test_sparse_vs_dense_bit_identity_euclidean_cross_sectional(self):
+        """Sparse and dense paths produce the same meat on a 1000-row
+        euclidean+bartlett fixture (atol=1e-10). Headroom over the ~1e-14
+        roundoff in chord-projection (haversine) and matmul ordering."""
+        X, residuals, coords, bread, cutoff = self._euclidean_fixture(n=1000)
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "euclidean",
+            "bartlett",
+            bread,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "euclidean",
+            "bartlett",
+            bread,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_vs_dense_bit_identity_haversine_cross_sectional(self):
+        """Sparse and dense paths produce the same meat on a 1000-row
+        haversine+bartlett fixture (atol=1e-10). Haversine adds the
+        chord-projection roundoff that the tolerance must absorb."""
+        X, residuals, coords, bread, cutoff = self._haversine_fixture(n=1000)
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "haversine",
+            "bartlett",
+            bread,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "haversine",
+            "bartlett",
+            bread,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_auto_toggle_above_threshold_uses_sparse(self, monkeypatch):
+        """n > _CONLEY_SPARSE_N_THRESHOLD with bartlett + euclidean must
+        auto-route through the sparse helper. Verified by spying on the
+        sparse helper call count."""
+        import diff_diff.conley as conley_module
+
+        X, residuals, coords, bread, cutoff = self._euclidean_fixture(
+            n=_CONLEY_SPARSE_N_THRESHOLD + 1
+        )
+        calls = {"n": 0}
+        orig = conley_module._compute_spatial_bartlett_meat_sparse
+
+        def _spy(*args, **kwargs):
+            calls["n"] += 1
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(conley_module, "_compute_spatial_bartlett_meat_sparse", _spy)
+        _compute_conley_vcov(X, residuals, coords, cutoff, "euclidean", "bartlett", bread)
+        assert calls["n"] >= 1, "Sparse helper not called when n > threshold."
+
+    def test_auto_toggle_below_threshold_stays_dense(self, monkeypatch):
+        """n <= _CONLEY_SPARSE_N_THRESHOLD must use the dense path even
+        when other sparse conditions (bartlett + euclidean) are met."""
+        import diff_diff.conley as conley_module
+
+        X, residuals, coords, bread, cutoff = self._euclidean_fixture(n=_CONLEY_SPARSE_N_THRESHOLD)
+        calls = {"n": 0}
+        orig = conley_module._compute_spatial_bartlett_meat_sparse
+
+        def _spy(*args, **kwargs):
+            calls["n"] += 1
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(conley_module, "_compute_spatial_bartlett_meat_sparse", _spy)
+        _compute_conley_vcov(X, residuals, coords, cutoff, "euclidean", "bartlett", bread)
+        assert calls["n"] == 0, "Sparse helper called below threshold."
+
+    def test_auto_toggle_callable_metric_stays_dense(self, monkeypatch):
+        """A callable conley_metric forces the dense path even at large n —
+        the kd-tree query needs a vectorizable metric, and callables are
+        not supported via projection."""
+        import diff_diff.conley as conley_module
+
+        X, residuals, coords, bread, cutoff = self._euclidean_fixture(
+            n=_CONLEY_SPARSE_N_THRESHOLD + 100
+        )
+
+        def callable_metric(c1, c2):
+            diff = c1[:, None, :] - c2[None, :, :]
+            return np.sqrt(np.sum(diff * diff, axis=-1))
+
+        calls = {"n": 0}
+        orig = conley_module._compute_spatial_bartlett_meat_sparse
+
+        def _spy(*args, **kwargs):
+            calls["n"] += 1
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(conley_module, "_compute_spatial_bartlett_meat_sparse", _spy)
+        _compute_conley_vcov(X, residuals, coords, cutoff, callable_metric, "bartlett", bread)
+        assert calls["n"] == 0, "Sparse helper called for callable metric."
+
+    def test_auto_toggle_uniform_kernel_stays_dense(self, monkeypatch):
+        """uniform kernel forces dense path — bartlett has K(u=1) == 0 which
+        the sparse path relies on; uniform has K(u=1) == 1 which would
+        require a closed-interval query semantic the chord projection
+        cannot reliably preserve."""
+        import diff_diff.conley as conley_module
+
+        X, residuals, coords, bread, cutoff = self._euclidean_fixture(
+            n=_CONLEY_SPARSE_N_THRESHOLD + 100
+        )
+        calls = {"n": 0}
+        orig = conley_module._compute_spatial_bartlett_meat_sparse
+
+        def _spy(*args, **kwargs):
+            calls["n"] += 1
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(conley_module, "_compute_spatial_bartlett_meat_sparse", _spy)
+        _compute_conley_vcov(X, residuals, coords, cutoff, "euclidean", "uniform", bread)
+        assert calls["n"] == 0, "Sparse helper called for uniform kernel."
+
+    def test_force_sparse_with_uniform_raises(self):
+        """Explicit _conley_sparse=True with uniform kernel raises rather
+        than silently falling back, so callers see the mismatch."""
+        X, residuals, coords, bread, cutoff = self._euclidean_fixture(n=100)
+        with pytest.raises(ValueError, match="_conley_sparse=True requires"):
+            _compute_conley_vcov(
+                X,
+                residuals,
+                coords,
+                cutoff,
+                "euclidean",
+                "uniform",
+                bread,
+                _conley_sparse=True,
+            )
+
+    def test_force_sparse_with_callable_metric_raises(self):
+        """Explicit _conley_sparse=True with a callable metric raises."""
+        X, residuals, coords, bread, cutoff = self._euclidean_fixture(n=100)
+
+        def callable_metric(c1, c2):
+            diff = c1[:, None, :] - c2[None, :, :]
+            return np.sqrt(np.sum(diff * diff, axis=-1))
+
+        with pytest.raises(ValueError, match="_conley_sparse=True requires"):
+            _compute_conley_vcov(
+                X,
+                residuals,
+                coords,
+                cutoff,
+                callable_metric,
+                "bartlett",
+                bread,
+                _conley_sparse=True,
+            )
+
+    def test_force_dense_with_sparse_eligible_inputs(self):
+        """_conley_sparse=False overrides the auto-toggle and stays dense
+        even when n is above the threshold."""
+        import diff_diff.conley as conley_module
+
+        X, residuals, coords, bread, cutoff = self._euclidean_fixture(
+            n=_CONLEY_SPARSE_N_THRESHOLD + 100
+        )
+        calls = {"n": 0}
+        orig = conley_module._compute_spatial_bartlett_meat_sparse
+
+        def _spy(*args, **kwargs):
+            calls["n"] += 1
+            return orig(*args, **kwargs)
+
+        # The monkeypatch fixture isn't available here; use plain attribute swap.
+        conley_module._compute_spatial_bartlett_meat_sparse = _spy
+        try:
+            _compute_conley_vcov(
+                X,
+                residuals,
+                coords,
+                cutoff,
+                "euclidean",
+                "bartlett",
+                bread,
+                _conley_sparse=False,
+            )
+        finally:
+            conley_module._compute_spatial_bartlett_meat_sparse = orig
+        assert calls["n"] == 0, "Sparse helper called when _conley_sparse=False."
+
+    def test_helper_direct_matches_dense_meat_euclidean(self):
+        """Call _compute_spatial_bartlett_meat_sparse directly and compare
+        to the dense matmul S' K S on the same data."""
+        X, residuals, coords, _, cutoff = self._euclidean_fixture(n=500)
+        S = X * residuals[:, None]
+        D = _pairwise_distance_matrix(coords, "euclidean")
+        K = _bartlett_kernel(D / cutoff)
+        meat_dense = S.T @ K @ S
+        meat_sparse = _compute_spatial_bartlett_meat_sparse(S, coords, cutoff, "euclidean")
+        np.testing.assert_allclose(meat_sparse, meat_dense, atol=1e-10, rtol=1e-10)
+
+    def test_helper_direct_matches_dense_meat_haversine(self):
+        """Helper direct match for haversine — exercises the chord-projection
+        + exact-distance refinement path."""
+        X, residuals, coords, _, cutoff = self._haversine_fixture(n=500)
+        S = X * residuals[:, None]
+        D = _pairwise_distance_matrix(coords, "haversine")
+        K = _bartlett_kernel(D / cutoff)
+        meat_dense = S.T @ K @ S
+        meat_sparse = _compute_spatial_bartlett_meat_sparse(S, coords, cutoff, "haversine")
+        np.testing.assert_allclose(meat_sparse, meat_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_haversine_cutoff_above_half_earth_circumference(self):
+        """Sparse haversine path with conley_cutoff_km > π·R_earth (~20,015 km)
+        must include all geometrically eligible pairs. Without the arc-radians
+        clamp, the chord-radius formula 2·sin(arc/2) shrinks for arc > π and
+        the kd-tree silently drops pairs that still have positive Bartlett
+        weight. The dense path saturates at π·R via _haversine_km's clip;
+        the sparse path matches via the clamp. Codex Wave A R1 P0 #1.
+        """
+        rng = np.random.default_rng(seed=101)
+        n = 200
+        lats = rng.uniform(-90.0, 90.0, size=n)
+        lons = rng.uniform(-180.0, 180.0, size=n)
+        coords = np.column_stack([lats, lons])
+        X = np.column_stack([np.ones(n), rng.standard_normal(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 2.0, -0.5]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        # Cutoff well above half-Earth circumference (~20,015 km). Without
+        # the clamp, the sparse path drops antipodal pairs and the meat
+        # diverges from the dense path.
+        cutoff_km = 25_000.0  # > π·R_earth ≈ 20015 km
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff_km,
+            "haversine",
+            "bartlett",
+            bread,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff_km,
+            "haversine",
+            "bartlett",
+            bread,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_density_gate_falls_back_to_dense_and_warns(self):
+        """When neighbor density exceeds the threshold (default 30%), the
+        sparse helper returns None and the dispatcher falls back to dense.
+        A UserWarning surfaces the reason so users with large cutoffs aren't
+        surprised by the "sparse" path materializing a near-dense matrix
+        and using more memory than dense float64. Codex CI R6 P2.
+        """
+        # Tight cluster of points + large cutoff → 100% density.
+        rng = np.random.default_rng(seed=151)
+        n = 100
+        coords = rng.uniform(0.0, 10.0, size=(n, 2))
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        # Cutoff = 1e6 → every pair is within range (density = 100%)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            V_forced_sparse = _compute_conley_vcov(
+                X,
+                residuals,
+                coords,
+                1e6,
+                "euclidean",
+                "bartlett",
+                bread,
+                _conley_sparse=True,
+            )
+            density_warnings = [msg for msg in w if "exceeds threshold" in str(msg.message)]
+            assert len(density_warnings) == 1, "Expected exactly one density-gate UserWarning"
+        # Result must equal the dense path (the dispatcher fell back).
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            1e6,
+            "euclidean",
+            "bartlett",
+            bread,
+            _conley_sparse=False,
+        )
+        np.testing.assert_allclose(V_forced_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_density_gate_does_not_trigger_below_threshold(self):
+        """At realistic Conley cutoffs (neighbor density well below 30%),
+        the sparse path runs normally without the density warning."""
+        # 1000 points spread over a wide area; cutoff small relative to span.
+        rng = np.random.default_rng(seed=157)
+        n = 1000
+        coords = rng.uniform(0.0, 100.0, size=(n, 2))
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _compute_conley_vcov(
+                X,
+                residuals,
+                coords,
+                10.0,  # small cutoff → sparse density << 30%
+                "euclidean",
+                "bartlett",
+                bread,
+                _conley_sparse=True,
+            )
+            density_warnings = [msg for msg in w if "exceeds threshold" in str(msg.message)]
+            assert (
+                len(density_warnings) == 0
+            ), "Density gate should not have triggered at low density"
+
+    def test_sparse_with_cluster_matches_dense(self):
+        """Sparse + combined cluster kernel matches the dense path bit-for-bit
+        at atol=1e-10 (cross-sectional). Codex CI R8 P1: load-bearing
+        sparse+cluster regression that was missing prior."""
+        rng = np.random.default_rng(seed=181)
+        n = 600
+        coords = rng.uniform(0.0, 100.0, size=(n, 2))
+        cluster_ids = rng.integers(0, 8, size=n)  # 8 clusters
+        X = np.column_stack([np.ones(n), rng.standard_normal(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5, -0.5]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            15.0,
+            "euclidean",
+            "bartlett",
+            bread,
+            cluster_ids=cluster_ids,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            15.0,
+            "euclidean",
+            "bartlett",
+            bread,
+            cluster_ids=cluster_ids,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_with_cluster_panel_matches_dense(self):
+        """Sparse + cluster + panel block-decomposed sandwich matches the
+        dense path on a 3-period panel with time-invariant cluster.
+        Codex CI R8 P1."""
+        rng = np.random.default_rng(seed=191)
+        n_units = 200
+        T = 3
+        unit = np.repeat(np.arange(n_units), T)
+        time = np.tile(np.arange(T), n_units)
+        n = n_units * T
+        # Time-invariant coords + cluster (per-unit)
+        unit_coords = rng.uniform(0.0, 100.0, size=(n_units, 2))
+        coords = unit_coords[unit]
+        cluster_per_unit = rng.integers(0, 5, size=n_units)
+        cluster_ids = cluster_per_unit[unit]
+        X = np.column_stack([np.ones(n), rng.standard_normal(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5, -0.3]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            15.0,
+            "euclidean",
+            "bartlett",
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=1,
+            cluster_ids=cluster_ids,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            15.0,
+            "euclidean",
+            "bartlett",
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=1,
+            cluster_ids=cluster_ids,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_density_gate_cluster_aware(self):
+        """High global spatial density + many small clusters: within-cluster
+        density is low, so the sparse path should NOT spuriously fall back
+        to dense. Tests the cluster-aware refinement of the density gate.
+        Codex CI R8 P1."""
+        # Tight spatial cluster of points → 100% global spatial density,
+        # but split into many small disjoint clusters so post-mask density
+        # is well below 30%.
+        rng = np.random.default_rng(seed=199)
+        n = 200
+        coords = rng.uniform(0.0, 5.0, size=(n, 2))  # tight cluster
+        # 50 clusters of 4 points each → within-cluster nnz = 4*4 = 16 per
+        # cluster, total = 50*16 = 800 = 800/(200*200) = 2% density << 30%.
+        cluster_ids = np.repeat(np.arange(50), 4)
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            V_sparse = _compute_conley_vcov(
+                X,
+                residuals,
+                coords,
+                1e6,  # cutoff > data span → 100% global density
+                "euclidean",
+                "bartlett",
+                bread,
+                cluster_ids=cluster_ids,
+                _conley_sparse=True,
+            )
+            density_warnings = [msg for msg in w if "exceeds threshold" in str(msg.message)]
+            assert len(density_warnings) == 0, (
+                "Density gate spuriously fell back to dense even though "
+                "within-cluster density is low — cluster-aware refinement "
+                "is not working."
+            )
+        # Result must equal the dense path (sparse path executed correctly)
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            1e6,
+            "euclidean",
+            "bartlett",
+            bread,
+            cluster_ids=cluster_ids,
+            _conley_sparse=False,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_haversine_cutoff_at_exactly_half_earth_circumference(self):
+        """Cutoff = π·R_earth: chord radius = 2 (sphere diameter); all
+        pairs are included. Bartlett at u=1 returns 0, so the antipodal
+        pair contributes zero — but pairs at all other distances
+        contribute. Sparse and dense paths must agree."""
+        rng = np.random.default_rng(seed=103)
+        n = 150
+        lats = rng.uniform(-90.0, 90.0, size=n)
+        lons = rng.uniform(-180.0, 180.0, size=n)
+        coords = np.column_stack([lats, lons])
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5]) + rng.standard_normal(n) * 0.5
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        cutoff_km = float(np.pi * _CONLEY_EARTH_RADIUS_KM)  # ≈ 20015.16 km
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff_km,
+            "haversine",
+            "bartlett",
+            bread,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff_km,
+            "haversine",
+            "bartlett",
+            bread,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_panel_block_decomposed_sparse_matches_dense(self):
+        """Panel block-decomposed sandwich produces the same vcov whether
+        the spatial component is computed dense or sparse. The serial
+        component is always dense regardless of the flag."""
+        X, residuals, coords, _, cutoff = self._euclidean_fixture(n=900, seed=21)
+        # Synthetic 3-period panel with 300 units per period
+        time = np.repeat(np.arange(3), 300)
+        unit = np.tile(np.arange(300), 3)
+        bread = X.T @ X
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "euclidean",
+            "bartlett",
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=1,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "euclidean",
+            "bartlett",
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=1,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+
+class TestConleySparseRParityForced:
+    """R conleyreg parity at atol=1e-6 with the sparse path FORCED on the
+    three panel R fixtures (bartlett kernel, haversine metric)."""
+
+    GOLDEN_PATH = "benchmarks/data/r_conleyreg_conley_golden.json"
+    PARITY_TOL = 1e-6
+
+    @pytest.fixture(scope="class")
+    def golden(self):
+        import json
+        from pathlib import Path
+
+        repo_root = Path(__file__).resolve().parent.parent
+        path = repo_root / self.GOLDEN_PATH
+        if not path.exists():
+            pytest.skip(
+                f"Golden JSON not present at {path}; run "
+                "`cd benchmarks/R && Rscript generate_conley_golden.R` to generate."
+            )
+        return json.loads(path.read_text())
+
+    def _check_panel_forced_sparse(self, golden, name):
+        entry = golden[name]
+        # Sparse path requires bartlett kernel; skip if fixture is uniform.
+        if entry["kernel"] != "bartlett":
+            pytest.skip(f"Fixture {name!r} is not bartlett; skipped for sparse parity.")
+        X = np.asarray(entry["x"], dtype=np.float64).reshape(entry["x_shape"])
+        y = np.asarray(entry["y"], dtype=np.float64)
+        coords = np.asarray(entry["coords"], dtype=np.float64).reshape(entry["coords_shape"])
+        vcov_expected = np.asarray(entry["vcov"], dtype=np.float64).reshape(entry["vcov_shape"])
+        unit = np.asarray(entry["unit"])
+        time = np.asarray(entry["time"])
+
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        vcov_got = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            entry["cutoff_km"],
+            entry["metric"],
+            entry["kernel"],
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=int(entry["lag_cutoff"]),
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(
+            vcov_got, vcov_expected, atol=self.PARITY_TOL, rtol=self.PARITY_TOL
+        )
+
+    def test_sparse_parity_panel_haversine_lag1(self, golden):
+        self._check_panel_forced_sparse(golden, "panel_haversine_lag1")
+
+    def test_sparse_parity_panel_haversine_lag2(self, golden):
+        self._check_panel_forced_sparse(golden, "panel_haversine_lag2")
+
+    def test_sparse_parity_panel_lat_lon_realistic_lag1(self, golden):
+        self._check_panel_forced_sparse(golden, "panel_lat_lon_realistic_lag1")
+
+
+# ---------------------------------------------------------------------------
+# TestConleyCluster — combined spatial + cluster product kernel (Wave A #119).
+# ---------------------------------------------------------------------------
+
+
+class TestConleyCluster:
+    """Combined spatial + cluster product kernel: K(d_ij/h) * 1{c_i = c_j}.
+
+    Wave A item #119. Lifts the prior linalg-level and TWFE-level rejects of
+    ``vcov_type='conley' + cluster_ids``. The cluster mask multiplies the
+    spatial kernel on both cross-sectional and panel block-decomposed paths.
+    On the panel path the validator enforces that cluster membership is
+    constant within each unit across periods (so the within-unit serial
+    sandwich's mask is trivially all-ones — no per-unit-time mask needed).
+    """
+
+    def _cross_sectional(self, n=24, k=2, seed=11):
+        rng = np.random.default_rng(seed)
+        coords = rng.uniform(0.0, 50.0, size=(n, 2))
+        X = np.column_stack([np.ones(n)] + [rng.standard_normal(n) for _ in range(k - 1)])
+        y = X @ np.array([1.0, 2.0])[:k] + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        return X, residuals, coords, bread
+
+    def test_cross_sectional_cluster_no_longer_raises(self):
+        """compute_robust_vcov + vcov_type='conley' + cluster_ids no longer
+        raises (was the linalg validator's NotImplementedError)."""
+        X, residuals, coords, _ = self._cross_sectional()
+        cluster_ids = np.arange(X.shape[0]) // 4
+        V = compute_robust_vcov(
+            X,
+            residuals,
+            cluster_ids=cluster_ids,
+            vcov_type="conley",
+            conley_coords=coords,
+            conley_cutoff_km=20.0,
+        )
+        assert V.shape == (X.shape[1], X.shape[1])
+        assert np.all(np.isfinite(V))
+
+    def test_combined_kernel_matches_hadamard_dense(self):
+        """The combined kernel matches the explicit Hadamard
+        ``K_space * cluster_mask`` on the same data."""
+        X, residuals, coords, bread = self._cross_sectional(n=30, seed=7)
+        cluster_ids = np.array([i % 4 for i in range(X.shape[0])])
+        cutoff = 15.0
+        V_helper = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "euclidean",
+            "bartlett",
+            bread,
+            cluster_ids=cluster_ids,
+        )
+        S = X * residuals[:, None]
+        D = _pairwise_distance_matrix(coords, "euclidean")
+        K = _bartlett_kernel(D / cutoff) * (cluster_ids[:, None] == cluster_ids[None, :])
+        meat = S.T @ K @ S
+        bread_inv = np.linalg.inv(bread)
+        V_manual = bread_inv @ meat @ bread_inv
+        np.testing.assert_allclose(V_helper, V_manual, atol=1e-12)
+
+    def test_combined_kernel_reduces_to_hc0_when_all_unique_clusters(self):
+        """Every observation in its own cluster → cluster_mask is the identity,
+        so the meat reduces to the diagonal HC0 contribution."""
+        X, residuals, coords, bread = self._cross_sectional(n=20, seed=13)
+        cluster_ids = np.arange(X.shape[0])  # all unique → cluster_mask = I
+        V_combined = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            10.0,
+            "euclidean",
+            "bartlett",
+            bread,
+            cluster_ids=cluster_ids,
+        )
+        # Manual HC0
+        S = X * residuals[:, None]
+        meat_hc0 = X.T @ (X * (residuals**2)[:, None])
+        bread_inv = np.linalg.inv(bread)
+        V_hc0 = bread_inv @ meat_hc0 @ bread_inv
+        np.testing.assert_allclose(V_combined, V_hc0, atol=1e-12)
+        del S
+
+    def test_combined_kernel_reduces_to_pure_cluster_at_huge_cutoff(self):
+        """Cutoff so large that K_space is identically 1 → combined kernel
+        reduces to the pure within-cluster sum (cluster mask alone). Uses
+        the UNIFORM kernel: K_uniform(u) = 1 for |u| <= 1, so at huge_cutoff
+        the kernel is exactly 1 on every in-range pair (i.e. all pairs).
+        Bartlett would give `1 - d_ij/cutoff < 1` for all pairs with d > 0,
+        so the reduction is only asymptotic, not exact (codex CI R6 P3).
+        """
+        X, residuals, coords, bread = self._cross_sectional(n=24, seed=19)
+        cluster_ids = np.array([i // 3 for i in range(X.shape[0])])
+        huge_cutoff = 1e9  # K_space (uniform) = 1 on every pair
+        V_combined = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            huge_cutoff,
+            "euclidean",
+            "uniform",
+            bread,
+            cluster_ids=cluster_ids,
+        )
+        # Manual pure-cluster meat
+        S = X * residuals[:, None]
+        K_cluster = (cluster_ids[:, None] == cluster_ids[None, :]).astype(np.float64)
+        meat = S.T @ K_cluster @ S
+        bread_inv = np.linalg.inv(bread)
+        V_expected = bread_inv @ meat @ bread_inv
+        np.testing.assert_allclose(V_combined, V_expected, atol=1e-12)
+
+    def test_combined_kernel_panel_serial_unchanged_when_cluster_per_unit(self):
+        """When cluster is constant within unit, the SERIAL component of the
+        panel sandwich is identical to the no-cluster case (the within-unit
+        cluster mask is trivially all-ones). Only the spatial component
+        differs."""
+        rng = np.random.default_rng(seed=23)
+        n_units = 6
+        T = 3
+        unit = np.repeat(np.arange(n_units), T)
+        time = np.tile(np.arange(T), n_units)
+        n = n_units * T
+        coords = np.column_stack([rng.uniform(-10, 10, size=n), rng.uniform(-10, 10, size=n)])
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5]) + rng.standard_normal(n) * 0.3
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        # Time-invariant cluster: one cluster per unit (cluster_per_unit)
+        cluster_per_unit = np.repeat(rng.integers(0, 3, size=n_units), T)
+        cutoff = 8.0
+        # Two variants: lag=1 with and without cluster
+        V_no_cluster_l0 = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "euclidean",
+            "bartlett",
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=0,
+        )
+        V_no_cluster_l1 = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "euclidean",
+            "bartlett",
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=1,
+        )
+        V_cluster_l0 = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "euclidean",
+            "bartlett",
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=0,
+            cluster_ids=cluster_per_unit,
+        )
+        V_cluster_l1 = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "euclidean",
+            "bartlett",
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=1,
+            cluster_ids=cluster_per_unit,
+        )
+        # Serial delta should be identical under cluster vs no-cluster — the
+        # within-unit mask is all-ones when cluster is constant within unit.
+        delta_no_cluster = bread @ (V_no_cluster_l1 - V_no_cluster_l0) @ bread
+        delta_cluster = bread @ (V_cluster_l1 - V_cluster_l0) @ bread
+        np.testing.assert_allclose(delta_cluster, delta_no_cluster, atol=1e-10)
+
+    def test_panel_time_varying_cluster_raises(self):
+        """Panel block-decomposed path with a cluster that varies across
+        periods within a unit raises ValueError naming the violating units."""
+        rng = np.random.default_rng(seed=29)
+        n_units = 4
+        T = 3
+        unit = np.repeat(np.arange(n_units), T)
+        time = np.tile(np.arange(T), n_units)
+        n = n_units * T
+        coords = np.column_stack([rng.uniform(-10, 10, size=n), rng.uniform(-10, 10, size=n)])
+        # Unit 1 changes cluster from 0 -> 1 -> 1 across periods
+        cluster_ids = np.array([0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2])
+        with pytest.raises(ValueError, match="constant within each unit"):
+            _validate_conley_kwargs(
+                coords=coords,
+                cutoff=10.0,
+                metric="euclidean",
+                kernel="bartlett",
+                n=n,
+                time=time,
+                unit=unit,
+                lag_cutoff=1,
+                cluster_ids=cluster_ids,
+            )
+
+    def test_cross_sectional_time_varying_cluster_ok(self):
+        """Cross-sectional path (no time/unit/lag_cutoff) has NO time-
+        invariance constraint — the validator should accept any cluster."""
+        X, _, coords, _ = self._cross_sectional(n=20, seed=31)
+        cluster_ids = np.arange(X.shape[0]) % 3
+        # Should not raise
+        _validate_conley_kwargs(
+            coords=coords,
+            cutoff=10.0,
+            metric="euclidean",
+            kernel="bartlett",
+            n=X.shape[0],
+            cluster_ids=cluster_ids,
+        )
+
+    def test_cluster_wrong_shape_raises(self):
+        X, _, coords, _ = self._cross_sectional(n=15)
+        with pytest.raises(ValueError, match="cluster_ids must be a 1-D array"):
+            _validate_conley_kwargs(
+                coords=coords,
+                cutoff=10.0,
+                metric="euclidean",
+                kernel="bartlett",
+                n=15,
+                cluster_ids=np.zeros((10,)),
+            )
+
+    def test_cluster_nan_raises(self):
+        X, _, coords, _ = self._cross_sectional(n=10)
+        cluster_ids = np.array([0, 0, 1, 1, np.nan, 2, 2, 2, 0, 1], dtype=object)
+        with pytest.raises(ValueError, match="cluster_ids contains NaN"):
+            _validate_conley_kwargs(
+                coords=coords,
+                cutoff=10.0,
+                metric="euclidean",
+                kernel="bartlett",
+                n=10,
+                cluster_ids=cluster_ids,
+            )
+
+    def test_twfe_explicit_cluster_propagates_to_cluster_name(self):
+        """TWFE + Conley + explicit cluster=<col> sets res.cluster_name to
+        the user's column AND to_dict()['cluster_name'] reflects it."""
+        from diff_diff import TwoWayFixedEffects
+
+        rng = np.random.default_rng(seed=37)
+        rows = []
+        n_units = 10
+        for u in range(n_units):
+            treated = u >= 5
+            lat = rng.uniform(-5, 5)
+            lon = rng.uniform(-5, 5)
+            region = u // 5  # time-invariant within unit
+            for t in range(2):
+                effect = 1.0 if (treated and t == 1) else 0.0
+                yv = effect + rng.normal(0, 0.5)
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": yv,
+                        "treated": int(treated),
+                        "lat": lat,
+                        "lon": lon,
+                        "region": region,
+                    }
+                )
+        import pandas as _pd
+
+        df = _pd.DataFrame(rows)
+        res = TwoWayFixedEffects(
+            vcov_type="conley",
+            cluster="region",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, outcome="y", treatment="treated", time="time", unit="unit")
+        assert res.cluster_name == "region"
+        d = res.to_dict()
+        assert d.get("cluster_name") == "region"
+
+    def _multi_period_panel_with_region(self, n_units=12, T=4, seed=41):
+        """Multi-period panel with a time-invariant `region` column for
+        combined-kernel estimator tests."""
+        import pandas as _pd
+
+        rng = np.random.default_rng(seed=seed)
+        rows = []
+        for u in range(n_units):
+            treated = u >= n_units // 2
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            region = u // 3  # time-invariant within unit; spans multiple units
+            for t in range(T):
+                effect = 1.0 if (treated and t >= T // 2) else 0.0
+                yv = 0.2 * t + effect + rng.normal(0, 0.3)
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": yv,
+                        "treated": int(treated),
+                        "lat": lat,
+                        "lon": lon,
+                        "region": region,
+                    }
+                )
+        return _pd.DataFrame(rows)
+
+    def test_did_combined_kernel_finite_se_and_cluster_name(self):
+        """DifferenceInDifferences(vcov_type='conley', cluster='region') on
+        a 2-period panel produces a finite SE, propagates `region` to
+        res.cluster_name and to_dict(), and differs from the no-cluster
+        baseline (combined kernel zeros out cross-cluster off-diagonals)."""
+        from diff_diff import DifferenceInDifferences
+
+        df = self._multi_period_panel_with_region(n_units=12, T=2, seed=43)
+        kwargs = dict(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        )
+        res_combined = DifferenceInDifferences(cluster="region", **kwargs).fit(
+            df, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        res_bare = DifferenceInDifferences(**kwargs).fit(
+            df, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        assert np.isfinite(res_combined.att)
+        assert np.isfinite(res_combined.se) and res_combined.se > 0
+        assert res_combined.cluster_name == "region"
+        d = res_combined.to_dict()
+        assert d.get("cluster_name") == "region"
+        # Combined kernel zeros out off-cluster pairs → SE differs from bare
+        assert not np.isclose(res_combined.se, res_bare.se, atol=1e-8)
+
+    def test_did_combined_kernel_time_varying_cluster_raises(self):
+        """DiD + Conley + cluster=<col> on the panel block-decomposed path
+        must raise when the cluster column varies across periods within a
+        unit (time-invariance contract). Codex CI R1 P1 #2."""
+        from diff_diff import DifferenceInDifferences
+
+        df = self._multi_period_panel_with_region(n_units=10, T=2, seed=47)
+        # Make region time-varying for unit 0 (different region in t=1)
+        mask_u0_t1 = (df["unit"] == 0) & (df["time"] == 1)
+        df.loc[mask_u0_t1, "region"] = 99
+        with pytest.raises(ValueError, match="constant within each unit"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                cluster="region",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(df, outcome="y", treatment="treated", time="time", unit="unit")
+
+    def test_mpd_combined_kernel_finite_se_and_cluster_name(self):
+        """MultiPeriodDiD(vcov_type='conley', cluster='region') on a 4-period
+        panel produces a finite SE and propagates `region` to cluster_name
+        on the result + to_dict()."""
+        from diff_diff import MultiPeriodDiD
+
+        df = self._multi_period_panel_with_region(n_units=12, T=4, seed=53)
+        res = MultiPeriodDiD(
+            vcov_type="conley",
+            cluster="region",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
+            post_periods=[2, 3],
+            reference_period=0,
+        )
+        assert np.isfinite(res.avg_att)
+        assert np.isfinite(res.avg_se) and res.avg_se > 0
+        assert res.cluster_name == "region"
+        d = res.to_dict()
+        assert d.get("cluster_name") == "region"
+
+    def test_mpd_combined_kernel_time_varying_cluster_raises(self):
+        """MultiPeriodDiD + Conley + cluster=<col> with a cluster that
+        varies across periods within a unit raises ValueError (same time-
+        invariance contract as the linalg validator). Codex CI R1 P1 #2."""
+        from diff_diff import MultiPeriodDiD
+
+        df = self._multi_period_panel_with_region(n_units=10, T=3, seed=59)
+        mask_violator = (df["unit"] == 2) & (df["time"] == 2)
+        df.loc[mask_violator, "region"] = 77
+        with pytest.raises(ValueError, match="constant within each unit"):
+            MultiPeriodDiD(
+                vcov_type="conley",
+                cluster="region",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                df,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+                post_periods=[1, 2],
+                reference_period=0,
+            )

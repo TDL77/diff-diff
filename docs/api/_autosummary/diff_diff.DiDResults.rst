@@ -29,6 +29,7 @@
       ~DiDResults.cluster_name
       ~DiDResults.coef_var
       ~DiDResults.coefficients
+      ~DiDResults.conley_lag_cutoff
       ~DiDResults.fitted_values
       ~DiDResults.inference_method
       ~DiDResults.is_significant

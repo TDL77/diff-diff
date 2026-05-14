@@ -77,10 +77,15 @@ def _format_vcov_label(
     if vcov_type == "conley":
         # Cross-sectional Conley on direct LinearRegression / compute_robust_vcov,
         # or panel block-decomposed Conley (within-period spatial + within-unit
-        # Bartlett serial) on MultiPeriodDiD / TwoWayFixedEffects.
-        if conley_lag_cutoff is not None:
-            return f"Conley spatial HAC (1999), lag_cutoff={conley_lag_cutoff}"
-        return "Conley spatial HAC (1999)"
+        # Bartlett serial) on DifferenceInDifferences / MultiPeriodDiD /
+        # TwoWayFixedEffects. With an explicit cluster_name, the combined
+        # spatial + cluster product kernel applies (Wave A #119).
+        lag_suffix = f", lag_cutoff={conley_lag_cutoff}" if conley_lag_cutoff is not None else ""
+        if cluster_name:
+            return (
+                f"Conley spatial HAC (1999) + cluster product kernel at {cluster_name}{lag_suffix}"
+            )
+        return f"Conley spatial HAC (1999){lag_suffix}"
     return None
 
 
@@ -135,12 +140,11 @@ class DiDResults:
     survey_metadata: Optional[Any] = field(default=None)
     # Variance-covariance family: "classical" | "hc1" | "hc2" | "hc2_bm" |
     # "conley". Plus cluster_name when cluster-robust. Used by summary() to
-    # label the SE family in the output. For vcov_type='conley' on
-    # MultiPeriodDiD / TwoWayFixedEffects, `conley_lag_cutoff` carries the
-    # within-unit Bartlett max lag (matches the constructor arg). On
-    # DifferenceInDifferences, vcov_type='conley' is rejected at fit-time
-    # (DiD.fit() has no unit column declaration); see MultiPeriodDiD /
-    # TwoWayFixedEffects for the panel block-decomposed path.
+    # label the SE family in the output. For vcov_type='conley' on the panel
+    # estimators (DifferenceInDifferences / MultiPeriodDiD / TwoWayFixedEffects),
+    # `conley_lag_cutoff` carries the within-unit Bartlett max lag (matches
+    # the constructor arg). DiD requires `unit=<col>` as a fit-time kwarg
+    # when vcov_type='conley' (Wave A #118).
     vcov_type: Optional[str] = field(default=None)
     cluster_name: Optional[str] = field(default=None)
     conley_lag_cutoff: Optional[int] = field(default=None)

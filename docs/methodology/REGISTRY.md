@@ -2962,18 +2962,32 @@ Newey-West-style Bartlett temporal HAC on panel data.
   estimator's `time` / `unit` column-name arguments; only
   `conley_lag_cutoff` is set on the constructor.
 
-**Panel API restrictions (Phase 2):**
-- `DifferenceInDifferences(vcov_type="conley")` continues to raise
-  `NotImplementedError`. DiD.fit() has no `unit` column declaration, and the
-  block-decomposed sandwich requires unit membership for the per-unit serial
-  sum. Use `MultiPeriodDiD` or `TwoWayFixedEffects` instead.
+**Panel API restrictions (Phase 2 + Wave A):**
+- `DifferenceInDifferences(vcov_type="conley")` is supported (Wave A #118):
+  pass `unit=<col>` as a fit-time argument to `fit(...)` (NOT on `__init__`;
+  unused unless Conley is set). DiD inherits the same panel block-decomposed
+  sandwich as MPD/TWFE on the two-period design.
 - `SyntheticDiD(vcov_type="conley")` raises `TypeError`. SyntheticDiD uses
   bootstrap/jackknife/placebo variance, not the analytical sandwich.
 - TWFE's default auto-cluster on the Conley path is silently dropped (no
-  combined kernel). Explicit `cluster=...` with Conley raises (deferred
-  follow-up PR).
+  combined kernel from auto-cluster). Explicit `cluster=<col>` + Conley
+  enables the **combined spatial + cluster product kernel** (Wave A #119;
+  see "Combined spatial + cluster product kernel" subsection below). On
+  the panel path the validator enforces that cluster membership is
+  constant within each unit across periods.
 - `inference="wild_bootstrap"` + Conley raises (wild bootstrap is a separate
   inference path that does not consume the analytical sandwich).
+
+**Note (DiD vs TWFE cluster asymmetry on the Conley path):** TWFE auto-clusters
+at the unit level by default, so combining with Conley silently drops the
+auto-cluster (otherwise every between-unit pair would be zeroed out, defeating
+the spatial pooling). To opt into the combined kernel, the user must pass an
+explicit `cluster=<col>` that is constant within each unit (typically an
+above-unit grouping like region). DiD has no auto-cluster — combining with
+Conley is fully opt-in: absent `cluster=`, pure Conley spatial HAC applies;
+with `cluster=`, the combined kernel applies. This asymmetry preserves the
+existing TWFE auto-cluster contract while making the cluster intent explicit
+on the Conley path.
 
 **Variance estimator — cross-sectional (Phase 1, Conley 1999 Eq 4.2 in pairwise-distance form, OLS specialization):**
 
@@ -3054,19 +3068,133 @@ cross-sectional (Phase 1) plus three panel fixtures with `lag_cutoff > 0`
 `conleyreg::haversine_dist`. Regeneration:
 `cd benchmarks/R && Rscript generate_conley_golden.R`.
 
+### Combined spatial + cluster product kernel (Wave A #119)
+
+When `cluster_ids` is supplied alongside `vcov_type="conley"`, the meat
+applies the combined product kernel:
+
+    K_total[i, j] = K_space(d_ij/h) · 1{cluster_i = cluster_j}
+
+On the panel block-decomposed path the cluster indicator multiplies BOTH
+the within-period spatial sandwich AND the within-unit serial sandwich:
+
+    XeeX_spatial = Σ_t Σ_{i,j∈units}    K_space(d_ij/h) · 1{c_{i,t}=c_{j,t}} · X_{i,t} ε_{i,t} ε_{j,t} X_{j,t}'
+    XeeX_serial  = Σ_u Σ_{|t-s|≤L, t≠s} (1 - |t-s|/(L+1))  · 1{c_{u,t}=c_{u,s}}  · X_{u,t} ε_{u,t} ε_{u,s} X_{u,s}'
+
+**Cluster-time-invariance contract:** on the panel block-decomposed path
+the validator REQUIRES that `cluster_ids` be constant within each unit
+across periods. The within-unit serial sandwich's cluster mask is then
+trivially all-ones, and the math simplifies to the bare serial Bartlett
+HAC weighted by the spatial mask only. If a unit's cluster changes
+across periods (e.g. a unit migrating between regions), the within-unit
+mask would zero out adjacent-time pairs that should contribute,
+producing a methodologically-muddled meat — the validator raises
+`ValueError` naming the violating unit(s). The cross-sectional path
+has no time dimension, so no invariance constraint applies.
+
+**Note:** R `conleyreg` does not support a combined spatial + cluster
+product kernel; this is a diff-diff convention validated by two limit
+fixtures rather than R parity:
+1. **All-unique-clusters reduction:** when every observation is in its
+   own cluster, the cluster mask is the identity, and the meat reduces
+   to the diagonal HC0 contribution `Σ_i X_i ε_i² X_i'`.
+2. **Huge-cutoff reduction:** when `conley_cutoff_km` is large enough
+   that `K_space = 1` on every pair, the meat reduces to the pure
+   within-cluster sum `Σ_g X_g' ε_g ε_g' X_g` (CR1 without the
+   Liang-Zeger small-sample correction). This exact reduction holds
+   only for `conley_kernel="uniform"` (`K_uniform(u) = 1` for `|u| ≤ 1`).
+   The Bartlett kernel gives `K_bartlett(u) = 1 - |u|`, which is
+   strictly less than 1 for `0 < |u| ≤ 1`, so the huge-cutoff limit
+   under Bartlett is asymptotic (`K → 1` as `cutoff → ∞` only at finite
+   off-diagonal distances), not exact at any finite cutoff. The fixture
+   anchor uses uniform for an exact identity check.
+
+The combined-kernel meat is well-defined either way; the two fixture
+limits anchor the math, and the panel time-invariance contract
+guarantees the serial component is unaffected by the cluster choice.
+
+### Performance / scale (Wave A #120)
+
+A sparse k-d-tree fast path auto-activates for the spatial Bartlett meat
+when `n > _CONLEY_SPARSE_N_THRESHOLD` (default 5,000) AND `conley_metric`
+is `"haversine"` or `"euclidean"` (NOT a callable) AND `conley_kernel`
+is `"bartlett"`. The dense O(n²) distance matrix is replaced with a CSR
+sparse kernel matrix built from `scipy.spatial.cKDTree.query_ball_tree`
+neighbor queries.
+
+**Why bartlett-only:** Bartlett at `u = 1.0` returns exactly `0.0`, so
+pairs at exactly the cutoff distance contribute zero to the meat — the
+sparse path can safely drop them. Uniform at `u = 1.0` returns `1.0`,
+which would require a closed-interval query semantic that the haversine
+chord-projection roundoff cannot reliably preserve. The auto-toggle
+falls back to the dense path for uniform regardless of n. Callable
+metrics also fall back (kd-tree needs a vectorizable Minkowski distance).
+
+For haversine, the kd-tree operates on a 3-D unit-sphere projection
+(`x = cos(lat)cos(lon), y = cos(lat)sin(lon), z = sin(lat)`) with the
+chord radius matching the arc-length cutoff; the exact great-circle
+distance is recomputed only for in-range neighbors before the kernel
+evaluation. The numerical tolerance vs the dense path is typically
+~1e-12 in absolute terms; R parity at `atol=1e-6` is preserved on the
+existing fixtures under the auto-toggle.
+
+The `_CONLEY_DENSE_OOM_WARN_N = 20_000` constant remains as a separate
+warning threshold for the dense fallback (callable metrics, uniform
+kernel) where O(n²) memory is at material risk. The two thresholds are
+independent — sparse auto-toggle at 5,000 is a compute optimization;
+dense OOM warning at 20,000 is a memory caution.
+
+**Density gate (`_CONLEY_SPARSE_DENSITY_THRESHOLD = 0.3`):** the sparse
+path's CSR storage carries ~12 bytes per non-zero (data + indices +
+indptr) vs 8 bytes per cell for dense float64. The memory crossover
+is at ~67% density, but at high density the CSR overhead loses its
+advantage well before that. The sparse helper measures actual neighbor
+density via `cKDTree.count_neighbors` (shares tree traversal with
+`query_ball_tree`, no extra allocation) and falls back to the dense
+path with a `UserWarning` when neighbor density exceeds 30%. This
+prevents the "sparse" path from silently using MORE memory than dense
+when cutoffs are large relative to the data span (e.g. cutoffs above
+half-Earth circumference on a global panel, or unit-scale cutoffs on
+a clustered dataset). Users see one line explaining the fallback so
+they can either reduce `conley_cutoff_km` or accept the dense path.
+
+### Callable conley_metric validation (Wave A #123)
+
+When `conley_metric` is a user-supplied callable, the result is
+validated at the boundary via `_validate_callable_metric_result`:
+
+1. Result casts to a float64 array (raises `ValueError` if not).
+2. Shape is exactly `(n, n)` (raises if mismatched).
+3. All entries are finite (NaN/inf raises).
+4. All entries are non-negative (negative distances raise).
+5. Symmetric to within `atol=1e-10` (asymmetric matrix raises).
+6. Zero diagonal: `|d(i, i)| ≤ 1e-10` for all `i` (nonzero diagonal raises).
+
+Each failure produces a `ValueError` naming the violated invariant.
+Sub-tolerance asymmetry (eps-level roundoff) is accepted. The zero-
+diagonal invariant is load-bearing for the Conley sandwich: the
+`i = j` term contributes `K(d_ii / h) · X_i ε_i² X_i'`, which must
+reduce to the HC0 diagonal `X_i ε_i² X_i'` (i.e., `K(0) = 1`). A
+callable with positive self-distance would attenuate the HC0 term
+by `K(d_ii / h) < 1` and silently misstate Conley SEs. Built-in
+metrics (`"haversine"`, `"euclidean"`) satisfy this by construction.
+
 **Edge cases / restrictions:**
-- `DifferenceInDifferences(vcov_type="conley")` → `NotImplementedError` at fit-time. DiD.fit() has no `unit` column declaration; redirect users to `MultiPeriodDiD` / `TwoWayFixedEffects` which take `unit` natively.
-- `MultiPeriodDiD` / `TwoWayFixedEffects` `+ vcov_type="conley"` without `conley_lag_cutoff` → `ValueError` (no defensible default; explicit user choice required per Conley 1999 Section 5 sensitivity-grid recommendation).
-- `MultiPeriodDiD(vcov_type="conley")` without `unit=` at fit-time → `ValueError`.
-- `TwoWayFixedEffects(vcov_type="conley", cluster=...)` → `NotImplementedError` (combined spatial + cluster product kernel deferred to follow-up PR). TWFE's auto-cluster on the Conley path is silently dropped.
-- `TwoWayFixedEffects(vcov_type="conley", inference="wild_bootstrap")` → `NotImplementedError` (wild bootstrap does not consume the analytical sandwich).
-- `SyntheticDiD(vcov_type="conley")` → `TypeError` (SyntheticDiD uses bootstrap/jackknife/placebo variance, not the analytical sandwich; tracked in TODO.md)
-- Cross-sectional `LinearRegression` / `compute_robust_vcov` `+ vcov_type="conley"` `+ cluster_ids=` → `NotImplementedError` (combined product kernel deferred to follow-up PR)
-- Any-mode `vcov_type="conley"` `+ weights=` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up)
-- Panel path: partial `conley_time` / `conley_unit` / `conley_lag_cutoff` (not all three set) → `ValueError` at validator
-- `n > 20_000`: emits `UserWarning` about O(n²) distance-matrix memory (sparse k-d-tree fast path queued as follow-up)
-- `conley_cutoff_km ≤ 0`, `nan`, or `inf`: rejected with `ValueError`. The HC0 reduction at h→0 is documented but not the sanctioned path; users should pass `vcov_type="hc1"`
-- Identical coordinates (`d_ij = 0` for `i ≠ j`): `K(0) = 1`, contributing the full HC0 weight per Conley 1999 page 19. Documented behavior; no warning
+- `DifferenceInDifferences(vcov_type="conley")` is supported (Wave A #118): pass `unit=<col>` to `fit(...)` (NOT on `__init__`; unused unless Conley is set; not part of `get_params()` / `set_params()`).
+- `MultiPeriodDiD` / `TwoWayFixedEffects` / `DifferenceInDifferences` `+ vcov_type="conley"` without `conley_lag_cutoff` → `ValueError`.
+- `MultiPeriodDiD` / `DifferenceInDifferences` `(vcov_type="conley")` without `unit=` at fit-time → `ValueError`.
+- `TwoWayFixedEffects(vcov_type="conley", cluster=<col>)` is supported (Wave A #119): combined spatial + cluster product kernel applies. The cluster must be time-invariant within each unit on the panel path (validator-enforced). TWFE's default auto-cluster is silently dropped on the Conley path; explicit cluster is required to opt in.
+- `DifferenceInDifferences(vcov_type="conley", cluster=<col>)`: combined kernel applies; same time-invariance contract on the panel path. DiD has no auto-cluster, so the cluster choice is fully explicit.
+- `DifferenceInDifferences` / `MultiPeriodDiD` / `TwoWayFixedEffects` `(vcov_type="conley", inference="wild_bootstrap")` → `NotImplementedError`. (MPD's pre-Conley analytical-fallback `UserWarning` is suppressed when `vcov_type="conley"` so the user gets one consistent error message.)
+- `DifferenceInDifferences` / `MultiPeriodDiD` / `TwoWayFixedEffects` `(vcov_type="conley")` + `survey_design=` → `NotImplementedError` at the estimator level (deferred to Bertanha-Imbens 2014 weighted-Conley follow-up).
+- `SyntheticDiD(vcov_type="conley")` → `TypeError` (SyntheticDiD uses bootstrap/jackknife/placebo variance, not the analytical sandwich; tracked in TODO.md).
+- Any-mode `vcov_type="conley"` `+ weights=` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up).
+- Panel path: partial `conley_time` / `conley_unit` / `conley_lag_cutoff` (not all three set) → `ValueError` at validator.
+- Panel path with `cluster_ids` that vary across periods within a unit → `ValueError` (time-invariance contract).
+- `n > 20_000` with `conley_kernel='uniform'` or callable metric: emits `UserWarning` about O(n²) distance-matrix memory (sparse fast path doesn't apply; consider switching to bartlett or projecting to euclidean for performance).
+- `conley_cutoff_km ≤ 0`, `nan`, or `inf`: rejected with `ValueError`. The HC0 reduction at h→0 is documented but not the sanctioned path; users should pass `vcov_type="hc1"`.
+- Identical coordinates (`d_ij = 0` for `i ≠ j`): `K(0) = 1`, contributing the full HC0 weight per Conley 1999 page 19. Documented behavior; no warning.
+- Callable `conley_metric` returning a non-(n,n)/NaN/inf/negative/asymmetric/non-zero-diagonal matrix raises `ValueError` naming the violated invariant. The zero-diagonal contract (`|d(i, i)| ≤ 1e-10`) is load-bearing for the Conley sandwich's HC0 reduction `K(0) = 1`; see "Callable conley_metric validation" subsection above.
 
 **Reference implementations:**
 - R: `conleyreg::conleyreg(...)` (Düsterhöft 2021, CRAN v0.1.9) — **parity benchmark for diff-diff**
