@@ -22,10 +22,18 @@ jobs:
     runs-on: ubuntu-latest
 
     # Run if:
-    # - PR opened, OR
+    # - PR opened (same-repo only — fork PRs are skipped here at the workflow
+    #   level, since `head.repo.full_name` is available on `pull_request`
+    #   events). For comment-triggered events, the same-repo check happens at
+    #   the step level via `steps.pr.outputs.is_fork` (we have to API-fetch
+    #   the PR there because `issue_comment` event payloads don't include
+    #   head-repo info). Closes CodeQL alerts #11, #12 (untrusted checkout).
     # - Comment "/ai-review" on a PR by a collaborator/member/owner (issue or inline diff comment)
     if: |
-      (github.event_name == 'pull_request') ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository
+      ) ||
       (
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request != null &&
@@ -75,6 +83,27 @@ jobs:
             const headRepoFullName =
               pr.data.head.repo?.full_name || `${owner}/${repo}`;
 
+            // Fork detection for comment-triggered events. Workflow-level
+            // `if:` already excludes fork PRs for `pull_request` events
+            // (uses `github.event.pull_request.head.repo.full_name`), but
+            // `issue_comment` / `pull_request_review_comment` payloads
+            // don't include head-repo info — we have to API-fetch.
+            // Subsequent steps gate on `steps.pr.outputs.is_fork == 'false'`.
+            // Uses raw `pr.data.head.repo?.full_name` (NOT the fallback
+            // `headRepoFullName`): a deleted fork should still skip the
+            // workflow because the code IS untrusted from CodeQL's
+            // perspective. `undefined !== "owner/repo"` -> is_fork = true.
+            // Closes CodeQL alerts #11, #12 (untrusted checkout TOCTOU).
+            const isFork =
+              pr.data.head.repo?.full_name !== `${owner}/${repo}`;
+            if (isFork) {
+              core.notice(
+                `AI review skipped: PR head is from fork ` +
+                `${pr.data.head.repo?.full_name || "(deleted)"}. ` +
+                `See CodeQL alerts #11, #12 for the security rationale.`
+              );
+            }
+
             core.setOutput("number", prNumber);
             core.setOutput("title", pr.data.title || "");
             core.setOutput("body", pr.data.body || "");
@@ -84,6 +113,7 @@ jobs:
             core.setOutput("head_ref", pr.data.head.ref);
             core.setOutput("head_repo_full_name", headRepoFullName);
             core.setOutput("state", pr.data.state);
+            core.setOutput("is_fork", isFork ? "true" : "false");
 
       # Closed/merged PR (e.g. `/ai-review` rerun on a merged PR):
       # use the base-repo mirror of the PR head, which GitHub keeps
@@ -91,7 +121,7 @@ jobs:
       # The previous workflow used `refs/pull/<N>/merge`, which is
       # garbage-collected on closed PRs — this path replaces that.
       - uses: actions/checkout@v6
-        if: steps.pr.outputs.state != 'open'
+        if: steps.pr.outputs.state != 'open' && steps.pr.outputs.is_fork == 'false'
         with:
           ref: refs/pull/${{ steps.pr.outputs.number }}/head
 
@@ -102,12 +132,13 @@ jobs:
       # (see .claude/commands/submit-pr.md:327-345). head_sha is
       # guaranteed to exist on the head repo for an open PR.
       - uses: actions/checkout@v6
-        if: steps.pr.outputs.state == 'open'
+        if: steps.pr.outputs.state == 'open' && steps.pr.outputs.is_fork == 'false'
         with:
           repository: ${{ steps.pr.outputs.head_repo_full_name }}
           ref: ${{ steps.pr.outputs.head_sha }}
 
       - name: Pre-fetch base SHA
+        if: steps.pr.outputs.is_fork == 'false'
         run: |
           set -euo pipefail
           # base_sha lives on the base repo (github.repository), which differs
@@ -119,6 +150,7 @@ jobs:
 
       - name: Fetch previous AI review (if any)
         id: prev_review
+        if: steps.pr.outputs.is_fork == 'false'
         uses: actions/github-script@v9
         with:
           script: |
@@ -136,6 +168,7 @@ jobs:
             core.setOutput("found", last ? "true" : "false");
 
       - name: Build review prompt with PR context + diff
+        if: steps.pr.outputs.is_fork == 'false'
         env:
           PR_TITLE: ${{ steps.pr.outputs.title }}
           PR_BODY: ${{ steps.pr.outputs.body }}
@@ -415,6 +448,7 @@ jobs:
 
       - name: Run Codex
         id: run_codex
+        if: steps.pr.outputs.is_fork == 'false'
         uses: openai/codex-action@v1
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
@@ -426,6 +460,7 @@ jobs:
           effort: xhigh
 
       - name: Post PR comment (new on every event except initial open)
+        if: steps.pr.outputs.is_fork == 'false'
         uses: actions/github-script@v9
         env:
           CODEX_FINAL_MESSAGE: ${{ steps.run_codex.outputs.final-message }}
