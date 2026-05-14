@@ -3125,6 +3125,145 @@ class TestConleySparse:
                 len(density_warnings) == 0
             ), "Density gate should not have triggered at low density"
 
+    def test_sparse_with_cluster_matches_dense(self):
+        """Sparse + combined cluster kernel matches the dense path bit-for-bit
+        at atol=1e-10 (cross-sectional). Codex CI R8 P1: load-bearing
+        sparse+cluster regression that was missing prior."""
+        rng = np.random.default_rng(seed=181)
+        n = 600
+        coords = rng.uniform(0.0, 100.0, size=(n, 2))
+        cluster_ids = rng.integers(0, 8, size=n)  # 8 clusters
+        X = np.column_stack([np.ones(n), rng.standard_normal(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5, -0.5]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            15.0,
+            "euclidean",
+            "bartlett",
+            bread,
+            cluster_ids=cluster_ids,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            15.0,
+            "euclidean",
+            "bartlett",
+            bread,
+            cluster_ids=cluster_ids,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_with_cluster_panel_matches_dense(self):
+        """Sparse + cluster + panel block-decomposed sandwich matches the
+        dense path on a 3-period panel with time-invariant cluster.
+        Codex CI R8 P1."""
+        rng = np.random.default_rng(seed=191)
+        n_units = 200
+        T = 3
+        unit = np.repeat(np.arange(n_units), T)
+        time = np.tile(np.arange(T), n_units)
+        n = n_units * T
+        # Time-invariant coords + cluster (per-unit)
+        unit_coords = rng.uniform(0.0, 100.0, size=(n_units, 2))
+        coords = unit_coords[unit]
+        cluster_per_unit = rng.integers(0, 5, size=n_units)
+        cluster_ids = cluster_per_unit[unit]
+        X = np.column_stack([np.ones(n), rng.standard_normal(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5, -0.3]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            15.0,
+            "euclidean",
+            "bartlett",
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=1,
+            cluster_ids=cluster_ids,
+            _conley_sparse=False,
+        )
+        V_sparse = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            15.0,
+            "euclidean",
+            "bartlett",
+            bread,
+            time=time,
+            unit=unit,
+            lag_cutoff=1,
+            cluster_ids=cluster_ids,
+            _conley_sparse=True,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_density_gate_cluster_aware(self):
+        """High global spatial density + many small clusters: within-cluster
+        density is low, so the sparse path should NOT spuriously fall back
+        to dense. Tests the cluster-aware refinement of the density gate.
+        Codex CI R8 P1."""
+        # Tight spatial cluster of points → 100% global spatial density,
+        # but split into many small disjoint clusters so post-mask density
+        # is well below 30%.
+        rng = np.random.default_rng(seed=199)
+        n = 200
+        coords = rng.uniform(0.0, 5.0, size=(n, 2))  # tight cluster
+        # 50 clusters of 4 points each → within-cluster nnz = 4*4 = 16 per
+        # cluster, total = 50*16 = 800 = 800/(200*200) = 2% density << 30%.
+        cluster_ids = np.repeat(np.arange(50), 4)
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            V_sparse = _compute_conley_vcov(
+                X,
+                residuals,
+                coords,
+                1e6,  # cutoff > data span → 100% global density
+                "euclidean",
+                "bartlett",
+                bread,
+                cluster_ids=cluster_ids,
+                _conley_sparse=True,
+            )
+            density_warnings = [msg for msg in w if "exceeds threshold" in str(msg.message)]
+            assert len(density_warnings) == 0, (
+                "Density gate spuriously fell back to dense even though "
+                "within-cluster density is low — cluster-aware refinement "
+                "is not working."
+            )
+        # Result must equal the dense path (sparse path executed correctly)
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            1e6,
+            "euclidean",
+            "bartlett",
+            bread,
+            cluster_ids=cluster_ids,
+            _conley_sparse=False,
+        )
+        np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
     def test_sparse_haversine_cutoff_at_exactly_half_earth_circumference(self):
         """Cutoff = π·R_earth: chord radius = 2 (sphere diameter); all
         pairs are included. Bartlett at u=1 returns 0, so the antipodal

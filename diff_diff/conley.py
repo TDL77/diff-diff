@@ -457,11 +457,13 @@ def _compute_spatial_bartlett_meat_sparse(
         query_r = 2.0 * np.sin(arc_radians / 2.0)
         query_r *= 1.0 + 1e-12
         tree = cKDTree(xyz)
+        tree_coords = xyz  # used for per-cluster sub-trees in the density gate
     elif metric == "euclidean":
         # Small relative epsilon for symmetry with the haversine branch.
         # Bartlett's <=-vs-< boundary is moot since kernel is exactly 0 at u=1.
         query_r = cutoff * (1.0 + 1e-12)
         tree = cKDTree(coords)
+        tree_coords = coords
     else:
         raise ValueError(
             "sparse Conley path requires metric in {'haversine', 'euclidean'}; "
@@ -475,6 +477,25 @@ def _compute_spatial_bartlett_meat_sparse(
     # memory than dense float64). Codex CI R6 P2.
     n_pairs_in_range = int(tree.count_neighbors(tree, r=query_r, p=2.0))
     density = n_pairs_in_range / float(n * n)
+    if density > density_threshold and cluster_codes is not None:
+        # Cluster-aware refinement: the actual CSR nnz reflects within-
+        # cluster pairs only (the inner loop drops cross-cluster neighbors
+        # before adding to the sparse matrix). On large clustered panels,
+        # spatial density can be ~100% while within-cluster density is
+        # tiny — without refinement we'd spuriously fall back to dense
+        # exactly when sparse helps most. Refine by counting per-cluster.
+        # Codex CI R8 P1: the unrefined density check was cluster-blind.
+        refined_pairs = 0
+        for c in np.unique(cluster_codes):
+            in_c = cluster_codes == c
+            n_c = int(in_c.sum())
+            if n_c <= 1:
+                # Singleton cluster contributes only the diagonal self-pair.
+                refined_pairs += n_c
+                continue
+            sub_tree = cKDTree(tree_coords[in_c])
+            refined_pairs += int(sub_tree.count_neighbors(sub_tree, r=query_r, p=2.0))
+        density = refined_pairs / float(n * n)
     if density > density_threshold:
         warnings.warn(
             f"Conley sparse path: neighbor density {density:.1%} exceeds "
