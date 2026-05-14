@@ -3100,7 +3100,7 @@ fixtures rather than R parity:
    to the diagonal HC0 contribution `Σ_i X_i ε_i² X_i'`.
 2. **Huge-cutoff reduction:** when `conley_cutoff_km` is large enough
    that `K_space = 1` on every pair, the meat reduces to the pure
-   within-cluster sum `Σ_g X_g' ε_g ε_g' X_g'` (CR1 without the
+   within-cluster sum `Σ_g X_g' ε_g ε_g' X_g` (CR1 without the
    Liang-Zeger small-sample correction). This exact reduction holds
    only for `conley_kernel="uniform"` (`K_uniform(u) = 1` for `|u| ≤ 1`).
    The Bartlett kernel gives `K_bartlett(u) = 1 - |u|`, which is
