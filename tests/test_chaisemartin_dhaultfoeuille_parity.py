@@ -1382,6 +1382,23 @@ class TestDCDHDynRParityHeterogeneity:
             assert py_h["se"] == pytest.approx(r_h["se"], rel=self.SE_RTOL), (
                 f"h={h} se: py={py_h['se']:.6f} vs r={r_h['se']:.6f}"
             )
+            # `t_stat = beta / se` is invariant to the Wald-test
+            # critical-value distribution; pin it at SE_RTOL so a
+            # regression in beta or se surfaces here too.
+            assert py_h["t_stat"] == pytest.approx(r_h["t"], rel=self.SE_RTOL), (
+                f"h={h} t_stat: py={py_h['t_stat']:.6f} vs r={r_h['t']:.6f}"
+            )
+            assert int(py_h["n_obs"]) == int(r_h["n_obs"]), (
+                f"h={h} n_obs: py={py_h['n_obs']} vs r={r_h['n_obs']}"
+            )
+            # NOTE: `p_value` and `conf_int` are NOT pinned to R here. Python's
+            # `safe_inference(..., df=None)` uses the normal Z critical value
+            # (~1.96 at alpha=0.05); R `did_multiplegt_dyn(..., predict_het)`
+            # uses t-distribution with df = n - k from the OLS regression.
+            # That structural deviation produces ~0.1-2% rtol gaps on CI
+            # bounds and p-values - tracked separately rather than masked by
+            # a loose parity tolerance. See REGISTRY Phase 3 heterogeneity
+            # Note "Deviation from R (heterogeneity inference critical value)".
 
 
 class TestDCDHDynRParityByPathHeterogeneity:
@@ -1470,4 +1487,19 @@ class TestDCDHDynRParityByPathHeterogeneity:
                 ), (
                     f"path={path_key} h={h} se: "
                     f"py={py_h['se']:.6f} vs r={r_h['se']:.6f}"
+                )
+                # `t_stat = beta / se` is invariant to the Wald-test
+                # critical-value distribution; pin it at SE_RTOL so a
+                # regression in beta or se surfaces here too. p_value
+                # and conf_int are not pinned - see the global parity
+                # class for the Z-vs-t deviation note.
+                assert py_h["t_stat"] == pytest.approx(
+                    r_h["t"], rel=self.SE_RTOL
+                ), (
+                    f"path={path_key} h={h} t_stat: "
+                    f"py={py_h['t_stat']:.6f} vs r={r_h['t']:.6f}"
+                )
+                assert int(py_h["n_obs"]) == int(r_h["n_obs"]), (
+                    f"path={path_key} h={h} n_obs: "
+                    f"py={py_h['n_obs']} vs r={r_h['n_obs']}"
                 )

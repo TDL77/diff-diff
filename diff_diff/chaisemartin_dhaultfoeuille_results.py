@@ -430,8 +430,9 @@ class ChaisemartinDHaultfoeuilleResults:
         ``paths_of_interest=[(...), ...]``) is set. Inner dict keyed by
         horizon directly (no ``"horizons"`` wrapper); each entry holds
         ``{"beta", "se", "t_stat", "p_value", "conf_int", "n_obs"}``,
-        where ``beta`` is the WLS coefficient on the heterogeneity
-        covariate on the path-restricted switcher subsample. Cohort
+        where ``beta`` is the heterogeneity coefficient on the path-
+        restricted switcher subsample - plain OLS on the non-survey
+        path, WLS-on-pweights under ``survey_design``. Cohort
         dummies in the design matrix absorb baseline by construction.
         Empty-state contract mirrors ``path_effects``: ``None`` when not
         requested; ``{}`` when requested but no path has eligible
