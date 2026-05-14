@@ -407,6 +407,7 @@ class DifferenceInDifferences:
                 conley_lag_cutoff=self.conley_lag_cutoff,
                 survey_design=survey_design,
                 inference=self.inference,
+                cluster=self.cluster,
             )
 
         if absorb:
@@ -1473,6 +1474,7 @@ class MultiPeriodDiD(DifferenceInDifferences):
                 conley_lag_cutoff=self.conley_lag_cutoff,
                 survey_design=survey_design,
                 inference=self.inference,
+                cluster=self.cluster,
             )
         # Pre-compute non_ref_periods (needed for absorb demeaning)
         non_ref_periods = [p for p in all_periods if p != reference_period]

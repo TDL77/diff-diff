@@ -184,6 +184,7 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 conley_lag_cutoff=self.conley_lag_cutoff,
                 survey_design=survey_design,
                 inference=self.inference,
+                cluster=self.cluster,
             )
 
         # Check for staggered treatment timing and warn if detected

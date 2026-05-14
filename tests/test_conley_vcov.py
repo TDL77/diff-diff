@@ -1162,6 +1162,103 @@ class TestConleyEstimatorIntegration:
                 unit="unit",
             )
 
+    def test_did_conley_unknown_cluster_column_raises(self, two_period_panel):
+        """DiD + Conley + cluster=<missing column> raises a clear estimator-
+        level ValueError before `data[self.cluster]` access (combined-kernel
+        path; codex CI R7 P1)."""
+        from diff_diff import DifferenceInDifferences
+
+        with pytest.raises(ValueError, match="Cluster column 'missing_region' not found"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                cluster="missing_region",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+            )
+
+    def test_mpd_conley_unknown_cluster_column_raises(self):
+        """MPD + Conley + cluster=<missing column> raises a clear estimator-
+        level ValueError before `data[self.cluster]` access (combined-kernel
+        path; codex CI R7 P1)."""
+        import pandas as _pd
+
+        from diff_diff import MultiPeriodDiD
+
+        rng = np.random.default_rng(seed=83)
+        rows = []
+        for u in range(8):
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            for t in range(3):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": rng.standard_normal(),
+                        "treated": int(u >= 4),
+                        "lat": lat,
+                        "lon": lon,
+                    }
+                )
+        df = _pd.DataFrame(rows)
+        with pytest.raises(ValueError, match="Cluster column 'missing_region' not found"):
+            MultiPeriodDiD(
+                vcov_type="conley",
+                cluster="missing_region",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                df,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+                post_periods=[1, 2],
+                reference_period=0,
+            )
+
+    def test_twfe_conley_unknown_cluster_column_raises(self):
+        """TWFE + Conley + cluster=<missing column> raises a clear estimator-
+        level ValueError before `data[self.cluster]` access (combined-kernel
+        path; codex CI R7 P1)."""
+        import pandas as _pd
+
+        from diff_diff import TwoWayFixedEffects
+
+        rng = np.random.default_rng(seed=89)
+        rows = []
+        for u in range(8):
+            lat = rng.uniform(-5, 5)
+            lon = rng.uniform(-5, 5)
+            for t in range(2):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": rng.standard_normal(),
+                        "treated": int(u >= 4),
+                        "lat": lat,
+                        "lon": lon,
+                    }
+                )
+        df = _pd.DataFrame(rows)
+        with pytest.raises(ValueError, match="Cluster column 'missing_region' not found"):
+            TwoWayFixedEffects(
+                vcov_type="conley",
+                cluster="missing_region",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(df, outcome="y", treatment="treated", time="time", unit="unit")
+
     def test_did_conley_malformed_coord_tuple_raises(self, two_period_panel):
         """vcov_type='conley' with a malformed conley_coords (wrong arity or
         non-string elements) raises ValueError before downstream access.

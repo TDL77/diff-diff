@@ -208,19 +208,20 @@ def _validate_conley_estimator_inputs(
     conley_lag_cutoff: Optional[int],
     survey_design: object,
     inference: str,
+    cluster: Optional[str] = None,
 ) -> None:
     """Shared front-door validation for ``vcov_type='conley'`` on the
     estimator entry points (``DifferenceInDifferences``, ``MultiPeriodDiD``,
     ``TwoWayFixedEffects``).
 
     Each estimator's ``fit()`` calls this BEFORE building Conley arrays or
-    threading them into the variance computation. The seven checks below
+    threading them into the variance computation. The eight checks below
     are the union of what each estimator needs; estimator-specific bits
     (e.g. building the array from a column name) remain inline at the
     caller. Centralizing this in one place prevents the validation-class
-    drift that surfaced repeatedly across Wave A CI rounds (DiD's
-    front-door guard for `unit` and `conley_coords` was missing on MPD
-    / TWFE).
+    drift that surfaced repeatedly across Wave A CI rounds (front-door
+    guards for `unit`, `conley_coords`, and `cluster` were each missing
+    on at least one estimator surface and required separate fixes).
 
     Parameters
     ----------
@@ -229,8 +230,8 @@ def _validate_conley_estimator_inputs(
         ``"DifferenceInDifferences"``).
     data : pandas.DataFrame
         The dataset passed to ``fit()``. Used to check column existence
-        for ``unit`` and ``conley_coords``. Typed as ``Any`` here to
-        avoid importing pandas at module load time.
+        for ``unit``, ``conley_coords``, and ``cluster``. Typed as
+        ``Any`` here to avoid importing pandas at module load time.
     unit : str or None
         Name of the unit identifier column (required for Conley).
     conley_coords : tuple/list/None
@@ -243,13 +244,19 @@ def _validate_conley_estimator_inputs(
         ``SurveyDesign`` instance or ``None``. Survey + Conley is deferred.
     inference : str
         Estimator inference mode. ``"wild_bootstrap"`` + Conley is rejected.
+    cluster : str or None, default None
+        Name of the cluster column if the user opted into the combined
+        spatial + cluster product kernel (Wave A #119). When non-None,
+        the column must exist in ``data``; otherwise the downstream
+        ``data[cluster]`` access would raise an opaque pandas
+        ``KeyError``. Pass ``None`` (the default) to skip this check.
 
     Raises
     ------
     ValueError
         Missing/malformed conley_coords, missing conley_cutoff_km,
-        missing/unknown unit, missing conley_lag_cutoff,
-        coord column not in ``data``.
+        missing/unknown unit, missing conley_lag_cutoff, coord column
+        not in ``data``, or ``cluster`` set to a name not in ``data``.
     NotImplementedError
         ``survey_design`` is non-None, or ``inference == "wild_bootstrap"``.
     """
@@ -285,6 +292,8 @@ def _validate_conley_estimator_inputs(
             "(non-negative int; 0 means spatial-within-period only, no serial "
             "component). See R conleyreg's `lag_cutoff` argument for the convention."
         )
+    if cluster is not None and cluster not in data.columns:
+        raise ValueError(f"Cluster column '{cluster}' not found in data")
     if survey_design is not None:
         raise NotImplementedError(
             f"{estimator_name}(vcov_type='conley') + survey_design is a "
