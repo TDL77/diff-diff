@@ -1291,6 +1291,92 @@ class TestConleyEstimatorIntegration:
         )
         assert set(uniques.tolist()) == {0, 1}, f"Expected raw integer labels 0/1, got {uniques}"
 
+    def test_mpd_conley_with_absorb_uses_raw_coords_and_time(self, monkeypatch):
+        """MultiPeriodDiD + Conley + absorb=[<col>] must feed the Conley
+        helper the ORIGINAL coords/time/unit columns from `data`, not the
+        absorb-demeaned `working_data`. If a user lists the `time` column
+        (or coord columns) in `absorb`, working_data has those demeaned and
+        the Conley helper would partition the within-period spatial sandwich
+        on residualized floats. Mirrors the DiD raw-time contract.
+        Codex CI R5 P0.
+        """
+        import pandas as _pd
+
+        import diff_diff.linalg as linalg_module
+        from diff_diff import MultiPeriodDiD
+
+        rng = np.random.default_rng(seed=71)
+        n_units = 10
+        T = 4
+        rows = []
+        for u in range(n_units):
+            treated = u >= n_units // 2
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            for t in range(T):
+                effect = 1.0 if (treated and t >= 2) else 0.0
+                yv = 0.2 * t + effect + rng.normal(0, 0.3)
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": yv,
+                        "treated": int(treated),
+                        "lat": lat,
+                        "lon": lon,
+                    }
+                )
+        df = _pd.DataFrame(rows)
+
+        captured: dict = {"time_arg": None, "unit_arg": None, "coords_arg": None}
+        orig = linalg_module._compute_conley_vcov
+
+        def _spy(*args, **kwargs):
+            captured["time_arg"] = kwargs.get("time")
+            captured["unit_arg"] = kwargs.get("unit")
+            # coords is the 3rd positional arg to _compute_conley_vcov
+            if len(args) >= 3:
+                captured["coords_arg"] = args[2]
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(linalg_module, "_compute_conley_vcov", _spy)
+        MultiPeriodDiD(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
+            post_periods=[2, 3],
+            reference_period=0,
+            absorb=["unit"],
+        )
+        # Raw time labels span exactly 0..T-1 = 4 distinct values; demeaned
+        # absorb would collapse to per-unit means → ~n_units distinct values.
+        time_arg = np.asarray(captured["time_arg"])
+        uniques = np.unique(time_arg)
+        assert len(uniques) == T, (
+            f"Expected {T} unique time labels (raw 0..{T - 1}), got {len(uniques)}: "
+            f"{uniques[:5]} — absorb is leaking demeaned time into the Conley helper."
+        )
+        assert set(uniques.tolist()) == set(range(T))
+        # Raw coords are time-invariant within unit and span n_units distinct
+        # (lat, lon) pairs. If absorb=["unit"] leaked demeaned coords, all
+        # within-unit coord values would collapse to 0 (per-unit mean), giving
+        # only 1 distinct row across all observations.
+        coords_arg = np.asarray(captured["coords_arg"])
+        # Expect n_units distinct (lat, lon) pairs since each unit has its own
+        unique_coords = np.unique(coords_arr_view := coords_arg, axis=0)
+        del coords_arr_view
+        assert len(unique_coords) == n_units, (
+            f"Expected {n_units} unique coord pairs, got {len(unique_coords)} — "
+            "absorb=['unit'] is leaking demeaned coords into the Conley helper."
+        )
+
     def test_multi_period_did_with_conley_panel(self):
         """Phase 2 MultiPeriodDiD + vcov_type='conley' uses the block-decomposed
         sandwich (matches R conleyreg). Verifies that finite SEs are produced

@@ -1666,21 +1666,30 @@ class MultiPeriodDiD(DifferenceInDifferences):
         _fit_vcov_type = self._resolve_effective_vcov_type(effective_cluster_ids)
 
         # Resolve Conley arrays from column names (init-time) plus the
-        # estimator's `time` / `unit` columns. When vcov_type != "conley",
-        # these are silently ignored downstream (Phase 1 / 2 convention).
+        # estimator's `time` / `unit` columns. CRITICAL: read from the
+        # ORIGINAL `data` frame, NOT `working_data` — if absorb is used
+        # with overlapping covariates (e.g. lat/lon or time listed in
+        # both `absorb` and `conley_coords`/`time`), `working_data` has
+        # those columns demeaned and the Conley helper would silently
+        # partition the spatial sandwich on residualized inputs.
+        # Mirrors the DiD/TWFE contract at `estimators.py::DifferenceInDifferences.fit`
+        # and `twfe.py::TwoWayFixedEffects.fit` (FWL composability: the meat
+        # is computed on demeaned scores but the kernel grid uses the raw
+        # coords + time/unit). When vcov_type != "conley", these are silently
+        # ignored downstream (Phase 1 / 2 convention).
         if _fit_vcov_type == "conley":
             _conley_coords_arr: Optional[np.ndarray] = np.column_stack(
                 [
-                    working_data[self.conley_coords[0]].values.astype(np.float64),
-                    working_data[self.conley_coords[1]].values.astype(np.float64),
+                    data[self.conley_coords[0]].values.astype(np.float64),
+                    data[self.conley_coords[1]].values.astype(np.float64),
                 ]
             )
             # Preserve the original time-label dtype (int, datetime64, pd.Period,
             # string). `_compute_conley_vcov` normalizes to dense 0..T-1 codes
             # internally; float coercion here would break datetime64 / Period /
             # string encodings before the normalizer runs.
-            _conley_time_arr: Optional[np.ndarray] = np.asarray(working_data[time].values)
-            _conley_unit_arr: Optional[np.ndarray] = working_data[unit].values
+            _conley_time_arr: Optional[np.ndarray] = np.asarray(data[time].values)
+            _conley_unit_arr: Optional[np.ndarray] = data[unit].values
         else:
             _conley_coords_arr = None
             _conley_time_arr = None
