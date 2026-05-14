@@ -77,10 +77,15 @@ def _format_vcov_label(
     if vcov_type == "conley":
         # Cross-sectional Conley on direct LinearRegression / compute_robust_vcov,
         # or panel block-decomposed Conley (within-period spatial + within-unit
-        # Bartlett serial) on MultiPeriodDiD / TwoWayFixedEffects.
-        if conley_lag_cutoff is not None:
-            return f"Conley spatial HAC (1999), lag_cutoff={conley_lag_cutoff}"
-        return "Conley spatial HAC (1999)"
+        # Bartlett serial) on DifferenceInDifferences / MultiPeriodDiD /
+        # TwoWayFixedEffects. With an explicit cluster_name, the combined
+        # spatial + cluster product kernel applies (Wave A #119).
+        lag_suffix = f", lag_cutoff={conley_lag_cutoff}" if conley_lag_cutoff is not None else ""
+        if cluster_name:
+            return (
+                f"Conley spatial HAC (1999) + cluster product kernel at {cluster_name}{lag_suffix}"
+            )
+        return f"Conley spatial HAC (1999){lag_suffix}"
     return None
 
 

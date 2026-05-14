@@ -1741,7 +1741,34 @@ class TestConleyTWFE:
         summary = res.summary()
         assert "Conley spatial HAC" in summary
         assert "lag_cutoff=1" in summary
+        # No explicit cluster on this fit → label must NOT advertise the
+        # combined kernel.
+        assert "+ cluster product kernel" not in summary
         # The result dataclass also carries the lag for programmatic access.
+        assert res.conley_lag_cutoff == 1
+
+    def test_twfe_conley_with_cluster_summary_label_names_kernel_and_cluster(self, panel):
+        """When an explicit cluster=<col> is combined with Conley, the
+        summary label must distinguish the combined spatial + cluster
+        product kernel from bare Conley and name the cluster column.
+        Codex CI R3 P3 (Maintainability)."""
+        from diff_diff import TwoWayFixedEffects
+
+        panel = panel.copy()
+        panel["region"] = panel["unit"] // 5  # time-invariant within unit
+        res = TwoWayFixedEffects(
+            vcov_type="conley",
+            cluster="region",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
+        summary = res.summary()
+        assert "Conley spatial HAC" in summary
+        assert "+ cluster product kernel at region" in summary
+        assert "lag_cutoff=1" in summary
+        # Programmatic access via the result dataclass.
+        assert res.cluster_name == "region"
         assert res.conley_lag_cutoff == 1
 
     def test_twfe_conley_to_dict_carries_lag_cutoff(self, panel):
