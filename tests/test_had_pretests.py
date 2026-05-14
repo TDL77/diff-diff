@@ -5469,7 +5469,12 @@ class TestStuteStratifiedSurveyBootstrap:
       smoke; QUG silently skipped, joint Stute + Yatchew run
       survey-aware; verdict carries the C0 deferral substring.
     - Trivial-stratum reduction: ``SurveyDesign(strata="all_ones")``
-      ≡ ``SurveyDesign(strata=None)`` at atol=1e-12.
+      vs ``SurveyDesign(strata=None)`` — the deterministic CvM
+      statistic is bit-equal (atol=1e-14, the algebraic-identity
+      claim); the bootstrap p-value matches only within
+      bootstrap-noise (≤0.15 abs) because
+      ``generate_survey_multiplier_weights_batch`` takes different
+      RNG-consumption paths for strata-Some vs strata-None.
     - Non-strata calibration-shift end-to-end smoke: finite + range
       check that the non-strata Stute path runs after the
       single-implicit-stratum centering lands. A direction-pin via
@@ -5610,10 +5615,24 @@ class TestStuteStratifiedSurveyBootstrap:
 
     def test_trivial_stratum_reduces_to_strata_none(self):
         """``SurveyDesign(weights, psu, strata="all_ones")`` (single
-        explicit stratum) is algebraically identical to
+        explicit stratum) is *algebraically* equivalent to
         ``SurveyDesign(weights, psu, strata=None)`` (single implicit
-        stratum) after the PR. Both apply the same Bessel correction.
-        Validates the trivial-stratum reduction at atol=1e-12."""
+        stratum) after the PR — both apply the same within-implicit-
+        stratum demean + sqrt(n_psu/(n_psu-1)) Bessel rescale.
+
+        The DETERMINISTIC CvM statistic matches bit-exactly between the
+        two fits — that is the algebraic-identity claim.
+
+        The BOOTSTRAP p-value does NOT match bit-exactly because
+        ``generate_survey_multiplier_weights_batch`` takes structurally
+        different code paths based on ``strata`` (see
+        ``bootstrap_utils.py:556+`` strata-None branch vs ``:579+``
+        stratified branch — different RNG-consumption patterns and the
+        strata-None branch additionally routes through the Rust backend
+        when available, while the stratified per-stratum loop uses
+        ``..._numpy``). Bootstrap p-values are expected to differ at
+        the order of bootstrap noise — we assert a loose closeness band
+        as a SMOKE, not bit-equality."""
         from diff_diff import SurveyDesign
 
         df = self._stratified_panel(n_strata=1, n_psu_per_stratum=20)
@@ -5635,19 +5654,31 @@ class TestStuteStratifiedSurveyBootstrap:
         resolved_explicit = sd_explicit.resolve(unit_df)
         resolved_implicit = sd_implicit.resolve(unit_df)
 
-        # Use the same seed for both to lock the RNG path.
+        # Use the same seed for both. The CvM is deterministic; the
+        # bootstrap p-value depends on the multiplier RNG path, which
+        # differs between the two helper branches (see docstring).
         r_explicit = stute_test(
             d=d_arr, dy=dy_arr, survey_design=resolved_explicit, n_bootstrap=199, seed=42
         )
         r_implicit = stute_test(
             d=d_arr, dy=dy_arr, survey_design=resolved_implicit, n_bootstrap=199, seed=42
         )
-        # CvM statistic is deterministic (no bootstrap) — bit-exact match.
+        # CvM statistic is deterministic — bit-exact match (the
+        # algebraic-identity claim).
         np.testing.assert_allclose(r_explicit.cvm_stat, r_implicit.cvm_stat, atol=1e-14)
-        # Bootstrap p-value: at the same seed + same multiplier draw,
-        # both apply the SAME stratum centering (one explicit, one
-        # implicit). p-values match at atol=1e-12.
-        np.testing.assert_allclose(r_explicit.p_value, r_implicit.p_value, atol=1e-12)
+        # Bootstrap p-values: loose closeness band (within bootstrap
+        # noise), NOT bit-equality. At B=199 the bootstrap SD on the
+        # uniform p-value is ~sqrt(0.25/199) ≈ 0.035; a ±0.15 band is
+        # ~4σ and decisively distinguishes "two fits of the same
+        # statistic" from "the algebraic-equivalence claim is broken"
+        # (which would push p-values to opposite tails).
+        assert abs(float(r_explicit.p_value) - float(r_implicit.p_value)) < 0.15, (
+            f"Trivial-stratum reduction smoke: explicit p={r_explicit.p_value!r} "
+            f"vs implicit p={r_implicit.p_value!r} differ by more than the "
+            f"bootstrap-noise band (0.15). The algebraic equivalence between "
+            f"SurveyDesign(strata='all_ones') and SurveyDesign(strata=None) "
+            f"may be broken; check apply_stratum_centering's strata-None branch."
+        )
 
     def test_stute_call_sites_invoke_apply_stratum_centering(self, monkeypatch):
         """Regression: ensure the Stute survey-bootstrap call sites
