@@ -2844,55 +2844,200 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             "above the resolve-pr step for context."
         )
 
+    @staticmethod
+    def _classify_shell_line(line):
+        """Tokenize a shell line via shlex and return a list of
+        (action, target) tuples for known operations.
+
+        Actions:
+          'python_exec':       target is the script path (str)
+          'cp_dest':           target is the destination path
+          'mv_dest':           target is the destination path
+          'tee_dest':          target is the destination path
+                               (multiple if tee writes to N files)
+          'ln_dest':           target is the link path (destination)
+          'redirect_write':    target is the path after `>` or `>>`
+          'git_show_redirect': target is (base_source, dest_path) tuple
+                               for `git show "${BASE_SHA}":<src> > <dest>`
+
+        Returns [] for empty/comment/unparseable lines.
+
+        Handles multi-command lines by splitting on shell operators
+        (`|`, `;`, `&&`, `||`) into segments and classifying each
+        segment independently. Required so e.g. `echo x | tee /tmp/foo`
+        recognizes `tee /tmp/foo` as the second-segment command.
+
+        R6 fix for PR #436: replaced raw-text regex matching with
+        shlex-based shell tokenization. Catches bypasses regex missed:
+          - quoted paths: `python3 "diff_diff/evil.py"`
+          - option-bearing forms: `cp -f src dst`
+          - quoted redirect destinations: `> "/tmp/foo"`
+          - multi-command pipes: `echo x | tee /tmp/foo`
+        """
+        import shlex
+
+        line = line.strip()
+        if not line or line.startswith("#"):
+            return []
+        # Strip trailing backslash (shell line continuation). shlex
+        # raises "No escaped character" otherwise. The command's
+        # identity (cmd, key positionals) is typically on the first
+        # line of a continuation; subsequent lines are usually args.
+        if line.endswith("\\"):
+            line = line[:-1].rstrip()
+            if not line:
+                return []
+        try:
+            # `punctuation_chars=True` treats `();<>|&` as separate
+            # tokens even without surrounding whitespace, so
+            # `cmd1;cmd2` tokenizes as ['cmd1', ';', 'cmd2'] (not
+            # ['cmd1;', 'cmd2']) and `>>` stays grouped as one token.
+            sh = shlex.shlex(line, posix=True, punctuation_chars=True)
+            sh.whitespace_split = True
+            all_tokens = list(sh)
+        except ValueError:
+            # Unmatched quotes / unparseable — be conservative.
+            return []
+        if not all_tokens:
+            return []
+
+        OPERATORS = {"|", ";", "&&", "||"}
+        LEADING_KEYWORDS = {
+            "if", "then", "else", "elif", "do", "while", "for",
+            "done", "fi", "until", "case", "esac",
+        }
+        FLAGS_WITH_ARG = {"-c", "-m"}
+
+        # Split into shell command segments by operator tokens.
+        segments = []
+        current = []
+        for t in all_tokens:
+            if t in OPERATORS:
+                if current:
+                    segments.append(current)
+                    current = []
+            else:
+                current.append(t)
+        if current:
+            segments.append(current)
+
+        actions = []
+        for tokens in segments:
+            # Strip leading shell control keywords
+            while tokens and tokens[0] in LEADING_KEYWORDS:
+                tokens.pop(0)
+            if not tokens:
+                continue
+
+            cmd = tokens[0]
+            seg_actions = []
+
+            # python file execution. Classify the FIRST non-flag
+            # positional regardless of extension — `python3 /tmp/foo.py.bak`
+            # IS a python execution of /tmp/foo.py.bak (allowlist
+            # check then differentiates allowed from forbidden).
+            # If `-c` or `-m` is seen, the script-execution path is
+            # bypassed (inline string / module mode); subsequent
+            # positionals are args to that mode, not a script path.
+            if cmd in ("python", "python3", "python2"):
+                script_mode_disabled = False
+                i = 1
+                while i < len(tokens):
+                    t = tokens[i]
+                    if t in FLAGS_WITH_ARG:
+                        script_mode_disabled = True
+                        i += 2
+                        continue
+                    if t.startswith("-"):
+                        i += 1
+                        continue
+                    if not script_mode_disabled:
+                        seg_actions.append(("python_exec", t))
+                    break
+
+            # cp / mv: destination is the LAST positional argument
+            elif cmd in ("cp", "mv"):
+                positional = [t for t in tokens[1:] if not t.startswith("-")]
+                if positional:
+                    seg_actions.append((f"{cmd}_dest", positional[-1]))
+
+            # tee: every positional is a destination
+            elif cmd == "tee":
+                for t in tokens[1:]:
+                    if not t.startswith("-"):
+                        seg_actions.append(("tee_dest", t))
+
+            # ln: destination is the last positional
+            elif cmd == "ln":
+                positional = [t for t in tokens[1:] if not t.startswith("-")]
+                if len(positional) >= 2:
+                    seg_actions.append(("ln_dest", positional[-1]))
+
+            # git show staging: `git show "${BASE_SHA}":<src> > <dest>`
+            elif cmd == "git" and len(tokens) >= 3 and tokens[1] == "show":
+                target_arg = tokens[2]
+                base_source = None
+                if target_arg.startswith("${BASE_SHA}:"):
+                    base_source = target_arg[len("${BASE_SHA}:"):]
+                elif target_arg.startswith("$BASE_SHA:"):
+                    base_source = target_arg[len("$BASE_SHA:"):]
+                if base_source is not None:
+                    for i, t in enumerate(tokens):
+                        if t in (">", ">>"):
+                            if i + 1 < len(tokens):
+                                seg_actions.append((
+                                    "git_show_redirect",
+                                    (base_source, tokens[i + 1]),
+                                ))
+                            break
+
+            # Redirects within this segment. Dedup against this
+            # segment's git_show_redirect to avoid double-counting
+            # the staging line's own `>` redirect as an overwrite.
+            seg_git_show_dests = {
+                tgt[1] for a, tgt in seg_actions if a == "git_show_redirect"
+            }
+            for i, t in enumerate(tokens):
+                if t in (">", ">>"):
+                    if i + 1 < len(tokens):
+                        dest = tokens[i + 1]
+                        if dest not in seg_git_show_dests:
+                            seg_actions.append(("redirect_write", dest))
+
+            actions.extend(seg_actions)
+
+        return actions
+
     def test_workflow_python_file_execution_uses_only_allowlisted_paths(
         self, workflow_text
     ):
-        """`python3 <path>.py` invocations against PR-controlled paths
+        """`python <path>.py` invocations against PR-controlled paths
         execute PR-head Python file bytes — invalidating the dismissal.
         Inline scripts (`python3 -c '...'`) and module invocations
-        (`python3 -m foo`) don't capture .py tokens, so they're
-        naturally excluded.
+        (`python3 -m foo`) don't have a `.py` script positional, so
+        they're naturally excluded by the classifier.
 
-        R2 fix for PR #436: replaced blanket `/tmp/` whitelist with
-        an EXPLICIT allowlist (`ALLOWED_TMP_PYTHON_EXECUTIONS`). The
-        prior whitelist let any `python3 /tmp/<anything>.py` pass, so a
-        future edit doing `cp diff_diff/foo.py /tmp/ && python3
-        /tmp/foo.py` would have passed. Now any new /tmp execution must
-        be explicitly added to the allowlist AND have a corresponding
-        BASE_SHA staging command (verified by the sibling test below)."""
-        import re
-
+        R2 fix: explicit ALLOWED_TMP_PYTHON_EXECUTIONS allowlist.
+        R5 fix: token-boundary handling so `.py.bak` doesn't match.
+        R6 fix: replaced regex matching with shlex-based shell
+        tokenization via `_classify_shell_line`. Now handles quoted
+        paths (`python3 "diff_diff/evil.py"`) which the prior regex
+        captured with quotes intact, evading the unquoted allowlist."""
         run_contents = self._extract_all_run_content(workflow_text)
         assert run_contents, "No `run:` content extracted"
 
-        # Use `(?=[\s;|&]|$)` token-boundary lookahead instead of `\b`
-        # after `.py`. The weaker `\b` matches between `y` and a
-        # following `.` (non-word), so `python3 /tmp/foo.py.bak`
-        # would match the `.py` prefix and the captured path would
-        # be `/tmp/foo.py` (in allowlist) — letting an attacker run
-        # `.py.bak`/`.py~`/`.pyx`/etc. under an allowlisted prefix.
-        # R5 fix for PR #436.
-        py_exec_re = re.compile(
-            r"\bpython3?\s+(\S+\.py)(?=[\s;|&]|$)",
-        )
-
         violations = []
         for label, content in run_contents:
-            for path in py_exec_re.findall(content):
-                if path in self.ALLOWED_TMP_PYTHON_EXECUTIONS:
-                    continue
-                snippet = next(
-                    (
-                        line
-                        for line in content.splitlines()
-                        if path in line and "python" in line
-                    ),
-                    content.strip()[:120],
-                ).strip()
-                violations.append(
-                    f"{label}: non-allowlisted python file execution "
-                    f"{path!r} in: {snippet}"
-                )
+            for line in content.splitlines():
+                for action, target in self._classify_shell_line(line):
+                    if action != "python_exec":
+                        continue
+                    if target in self.ALLOWED_TMP_PYTHON_EXECUTIONS:
+                        continue
+                    violations.append(
+                        f"{label}: non-allowlisted python file "
+                        f"execution {target!r} in: {line.strip()}"
+                    )
         assert not violations, (
             "CodeQL #14 dismissal invalidated by python file execution "
             "of non-allowlisted paths. Either use a path in "
@@ -2909,113 +3054,77 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         self, workflow_text
     ):
         """Each entry in ALLOWED_TMP_PYTHON_EXECUTIONS must correspond
-        to an EXACT `git show "${BASE_SHA}":<source> > <tmp-path>`
-        staging command IN THE BUILD-PROMPT STEP'S BODY (not anywhere
-        in the workflow), AND the python execution of <tmp-path> must
-        come AFTER the staging line, AND no intervening `cp`, `mv`,
-        `tee`, or output redirect may overwrite <tmp-path> between
-        them. This is what makes /tmp execution safe: the file content
-        comes from BASE (trusted), not PR head, and stays that way
-        until execution.
+        to a `git show "${BASE_SHA}":<source> > <tmp-path>` staging
+        command IN THE BUILD-PROMPT STEP'S BODY, AND the python
+        execution of <tmp-path> must come AFTER the staging line, AND
+        no intervening write (cp/mv/tee/ln/redirect) may overwrite
+        <tmp-path> between them.
 
-        R2 fix for PR #436: introduced as a separate assertion.
-        R3 fix: pinned exact staging command (regex), not independent
-        substrings.
-        R4 fix: scope to the build-prompt step's body (was searching
-        raw workflow_text — a comment or echo of the literal command
-        could satisfy the assertion). Add ordering check (python exec
-        after staging) and overwrite check (no cp/mv/tee/redirect to
-        tmp_path between staging and execution)."""
-        import re
-
+        R2 fix: introduced.
+        R3 fix: exact staging command, not independent substrings.
+        R4 fix: scope to build-prompt step body, ordering, overwrite.
+        R5 fix: token-boundary handling.
+        R6 fix: replaced regex matching with shlex-based classifier
+        (`_classify_shell_line`). Now handles quoted paths, option-
+        bearing cp/mv (`cp -f src dst`), quoted redirect destinations
+        (`> "/tmp/foo"`), and ln-symlinks. Each non-comment line in
+        the step body is tokenized once; actions are extracted by
+        argv position rather than regex substring."""
         build_block = self._extract_step_block(
             workflow_text, self.BUILD_PROMPT_STEP_NAME
         )
         assert build_block is not None, (
             f"Could not find `- name: {self.BUILD_PROMPT_STEP_NAME}` "
-            f"step block. The build-prompt step is where /tmp staging "
-            f"and python execution happen; without it the dismissal "
-            f"premise is moot."
+            f"step block."
         )
-
-        # Strip shell comment lines so a `# git show ...` comment
-        # cannot satisfy the staging assertion. We don't strip
-        # mid-line `#` because that would corrupt URLs / regex
-        # patterns; lines starting with `#` (after whitespace) are
-        # the typical shell-comment form.
         body_lines = build_block.splitlines()
-        non_comment_lines = [
-            (i, line) for i, line in enumerate(body_lines)
-            if not line.lstrip().startswith("#")
-        ]
+
+        # Pre-classify each line once. Skip comment-only lines.
+        line_actions = []  # list of (line_idx, [actions])
+        for i, line in enumerate(body_lines):
+            if line.lstrip().startswith("#"):
+                continue
+            actions = self._classify_shell_line(line)
+            if actions:
+                line_actions.append((i, actions))
 
         for tmp_path, base_source in self.ALLOWED_TMP_PYTHON_EXECUTIONS.items():
-            # Pattern A: the exact BASE_SHA staging command, anchored
-            # to line-start (after optional indent and optional shell
-            # control prefix like `if`/`then`/`&&`/`||`). The anchor
-            # prevents an `echo "git show ${BASE_SHA}:..."` line from
-            # satisfying the staging check by accident — an echo line
-            # starts with `echo`, not `git`, so it won't match.
-            # `[ \t]+` (NOT `\s+`) so the regex can't span newlines.
-            staging_re = re.compile(
-                r'^[ \t]*(?:(?:if|then|else|elif|do|&&|\|\|)[ \t]+)?'
-                r'git[ \t]+show[ \t]+"\$\{BASE_SHA\}":'
-                + re.escape(base_source)
-                + r'[ \t]+>[ \t]+'
-                + re.escape(tmp_path)
-                + r'(?=[\s;|&]|$)',
-            )
-            # Pattern B: python execution of this tmp_path. Use
-            # `(?=[\s;|&]|$)` token-boundary lookahead instead of `\b`
-            # for the same reason as the sibling test above
-            # (`\bfoo.py\b` matches as a prefix of `foo.py.bak`).
-            # R5 fix for PR #436.
-            py_exec_re = re.compile(
-                r'\bpython3?[ \t]+'
-                + re.escape(tmp_path)
-                + r'(?=[\s;|&]|$)',
-            )
-            # Pattern C: any non-staging write to tmp_path that would
-            # overwrite the BASE-staged content. Matches:
-            #   > <path>     (truncate redirect)
-            #   >> <path>    (append redirect)
-            #   cp <src> <path>
-            #   mv <src> <path>
-            #   tee [-a] <path>
-            #   ln [-s/-sf/-f] <src> <path>   (symlink, R5 preempt)
-            # We exclude lines that match pattern A (the staging line
-            # itself uses `>`, which would otherwise self-flag).
-            # Token-boundary lookahead `(?=[\s;|&]|$)` (not `\b`)
-            # prevents `> /tmp/foo.py.bak` from matching as `> /tmp/foo.py`.
-            tail = r'(?=[\s;|&]|$)'
-            overwrite_re = re.compile(
-                r'(?:'
-                r'>>?[ \t]*' + re.escape(tmp_path) + tail
-                + r'|cp[ \t]+\S+[ \t]+' + re.escape(tmp_path) + tail
-                + r'|mv[ \t]+\S+[ \t]+' + re.escape(tmp_path) + tail
-                + r'|tee[ \t]+(?:-[a-zA-Z]+[ \t]+)?' + re.escape(tmp_path) + tail
-                + r'|ln[ \t]+(?:-[a-zA-Z]+[ \t]+)?\S+[ \t]+' + re.escape(tmp_path) + tail
-                + r')',
-            )
-
             staging_indices = []
             py_exec_indices = []
             overwrite_indices = []
-            for i, line in non_comment_lines:
-                is_staging = bool(staging_re.search(line))
-                if is_staging:
+            for i, actions in line_actions:
+                line_writes_path = False
+                line_stages_path = False
+                for action, target in actions:
+                    if action == "git_show_redirect":
+                        src, dest = target
+                        if src == base_source and dest == tmp_path:
+                            line_stages_path = True
+                    elif action == "python_exec":
+                        if target == tmp_path:
+                            py_exec_indices.append(i)
+                    elif action in (
+                        "cp_dest", "mv_dest", "tee_dest",
+                        "ln_dest", "redirect_write",
+                    ):
+                        if target == tmp_path:
+                            line_writes_path = True
+                if line_stages_path:
                     staging_indices.append(i)
-                if py_exec_re.search(line):
-                    py_exec_indices.append(i)
-                if overwrite_re.search(line) and not is_staging:
+                # Only record as overwrite if it writes to tmp_path AND
+                # didn't stage to it (the staging line's own `>`
+                # redirect would otherwise self-flag).
+                if line_writes_path and not line_stages_path:
                     overwrite_indices.append(i)
 
             assert staging_indices, (
                 f"ALLOWED_TMP_PYTHON_EXECUTIONS[{tmp_path!r}] = "
-                f"{base_source!r}: expected an EXACT staging command in "
-                f"the `{self.BUILD_PROMPT_STEP_NAME}` step:\n  "
+                f"{base_source!r}: expected a staging command in the "
+                f"`{self.BUILD_PROMPT_STEP_NAME}` step:\n  "
                 f'git show "${{BASE_SHA}}":{base_source} > {tmp_path}\n'
-                f"Found no matching non-comment line in step body."
+                f"No line in the step body classifies as "
+                f"`git_show_redirect` with src={base_source!r} and "
+                f"dest={tmp_path!r}."
             )
             assert py_exec_indices, (
                 f"ALLOWED_TMP_PYTHON_EXECUTIONS[{tmp_path!r}] declared "
@@ -3026,10 +3135,10 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             for py_idx in py_exec_indices:
                 prior_stagings = [s for s in staging_indices if s < py_idx]
                 assert prior_stagings, (
-                    f"python execution at line {py_idx} of build-prompt "
-                    f"step body has NO prior BASE_SHA staging command "
-                    f"for {tmp_path!r}. Staging must precede execution "
-                    f"so the executed file content is BASE-anchored."
+                    f"python execution at body line {py_idx} has NO "
+                    f"prior BASE_SHA staging command for {tmp_path!r}. "
+                    f"Staging must precede execution so the executed "
+                    f"file content is BASE-anchored."
                 )
                 latest_staging = max(prior_stagings)
                 intervening = [
@@ -3041,12 +3150,12 @@ class TestWorkflowDoesNotExecutePRHeadCode:
                     snippets = [body_lines[w].strip() for w in intervening]
                     raise AssertionError(
                         f"{tmp_path!r} is overwritten between BASE_SHA "
-                        f"staging (build-prompt body line {latest_staging}) "
-                        f"and python execution (line {py_idx}) by:\n"
+                        f"staging (body line {latest_staging}) and "
+                        f"python execution (line {py_idx}) by:\n"
                         + "\n".join(snippets)
-                        + f"\nThis would replace the trusted BASE-staged "
-                        f"content with arbitrary bytes before execution, "
-                        f"invalidating the dismissal."
+                        + f"\nThis would replace the trusted BASE-"
+                        f"staged content with arbitrary bytes before "
+                        f"execution, invalidating the dismissal."
                     )
 
     def test_workflow_dismissal_comment_block_present(self, workflow_text):
@@ -3155,86 +3264,119 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             "Found checkout block:\n" + checkout_block
         )
 
-    def test_python_exec_regex_rejects_suffixed_paths(self):
-        """Regression: `python3 /tmp/notebook_md_extract.py.bak` must
-        NOT be treated as the allowlisted `/tmp/notebook_md_extract.py`.
-        Likewise for `~`, `.swp`, `.pyc` and other suffixes. R5 fix
-        for PR #436: prior `\\b` boundary matched between `y` and `.`
-        (non-word char), letting suffixed paths bypass the allowlist."""
-        import re
+    def test_classify_python_exec_handles_quotes_flags_suffixes(self):
+        """Regression for the python_exec classification across
+        bypass forms previous regex versions missed:
+        - quoted paths (R6): `python3 "foo.py"` → exact path
+        - flags before script: `python3 -u foo.py` (-u, -O, etc.)
+        - -c / -m don't yield python_exec (no .py script positional)
+        - suffixed paths (R5): `foo.py.bak` not classified as `foo.py`
+        """
+        cls = self._classify_shell_line
 
-        py_exec_re = re.compile(
-            r"\bpython3?\s+(\S+\.py)(?=[\s;|&]|$)",
+        def py_targets(line):
+            return [tgt for a, tgt in cls(line) if a == "python_exec"]
+
+        # Legit forms: exact path captured
+        assert py_targets("python3 /tmp/foo.py") == ["/tmp/foo.py"]
+        assert py_targets('python3 "diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        assert py_targets("python3 'diff_diff/evil.py'") == ["diff_diff/evil.py"]
+        assert py_targets("python3 -u /tmp/foo.py --input bar") == ["/tmp/foo.py"]
+        assert py_targets("python3 /tmp/foo.py --input bar") == ["/tmp/foo.py"]
+
+        # Inline scripts and modules: no .py positional, not classified
+        assert py_targets('python3 -c \'import os; print(os.environ)\'') == []
+        assert py_targets("python3 -m unittest discover") == []
+
+        # Suffix bypasses (R5): different files, not the allowlisted prefix.
+        # Each is captured as the EXACT path; allowlist test then
+        # rejects them (none are in ALLOWED_TMP_PYTHON_EXECUTIONS).
+        # Stricter than the regex version which gated on `.py` suffix
+        # — `python3 /tmp/foo.pyc` is a legitimate python execution
+        # of a compiled file and should not silently slip through.
+        assert py_targets("python3 /tmp/foo.py.bak") == ["/tmp/foo.py.bak"]
+        assert py_targets("python3 /tmp/foo.py~") == ["/tmp/foo.py~"]
+        assert py_targets("python3 /tmp/foo.pyc") == ["/tmp/foo.pyc"]
+
+        # Bash control prefixes (if/&&/etc.) are stripped
+        assert py_targets("if python3 /tmp/foo.py; then echo ok; fi") == ["/tmp/foo.py"]
+        assert py_targets("&& python3 /tmp/foo.py") == ["/tmp/foo.py"]
+
+    def test_classify_overwrite_handles_quotes_flags_lns(self):
+        """Regression for write-action classification: cp/mv with
+        flags (`cp -f src dst`), tee/ln variants, quoted destinations
+        (`> "/tmp/foo.py"`). All must produce the appropriate
+        action with the destination as bare path token."""
+        cls = self._classify_shell_line
+
+        def write_dests(line, action_filter=None):
+            return [
+                tgt for a, tgt in cls(line)
+                if (action_filter is None or a == action_filter)
+                and a in (
+                    "cp_dest", "mv_dest", "tee_dest",
+                    "ln_dest", "redirect_write",
+                )
+            ]
+
+        # Quoted redirect destinations
+        assert write_dests('echo x > "/tmp/foo.py"') == ["/tmp/foo.py"]
+        assert write_dests("echo x >> '/tmp/foo.py'") == ["/tmp/foo.py"]
+
+        # cp/mv with flags
+        assert write_dests("cp -f src.py /tmp/foo.py", "cp_dest") == ["/tmp/foo.py"]
+        assert write_dests("cp -fv src.py /tmp/foo.py", "cp_dest") == ["/tmp/foo.py"]
+        assert write_dests("mv -f src.py /tmp/foo.py", "mv_dest") == ["/tmp/foo.py"]
+        assert write_dests('cp -f "src.py" "/tmp/foo.py"', "cp_dest") == ["/tmp/foo.py"]
+
+        # tee variants
+        assert write_dests("echo x | tee /tmp/foo.py", "tee_dest") == ["/tmp/foo.py"]
+        assert write_dests("echo x | tee -a /tmp/foo.py", "tee_dest") == ["/tmp/foo.py"]
+
+        # ln variants
+        assert write_dests("ln -sf evil.py /tmp/foo.py", "ln_dest") == ["/tmp/foo.py"]
+        assert write_dests("ln -s evil.py /tmp/foo.py", "ln_dest") == ["/tmp/foo.py"]
+        assert write_dests("ln evil.py /tmp/foo.py", "ln_dest") == ["/tmp/foo.py"]
+
+    def test_classify_git_show_redirect(self):
+        """The BASE_SHA staging command must produce a
+        git_show_redirect action with (source, dest) tuple, matched
+        regardless of leading `if`, quotes around the BASE_SHA target,
+        or trailing `2>/dev/null` style stderr redirects."""
+        cls = self._classify_shell_line
+
+        def staging(line):
+            return [
+                tgt for a, tgt in cls(line) if a == "git_show_redirect"
+            ]
+
+        # Real workflow form
+        assert staging(
+            'if git show "${BASE_SHA}":tools/notebook_md_extract.py > /tmp/notebook_md_extract.py 2>/dev/null; then'
+        ) == [("tools/notebook_md_extract.py", "/tmp/notebook_md_extract.py")]
+        # Bare form (no `if`)
+        assert staging(
+            'git show "${BASE_SHA}":tools/foo.py > /tmp/foo.py'
+        ) == [("tools/foo.py", "/tmp/foo.py")]
+        # Without curly braces ($BASE_SHA)
+        assert staging(
+            'git show "$BASE_SHA":tools/foo.py > /tmp/foo.py'
+        ) == [("tools/foo.py", "/tmp/foo.py")]
+        # Echo of literal staging command: NOT classified as git_show
+        # (cmd is `echo`, not `git`)
+        assert staging(
+            'echo \'git show "${BASE_SHA}":tools/foo.py > /tmp/foo.py\''
+        ) == []
+
+        # Same line should also produce a redirect_write — but the
+        # classifier de-duplicates so a git_show_redirect line does
+        # NOT also produce a generic redirect_write for the same dest.
+        actions = cls('git show "${BASE_SHA}":tools/foo.py > /tmp/foo.py')
+        redirect_writes = [tgt for a, tgt in actions if a == "redirect_write"]
+        assert redirect_writes == [], (
+            "git_show_redirect should suppress the generic "
+            "redirect_write to the same destination"
         )
-        # Should match (legit forms): captures the exact path.
-        for line, expected in [
-            ("python3 /tmp/notebook_md_extract.py", "/tmp/notebook_md_extract.py"),
-            ("python3 /tmp/notebook_md_extract.py --input foo", "/tmp/notebook_md_extract.py"),
-            ("python3 /tmp/notebook_md_extract.py;", "/tmp/notebook_md_extract.py"),
-            ("python3 /tmp/notebook_md_extract.py | tee log", "/tmp/notebook_md_extract.py"),
-            ("python /tmp/foo.py && echo done", "/tmp/foo.py"),
-        ]:
-            matches = py_exec_re.findall(line)
-            assert matches == [expected], (
-                f"Expected {expected!r} captured from {line!r}, got {matches!r}"
-            )
-        # Should NOT match (suffix bypasses): regex must reject these.
-        for line in [
-            "python3 /tmp/notebook_md_extract.py.bak",
-            "python3 /tmp/notebook_md_extract.py~",
-            "python3 /tmp/notebook_md_extract.pyc",
-            "python3 /tmp/notebook_md_extract.pyx",
-            "python3 /tmp/foo.py.evil",
-        ]:
-            matches = py_exec_re.findall(line)
-            assert matches == [], (
-                f"Suffix-bypass {line!r} must NOT match the allowlist regex; "
-                f"got {matches!r}. R5 dismissal-test fix would regress."
-            )
-
-    def test_overwrite_regex_rejects_suffixed_paths(self):
-        """Regression: an overwrite to `/tmp/foo.py.bak` must NOT be
-        treated as an overwrite to the allowlisted `/tmp/foo.py`. Used
-        to prevent the staging-vs-execution ordering check from being
-        confused by suffix-only writes (which do not actually corrupt
-        the BASE-staged file)."""
-        import re
-
-        tmp_path = "/tmp/notebook_md_extract.py"
-        tail = r"(?=[\s;|&]|$)"
-        overwrite_re = re.compile(
-            r"(?:"
-            r">>?[ \t]*" + re.escape(tmp_path) + tail
-            + r"|cp[ \t]+\S+[ \t]+" + re.escape(tmp_path) + tail
-            + r"|mv[ \t]+\S+[ \t]+" + re.escape(tmp_path) + tail
-            + r"|tee[ \t]+(?:-[a-zA-Z]+[ \t]+)?" + re.escape(tmp_path) + tail
-            + r"|ln[ \t]+(?:-[a-zA-Z]+[ \t]+)?\S+[ \t]+" + re.escape(tmp_path) + tail
-            + r")",
-        )
-        # Should match (real overwrites of the allowlisted path):
-        for line in [
-            "echo x > /tmp/notebook_md_extract.py",
-            "cat foo >> /tmp/notebook_md_extract.py",
-            "cp src.py /tmp/notebook_md_extract.py",
-            "mv src.py /tmp/notebook_md_extract.py",
-            "echo x | tee /tmp/notebook_md_extract.py",
-            "echo x | tee -a /tmp/notebook_md_extract.py",
-            "ln -sf evil.py /tmp/notebook_md_extract.py",
-            "ln -s evil.py /tmp/notebook_md_extract.py",
-        ]:
-            assert overwrite_re.search(line), (
-                f"Real overwrite {line!r} must match the overwrite regex"
-            )
-        # Should NOT match (suffix variants — different files):
-        for line in [
-            "echo x > /tmp/notebook_md_extract.py.bak",
-            "cp src.py /tmp/notebook_md_extract.py~",
-            "ln -sf evil.py /tmp/notebook_md_extract.pyc",
-        ]:
-            assert not overwrite_re.search(line), (
-                f"Suffix-only write {line!r} must NOT match the overwrite "
-                f"regex (it does not corrupt the allowlisted exact path)"
-            )
 
     def test_workflow_comment_triggers_require_author_association(
         self, workflow_text
