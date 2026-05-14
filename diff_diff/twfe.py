@@ -593,6 +593,7 @@ class TwoWayFixedEffects(DifferenceInDifferences):
             # remapped hc1 under the legacy alias path, not self.vcov_type.
             vcov_type=_fit_vcov_type,
             cluster_name=_twfe_cluster_label,
+            conley_lag_cutoff=(self.conley_lag_cutoff if _fit_vcov_type == "conley" else None),
         )
 
         self.is_fitted_ = True

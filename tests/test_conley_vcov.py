@@ -1403,7 +1403,10 @@ class TestConleyTWFE:
 
     def test_twfe_conley_summary_emits_conley_label(self, panel):
         """Panel result summary must label the variance family as Conley
-        spatial HAC when vcov_type='conley'. Closes Codex P3."""
+        spatial HAC and surface `lag_cutoff` so downstream consumers can tell
+        which Conley variant produced the SEs. Closes Codex P3 and the
+        re-review P1 (Maintainability).
+        """
         from diff_diff import TwoWayFixedEffects
 
         res = TwoWayFixedEffects(
@@ -1414,6 +1417,34 @@ class TestConleyTWFE:
         ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
         summary = res.summary()
         assert "Conley spatial HAC" in summary
+        assert "lag_cutoff=1" in summary
+        # The result dataclass also carries the lag for programmatic access.
+        assert res.conley_lag_cutoff == 1
+
+    def test_twfe_conley_non_numeric_time_fails(self, panel):
+        """TWFE's `_treatment_post = treated * time` design step requires
+        numeric `time`. Non-numeric labels (datetime64, pd.Period, strings)
+        are TWFE-incompatible end-to-end and surface as a clean error before
+        the Conley path runs. Use MultiPeriodDiD if you need non-numeric
+        time labels.
+        """
+        from diff_diff import TwoWayFixedEffects
+
+        df_str = panel.copy()
+        df_str["time_str"] = df_str["time"].map({0: "pre", 1: "post"})
+        with pytest.raises((TypeError, ValueError)):
+            TwoWayFixedEffects(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                df_str,
+                outcome="y",
+                treatment="treated",
+                time="time_str",
+                unit="unit",
+            )
 
     def test_twfe_conley_within_vs_dummy_expansion_equivalence(self, panel):
         """FWL composability: TWFE (within-transform) + Conley should produce

@@ -52,6 +52,7 @@ def _format_vcov_label(
     cluster_name: Optional[str],
     n_clusters: Optional[int],
     n_obs: Optional[int],
+    conley_lag_cutoff: Optional[int] = None,
 ) -> Optional[str]:
     """Compose a human-readable variance-family label for summary output.
 
@@ -77,6 +78,8 @@ def _format_vcov_label(
         # Cross-sectional Conley on direct LinearRegression / compute_robust_vcov,
         # or panel block-decomposed Conley (within-period spatial + within-unit
         # Bartlett serial) on MultiPeriodDiD / TwoWayFixedEffects.
+        if conley_lag_cutoff is not None:
+            return f"Conley spatial HAC (1999), lag_cutoff={conley_lag_cutoff}"
         return "Conley spatial HAC (1999)"
     return None
 
@@ -130,15 +133,17 @@ class DiDResults:
     bootstrap_distribution: Optional[np.ndarray] = field(default=None, repr=False)
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None)
-    # Variance-covariance family: "classical" | "hc1" | "hc2" | "hc2_bm".
-    # Plus cluster_name when cluster-robust. Used by summary() to label the
-    # SE family in the output. vcov_type='conley' is rejected at fit-time
-    # for all panel estimators (DifferenceInDifferences/MultiPeriodDiD/TWFE)
-    # in Phase 1; the supported Conley path is direct LinearRegression /
-    # compute_robust_vcov on a cross-sectional design, which uses its own
-    # result class.
+    # Variance-covariance family: "classical" | "hc1" | "hc2" | "hc2_bm" |
+    # "conley". Plus cluster_name when cluster-robust. Used by summary() to
+    # label the SE family in the output. For vcov_type='conley' on
+    # MultiPeriodDiD / TwoWayFixedEffects, `conley_lag_cutoff` carries the
+    # within-unit Bartlett max lag (matches the constructor arg). On
+    # DifferenceInDifferences, vcov_type='conley' is rejected at fit-time
+    # (DiD.fit() has no unit column declaration); see MultiPeriodDiD /
+    # TwoWayFixedEffects for the panel block-decomposed path.
     vcov_type: Optional[str] = field(default=None)
     cluster_name: Optional[str] = field(default=None)
+    conley_lag_cutoff: Optional[int] = field(default=None)
 
     def __repr__(self) -> str:
         """Concise string representation."""
@@ -220,6 +225,7 @@ class DiDResults:
                 cluster_name=self.cluster_name,
                 n_clusters=self.n_clusters,
                 n_obs=self.n_obs,
+                conley_lag_cutoff=self.conley_lag_cutoff,
             )
             if label is not None:
                 lines.append(f"{'Variance:':<25} {label:>40}")
@@ -453,11 +459,12 @@ class MultiPeriodDiDResults:
     n_bootstrap: Optional[int] = field(default=None)
     n_clusters: Optional[int] = field(default=None)
     # Variance-covariance family and cluster column for summary() labeling.
-    # vcov_type='conley' is rejected at fit-time for MultiPeriodDiD (Phase 1
-    # supports cross-sectional Conley only via direct compute_robust_vcov);
-    # see _format_vcov_label.
+    # vcov_type='conley' on MultiPeriodDiD uses the panel block-decomposed
+    # form; `conley_lag_cutoff` carries the within-unit Bartlett max lag
+    # (matches the constructor arg). See _format_vcov_label.
     vcov_type: Optional[str] = field(default=None)
     cluster_name: Optional[str] = field(default=None)
+    conley_lag_cutoff: Optional[int] = field(default=None)
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property
@@ -560,6 +567,7 @@ class MultiPeriodDiDResults:
                 cluster_name=self.cluster_name,
                 n_clusters=self.n_clusters,
                 n_obs=self.n_obs,
+                conley_lag_cutoff=self.conley_lag_cutoff,
             )
             if label is not None:
                 lines.append(f"{'Variance:':<25} {label:>50}")

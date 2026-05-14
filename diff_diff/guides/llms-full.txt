@@ -1924,24 +1924,29 @@ reg = LinearRegression(
 ).fit(X, y)
 se = np.sqrt(np.diag(reg.vcov_))
 
-# Panel design: TWFE with within-unit Bartlett serial HAC (lag = 2 periods).
-# `time` must be a panel-period index column with one row per (unit, period).
-# diff-diff internally normalizes the time labels to dense panel-period codes
-# 0..T-1, so any orderable encoding works — int years (2020, 2021, ...),
-# YYYYMM (202012, 202101, ...), datetime64, pd.Period, strings.
+# Panel design: TWFE with within-unit Bartlett serial HAC.
+# TWFE's `time` column is intrinsically a binary post indicator
+# (treatment * time interaction); only numeric encodings are supported on
+# this surface. `conley_lag_cutoff=1` includes the cross-period pair under
+# the Bartlett taper. For multi-period panels, use MultiPeriodDiD.
 res = TwoWayFixedEffects(
     vcov_type="conley",
     conley_coords=("lat", "lon"),        # column names on `data`
     conley_cutoff_km=500.0,
-    conley_lag_cutoff=2,                 # within-unit Bartlett up to 2 panel periods
-).fit(data, outcome="y", treatment="treated", time="period", unit="unit_id")
+    conley_lag_cutoff=1,                 # within-unit Bartlett, lag 1 panel period
+).fit(data, outcome="y", treatment="treated", time="post", unit="unit_id")
 
-# Panel design: MultiPeriodDiD with cross-sectional within-period only (lag=0)
+# Panel design: MultiPeriodDiD with multi-period time.
+# MultiPeriodDiD builds period dummies (NOT a treated * time product), so
+# `time` can be any orderable encoding — int years (2020, 2021, ...),
+# YYYYMM (202012, 202101, ...), datetime64, pd.Period, strings.
+# `_compute_conley_vcov` normalizes time to dense codes 0..T-1 internally,
+# so `conley_lag_cutoff` always counts panel periods regardless of label.
 mp_res = MultiPeriodDiD(
     vcov_type="conley",
     conley_coords=("lat", "lon"),
     conley_cutoff_km=200.0,
-    conley_lag_cutoff=0,                 # spatial-within-period only
+    conley_lag_cutoff=2,                 # within-unit Bartlett up to 2 panel periods
 ).fit(data, outcome="y", treatment="treated", time="period",
       post_periods=[2, 3], unit="unit_id")
 ```
@@ -1949,14 +1954,17 @@ mp_res = MultiPeriodDiD(
 **Note on `conley_lag_cutoff` semantics:** the lag is counted in **panel
 periods** (number of distinct sorted values in the `time` column), NOT in
 raw-label differences. Internally, time labels are normalized to dense codes
-`0..T-1` via `np.unique(return_inverse=True)`. For example, `time` values
-`(2020, 2021, 2022)` and `(202012, 202101, 202102)` both produce the same
-codes `(0, 1, 2)` and the same lag matrix. **Deviation from R `conleyreg`:**
-R uses raw `time` values directly in the lag computation, which silently
-mishandles non-dense encodings (`time = 202012, 202101` and `lag_cutoff=1`
-under R produces 0 weight because the raw difference is 89). diff-diff is
-the more robust default; for bit-exact R parity, pass `time` as a dense
-integer index.
+`0..T-1` via `np.unique(return_inverse=True)`. For example, MultiPeriodDiD
+with `time` values `(2020, 2021, 2022)` and `(202012, 202101, 202102)` both
+produce the same codes `(0, 1, 2)` and the same lag matrix. **TWFE caveat:**
+the time-label normalization runs inside `_compute_conley_vcov`, but TWFE's
+own design step `_treatment_post = treated * time` requires numeric `time`;
+non-numeric labels (datetime64, pd.Period, strings) are TWFE-incompatible
+end-to-end. Use MultiPeriodDiD if you need datetime/Period/string time
+labels. **Deviation from R `conleyreg`:** R uses raw `time` values directly
+in the lag computation, which silently mishandles non-dense encodings.
+diff-diff is the more robust default; for bit-exact R parity, pass `time`
+as a dense integer index.
 
 **Variance estimator — cross-sectional:**
 

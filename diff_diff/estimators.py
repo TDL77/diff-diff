@@ -601,6 +601,7 @@ class DifferenceInDifferences:
             # stored `self.vcov_type`.
             vcov_type=_fit_vcov_type,
             cluster_name=self.cluster,
+            conley_lag_cutoff=(self.conley_lag_cutoff if _fit_vcov_type == "conley" else None),
         )
 
         self._coefficients = coefficients
@@ -1416,6 +1417,14 @@ class MultiPeriodDiD(DifferenceInDifferences):
                     "cluster-robust without spatial HAC, or drop survey_design= "
                     "for panel Conley."
                 )
+            if self.inference == "wild_bootstrap":
+                raise NotImplementedError(
+                    "MultiPeriodDiD(vcov_type='conley', "
+                    "inference='wild_bootstrap') is not supported: wild "
+                    "bootstrap is a separate inference path that does not "
+                    "consume the analytical Conley sandwich. Use "
+                    "inference='analytical' for Conley SEs."
+                )
         # Pre-compute non_ref_periods (needed for absorb demeaning)
         non_ref_periods = [p for p in all_periods if p != reference_period]
 
@@ -1878,6 +1887,7 @@ class MultiPeriodDiD(DifferenceInDifferences):
             n_clusters=(
                 len(np.unique(effective_cluster_ids)) if effective_cluster_ids is not None else None
             ),
+            conley_lag_cutoff=(self.conley_lag_cutoff if _fit_vcov_type == "conley" else None),
         )
 
         self._coefficients = coefficients
