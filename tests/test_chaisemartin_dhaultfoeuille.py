@@ -9998,12 +9998,20 @@ class TestByPathSurveyDesignAnalytical:
             for vals in entry["horizons"].values():
                 if vals["n_obs"] > 0 and np.isfinite(vals["se"]) and np.isfinite(vals["effect"]):
                     exp_t, exp_p, exp_ci = safe_inference(vals["effect"], vals["se"], df=final_df)
-                    matches = vals["t_stat"] == exp_t or (
+                    t_matches = vals["t_stat"] == exp_t or (
                         np.isnan(vals["t_stat"]) and np.isnan(exp_t)
                     )
-                    assert matches, (
-                        "Per-path t_stat does not match safe_inference at the "
-                        f"final df_survey={final_df} — refresh did not propagate"
+                    p_matches = vals["p_value"] == exp_p or (
+                        np.isnan(vals["p_value"]) and np.isnan(exp_p)
+                    )
+                    ci_matches = vals["conf_int"] == exp_ci or all(
+                        np.isnan(a) == np.isnan(b)
+                        for a, b in zip(vals["conf_int"], exp_ci, strict=True)
+                    )
+                    assert t_matches and p_matches and ci_matches, (
+                        "Per-path inference fields do not match safe_inference at "
+                        f"final df_survey={final_df} — refresh did not propagate "
+                        "(t/p/conf_int must update jointly per safe_inference contract)"
                     )
 
     @pytest.mark.slow
@@ -10052,8 +10060,12 @@ class TestByPathSurveyDesignAnalytical:
                 L_max=3,
                 survey_design=sd,
             )
-        # Sanity-check: placebos for at least one requested path are populated.
+        # Both requested paths must be present in the placebo surface —
+        # a regression that silently drops one requested path would slip
+        # through an "at least one finite entry" check.
         assert res.path_placebo_event_study is not None
+        assert (0, 1, 1, 1) in res.path_placebo_event_study
+        assert (0, 1, 0, 0) in res.path_placebo_event_study
         any_finite_placebo = False
         for entry in res.path_placebo_event_study.values():
             for vals in entry.values():
