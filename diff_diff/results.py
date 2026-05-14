@@ -135,12 +135,11 @@ class DiDResults:
     survey_metadata: Optional[Any] = field(default=None)
     # Variance-covariance family: "classical" | "hc1" | "hc2" | "hc2_bm" |
     # "conley". Plus cluster_name when cluster-robust. Used by summary() to
-    # label the SE family in the output. For vcov_type='conley' on
-    # MultiPeriodDiD / TwoWayFixedEffects, `conley_lag_cutoff` carries the
-    # within-unit Bartlett max lag (matches the constructor arg). On
-    # DifferenceInDifferences, vcov_type='conley' is rejected at fit-time
-    # (DiD.fit() has no unit column declaration); see MultiPeriodDiD /
-    # TwoWayFixedEffects for the panel block-decomposed path.
+    # label the SE family in the output. For vcov_type='conley' on the panel
+    # estimators (DifferenceInDifferences / MultiPeriodDiD / TwoWayFixedEffects),
+    # `conley_lag_cutoff` carries the within-unit Bartlett max lag (matches
+    # the constructor arg). DiD requires `unit=<col>` as a fit-time kwarg
+    # when vcov_type='conley' (Wave A #118).
     vcov_type: Optional[str] = field(default=None)
     cluster_name: Optional[str] = field(default=None)
     conley_lag_cutoff: Optional[int] = field(default=None)

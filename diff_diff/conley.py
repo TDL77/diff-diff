@@ -28,14 +28,26 @@ Earth radius constant is 6371.01 km (mean radius), matching R
 ``conleyreg::haversine_dist`` (Düsterhöft 2021, CRAN v0.1.9). See
 ``benchmarks/R/README.md`` for the cross-language parity convention.
 
-A sparse k-d-tree fast path for ``n > 20_000`` is a follow-up; the dense
-O(n²) distance matrix is emitted with a ``UserWarning`` for now.
+A sparse k-d-tree fast path auto-activates for the spatial component when
+``n > _CONLEY_SPARSE_N_THRESHOLD`` (5_000), ``conley_metric`` is one of
+``{"haversine", "euclidean"}``, and ``conley_kernel`` is ``"bartlett"``.
+The bartlett-only gate is for boundary correctness — bartlett at
+``u = 1.0`` returns exactly ``0.0``, so pairs at exactly the cutoff
+contribute zero and can be safely dropped by the sparse path. The
+uniform kernel returns ``1.0`` at the cutoff and is methodologically
+incompatible with the chord-projection roundoff in the haversine query;
+it falls back to the dense path. The serial component (within-unit
+Bartlett HAC over time) is always dense regardless of n. The
+``_CONLEY_DENSE_OOM_WARN_N`` constant (20_000) is a separate
+memory-exhaustion warning, retained even when the sparse path activates
+because dense fallback still applies for non-bartlett kernels and for
+callable metrics.
 """
 
 from __future__ import annotations
 
 import warnings
-from typing import Callable, Literal, Optional, Union
+from typing import Callable, Literal, Optional, Union, cast
 
 import numpy as np
 
@@ -58,8 +70,22 @@ ConleyMetric = Union[
 # at many more digits) but matters for the 1e-6 cross-language parity bound.
 _CONLEY_EARTH_RADIUS_KM = 6371.01
 
-# Empirical threshold for warning about dense O(n²) distance matrix memory
-_CONLEY_DENSE_WARN_N = 20_000
+# Empirical threshold above which the dense O(n²) distance matrix is expected
+# to risk OOM on typical commodity workstations (64 GB float64 at n=89_443).
+# Renamed from the original ``_CONLEY_DENSE_WARN_N`` to disambiguate it from
+# ``_CONLEY_SPARSE_N_THRESHOLD``: this constant is about memory exhaustion;
+# the sparse-path threshold is about compute. The two are independent because
+# the sparse fast path requires ``conley_kernel='bartlett'`` and a non-callable
+# metric — callable metrics and uniform kernels still take the dense path
+# at any n.
+_CONLEY_DENSE_OOM_WARN_N = 20_000
+
+# Total-n threshold above which the sparse k-d-tree fast path auto-activates
+# for the spatial Bartlett meat. Subject to two additional gates: the metric
+# must be ``"haversine"`` or ``"euclidean"`` (not callable), and the kernel
+# must be ``"bartlett"`` (not ``"uniform"``). Crossed in either direction,
+# the dense path is used regardless of n.
+_CONLEY_SPARSE_N_THRESHOLD = 5_000
 
 
 def _haversine_km(
@@ -88,11 +114,69 @@ def _haversine_km(
     return _CONLEY_EARTH_RADIUS_KM * 2.0 * np.arcsin(np.sqrt(a))
 
 
+def _validate_callable_metric_result(result: object, n: int) -> np.ndarray:
+    """Validate the output of a user-supplied callable ``conley_metric``.
+
+    A user-supplied distance callable must return an ``(n, n)`` matrix of
+    finite, non-negative, symmetric values; otherwise downstream code
+    produces opaque BLAS errors or silently-wrong vcov estimates. This
+    helper performs all five checks at the boundary and produces a
+    targeted :class:`ValueError` for each failure.
+
+    Returns
+    -------
+    arr : ndarray of shape (n, n), float64
+        The validated distance matrix, ready for kernel evaluation.
+
+    Raises
+    ------
+    ValueError
+        Result cannot cast to ``float64``; shape is not ``(n, n)``;
+        contains NaN/inf; contains negative entries; is not symmetric
+        within ``atol=1e-10``.
+    """
+    try:
+        arr = np.asarray(result, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "conley_metric callable returned a value that cannot be cast to "
+            f"a float64 array: {exc}."
+        ) from exc
+    if arr.shape != (n, n):
+        raise ValueError(
+            "conley_metric callable must return a (n, n) distance matrix; "
+            f"got shape {arr.shape}, expected ({n}, {n})."
+        )
+    if not np.isfinite(arr).all():
+        raise ValueError(
+            "conley_metric callable returned non-finite entries (NaN or inf); "
+            "all pairwise distances must be finite."
+        )
+    if (arr < 0.0).any():
+        raise ValueError(
+            "conley_metric callable returned negative entries; all pairwise "
+            "distances must be non-negative."
+        )
+    asymmetry = float(np.max(np.abs(arr - arr.T))) if arr.size else 0.0
+    if asymmetry > 1e-10:
+        raise ValueError(
+            "conley_metric callable returned an asymmetric matrix; the "
+            "distance matrix must satisfy d(i, j) = d(j, i). Max |D - D.T| = "
+            f"{asymmetry:.2e}, tolerance 1e-10."
+        )
+    return arr
+
+
 def _pairwise_distance_matrix(coords: np.ndarray, metric: ConleyMetric) -> np.ndarray:
     """Build the dense n×n pairwise distance matrix.
 
     ``metric`` is one of ``"haversine"`` (lat/lon in degrees, distance in km),
     ``"euclidean"`` (any units), or a callable ``f(coords1, coords2) -> n×n``.
+
+    For the callable branch, the result is validated via
+    :func:`_validate_callable_metric_result`: shape ``(n, n)``, finite,
+    non-negative, symmetric within ``atol=1e-10``. Each failure raises
+    :class:`ValueError` naming the violated invariant.
     """
     if metric == "haversine":
         lats = coords[:, 0]
@@ -104,7 +188,7 @@ def _pairwise_distance_matrix(coords: np.ndarray, metric: ConleyMetric) -> np.nd
         diff = coords[:, None, :] - coords[None, :, :]
         return np.sqrt(np.sum(diff * diff, axis=-1))
     if callable(metric):
-        return np.asarray(metric(coords, coords), dtype=np.float64)
+        return _validate_callable_metric_result(metric(coords, coords), coords.shape[0])
     raise ValueError(
         f"conley_metric must be 'haversine', 'euclidean', or callable; got {metric!r}."
     )
@@ -138,6 +222,151 @@ def _uniform_kernel(u: np.ndarray) -> np.ndarray:
     return (np.abs(u) <= 1.0).astype(np.float64)
 
 
+def _compute_spatial_bartlett_meat_sparse(
+    S: np.ndarray,
+    coords: np.ndarray,
+    cutoff: float,
+    metric: str,
+    *,
+    cluster_codes: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Sparse k-d-tree-based spatial Bartlett meat: ``S.T @ K_bartlett @ S``.
+
+    Used by :func:`_compute_conley_vcov` when ``_conley_sparse`` is True or
+    when the auto-toggle fires (n above the threshold, bartlett kernel,
+    non-callable metric). Avoids materializing the full n×n distance matrix
+    by using ``scipy.spatial.cKDTree.query_ball_tree`` to find in-range
+    neighbor pairs and assembling a CSR sparse kernel matrix on top of those.
+
+    Parameters
+    ----------
+    S : (n, k) array
+        Score matrix ``X * residuals[:, None]``.
+    coords : (n, 2) array of float64
+        ``[lat, lon]`` (haversine) or arbitrary 2-D coordinates (euclidean).
+    cutoff : float
+        Conley bandwidth (km for haversine; same units as ``coords`` for
+        euclidean).
+    metric : {"haversine", "euclidean"}
+        Distance metric. Callable metrics fall back to the dense path and
+        are not supported here — the caller is expected to enforce that.
+    cluster_codes : (n,) int array, optional, keyword-only
+        Integer cluster codes (one per row of ``S``). When supplied, the
+        combined kernel ``K_total[i, j] = K_space(d_ij/h) · 1{cluster_i =
+        cluster_j}`` is applied: neighbors are filtered to same-cluster
+        pairs before the kernel evaluation.
+
+    Returns
+    -------
+    meat : (k, k) array
+
+    Notes
+    -----
+    For haversine, lat/lon is projected to a 3-D unit-sphere Cartesian
+    point cloud (``x = cos(lat) cos(lon), y = cos(lat) sin(lon), z = sin(lat)``)
+    so that the kd-tree's euclidean radius query corresponds to a chord
+    distance on the unit sphere. The chord radius is
+    ``2 sin(cutoff_km / (2 R_earth))`` (the chord on the unit sphere
+    matching the great-circle arc of length ``cutoff_km``). A small
+    relative epsilon (``1 + 1e-12``) is added to the query radius to
+    absorb chord-projection roundoff; after the query, the exact
+    great-circle distance is recomputed via :func:`_haversine_km` and
+    the Bartlett kernel is applied. Pairs at exactly the cutoff distance
+    contribute zero to the kernel (bartlett at ``u = 1.0`` is exactly
+    ``0.0``) and are filtered out, which is why the sparse path is
+    bartlett-only — uniform at ``u = 1.0`` returns ``1.0`` and would
+    require querying with a strict superset and applying the closed-
+    interval kernel by hand.
+
+    Numerical tolerance vs the dense path on the same inputs is
+    typically ~1e-12 in absolute terms; the haversine→chord projection
+    introduces sub-eps error that propagates through the matmul.
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.spatial import cKDTree
+
+    n = coords.shape[0]
+    k = S.shape[1]
+
+    if metric == "haversine":
+        lat_r = np.radians(coords[:, 0])
+        lon_r = np.radians(coords[:, 1])
+        xyz = np.column_stack(
+            [
+                np.cos(lat_r) * np.cos(lon_r),
+                np.cos(lat_r) * np.sin(lon_r),
+                np.sin(lat_r),
+            ]
+        )
+        # Chord on the unit sphere matching arc-length cutoff_km.
+        # Multiply by (1 + 1e-12) to absorb chord-projection float roundoff
+        # so that pairs whose arc-distance is just under cutoff aren't
+        # excluded by a chord-roundoff false-negative in the kd-tree query.
+        chord_radius = 2.0 * np.sin(cutoff / (2.0 * _CONLEY_EARTH_RADIUS_KM))
+        chord_radius *= 1.0 + 1e-12
+        tree = cKDTree(xyz)
+        neighbors = tree.query_ball_tree(tree, r=chord_radius, p=2.0)
+    elif metric == "euclidean":
+        # Small relative epsilon for symmetry with the haversine branch.
+        # Bartlett's <=-vs-< boundary is moot since kernel is exactly 0 at u=1.
+        query_r = cutoff * (1.0 + 1e-12)
+        tree = cKDTree(coords)
+        neighbors = tree.query_ball_tree(tree, r=query_r, p=2.0)
+    else:
+        raise ValueError(
+            "sparse Conley path requires metric in {'haversine', 'euclidean'}; "
+            f"got {metric!r}. (Callable metrics fall back to the dense path.)"
+        )
+
+    rows_list: list[np.ndarray] = []
+    cols_list: list[np.ndarray] = []
+    data_list: list[np.ndarray] = []
+    for i, neigh in enumerate(neighbors):
+        if not neigh:
+            # Should not happen — i is always in its own ball — but guard.
+            continue
+        neigh_arr = np.asarray(neigh, dtype=np.intp)
+        # Combined spatial + cluster product kernel: drop neighbors that
+        # don't share i's cluster. This is the sparse-path analog of the
+        # dense path's Hadamard-with-cluster-mask step.
+        if cluster_codes is not None:
+            same_cluster = cluster_codes[neigh_arr] == cluster_codes[i]
+            neigh_arr = neigh_arr[same_cluster]
+            if neigh_arr.size == 0:
+                continue
+        # Recompute exact distance for the in-range neighbors (NOT chord
+        # for haversine — we apply the kernel to actual great-circle km).
+        if metric == "haversine":
+            dist = _haversine_km(
+                np.asarray(coords[i, 0]),
+                np.asarray(coords[i, 1]),
+                coords[neigh_arr, 0],
+                coords[neigh_arr, 1],
+            )
+        else:
+            diff = coords[neigh_arr] - coords[i]
+            dist = np.sqrt(np.sum(diff * diff, axis=-1))
+        kernel_vals = _bartlett_kernel(dist / cutoff)
+        nonzero_mask = kernel_vals > 0.0
+        if not nonzero_mask.any():
+            continue
+        nonzero_neighbors = neigh_arr[nonzero_mask]
+        nonzero_kernels = kernel_vals[nonzero_mask]
+        rows_list.append(np.full(nonzero_neighbors.shape, i, dtype=np.intp))
+        cols_list.append(nonzero_neighbors)
+        data_list.append(nonzero_kernels)
+
+    if not data_list:
+        return np.zeros((k, k))
+
+    K = csr_matrix(
+        (np.concatenate(data_list), (np.concatenate(rows_list), np.concatenate(cols_list))),
+        shape=(n, n),
+    )
+    # scipy sparse @ dense returns dense; do K @ S first then S.T @ that.
+    return S.T @ (K @ S)
+
+
 def _validate_conley_kwargs(
     coords: Optional[np.ndarray],
     cutoff: Optional[float],
@@ -148,19 +377,27 @@ def _validate_conley_kwargs(
     time: Optional[np.ndarray] = None,
     unit: Optional[np.ndarray] = None,
     lag_cutoff: Optional[int] = None,
+    cluster_ids: Optional[np.ndarray] = None,
 ) -> None:
     """Validate the Conley kwargs against the design's row count.
 
     The first five positional args define the cross-sectional contract (Phase 1).
     The three keyword-only ``time`` / ``unit`` / ``lag_cutoff`` args define the
     panel block-decomposed contract (Phase 2); they are three-way co-required.
+    The ``cluster_ids`` keyword-only arg enables the combined spatial +
+    cluster product kernel (Wave A item #119); on the panel block-decomposed
+    path it must be **constant within each unit across periods** (otherwise
+    the within-unit serial mask would zero out adjacent-time pairs and
+    produce a methodologically-muddled meat).
 
     Raises
     ------
     ValueError
         Missing/malformed coords or cutoff; lat/lon out of range under
         haversine; unknown kernel/metric; non-finite or non-positive cutoff;
-        partial panel arg set (must pass all three of time/unit/lag_cutoff or none).
+        partial panel arg set (must pass all three of time/unit/lag_cutoff or none);
+        ``cluster_ids`` with wrong shape or NaN; ``cluster_ids`` not constant
+        within each unit on the panel path.
 
     Warnings
     --------
@@ -254,15 +491,86 @@ def _validate_conley_kwargs(
                 f"conley_lag_cutoff must be a non-negative integer; got {lag_cutoff!r}."
             )
 
-    if n > _CONLEY_DENSE_WARN_N:
+    # Combined spatial + cluster product kernel (Wave A #119). The validator
+    # checks shape, missing values, and — on the panel block-decomposed path
+    # only — that cluster membership is constant within each unit across
+    # periods. Cross-sectional path has no time dimension, so no
+    # invariance constraint applies.
+    if cluster_ids is not None:
+        cluster_arr = np.asarray(cluster_ids)
+        if cluster_arr.ndim != 1 or cluster_arr.shape[0] != n:
+            raise ValueError(
+                f"cluster_ids must be a 1-D array of length {n} when combined "
+                f"with vcov_type='conley'; got shape {cluster_arr.shape}."
+            )
+        import pandas as _pd
+
+        if _pd.isna(cluster_arr).any():
+            raise ValueError(
+                "cluster_ids contains NaN or missing values when combined "
+                "with vcov_type='conley'."
+            )
+        if n_panel_set == 3:
+            # Panel path: enforce time-invariance within unit. If a unit's
+            # cluster changes across periods, the within-unit serial mask
+            # would zero out adjacent-time pairs that should contribute.
+            cluster_codes_v, _ = _pd.factorize(cluster_arr)
+            unit_arr_local = np.asarray(unit)
+            unit_codes_v, _ = _pd.factorize(unit_arr_local)
+            # Count distinct cluster codes per unit. >1 means the cluster
+            # assignment varies across time within at least one unit.
+            df_check = _pd.DataFrame({"u": unit_codes_v, "c": cluster_codes_v})
+            unit_n_clusters = df_check.groupby("u")["c"].nunique()
+            violator_mask = unit_n_clusters.to_numpy() > 1
+            if bool(violator_mask.any()):
+                # Report up to 5 violating unit labels to help debugging.
+                violator_codes = np.asarray(unit_n_clusters.index)[violator_mask]
+                uniques_unit = _pd.unique(unit_arr_local)
+                shown = [str(uniques_unit[int(c)]) for c in violator_codes[:5]]
+                total = int(violator_mask.sum())
+                more = "" if total <= 5 else f" (+{total - 5} more)"
+                raise ValueError(
+                    "cluster_ids combined with the panel block-decomposed "
+                    "Conley path (conley_lag_cutoff set) must be constant "
+                    "within each unit across periods; the within-unit serial "
+                    "Bartlett HAC's mask is trivially all-ones only under "
+                    "this contract. Violating units: "
+                    f"{', '.join(shown)}{more}. Either pass a "
+                    "time-invariant cluster (e.g. unit-level region) or "
+                    "drop cluster_ids."
+                )
+
+    if n > _CONLEY_DENSE_OOM_WARN_N:
         memory_gb = (n * n * 8) / 1e9
-        warnings.warn(
-            f"vcov_type='conley' builds a dense {n}x{n} distance matrix "
-            f"(~{memory_gb:.1f} GB float64). The sparse k-d-tree fast path is "
-            "deferred to a follow-up PR.",
-            UserWarning,
-            stacklevel=3,
-        )
+        # The sparse k-d-tree fast path will auto-activate for the spatial
+        # meat when n > _CONLEY_SPARSE_N_THRESHOLD AND metric is haversine
+        # or euclidean AND kernel is bartlett. Above the OOM warning
+        # threshold the dense fallback (callable metric, uniform kernel)
+        # is at material memory risk.
+        if (
+            isinstance(metric, str)
+            and metric in ("haversine", "euclidean")
+            and kernel == "bartlett"
+        ):
+            warnings.warn(
+                f"vcov_type='conley': the sparse k-d-tree fast path will be "
+                f"used for the spatial Bartlett meat (n={n}, kernel='bartlett', "
+                f"metric={metric!r}); the per-unit serial Bartlett HAC remains "
+                f"dense. The dense {n}x{n} fallback would be ~{memory_gb:.1f} GB "
+                "float64.",
+                UserWarning,
+                stacklevel=3,
+            )
+        else:
+            warnings.warn(
+                f"vcov_type='conley' builds a dense {n}x{n} distance matrix "
+                f"(~{memory_gb:.1f} GB float64). The sparse k-d-tree fast path "
+                "requires conley_kernel='bartlett' and conley_metric in "
+                "{'haversine', 'euclidean'}; "
+                f"current kernel={kernel!r}, metric={metric!r}.",
+                UserWarning,
+                stacklevel=3,
+            )
 
 
 def _compute_conley_vcov(
@@ -277,6 +585,8 @@ def _compute_conley_vcov(
     time: Optional[np.ndarray] = None,
     unit: Optional[np.ndarray] = None,
     lag_cutoff: Optional[int] = None,
+    cluster_ids: Optional[np.ndarray] = None,
+    _conley_sparse: Optional[bool] = None,
 ) -> np.ndarray:
     """Conley (1999) spatial HAC sandwich variance.
 
@@ -300,6 +610,16 @@ def _compute_conley_vcov(
     exclusion avoids double-counting the diagonal already covered by the
     spatial component.
 
+    **Combined spatial + cluster product kernel** (``cluster_ids`` supplied):
+
+        K_total[i, j] = K_space(d_ij/h) · 1{cluster_i = cluster_j}
+
+    The cluster indicator multiplies the spatial kernel on the within-period
+    (or full cross-sectional) sandwich. On the panel path, the validator
+    enforces that ``cluster_ids`` is constant within each unit across
+    periods, which guarantees the within-unit serial mask is trivially
+    all-ones — no explicit per-unit-time mask needed in the serial loop.
+
     Inputs are assumed already validated by :func:`_validate_conley_kwargs`;
     the helper only does the math. Caller is responsible for the validator.
 
@@ -319,6 +639,15 @@ def _compute_conley_vcov(
     """
     coords_arr = np.asarray(coords, dtype=np.float64)
     S = X * residuals[:, np.newaxis]
+    n = X.shape[0]
+
+    # Factorize cluster_ids once if supplied, so per-slice mask construction
+    # below can use integer comparisons rather than re-factorizing per call.
+    cluster_codes: Optional[np.ndarray] = None
+    if cluster_ids is not None:
+        import pandas as _pd
+
+        cluster_codes = np.asarray(_pd.factorize(np.asarray(cluster_ids))[0], dtype=np.int64)
 
     def _kernel_fn(u: np.ndarray) -> np.ndarray:
         if kernel == "bartlett":
@@ -327,6 +656,66 @@ def _compute_conley_vcov(
             return _uniform_kernel(u)
         raise ValueError(f"conley_kernel must be 'bartlett' or 'uniform'; got {kernel!r}.")
 
+    # Decide whether to use the sparse k-d-tree path for the spatial component.
+    # Three gates: a supported metric (haversine/euclidean, NOT callable), a
+    # supported kernel (bartlett — see module docstring for the boundary-
+    # semantics rationale), and either the auto-toggle threshold or an
+    # explicit override via the private _conley_sparse kwarg. When explicit
+    # forcing requests sparse on an unsupported metric/kernel, we raise
+    # rather than silently fall back so the caller sees the mismatch.
+    # Use direct equality (NOT isinstance(metric, str)) so pyright can keep
+    # the Literal narrowing on the dense fallback path below — checking
+    # `isinstance(metric, str)` widens metric from ConleyMetric to
+    # str | Callable and breaks downstream typing on `_pairwise_distance_matrix`.
+    metric_supports_sparse = metric == "haversine" or metric == "euclidean"
+    kernel_supports_sparse = kernel == "bartlett"
+    if _conley_sparse is True:
+        if not (metric_supports_sparse and kernel_supports_sparse):
+            raise ValueError(
+                "_conley_sparse=True requires conley_metric in "
+                "{'haversine', 'euclidean'} and conley_kernel='bartlett'; "
+                f"got metric={metric!r}, kernel={kernel!r}."
+            )
+        use_sparse = True
+    elif _conley_sparse is False:
+        use_sparse = False
+    else:
+        use_sparse = (
+            n > _CONLEY_SPARSE_N_THRESHOLD and metric_supports_sparse and kernel_supports_sparse
+        )
+
+    def _spatial_meat_for_mask(mask: Optional[np.ndarray] = None) -> np.ndarray:
+        """Compute the spatial meat ``S' K S`` for the given subset of rows.
+
+        ``mask`` may be ``None`` (use all rows) or a boolean array of length n.
+        Dispatches to the sparse helper when ``use_sparse`` is True, otherwise
+        builds the dense n×n distance matrix. When ``cluster_codes`` is set,
+        the cluster indicator multiplies the spatial kernel on this slice
+        (per-slice mask, NOT full n×n — saves memory for panel paths).
+        """
+        if mask is None:
+            S_sub = S
+            coords_sub = coords_arr
+            cluster_sub = cluster_codes
+        else:
+            S_sub = S[mask]
+            coords_sub = coords_arr[mask]
+            cluster_sub = cluster_codes[mask] if cluster_codes is not None else None
+        if use_sparse:
+            # The auto-toggle and explicit-True gate above both guarantee
+            # metric is a str (haversine/euclidean), so this cast is safe;
+            # using cast() avoids leaking the narrowing into the dense
+            # fallback below.
+            return _compute_spatial_bartlett_meat_sparse(
+                S_sub, coords_sub, cutoff, cast(str, metric), cluster_codes=cluster_sub
+            )
+        D = _pairwise_distance_matrix(coords_sub, metric)
+        K = _kernel_fn(D / cutoff)
+        if cluster_sub is not None:
+            cluster_mask = cluster_sub[:, None] == cluster_sub[None, :]
+            K = K * cluster_mask
+        return S_sub.T @ K @ S_sub
+
     # Suppress spurious BLAS-level "divide by zero / overflow" warnings on
     # macOS Accelerate when K is sparse-ish (most off-diagonals are exactly
     # 0 outside the cutoff). The matmul result is mathematically correct;
@@ -334,10 +723,8 @@ def _compute_conley_vcov(
     # We verify finiteness immediately after.
     if time is None:
         # Phase 1 cross-sectional path: full n×n spatial sandwich.
-        D = _pairwise_distance_matrix(coords_arr, metric)
-        K = _kernel_fn(D / cutoff)
         with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
-            meat = S.T @ K @ S
+            meat = _spatial_meat_for_mask(None)
     else:
         # Phase 2 panel block-decomposed path (matches R conleyreg).
         time_arr = np.asarray(time)
@@ -358,13 +745,11 @@ def _compute_conley_vcov(
         k = X.shape[1]
         meat = np.zeros((k, k))
         # Spatial component: within-period sandwich, summed across periods.
+        # _spatial_meat_for_mask dispatches to sparse or dense per the toggle.
         with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
             for t_code in np.unique(time_codes):
                 mask_t = time_codes == t_code
-                S_t = S[mask_t]
-                D_t = _pairwise_distance_matrix(coords_arr[mask_t], metric)
-                K_t = _kernel_fn(D_t / cutoff)
-                meat += S_t.T @ K_t @ S_t
+                meat += _spatial_meat_for_mask(mask_t)
             # Serial component: within-unit Bartlett HAC for lag in {1..L},
             # excluding lag=0 to avoid double-counting the spatial diagonal.
             # Bartlett form hardcoded (matches conleyreg::time_dist).

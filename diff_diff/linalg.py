@@ -549,9 +549,11 @@ def solve_ols(
           design or pooled cross-section) and panel block-decomposed (matches
           R ``conleyreg`` with ``lag_cutoff > 0``); switch by passing the
           three co-required kwargs ``conley_time`` / ``conley_unit`` /
-          ``conley_lag_cutoff``. Combining with ``cluster_ids`` or ``weights``
-          raises ``NotImplementedError`` (combined spatial-cluster kernel +
-          Bertanha-Imbens 2014 weighted-Conley deferred to follow-up PRs).
+          ``conley_lag_cutoff``. Combining with ``cluster_ids`` applies the
+          combined spatial + cluster product kernel (a diff-diff convention;
+          see :func:`compute_robust_vcov` for details). Combining with
+          ``weights`` raises ``NotImplementedError`` (Bertanha-Imbens 2014
+          weighted-Conley deferred to a follow-up PR).
     conley_coords : ndarray of shape (n, 2), optional
         Required when ``vcov_type="conley"``. Two-column array of
         ``[lat, lon]`` (degrees, for ``conley_metric="haversine"``) or
@@ -1170,17 +1172,12 @@ def _validate_vcov_args(
             "Bell-McCaffrey. Tracked in TODO.md."
         )
     if vcov_type == "conley":
-        # Conley + cluster_ids (combined spatial-cluster kernel) and Conley +
-        # weights (Bertanha-Imbens 2014) are deferred to follow-up PRs.
-        # TwoWayFixedEffects has its own earlier raise at twfe.py with a
-        # TWFE-specific message; this is the fallback path for
-        # MultiPeriodDiD callers and direct compute_robust_vcov use.
-        if cluster_ids is not None:
-            raise NotImplementedError(
-                "vcov_type='conley' with cluster_ids is a follow-up "
-                "(combined spatial-cluster kernel). Use vcov_type='hc1' for "
-                "cluster-robust without spatial HAC, or drop cluster= for Conley."
-            )
+        # Conley + cluster_ids is now supported (combined spatial + cluster
+        # product kernel; see ``docs/methodology/REGISTRY.md`` § ConleySpatialHAC
+        # → "Combined spatial + cluster product kernel"). Conley + weights
+        # (Bertanha-Imbens 2014) is still deferred to a follow-up PR — the
+        # design-based weighted-Conley methodology requires its own
+        # treatment.
         if weights is not None:
             raise NotImplementedError(
                 "vcov_type='conley' with weights is a Phase 2+ follow-up "
@@ -1763,7 +1760,9 @@ def _compute_robust_vcov_numpy(
     # is supplied; panel block-decomposed form (matches R conleyreg with
     # lag_cutoff > 0) when all three of conley_time / conley_unit /
     # conley_lag_cutoff are supplied. The validator above already raised
-    # on conley + cluster_ids and conley + weights.
+    # on conley + weights. ``cluster_ids`` is threaded through when set,
+    # combining the spatial kernel with the cluster indicator (combined
+    # spatial + cluster product kernel; see REGISTRY.md § ConleySpatialHAC).
     # ------------------------------------------------------------------
     if vcov_type == "conley":
         _validate_conley_kwargs(
@@ -1775,6 +1774,7 @@ def _compute_robust_vcov_numpy(
             time=conley_time,
             unit=conley_unit,
             lag_cutoff=conley_lag_cutoff,
+            cluster_ids=cluster_ids,
         )
         vcov = _compute_conley_vcov(
             X,
@@ -1787,6 +1787,7 @@ def _compute_robust_vcov_numpy(
             time=conley_time,
             unit=conley_unit,
             lag_cutoff=conley_lag_cutoff,
+            cluster_ids=cluster_ids,
         )
         if return_dof:
             return vcov, np.full(k, n_eff - k, dtype=np.float64)

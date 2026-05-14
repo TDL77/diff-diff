@@ -31,6 +31,7 @@
       ~MultiPeriodDiDResults.coef_var
       ~MultiPeriodDiDResults.coefficients
       ~MultiPeriodDiDResults.conf_int
+      ~MultiPeriodDiDResults.conley_lag_cutoff
       ~MultiPeriodDiDResults.fitted_values
       ~MultiPeriodDiDResults.inference_method
       ~MultiPeriodDiDResults.interaction_indices

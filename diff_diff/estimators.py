@@ -97,13 +97,23 @@ class DifferenceInDifferences:
         - "warn": Issue warning and drop linearly dependent columns (default)
         - "error": Raise ValueError
         - "silent": Drop columns silently without warning
-    conley_coords, conley_cutoff_km, conley_metric, conley_kernel
-        Accepted by the constructor for sklearn-style API symmetry, but
-        ``vcov_type="conley"`` is rejected at fit-time on
-        ``DifferenceInDifferences`` (see ``vcov_type`` above). Use direct
-        ``compute_robust_vcov`` / ``LinearRegression`` on a single-period
-        regression for cross-sectional Conley in Phase 1; Phase 2 will lift
-        the panel rejection.
+    conley_coords, conley_cutoff_km, conley_metric, conley_kernel, conley_lag_cutoff
+        Conley (1999) spatial-HAC variance configuration. Pass
+        ``conley_coords=(lat_col, lon_col)``, ``conley_cutoff_km=<float>``,
+        and ``conley_lag_cutoff=<int>`` on the constructor; the ``unit``
+        identifier is passed as a fit-time arg to ``fit(...)`` (NOT on
+        ``__init__``) — it is unused unless ``vcov_type="conley"`` and is
+        therefore not part of ``get_params()`` / ``set_params()`` (which
+        return constructor-arg dicts). The block-decomposed panel sandwich
+        (matching R ``conleyreg`` with ``lag_cutoff > 0``) sums within-period
+        spatial pairs plus within-unit Bartlett serial pairs (lag=0 excluded
+        to avoid double-counting). Explicit ``cluster=<col>`` + Conley
+        enables the combined spatial + cluster product kernel; the cluster
+        must be constant within each unit across periods (validator-enforced).
+        DiD has no auto-cluster, so cluster is fully opt-in on the Conley
+        path — absent ``cluster=``, pure Conley spatial HAC applies.
+        ``survey_design=`` + Conley and ``inference='wild_bootstrap'`` +
+        Conley both raise ``NotImplementedError``.
 
     Attributes
     ----------
@@ -218,6 +228,7 @@ class DifferenceInDifferences:
         fixed_effects: Optional[List[str]] = None,
         absorb: Optional[List[str]] = None,
         survey_design=None,
+        unit: Optional[str] = None,
     ) -> DiDResults:
         """
         Fit the Difference-in-Differences model.
@@ -249,6 +260,16 @@ class DifferenceInDifferences:
             Survey design specification for design-based inference. When provided,
             uses Taylor Series Linearization for variance estimation and
             applies sampling weights to the regression.
+        unit : str, optional
+            Name of the unit identifier column. Required ONLY when
+            ``vcov_type="conley"`` — the panel block-decomposed Conley
+            sandwich (matching R ``conleyreg`` with ``lag_cutoff > 0``)
+            needs the unit identifier to compute the per-unit serial sum.
+            Mirrors :meth:`MultiPeriodDiD.fit(unit=...)` and
+            :meth:`TwoWayFixedEffects.fit(unit=...)`. Fit-time only — NOT
+            a constructor kwarg, so it is not part of ``get_params()`` /
+            ``set_params()`` (which return constructor-arg dicts).
+            Ignored when ``vcov_type`` is not ``"conley"``.
 
         Returns
         -------
@@ -358,23 +379,49 @@ class DifferenceInDifferences:
                 "HC2/CR2-BM are computed on the full projection."
             )
 
-        # Reject vcov_type='conley' on DifferenceInDifferences. The Phase 2
-        # block-decomposed panel Conley sandwich (matching R conleyreg)
-        # requires the unit identifier to compute the per-unit serial sum,
-        # but DifferenceInDifferences.fit() has no `unit` column argument.
-        # Adding a `unit` arg is API churn for a path with a clean redirect:
-        # MultiPeriodDiD and TwoWayFixedEffects both take `unit` natively
-        # and support vcov_type="conley" via the same parity-tested helper.
+        # Validate vcov_type="conley" wire-up. DiD.fit() accepts `unit`
+        # as a fit-time arg (NOT on __init__) because cluster/unit
+        # semantics on DiD are opt-in rather than auto-derived (unlike
+        # MultiPeriodDiD / TwoWayFixedEffects which have a unit declaration
+        # at fit-time anyway). The panel block-decomposed Conley sandwich
+        # (matching R conleyreg with lag_cutoff > 0) needs unit/time/coords
+        # to assemble the within-period spatial and within-unit serial
+        # sums; we mirror MultiPeriodDiD's reject pattern for missing args
+        # and the survey/wild-bootstrap incompatibilities.
         if self.vcov_type == "conley":
-            raise NotImplementedError(
-                "DifferenceInDifferences(vcov_type='conley') is not supported "
-                "because DiD.fit() has no unit-column declaration; the panel "
-                "block-decomposed Conley sandwich requires per-unit serial "
-                "sums. Use MultiPeriodDiD(vcov_type='conley', "
-                "conley_lag_cutoff=...) or TwoWayFixedEffects(vcov_type='conley',"
-                " conley_lag_cutoff=...) — both take a `unit` argument in "
-                ".fit() and implement the same R conleyreg-parity sandwich."
-            )
+            if unit is None:
+                raise ValueError(
+                    "DifferenceInDifferences(vcov_type='conley').fit() requires "
+                    "`unit=<column_name>` — the panel block-decomposed Conley "
+                    "sandwich needs the unit identifier to compute the per-unit "
+                    "serial sum. Pass DiD(...).fit(data, ..., unit='<col>')."
+                )
+            if self.conley_lag_cutoff is None:
+                raise ValueError(
+                    "DifferenceInDifferences(vcov_type='conley') requires "
+                    "conley_lag_cutoff (non-negative int; 0 means spatial-"
+                    "within-period only, no serial component)."
+                )
+            if self.conley_coords is None or self.conley_cutoff_km is None:
+                raise ValueError(
+                    "DifferenceInDifferences(vcov_type='conley') requires "
+                    "conley_coords=(lat_col, lon_col) and conley_cutoff_km "
+                    "on the constructor."
+                )
+            if survey_design is not None:
+                raise NotImplementedError(
+                    "DifferenceInDifferences(vcov_type='conley') + survey_design "
+                    "is a follow-up (Bertanha-Imbens 2014 weighted-Conley). Drop "
+                    "survey_design for cross-sectional Conley."
+                )
+            if self.inference == "wild_bootstrap":
+                raise NotImplementedError(
+                    "DifferenceInDifferences(vcov_type='conley', "
+                    "inference='wild_bootstrap') is not supported: the wild "
+                    "bootstrap is a separate inference path that does not "
+                    "consume the analytical Conley sandwich. Use "
+                    "inference='analytical' for Conley SEs."
+                )
 
         if absorb:
             # FWL theorem: demean ALL regressors alongside outcome.
@@ -466,6 +513,30 @@ class DifferenceInDifferences:
         # Remap implicit "classical" + cluster to CR1 for legacy-alias
         # backward compatibility (see `_resolve_effective_vcov_type`).
         _fit_vcov_type = self._resolve_effective_vcov_type(effective_cluster_ids)
+
+        # Build Conley coord/time/unit arrays when applicable. The same
+        # `working_data` (post-absorb demean if absorb was used) supplies
+        # the rows; the validator above already enforced that `unit` is
+        # set and conley_coords/conley_cutoff_km/conley_lag_cutoff are
+        # consistent. The time column for the panel block-decomposed form
+        # is the `time` argument passed to fit() (i.e. the post-treatment
+        # period indicator, which is integer 0/1 for the standard DiD
+        # design — `_compute_conley_vcov` normalizes to dense codes
+        # internally so non-numeric labels still work).
+        if _fit_vcov_type == "conley":
+            _conley_coords_arr: Optional[np.ndarray] = np.column_stack(
+                [
+                    working_data[self.conley_coords[0]].values.astype(np.float64),
+                    working_data[self.conley_coords[1]].values.astype(np.float64),
+                ]
+            )
+            _conley_time_arr: Optional[np.ndarray] = np.asarray(working_data[time].values)
+            _conley_unit_arr: Optional[np.ndarray] = working_data[unit].values
+        else:
+            _conley_coords_arr = None
+            _conley_time_arr = None
+            _conley_unit_arr = None
+
         # Don't forward `robust=self.robust` when the vcov_type has been
         # remapped; `robust=False + vcov_type="hc1"` would otherwise trip
         # the conflict check inside `LinearRegression.__init__`. The
@@ -479,6 +550,13 @@ class DifferenceInDifferences:
             weight_type=survey_weight_type,
             survey_design=_lr_survey,
             vcov_type=_fit_vcov_type,
+            conley_coords=_conley_coords_arr,
+            conley_cutoff_km=self.conley_cutoff_km,
+            conley_metric=self.conley_metric,
+            conley_kernel=self.conley_kernel,
+            conley_time=_conley_time_arr,
+            conley_unit=_conley_unit_arr,
+            conley_lag_cutoff=self.conley_lag_cutoff,
         ).fit(X, y, df_adjustment=n_absorbed_effects)
 
         coefficients = reg.coefficients_
