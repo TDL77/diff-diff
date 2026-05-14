@@ -143,7 +143,10 @@ def _validate_and_aggregate_to_cells(
     Raises
     ------
     ValueError
-        On missing columns; NaN values in the treatment / outcome columns;
+        On missing columns; NaN values in any of the ``group``, ``time``,
+        ``treatment``, or ``outcome`` columns (``group`` and ``time`` are
+        rejected pre-``groupby`` because ``groupby`` silently drops NaN
+        keys, which would change the estimation sample without warning);
         non-numeric treatment / outcome that cannot be coerced via
         ``pd.to_numeric``; or within-cell-varying treatment (any
         ``(group, time)`` cell where ``d_min != d_max``, since fuzzy DiD
