@@ -5639,27 +5639,25 @@ class TestStuteStratifiedSurveyBootstrap:
         # implicit). p-values match at atol=1e-12.
         np.testing.assert_allclose(r_explicit.p_value, r_implicit.p_value, atol=1e-12)
 
-    def test_calibration_shift_direction_pin_non_strata(self):
-        """Direction pin: the non-strata Stute path now applies the
-        single-implicit-stratum centering (sqrt(n_psu/(n_psu-1)) Bessel
-        rescale). Pre-PR Phase 4.5 C used raw iid multipliers without
-        centering — pre-PR and post-PR p-values DIFFER. This test pins
-        the post-PR p-value at a seeded baseline so a future revert of
-        the centering would be caught.
+    def test_calibration_shift_non_strata_end_to_end_smoke(self):
+        """End-to-end smoke for the non-strata Stute path after the
+        single-implicit-stratum centering lands. The post-PR path
+        applies the ``sqrt(n_psu / (n_psu - 1))`` Bessel rescale (and
+        within-implicit-stratum demean) on the PSU multipliers, where
+        the pre-PR Phase 4.5 C path applied no correction.
 
-        Pre-PR value at this seed/DGP: bootstrap p-value ≈ 0.245 (raw
-        multipliers, no centering). Post-PR value: lower because the
-        Bessel-corrected multipliers inflate the bootstrap CvM
-        distribution slightly, pushing observed S further toward the
-        non-rejection tail.
+        This test is a finite + range smoke — NOT a baseline-capture
+        direction pin. A heavier worktree-based pre/post comparison was
+        considered but is redundant with the helper-level bit-parity
+        regression at ``tests/test_bootstrap_utils.py::TestApplyStratumCentering::
+        test_bit_parity_vs_pre_refactor_inline_block`` (locked at
+        ``atol=1e-14``), which fails the instant ``apply_stratum_centering``
+        stops centering — regardless of which call site consumes it.
+        That helper-level invariant lock catches any revert of the
+        non-strata calibration end-to-end.
 
-        Tolerance ±0.05 abs on the post-PR p-value is loose because
-        the bootstrap distribution is itself stochastic at B=199; the
-        intent is to lock the SHIFT DIRECTION, not its precise
-        magnitude. See REGISTRY § "Note (Stute stratified survey-
-        bootstrap calibration)" non-strata calibration improvement
-        subsection.
-        """
+        See REGISTRY § "Note (Stute stratified survey-bootstrap
+        calibration)" non-strata calibration improvement subsection."""
         from diff_diff.survey import make_pweight_design
 
         rng = np.random.default_rng(11)
@@ -5671,10 +5669,6 @@ class TestStuteStratifiedSurveyBootstrap:
         w_arr = w_arr / w_arr.mean()
         resolved = make_pweight_design(w_arr)
         r = stute_test(d=d_arr, dy=dy_arr, survey_design=resolved, n_bootstrap=999, seed=11)
-        # The post-PR value at this exact seed + DGP. Loose tolerance:
-        # this is a DIRECTION pin, not a precise calibration pin.
-        # A future revert of apply_stratum_centering would push the
-        # value back outside this band toward the (lower) pre-PR value.
         assert np.isfinite(r.p_value)
         assert 0.0 <= r.p_value <= 1.0, f"Stute p-value out of valid range: {r.p_value}"
 
