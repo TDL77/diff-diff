@@ -2865,7 +2865,16 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         run_contents = self._extract_all_run_content(workflow_text)
         assert run_contents, "No `run:` content extracted"
 
-        py_exec_re = re.compile(r"\bpython3?\s+(\S+\.py)\b")
+        # Use `(?=[\s;|&]|$)` token-boundary lookahead instead of `\b`
+        # after `.py`. The weaker `\b` matches between `y` and a
+        # following `.` (non-word), so `python3 /tmp/foo.py.bak`
+        # would match the `.py` prefix and the captured path would
+        # be `/tmp/foo.py` (in allowlist) — letting an attacker run
+        # `.py.bak`/`.py~`/`.pyx`/etc. under an allowlisted prefix.
+        # R5 fix for PR #436.
+        py_exec_re = re.compile(
+            r"\bpython3?\s+(\S+\.py)(?=[\s;|&]|$)",
+        )
 
         violations = []
         for label, content in run_contents:
@@ -2954,11 +2963,17 @@ class TestWorkflowDoesNotExecutePRHeadCode:
                 + re.escape(base_source)
                 + r'[ \t]+>[ \t]+'
                 + re.escape(tmp_path)
-                + r'\b',
+                + r'(?=[\s;|&]|$)',
             )
-            # Pattern B: python execution of this tmp_path.
+            # Pattern B: python execution of this tmp_path. Use
+            # `(?=[\s;|&]|$)` token-boundary lookahead instead of `\b`
+            # for the same reason as the sibling test above
+            # (`\bfoo.py\b` matches as a prefix of `foo.py.bak`).
+            # R5 fix for PR #436.
             py_exec_re = re.compile(
-                r'\bpython3?[ \t]+' + re.escape(tmp_path) + r'\b',
+                r'\bpython3?[ \t]+'
+                + re.escape(tmp_path)
+                + r'(?=[\s;|&]|$)',
             )
             # Pattern C: any non-staging write to tmp_path that would
             # overwrite the BASE-staged content. Matches:
@@ -2967,15 +2982,20 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             #   cp <src> <path>
             #   mv <src> <path>
             #   tee [-a] <path>
+            #   ln [-s/-sf/-f] <src> <path>   (symlink, R5 preempt)
             # We exclude lines that match pattern A (the staging line
             # itself uses `>`, which would otherwise self-flag).
+            # Token-boundary lookahead `(?=[\s;|&]|$)` (not `\b`)
+            # prevents `> /tmp/foo.py.bak` from matching as `> /tmp/foo.py`.
+            tail = r'(?=[\s;|&]|$)'
             overwrite_re = re.compile(
                 r'(?:'
-                r'>>?[ \t]*' + re.escape(tmp_path) + r'\b'
-                r'|cp[ \t]+\S+[ \t]+' + re.escape(tmp_path) + r'\b'
-                r'|mv[ \t]+\S+[ \t]+' + re.escape(tmp_path) + r'\b'
-                r'|tee[ \t]+(?:-a[ \t]+)?' + re.escape(tmp_path) + r'\b'
-                r')',
+                r'>>?[ \t]*' + re.escape(tmp_path) + tail
+                + r'|cp[ \t]+\S+[ \t]+' + re.escape(tmp_path) + tail
+                + r'|mv[ \t]+\S+[ \t]+' + re.escape(tmp_path) + tail
+                + r'|tee[ \t]+(?:-[a-zA-Z]+[ \t]+)?' + re.escape(tmp_path) + tail
+                + r'|ln[ \t]+(?:-[a-zA-Z]+[ \t]+)?\S+[ \t]+' + re.escape(tmp_path) + tail
+                + r')',
             )
 
             staging_indices = []
@@ -3134,6 +3154,87 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             "`steps.pr.outputs.head_sha` (the API-pinned head SHA). "
             "Found checkout block:\n" + checkout_block
         )
+
+    def test_python_exec_regex_rejects_suffixed_paths(self):
+        """Regression: `python3 /tmp/notebook_md_extract.py.bak` must
+        NOT be treated as the allowlisted `/tmp/notebook_md_extract.py`.
+        Likewise for `~`, `.swp`, `.pyc` and other suffixes. R5 fix
+        for PR #436: prior `\\b` boundary matched between `y` and `.`
+        (non-word char), letting suffixed paths bypass the allowlist."""
+        import re
+
+        py_exec_re = re.compile(
+            r"\bpython3?\s+(\S+\.py)(?=[\s;|&]|$)",
+        )
+        # Should match (legit forms): captures the exact path.
+        for line, expected in [
+            ("python3 /tmp/notebook_md_extract.py", "/tmp/notebook_md_extract.py"),
+            ("python3 /tmp/notebook_md_extract.py --input foo", "/tmp/notebook_md_extract.py"),
+            ("python3 /tmp/notebook_md_extract.py;", "/tmp/notebook_md_extract.py"),
+            ("python3 /tmp/notebook_md_extract.py | tee log", "/tmp/notebook_md_extract.py"),
+            ("python /tmp/foo.py && echo done", "/tmp/foo.py"),
+        ]:
+            matches = py_exec_re.findall(line)
+            assert matches == [expected], (
+                f"Expected {expected!r} captured from {line!r}, got {matches!r}"
+            )
+        # Should NOT match (suffix bypasses): regex must reject these.
+        for line in [
+            "python3 /tmp/notebook_md_extract.py.bak",
+            "python3 /tmp/notebook_md_extract.py~",
+            "python3 /tmp/notebook_md_extract.pyc",
+            "python3 /tmp/notebook_md_extract.pyx",
+            "python3 /tmp/foo.py.evil",
+        ]:
+            matches = py_exec_re.findall(line)
+            assert matches == [], (
+                f"Suffix-bypass {line!r} must NOT match the allowlist regex; "
+                f"got {matches!r}. R5 dismissal-test fix would regress."
+            )
+
+    def test_overwrite_regex_rejects_suffixed_paths(self):
+        """Regression: an overwrite to `/tmp/foo.py.bak` must NOT be
+        treated as an overwrite to the allowlisted `/tmp/foo.py`. Used
+        to prevent the staging-vs-execution ordering check from being
+        confused by suffix-only writes (which do not actually corrupt
+        the BASE-staged file)."""
+        import re
+
+        tmp_path = "/tmp/notebook_md_extract.py"
+        tail = r"(?=[\s;|&]|$)"
+        overwrite_re = re.compile(
+            r"(?:"
+            r">>?[ \t]*" + re.escape(tmp_path) + tail
+            + r"|cp[ \t]+\S+[ \t]+" + re.escape(tmp_path) + tail
+            + r"|mv[ \t]+\S+[ \t]+" + re.escape(tmp_path) + tail
+            + r"|tee[ \t]+(?:-[a-zA-Z]+[ \t]+)?" + re.escape(tmp_path) + tail
+            + r"|ln[ \t]+(?:-[a-zA-Z]+[ \t]+)?\S+[ \t]+" + re.escape(tmp_path) + tail
+            + r")",
+        )
+        # Should match (real overwrites of the allowlisted path):
+        for line in [
+            "echo x > /tmp/notebook_md_extract.py",
+            "cat foo >> /tmp/notebook_md_extract.py",
+            "cp src.py /tmp/notebook_md_extract.py",
+            "mv src.py /tmp/notebook_md_extract.py",
+            "echo x | tee /tmp/notebook_md_extract.py",
+            "echo x | tee -a /tmp/notebook_md_extract.py",
+            "ln -sf evil.py /tmp/notebook_md_extract.py",
+            "ln -s evil.py /tmp/notebook_md_extract.py",
+        ]:
+            assert overwrite_re.search(line), (
+                f"Real overwrite {line!r} must match the overwrite regex"
+            )
+        # Should NOT match (suffix variants — different files):
+        for line in [
+            "echo x > /tmp/notebook_md_extract.py.bak",
+            "cp src.py /tmp/notebook_md_extract.py~",
+            "ln -sf evil.py /tmp/notebook_md_extract.pyc",
+        ]:
+            assert not overwrite_re.search(line), (
+                f"Suffix-only write {line!r} must NOT match the overwrite "
+                f"regex (it does not corrupt the allowlisted exact path)"
+            )
 
     def test_workflow_comment_triggers_require_author_association(
         self, workflow_text
