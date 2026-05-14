@@ -1033,21 +1033,28 @@ class MultiPeriodDiD(DifferenceInDifferences):
         - ``"hc2_bm"``: one-way HC2 + Imbens-Kolesar (2016) Satterthwaite DOF
           per coefficient plus a contrast-aware DOF for the post-period-average
           ATT. **Unsupported with** ``cluster=`` — see ``cluster`` above.
-        - ``"conley"``: Conley 1999 spatial-HAC sandwich. **Accepted by the
-          constructor for sklearn-style API symmetry but rejected at
-          fit-time on ``MultiPeriodDiD``** because MultiPeriodDiD is
-          intrinsically a multi-period panel estimator and Phase 1's
-          cross-sectional Conley does not handle the time dimension. The
-          supported Phase 1 path for Conley is direct
-          ``compute_robust_vcov`` / ``LinearRegression`` on a single-period
-          regression. Phase 2 will add the space-time product kernel
-          (Driscoll-Kraay) and lift the rejection.
+        - ``"conley"``: Conley 1999 spatial-HAC sandwich via the panel
+          block-decomposed form (matches R ``conleyreg`` with
+          ``lag_cutoff > 0``). Pass ``conley_coords=(lat_col, lon_col)``,
+          ``conley_cutoff_km=<float>``, and ``conley_lag_cutoff=<int>`` on
+          the constructor; ``unit=`` must be supplied at fit-time. The
+          sandwich sums within-period spatial pairs plus within-unit
+          Bartlett serial pairs (lag=0 excluded to avoid double-counting);
+          this is NOT a multiplicative product kernel. ``conley_time`` is
+          auto-derived from the ``time`` column at fit-time and normalized
+          to dense panel-period codes ``0..T-1`` so ``conley_lag_cutoff``
+          always counts panel periods (works for int / datetime64 /
+          ``pd.Period`` / string encodings). Restrictions: ``cluster=``,
+          ``survey_design=``, and ``inference="wild_bootstrap"`` raise on
+          this path (Phase 5 / follow-up).
     alpha : float, default=0.05
         Significance level for confidence intervals.
-    conley_coords, conley_cutoff_km, conley_metric, conley_kernel
-        Accepted by the constructor for sklearn-style API symmetry, but
-        ``vcov_type="conley"`` is rejected at fit-time on ``MultiPeriodDiD``
-        (see ``vcov_type`` above).
+    conley_coords, conley_cutoff_km, conley_metric, conley_kernel, conley_lag_cutoff
+        Constructor kwargs that take effect when ``vcov_type="conley"``.
+        ``conley_coords`` is a ``(lat_col, lon_col)`` tuple of column names
+        on ``data``. ``conley_lag_cutoff`` is the within-unit Bartlett lag
+        (non-negative int; 0 means within-period spatial only, no serial
+        component).
 
     Attributes
     ----------
@@ -1147,9 +1154,10 @@ class MultiPeriodDiD(DifferenceInDifferences):
         unit : str, optional
             Name of the unit identifier column. When provided, checks whether
             treatment timing varies across units and warns if staggered adoption
-            is detected (suggests CallawaySantAnna instead). Does NOT affect
-            standard error computation -- use the ``cluster`` parameter for
-            cluster-robust SEs.
+            is detected (suggests CallawaySantAnna instead). Required when
+            ``vcov_type="conley"`` (the panel block-decomposed sandwich computes
+            a per-unit serial sum). For other ``vcov_type`` values, use the
+            ``cluster`` parameter for cluster-robust SEs.
         survey_design : SurveyDesign, optional
             Survey design specification for design-based inference. When provided,
             uses Taylor Series Linearization for variance estimation and
@@ -1550,7 +1558,11 @@ class MultiPeriodDiD(DifferenceInDifferences):
                     working_data[self.conley_coords[1]].values.astype(np.float64),
                 ]
             )
-            _conley_time_arr: Optional[np.ndarray] = working_data[time].values.astype(np.float64)
+            # Preserve the original time-label dtype (int, datetime64, pd.Period,
+            # string). `_compute_conley_vcov` normalizes to dense 0..T-1 codes
+            # internally; float coercion here would break datetime64 / Period /
+            # string encodings before the normalizer runs.
+            _conley_time_arr: Optional[np.ndarray] = np.asarray(working_data[time].values)
             _conley_unit_arr: Optional[np.ndarray] = working_data[unit].values
         else:
             _conley_coords_arr = None

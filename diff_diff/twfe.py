@@ -368,7 +368,11 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                     data[self.conley_coords[1]].values.astype(np.float64),
                 ]
             )
-            _conley_time_arr: Optional[np.ndarray] = data[time].values.astype(np.float64)
+            # Preserve the original time-label dtype (int, datetime64, pd.Period,
+            # string). `_compute_conley_vcov` normalizes to dense 0..T-1 codes
+            # internally; float coercion here would break datetime64 / Period /
+            # string encodings before the normalizer runs.
+            _conley_time_arr: Optional[np.ndarray] = np.asarray(data[time].values)
             _conley_unit_arr: Optional[np.ndarray] = data[unit].values
             # vcov_type="conley" + cluster_ids raises at the linalg validator
             # (combined kernel deferred). TWFE's auto-cluster would force that

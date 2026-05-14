@@ -1178,6 +1178,71 @@ class TestConleyEstimatorIntegration:
                 survey_design=sd_psu,
             )
 
+    def test_multi_period_did_conley_with_datetime64_time(self):
+        """End-to-end MPD + vcov_type='conley' with datetime64 time labels.
+        Closes Codex re-review P1: the wrapper must NOT coerce time to float64
+        before passing to _compute_conley_vcov; the helper normalizes to
+        dense codes internally. Verifies the SEs match an equivalent
+        dense-integer-coded fit.
+        """
+        import pandas as pd
+
+        from diff_diff import MultiPeriodDiD
+
+        rng = np.random.default_rng(seed=37)
+        n_units = 12
+        date_labels = pd.to_datetime(["2024-01-01", "2024-04-01", "2024-08-01"])
+        rows = []
+        for u in range(n_units):
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            for t_idx, dt in enumerate(date_labels):
+                treated = u < 6
+                y = 0.2 * t_idx + (1.0 if (treated and t_idx >= 1) else 0.0) + rng.normal(0, 0.4)
+                rows.append(
+                    {
+                        "unit": u,
+                        "time_dt": dt,
+                        "time_int": t_idx,
+                        "y": y,
+                        "treated": int(treated),
+                        "lat": lat,
+                        "lon": lon,
+                    }
+                )
+        df_mp = pd.DataFrame(rows)
+        kwargs = dict(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        )
+        res_int = MultiPeriodDiD(**kwargs).fit(
+            df_mp,
+            outcome="y",
+            treatment="treated",
+            time="time_int",
+            post_periods=[1, 2],
+            unit="unit",
+            reference_period=0,
+        )
+        res_dt = MultiPeriodDiD(**kwargs).fit(
+            df_mp,
+            outcome="y",
+            treatment="treated",
+            time="time_dt",
+            post_periods=[date_labels[1], date_labels[2]],
+            unit="unit",
+            reference_period=date_labels[0],
+        )
+        # Per-coefficient SE should match across the two encodings (dense
+        # codes normalize identically). MPD orders coefficients by the
+        # reference-vs-non-reference period split; with reference_period=0
+        # and post_periods=[1,2] the coefficient ordering is bit-identical.
+        se_int = np.sqrt(np.diag(res_int.vcov))
+        se_dt = np.sqrt(np.diag(res_dt.vcov))
+        np.testing.assert_allclose(se_dt, se_int, atol=1e-10)
+
     def test_multi_period_did_conley_missing_coords_raises(self):
         """MPD + vcov_type='conley' without conley_coords raises a clean
         ValueError instead of a raw TypeError on `self.conley_coords[0]`.
