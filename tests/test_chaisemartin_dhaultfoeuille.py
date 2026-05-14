@@ -2867,6 +2867,44 @@ class TestHeterogeneityTesting:
         assert 1 in r.heterogeneity_effects
         assert 2 in r.heterogeneity_effects
 
+    def test_heterogeneity_inference_matches_safe_inference(self):
+        """Local invariant: non-survey heterogeneity `t_stat` / `p_value` /
+        `conf_int` must equal ``safe_inference(beta, se, df=None)`` on every
+        populated horizon. R parity for these fields is intentionally
+        skipped (Python uses normal Z, R uses finite-df t — documented in
+        REGISTRY); without this local invariant a regression isolated to
+        the inference extraction or `_refresh_path_inference` ordering
+        could silently drop / mis-route the SE-derived fields while
+        beta / se still pass R parity.
+        """
+        from diff_diff.utils import safe_inference
+
+        df = self._make_panel_with_het()
+        r = ChaisemartinDHaultfoeuille(seed=1).fit(
+            df, "outcome", "group", "period", "treatment",
+            L_max=2, heterogeneity="het_x",
+        )
+        assert r.heterogeneity_effects is not None
+        checked = 0
+        for l_h, het in r.heterogeneity_effects.items():
+            if not (np.isfinite(het["beta"]) and np.isfinite(het["se"])):
+                continue
+            expected_t, expected_p, expected_ci = safe_inference(
+                het["beta"], het["se"], df=None
+            )
+            assert het["t_stat"] == pytest.approx(expected_t, rel=1e-12), (
+                f"l={l_h} t_stat: stored={het['t_stat']} vs "
+                f"safe_inference={expected_t}"
+            )
+            assert het["p_value"] == pytest.approx(expected_p, rel=1e-12), (
+                f"l={l_h} p_value: stored={het['p_value']} vs "
+                f"safe_inference={expected_p}"
+            )
+            assert het["conf_int"][0] == pytest.approx(expected_ci[0], rel=1e-12)
+            assert het["conf_int"][1] == pytest.approx(expected_ci[1], rel=1e-12)
+            checked += 1
+        assert checked >= 1, "Expected at least one populated heterogeneity horizon"
+
     def test_heterogeneity_missing_column(self):
         df = self._make_panel_with_het()
         with pytest.raises(ValueError, match="not found"):
@@ -10078,6 +10116,56 @@ class TestByPathHeterogeneity:
                 f"path={path} l=1: expected positive het beta "
                 f"(DGP: 5 + 3*het_x), got {horizons[1]['beta']}"
             )
+
+    def test_per_path_heterogeneity_inference_matches_safe_inference(self):
+        """Local invariant: non-survey per-path heterogeneity `t_stat` /
+        `p_value` / `conf_int` must equal ``safe_inference(beta, se,
+        df=None)`` on every populated (path, horizon) entry. R parity
+        for these fields is intentionally skipped (Python uses normal Z,
+        R uses finite-df t — documented in REGISTRY); without this local
+        invariant a regression isolated to the inference extraction or
+        `_refresh_path_inference` ordering could silently drop or
+        mis-route the SE-derived fields while beta / se still pass R
+        parity. Mirrors the global heterogeneity test of the same name
+        in TestHeterogeneityTesting.
+        """
+        from diff_diff.utils import safe_inference
+
+        df = _by_path_het_data()
+        est = ChaisemartinDHaultfoeuille(drop_larger_lower=False, by_path=3)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        assert res.path_heterogeneity_effects
+        checked = 0
+        for path, horizons in res.path_heterogeneity_effects.items():
+            for l_h, het in horizons.items():
+                if not (np.isfinite(het["beta"]) and np.isfinite(het["se"])):
+                    continue
+                expected_t, expected_p, expected_ci = safe_inference(
+                    het["beta"], het["se"], df=None
+                )
+                assert het["t_stat"] == pytest.approx(expected_t, rel=1e-12), (
+                    f"path={path} l={l_h} t_stat: stored={het['t_stat']} vs "
+                    f"safe_inference={expected_t}"
+                )
+                assert het["p_value"] == pytest.approx(expected_p, rel=1e-12), (
+                    f"path={path} l={l_h} p_value: stored={het['p_value']} vs "
+                    f"safe_inference={expected_p}"
+                )
+                assert het["conf_int"][0] == pytest.approx(
+                    expected_ci[0], rel=1e-12
+                )
+                assert het["conf_int"][1] == pytest.approx(
+                    expected_ci[1], rel=1e-12
+                )
+                checked += 1
+        assert checked >= 1, (
+            "Expected at least one populated (path, horizon) heterogeneity entry"
+        )
 
     def test_per_path_heterogeneity_telescope_to_global_on_single_path(self):
         """On a single-path panel, per-path == global heterogeneity.
