@@ -47,7 +47,7 @@ callable metrics.
 from __future__ import annotations
 
 import warnings
-from typing import Callable, Literal, Optional, Union, cast
+from typing import Any, Callable, Literal, Optional, Union, cast
 
 import numpy as np
 
@@ -86,6 +86,18 @@ _CONLEY_DENSE_OOM_WARN_N = 20_000
 # must be ``"bartlett"`` (not ``"uniform"``). Crossed in either direction,
 # the dense path is used regardless of n.
 _CONLEY_SPARSE_N_THRESHOLD = 5_000
+
+# Density gate: fraction of n*n pairs within cutoff above which the sparse
+# CSR matrix's storage overhead (~12 bytes/nnz: data + indices + indptr)
+# loses its memory advantage over a dense float64 (8 bytes/cell). The
+# break-even is at ~67% density; we gate at 30% (well below break-even)
+# to give a comfortable safety margin: at 30% nnz, CSR uses ~45% of
+# dense memory. Above 30%, fall back to dense + emit a UserWarning so
+# users with large cutoffs aren't surprised by the "sparse" path
+# materializing a near-dense matrix. Computed exactly via
+# ``cKDTree.count_neighbors`` (O(n log n + nnz), shares tree traversal
+# with the subsequent ``query_ball_tree``).
+_CONLEY_SPARSE_DENSITY_THRESHOLD = 0.3
 
 
 def _haversine_km(
@@ -186,6 +198,109 @@ def _validate_callable_metric_result(result: object, n: int) -> np.ndarray:
     return arr
 
 
+def _validate_conley_estimator_inputs(
+    *,
+    estimator_name: str,
+    data: "Any",
+    unit: Optional[str],
+    conley_coords: object,
+    conley_cutoff_km: Optional[float],
+    conley_lag_cutoff: Optional[int],
+    survey_design: object,
+    inference: str,
+) -> None:
+    """Shared front-door validation for ``vcov_type='conley'`` on the
+    estimator entry points (``DifferenceInDifferences``, ``MultiPeriodDiD``,
+    ``TwoWayFixedEffects``).
+
+    Each estimator's ``fit()`` calls this BEFORE building Conley arrays or
+    threading them into the variance computation. The seven checks below
+    are the union of what each estimator needs; estimator-specific bits
+    (e.g. building the array from a column name) remain inline at the
+    caller. Centralizing this in one place prevents the validation-class
+    drift that surfaced repeatedly across Wave A CI rounds (DiD's
+    front-door guard for `unit` and `conley_coords` was missing on MPD
+    / TWFE).
+
+    Parameters
+    ----------
+    estimator_name : str
+        Class name surfaced in error messages (e.g.
+        ``"DifferenceInDifferences"``).
+    data : pandas.DataFrame
+        The dataset passed to ``fit()``. Used to check column existence
+        for ``unit`` and ``conley_coords``. Typed as ``Any`` here to
+        avoid importing pandas at module load time.
+    unit : str or None
+        Name of the unit identifier column (required for Conley).
+    conley_coords : tuple/list/None
+        Pair of column names ``(lat_col, lon_col)``.
+    conley_cutoff_km : float or None
+        Positive finite bandwidth.
+    conley_lag_cutoff : int or None
+        Non-negative integer lag for the within-unit Bartlett serial sum.
+    survey_design : object
+        ``SurveyDesign`` instance or ``None``. Survey + Conley is deferred.
+    inference : str
+        Estimator inference mode. ``"wild_bootstrap"`` + Conley is rejected.
+
+    Raises
+    ------
+    ValueError
+        Missing/malformed conley_coords, missing conley_cutoff_km,
+        missing/unknown unit, missing conley_lag_cutoff,
+        coord column not in ``data``.
+    NotImplementedError
+        ``survey_design`` is non-None, or ``inference == "wild_bootstrap"``.
+    """
+    if conley_coords is None or conley_cutoff_km is None:
+        raise ValueError(
+            f"{estimator_name}(vcov_type='conley') requires "
+            "conley_coords=(lat_col, lon_col) and conley_cutoff_km "
+            "on the constructor."
+        )
+    if (
+        not isinstance(conley_coords, (tuple, list))
+        or len(conley_coords) != 2
+        or not all(isinstance(c, str) for c in conley_coords)
+    ):
+        raise ValueError(
+            "conley_coords must be a 2-element tuple/list of column "
+            f"names (lat_col, lon_col); got {conley_coords!r}."
+        )
+    for _coord_col in conley_coords:
+        if _coord_col not in data.columns:
+            raise ValueError(f"conley_coords column '{_coord_col}' not found in data.")
+    if unit is None:
+        raise ValueError(
+            f"{estimator_name}(vcov_type='conley') requires `unit=<column_name>` "
+            "— the panel block-decomposed Conley sandwich needs the unit "
+            "identifier to compute the per-unit serial sum."
+        )
+    if unit not in data.columns:
+        raise ValueError(f"Unit column '{unit}' not found in data")
+    if conley_lag_cutoff is None:
+        raise ValueError(
+            f"{estimator_name}(vcov_type='conley') requires conley_lag_cutoff "
+            "(non-negative int; 0 means spatial-within-period only, no serial "
+            "component). See R conleyreg's `lag_cutoff` argument for the convention."
+        )
+    if survey_design is not None:
+        raise NotImplementedError(
+            f"{estimator_name}(vcov_type='conley') + survey_design is a "
+            "follow-up (Bertanha-Imbens 2014 weighted-Conley). Drop "
+            "survey_design for cross-sectional Conley, or use vcov_type='hc1' "
+            "for survey-aware cluster-robust without spatial HAC."
+        )
+    if inference == "wild_bootstrap":
+        raise NotImplementedError(
+            f"{estimator_name}(vcov_type='conley', inference='wild_bootstrap') "
+            "is not supported: the wild bootstrap is a separate inference path "
+            "that does not consume the analytical Conley sandwich. Use "
+            "inference='analytical' for Conley SEs."
+        )
+
+
 def _pairwise_distance_matrix(coords: np.ndarray, metric: ConleyMetric) -> np.ndarray:
     """Build the dense n×n pairwise distance matrix.
 
@@ -248,7 +363,8 @@ def _compute_spatial_bartlett_meat_sparse(
     metric: str,
     *,
     cluster_codes: Optional[np.ndarray] = None,
-) -> np.ndarray:
+    density_threshold: float = _CONLEY_SPARSE_DENSITY_THRESHOLD,
+) -> Optional[np.ndarray]:
     """Sparse k-d-tree-based spatial Bartlett meat: ``S.T @ K_bartlett @ S``.
 
     Used by :func:`_compute_conley_vcov` when ``_conley_sparse`` is True or
@@ -329,21 +445,40 @@ def _compute_spatial_bartlett_meat_sparse(
         # clamp mirrors that saturation. The 1+1e-12 epsilon then absorbs
         # chord-projection float roundoff at sub-cutoff distances.
         arc_radians = min(cutoff / _CONLEY_EARTH_RADIUS_KM, np.pi)
-        chord_radius = 2.0 * np.sin(arc_radians / 2.0)
-        chord_radius *= 1.0 + 1e-12
+        query_r = 2.0 * np.sin(arc_radians / 2.0)
+        query_r *= 1.0 + 1e-12
         tree = cKDTree(xyz)
-        neighbors = tree.query_ball_tree(tree, r=chord_radius, p=2.0)
     elif metric == "euclidean":
         # Small relative epsilon for symmetry with the haversine branch.
         # Bartlett's <=-vs-< boundary is moot since kernel is exactly 0 at u=1.
         query_r = cutoff * (1.0 + 1e-12)
         tree = cKDTree(coords)
-        neighbors = tree.query_ball_tree(tree, r=query_r, p=2.0)
     else:
         raise ValueError(
             "sparse Conley path requires metric in {'haversine', 'euclidean'}; "
             f"got {metric!r}. (Callable metrics fall back to the dense path.)"
         )
+
+    # Density gate: count in-range pairs cheaply via the same tree (shares
+    # traversal cost with query_ball_tree, no extra allocation). If density
+    # exceeds the threshold, return None so the caller falls back to dense
+    # (avoids materializing a near-dense CSR matrix that would use MORE
+    # memory than dense float64). Codex CI R6 P2.
+    n_pairs_in_range = int(tree.count_neighbors(tree, r=query_r, p=2.0))
+    density = n_pairs_in_range / float(n * n)
+    if density > density_threshold:
+        warnings.warn(
+            f"Conley sparse path: neighbor density {density:.1%} exceeds "
+            f"threshold {density_threshold:.1%}; falling back to dense "
+            "(CSR storage would use more memory than the dense float64 "
+            "matrix at this density). Consider a smaller conley_cutoff_km "
+            "for genuine memory savings.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return None
+
+    neighbors = tree.query_ball_tree(tree, r=query_r, p=2.0)
 
     rows_list: list[np.ndarray] = []
     cols_list: list[np.ndarray] = []
@@ -732,10 +867,16 @@ def _compute_conley_vcov(
             # The auto-toggle and explicit-True gate above both guarantee
             # metric is a str (haversine/euclidean), so this cast is safe;
             # using cast() avoids leaking the narrowing into the dense
-            # fallback below.
-            return _compute_spatial_bartlett_meat_sparse(
+            # fallback below. The sparse helper returns None when the
+            # neighbor density exceeds the threshold (sparse CSR storage
+            # would use more memory than dense); fall through to dense in
+            # that case (the warning is already emitted by the helper).
+            sparse_meat = _compute_spatial_bartlett_meat_sparse(
                 S_sub, coords_sub, cutoff, cast(str, metric), cluster_codes=cluster_sub
             )
+            if sparse_meat is not None:
+                return sparse_meat
+            # Density-gated fallback: continue to the dense path below.
         D = _pairwise_distance_matrix(coords_sub, metric)
         K = _kernel_fn(D / cutoff)
         if cluster_sub is not None:

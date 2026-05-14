@@ -2955,6 +2955,79 @@ class TestConleySparse:
         )
         np.testing.assert_allclose(V_sparse, V_dense, atol=1e-10, rtol=1e-10)
 
+    def test_sparse_density_gate_falls_back_to_dense_and_warns(self):
+        """When neighbor density exceeds the threshold (default 30%), the
+        sparse helper returns None and the dispatcher falls back to dense.
+        A UserWarning surfaces the reason so users with large cutoffs aren't
+        surprised by the "sparse" path materializing a near-dense matrix
+        and using more memory than dense float64. Codex CI R6 P2.
+        """
+        # Tight cluster of points + large cutoff → 100% density.
+        rng = np.random.default_rng(seed=151)
+        n = 100
+        coords = rng.uniform(0.0, 10.0, size=(n, 2))
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        # Cutoff = 1e6 → every pair is within range (density = 100%)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            V_forced_sparse = _compute_conley_vcov(
+                X,
+                residuals,
+                coords,
+                1e6,
+                "euclidean",
+                "bartlett",
+                bread,
+                _conley_sparse=True,
+            )
+            density_warnings = [msg for msg in w if "exceeds threshold" in str(msg.message)]
+            assert len(density_warnings) == 1, "Expected exactly one density-gate UserWarning"
+        # Result must equal the dense path (the dispatcher fell back).
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            1e6,
+            "euclidean",
+            "bartlett",
+            bread,
+            _conley_sparse=False,
+        )
+        np.testing.assert_allclose(V_forced_sparse, V_dense, atol=1e-10, rtol=1e-10)
+
+    def test_sparse_density_gate_does_not_trigger_below_threshold(self):
+        """At realistic Conley cutoffs (neighbor density well below 30%),
+        the sparse path runs normally without the density warning."""
+        # 1000 points spread over a wide area; cutoff small relative to span.
+        rng = np.random.default_rng(seed=157)
+        n = 1000
+        coords = rng.uniform(0.0, 100.0, size=(n, 2))
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        y = X @ np.array([1.0, 1.5]) + rng.standard_normal(n) * 0.4
+        coefs, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coefs
+        bread = X.T @ X
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _compute_conley_vcov(
+                X,
+                residuals,
+                coords,
+                10.0,  # small cutoff → sparse density << 30%
+                "euclidean",
+                "bartlett",
+                bread,
+                _conley_sparse=True,
+            )
+            density_warnings = [msg for msg in w if "exceeds threshold" in str(msg.message)]
+            assert (
+                len(density_warnings) == 0
+            ), "Density gate should not have triggered at low density"
+
     def test_sparse_haversine_cutoff_at_exactly_half_earth_circumference(self):
         """Cutoff = π·R_earth: chord radius = 2 (sphere diameter); all
         pairs are included. Bartlett at u=1 returns 0, so the antipodal
@@ -3185,17 +3258,22 @@ class TestConleyCluster:
 
     def test_combined_kernel_reduces_to_pure_cluster_at_huge_cutoff(self):
         """Cutoff so large that K_space is identically 1 → combined kernel
-        reduces to the pure within-cluster sum (cluster mask alone)."""
+        reduces to the pure within-cluster sum (cluster mask alone). Uses
+        the UNIFORM kernel: K_uniform(u) = 1 for |u| <= 1, so at huge_cutoff
+        the kernel is exactly 1 on every in-range pair (i.e. all pairs).
+        Bartlett would give `1 - d_ij/cutoff < 1` for all pairs with d > 0,
+        so the reduction is only asymptotic, not exact (codex CI R6 P3).
+        """
         X, residuals, coords, bread = self._cross_sectional(n=24, seed=19)
         cluster_ids = np.array([i // 3 for i in range(X.shape[0])])
-        huge_cutoff = 1e9  # K_space = 1 on every pair
+        huge_cutoff = 1e9  # K_space (uniform) = 1 on every pair
         V_combined = _compute_conley_vcov(
             X,
             residuals,
             coords,
             huge_cutoff,
             "euclidean",
-            "bartlett",
+            "uniform",
             bread,
             cluster_ids=cluster_ids,
         )

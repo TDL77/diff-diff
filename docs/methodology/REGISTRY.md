@@ -3101,7 +3101,13 @@ fixtures rather than R parity:
 2. **Huge-cutoff reduction:** when `conley_cutoff_km` is large enough
    that `K_space = 1` on every pair, the meat reduces to the pure
    within-cluster sum `Σ_g X_g' ε_g ε_g' X_g'` (CR1 without the
-   Liang-Zeger small-sample correction).
+   Liang-Zeger small-sample correction). This exact reduction holds
+   only for `conley_kernel="uniform"` (`K_uniform(u) = 1` for `|u| ≤ 1`).
+   The Bartlett kernel gives `K_bartlett(u) = 1 - |u|`, which is
+   strictly less than 1 for `0 < |u| ≤ 1`, so the huge-cutoff limit
+   under Bartlett is asymptotic (`K → 1` as `cutoff → ∞` only at finite
+   off-diagonal distances), not exact at any finite cutoff. The fixture
+   anchor uses uniform for an exact identity check.
 
 The combined-kernel meat is well-defined either way; the two fixture
 limits anchor the math, and the panel time-invariance contract
@@ -3137,6 +3143,20 @@ warning threshold for the dense fallback (callable metrics, uniform
 kernel) where O(n²) memory is at material risk. The two thresholds are
 independent — sparse auto-toggle at 5,000 is a compute optimization;
 dense OOM warning at 20,000 is a memory caution.
+
+**Density gate (`_CONLEY_SPARSE_DENSITY_THRESHOLD = 0.3`):** the sparse
+path's CSR storage carries ~12 bytes per non-zero (data + indices +
+indptr) vs 8 bytes per cell for dense float64. The memory crossover
+is at ~67% density, but at high density the CSR overhead loses its
+advantage well before that. The sparse helper measures actual neighbor
+density via `cKDTree.count_neighbors` (shares tree traversal with
+`query_ball_tree`, no extra allocation) and falls back to the dense
+path with a `UserWarning` when neighbor density exceeds 30%. This
+prevents the "sparse" path from silently using MORE memory than dense
+when cutoffs are large relative to the data span (e.g. cutoffs above
+half-Earth circumference on a global panel, or unit-scale cutoffs on
+a clustered dataset). Users see one line explaining the fallback so
+they can either reduce `conley_cutoff_km` or accept the dense path.
 
 ### Callable conley_metric validation (Wave A #123)
 

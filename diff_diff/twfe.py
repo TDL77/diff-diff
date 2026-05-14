@@ -173,27 +173,18 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         # with the original (un-demeaned) time / unit vectors and coords
         # yields the correct block-decomposed sandwich.
         if self.vcov_type == "conley":
-            if self.conley_lag_cutoff is None:
-                raise ValueError(
-                    "TwoWayFixedEffects(vcov_type='conley') requires "
-                    "conley_lag_cutoff (non-negative int; 0 means spatial-"
-                    "within-period only, no serial component). See R "
-                    "conleyreg's `lag_cutoff` argument for the convention."
-                )
-            if self.conley_coords is None or self.conley_cutoff_km is None:
-                raise ValueError(
-                    "TwoWayFixedEffects(vcov_type='conley') requires "
-                    "conley_coords=(lat_col, lon_col) and "
-                    "conley_cutoff_km on the constructor."
-                )
-            if self.inference == "wild_bootstrap":
-                raise NotImplementedError(
-                    "TwoWayFixedEffects(vcov_type='conley', "
-                    "inference='wild_bootstrap') is not supported: the "
-                    "wild bootstrap is a separate inference path that does "
-                    "not consume the analytical Conley sandwich. Use "
-                    "inference='analytical' for Conley SEs."
-                )
+            from diff_diff.conley import _validate_conley_estimator_inputs
+
+            _validate_conley_estimator_inputs(
+                estimator_name="TwoWayFixedEffects",
+                data=data,
+                unit=unit,
+                conley_coords=self.conley_coords,
+                conley_cutoff_km=self.conley_cutoff_km,
+                conley_lag_cutoff=self.conley_lag_cutoff,
+                survey_design=survey_design,
+                inference=self.inference,
+            )
 
         # Check for staggered treatment timing and warn if detected
         self._check_staggered_treatment(data, treatment, time, unit)

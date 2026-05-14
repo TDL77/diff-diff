@@ -392,57 +392,22 @@ class DifferenceInDifferences:
         # sums; we mirror MultiPeriodDiD's reject pattern for missing args
         # and the survey/wild-bootstrap incompatibilities.
         if self.vcov_type == "conley":
-            if unit is None:
-                raise ValueError(
-                    "DifferenceInDifferences(vcov_type='conley').fit() requires "
-                    "`unit=<column_name>` — the panel block-decomposed Conley "
-                    "sandwich needs the unit identifier to compute the per-unit "
-                    "serial sum. Pass DiD(...).fit(data, ..., unit='<col>')."
-                )
-            if unit not in data.columns:
-                raise ValueError(f"Unit column '{unit}' not found in data")
-            if self.conley_lag_cutoff is None:
-                raise ValueError(
-                    "DifferenceInDifferences(vcov_type='conley') requires "
-                    "conley_lag_cutoff (non-negative int; 0 means spatial-"
-                    "within-period only, no serial component)."
-                )
-            if self.conley_coords is None or self.conley_cutoff_km is None:
-                raise ValueError(
-                    "DifferenceInDifferences(vcov_type='conley') requires "
-                    "conley_coords=(lat_col, lon_col) and conley_cutoff_km "
-                    "on the constructor."
-                )
-            # Validate conley_coords is a 2-element tuple/list of strings
-            # and both columns exist on `data`. Without these guards, a
-            # malformed tuple or missing column fell through to an opaque
-            # IndexError / pandas KeyError downstream. Codex CI R2 P1.
-            if (
-                not isinstance(self.conley_coords, (tuple, list))
-                or len(self.conley_coords) != 2
-                or not all(isinstance(c, str) for c in self.conley_coords)
-            ):
-                raise ValueError(
-                    "conley_coords must be a 2-element tuple/list of column "
-                    f"names (lat_col, lon_col); got {self.conley_coords!r}."
-                )
-            for _coord_col in self.conley_coords:
-                if _coord_col not in data.columns:
-                    raise ValueError(f"conley_coords column '{_coord_col}' not found in data.")
-            if survey_design is not None:
-                raise NotImplementedError(
-                    "DifferenceInDifferences(vcov_type='conley') + survey_design "
-                    "is a follow-up (Bertanha-Imbens 2014 weighted-Conley). Drop "
-                    "survey_design for cross-sectional Conley."
-                )
-            if self.inference == "wild_bootstrap":
-                raise NotImplementedError(
-                    "DifferenceInDifferences(vcov_type='conley', "
-                    "inference='wild_bootstrap') is not supported: the wild "
-                    "bootstrap is a separate inference path that does not "
-                    "consume the analytical Conley sandwich. Use "
-                    "inference='analytical' for Conley SEs."
-                )
+            # Shared front-door validation across DiD / MPD / TWFE entry
+            # points (Wave A holistic fix: replaces the inline drift that
+            # accumulated across CI R1/R2/R6 — same-class validation gaps
+            # mirrored across estimator surfaces).
+            from diff_diff.conley import _validate_conley_estimator_inputs
+
+            _validate_conley_estimator_inputs(
+                estimator_name="DifferenceInDifferences",
+                data=data,
+                unit=unit,
+                conley_coords=self.conley_coords,
+                conley_cutoff_km=self.conley_cutoff_km,
+                conley_lag_cutoff=self.conley_lag_cutoff,
+                survey_design=survey_design,
+                inference=self.inference,
+            )
 
         if absorb:
             # FWL theorem: demean ALL regressors alongside outcome.
@@ -1492,47 +1457,23 @@ class MultiPeriodDiD(DifferenceInDifferences):
             )
 
         # MultiPeriodDiD is intrinsically a multi-period panel estimator;
-        # Phase 2 panel block-decomposed Conley (matches R conleyreg): require
-        # `unit` and `conley_lag_cutoff` when vcov_type="conley". The actual
-        # array extraction (and conley_coords resolution from column names)
-        # happens just below at the solve_ols call.
+        # Phase 2 panel block-decomposed Conley (matches R conleyreg) needs
+        # `unit`, `conley_lag_cutoff`, and `conley_coords` at fit-time. The
+        # validation is shared with DiD / TWFE to avoid the validation-class
+        # drift that surfaced across Wave A CI R1/R2/R6.
         if self.vcov_type == "conley":
-            if self.conley_coords is None or self.conley_cutoff_km is None:
-                raise ValueError(
-                    "MultiPeriodDiD(vcov_type='conley') requires "
-                    "conley_coords=(lat_col, lon_col) and conley_cutoff_km "
-                    "on the constructor."
-                )
-            if unit is None:
-                raise ValueError(
-                    "MultiPeriodDiD(vcov_type='conley') requires unit= at "
-                    "fit-time (the panel block-decomposed sandwich computes "
-                    "a per-unit serial sum, matching R conleyreg)."
-                )
-            if self.conley_lag_cutoff is None:
-                raise ValueError(
-                    "MultiPeriodDiD(vcov_type='conley') requires "
-                    "conley_lag_cutoff (non-negative int; 0 means spatial-"
-                    "within-period only, no serial component). See R "
-                    "conleyreg's `lag_cutoff` argument for the convention."
-                )
-            if survey_design is not None:
-                raise NotImplementedError(
-                    "MultiPeriodDiD(vcov_type='conley', survey_design=...) "
-                    "is not supported: Conley + survey weights / replicate "
-                    "vcov is deferred to a follow-up PR (Bertanha-Imbens 2014 "
-                    "territory). Use vcov_type='hc1' for survey-aware "
-                    "cluster-robust without spatial HAC, or drop survey_design= "
-                    "for panel Conley."
-                )
-            if self.inference == "wild_bootstrap":
-                raise NotImplementedError(
-                    "MultiPeriodDiD(vcov_type='conley', "
-                    "inference='wild_bootstrap') is not supported: wild "
-                    "bootstrap is a separate inference path that does not "
-                    "consume the analytical Conley sandwich. Use "
-                    "inference='analytical' for Conley SEs."
-                )
+            from diff_diff.conley import _validate_conley_estimator_inputs
+
+            _validate_conley_estimator_inputs(
+                estimator_name="MultiPeriodDiD",
+                data=data,
+                unit=unit,
+                conley_coords=self.conley_coords,
+                conley_cutoff_km=self.conley_cutoff_km,
+                conley_lag_cutoff=self.conley_lag_cutoff,
+                survey_design=survey_design,
+                inference=self.inference,
+            )
         # Pre-compute non_ref_periods (needed for absorb demeaning)
         non_ref_periods = [p for p in all_periods if p != reference_period]
 
