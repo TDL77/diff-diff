@@ -17,6 +17,7 @@ __all__ = [
     "generate_bootstrap_weights_batch",
     "generate_bootstrap_weights_batch_numpy",
     "generate_survey_multiplier_weights_batch",
+    "apply_stratum_centering",
     "generate_rao_wu_weights",
     "generate_rao_wu_weights_batch",
     "compute_percentile_ci",
@@ -652,6 +653,137 @@ def generate_survey_multiplier_weights_batch(
                 weights[:, _singleton_cols[0]] = 0.0
 
     return weights, psu_ids
+
+
+def apply_stratum_centering(
+    tensor: np.ndarray,
+    resolved_survey: "ResolvedSurveyDesign",
+    psu_ids: np.ndarray,
+    psu_axis: int = 0,
+) -> np.ndarray:
+    """Within-stratum demean + sqrt(n_h/(n_h-1)) Bessel rescale along the
+    PSU axis of a tensor. Mutates ``tensor`` in place AND returns it.
+
+    Shared by the HAD sup-t event-study bootstrap
+    (``had._sup_t_multiplier_bootstrap``, PSU axis = 0 on the
+    PSU-aggregated influence tensor ``Psi_psu`` of shape ``(n_psu,
+    n_horizons)``) AND the HAD Stute survey-bootstrap family
+    (``stute_test``, ``stute_joint_pretest``, PSU axis = 1 on the
+    multiplier matrix ``psu_mults`` of shape ``(n_bootstrap, n_psu)``).
+    Same algebra applied at different points in the two pipelines:
+
+    - HAD sup-t is a multiplier bootstrap on a precomputed influence
+      tensor. The correction is applied to the tensor before
+      ``perturbations = psu_weights @ Psi_psu`` — see ``had.py:2151-2204``.
+    - Stute is a wild residual bootstrap with refit-in-loop and a
+      nonlinear functional. The correction is applied to the multipliers
+      before the per-obs broadcast ``eta_obs = psu_mults[b,
+      psu_col_idx]`` — see ``had_pretests.py:1988-2007``.
+
+    Locks the algebraic identity architecturally (so future drift in
+    one site cannot silently diverge from the other) and makes both
+    sites consume the same battle-tested code path.
+
+    The combined correction makes ``Var_xi[xi @ Psi_psu]`` match the
+    analytical Binder-TSL stratified target
+    ``V = sum_h (1 - f_h) (n_h / (n_h - 1)) sum_j (psi_hj - psi_h_bar)²``
+    exactly (the ``(1 - f_h)`` factor is already baked into
+    ``psu_mults`` by :func:`generate_survey_multiplier_weights_batch`;
+    this helper bakes the remaining ``(n_h / (n_h - 1))`` factor and
+    enforces the within-stratum-zero centering required for cluster
+    wild bootstrap consistency under stratification).
+
+    See REGISTRY § HeterogeneousAdoptionDiD —
+    "Note (Stute stratified survey-bootstrap calibration)" for the
+    derivation.
+
+    Parameters
+    ----------
+    tensor : np.ndarray
+        Tensor with the PSU dimension on ``psu_axis``. Modified
+        in-place.
+    resolved_survey : ResolvedSurveyDesign
+        Resolved survey design. Provides ``.psu`` (per-unit PSU IDs;
+        may be None for the implicit-PSU case where each unit is its
+        own PSU) and ``.strata`` (per-unit stratum labels; may be None
+        for the single-implicit-stratum case).
+    psu_ids : np.ndarray, shape ``(n_psu,)``
+        Unique PSU identifiers aligned to the ``psu_axis`` of
+        ``tensor``. Output of
+        :func:`generate_survey_multiplier_weights_batch`.
+    psu_axis : int, default 0
+        Axis of ``tensor`` along which PSUs are indexed. 0 for HAD
+        sup-t ``Psi_psu`` (shape ``(n_psu, n_horizons)``); 1 for Stute
+        ``psu_mults`` (shape ``(n_bootstrap, n_psu)``).
+
+    Returns
+    -------
+    np.ndarray
+        Same object as ``tensor`` (in-place mutation; returned for
+        chaining). Singleton strata under ``lonely_psu='remove'`` /
+        ``'certainty'`` have all-zero entries along ``psu_axis``
+        (set by :func:`generate_survey_multiplier_weights_batch`'s
+        lonely-PSU handling); the centering here skips them to avoid
+        a divide-by-zero on ``sqrt(n_h / 0)``.
+
+    Notes
+    -----
+    Under ``strata=None``, the correction is applied uniformly with a
+    single implicit stratum (``n_h = n_psu``) — demean across all PSUs
+    along ``psu_axis`` and rescale by ``sqrt(n_psu / (n_psu - 1))``.
+    This is the standard small-sample correction for an iid cluster
+    wild bootstrap (Wu 1986; Liu 1988) and matches the HAD sup-t
+    convention at ``had.py:2199-2204``.
+
+    The Stute call site has historically NOT applied this correction
+    (pre-PR Phase 4.5 C). Lifting the gate on stratified designs +
+    introducing this shared helper makes the non-strata Stute path
+    apply the correction uniformly, which is a deliberate calibration
+    improvement (~1-2% p-value shift for typical ``n_psu``) — see
+    REGISTRY § "Note (Stute stratified survey-bootstrap calibration)".
+    """
+    n_psu = tensor.shape[psu_axis]
+
+    if resolved_survey.strata is not None:
+        strata = np.asarray(resolved_survey.strata)
+        # Build PSU -> stratum map. Constant-within-PSU by the
+        # SurveyDesign.resolve contract — assert defensively in tests.
+        psu_id_to_col = {int(p): c for c, p in enumerate(psu_ids)}
+        psu_stratum = np.empty(n_psu, dtype=strata.dtype)
+        if resolved_survey.psu is not None:
+            unit_psu = np.asarray(resolved_survey.psu)
+            seen = np.zeros(n_psu, dtype=bool)
+            for i in range(len(unit_psu)):
+                col = psu_id_to_col[int(unit_psu[i])]
+                if not seen[col]:
+                    psu_stratum[col] = strata[i]
+                    seen[col] = True
+        else:
+            # Each unit is its own PSU; psu_ids = arange(n_psu).
+            psu_stratum = strata.copy()
+
+        for h in np.unique(psu_stratum):
+            mask_h = psu_stratum == h
+            n_h = int(mask_h.sum())
+            if n_h < 2:
+                # Singleton / empty stratum: caller's lonely_psu logic
+                # has already zeroed the corresponding multipliers (or
+                # the contribution is zero by construction). Skip to
+                # avoid a divide-by-zero on sqrt(n_h / 0).
+                continue
+            slc = [slice(None)] * tensor.ndim
+            slc[psu_axis] = mask_h
+            slc = tuple(slc)
+            tensor[slc] -= tensor[slc].mean(axis=psu_axis, keepdims=True)
+            tensor[slc] *= np.sqrt(n_h / (n_h - 1))
+    else:
+        # Single implicit stratum — demean across all PSUs along
+        # psu_axis, rescale by sqrt(n_psu / (n_psu - 1)).
+        if n_psu >= 2:
+            tensor -= tensor.mean(axis=psu_axis, keepdims=True)
+            tensor *= np.sqrt(n_psu / (n_psu - 1))
+
+    return tensor
 
 
 def generate_rao_wu_weights(

@@ -42,11 +42,33 @@ Robust Standard Errors
 Wild Cluster Bootstrap
 ----------------------
 
+- **Wu, C. F. J. (1986).** "Jackknife, Bootstrap and Other Resampling Methods in Regression Analysis." *The Annals of Statistics*, 14(4), 1261-1295. https://doi.org/10.1214/aos/1176350142
+
+  Source of the ``sqrt(n_h/(n_h-1))`` Bessel small-sample correction applied to within-stratum bootstrap multipliers in :func:`diff_diff.bootstrap_utils.apply_stratum_centering`.
+
+- **Liu, R. Y. (1988).** "Bootstrap Procedures Under Some Non-I.I.D. Models." *The Annals of Statistics*, 16(4), 1696-1708. https://doi.org/10.1214/aos/1176351062
+
 - **Cameron, A. C., Gelbach, J. B., & Miller, D. L. (2008).** "Bootstrap-Based Improvements for Inference with Clustered Errors." *The Review of Economics and Statistics*, 90(3), 414-427. https://doi.org/10.1162/rest.90.3.414
+
+- **Davidson, R., & Flachaire, E. (2008).** "The Wild Bootstrap, Tamed at Last." *Journal of Econometrics*, 146(1), 162-169. https://doi.org/10.1016/j.jeconom.2008.08.003
+
+  Source of the within-stratum demean requirement on cluster-level multipliers under stratified sampling (Davidson-Flachaire 2008 §2.3). Combined with Wu (1986) Bessel rescale, drives the stratified clustered wild-bootstrap correction in :func:`diff_diff.bootstrap_utils.apply_stratum_centering` (HAD sup-t event-study cband + HAD Stute survey-bootstrap family).
+
+- **Kreiss, J.-P., & Lahiri, S. N. (2012).** "Bootstrap Methods for Time Series." In *Time Series Analysis: Methods and Applications* (Vol. 30, pp. 3-26). Elsevier. https://doi.org/10.1016/B978-0-444-53858-1.00001-6
+
+  Extends the cluster-wild bootstrap to stratified PSU sampling — within-stratum-independent multipliers + within-stratum centering preserves wild-bootstrap consistency for empirical-process functionals under stratification.
 
 - **Webb, M. D. (2014).** "Reworking Wild Bootstrap Based Inference for Clustered Errors." Queen's Economics Department Working Paper No. 1315. https://www.econ.queensu.ca/sites/econ.queensu.ca/files/qed_wp_1315.pdf
 
 - **MacKinnon, J. G., & Webb, M. D. (2018).** "The Wild Bootstrap for Few (Treated) Clusters." *The Econometrics Journal*, 21(2), 114-135. https://doi.org/10.1111/ectj.12107
+
+- **Djogbenou, A. A., MacKinnon, J. G., & Nielsen, M. Ø. (2019).** "Asymptotic Theory and Wild Bootstrap Inference with Clustered Errors." *Journal of Econometrics*, 212(2), 393-412. https://doi.org/10.1016/j.jeconom.2019.04.035
+
+  Theorem 2 establishes empirical-process consistency of the cluster wild bootstrap for nonlinear smooth-functional consumers of per-obs residuals — the theoretical anchor for the stratified Stute CvM survey-bootstrap in :func:`diff_diff.had_pretests.stute_test` / :func:`stute_joint_pretest` (Phase 4.5 C strata extension).
+
+- **Hlávka, Z., & Hušková, M. (2020).** "Multivariate Tests of Independence and the Wild Bootstrap." *Computational Statistics & Data Analysis*, 152, 107048. https://doi.org/10.1016/j.csda.2020.107048
+
+  Vector-valued wild bootstrap consistency for empirical-process functionals (§3 condition on shared per-replicate multipliers preserving cross-component dependence). The theoretical anchor for the multi-horizon joint Stute survey-bootstrap in :func:`diff_diff.had_pretests.stute_joint_pretest` (the same ``psu_mults[b, :]`` row is shared across horizons within each replicate, preserving cross-horizon empirical-process dependence).
 
 Nonparametric Bias-Corrected Inference
 --------------------------------------
