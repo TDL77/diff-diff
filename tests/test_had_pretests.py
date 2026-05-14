@@ -5639,6 +5639,82 @@ class TestStuteStratifiedSurveyBootstrap:
         # implicit). p-values match at atol=1e-12.
         np.testing.assert_allclose(r_explicit.p_value, r_implicit.p_value, atol=1e-12)
 
+    def test_stute_call_sites_invoke_apply_stratum_centering(self, monkeypatch):
+        """Regression: ensure the Stute survey-bootstrap call sites
+        actually invoke ``apply_stratum_centering`` on the PSU multipliers
+        before the per-obs broadcast. A future change that silently
+        removed the calls at ``had_pretests.py:1985`` (``stute_test``)
+        or ``had_pretests.py:3312`` (``stute_joint_pretest``) would
+        disable the stratified clustered wild-bootstrap correction
+        without failing the helper-level bit-parity regression at
+        ``tests/test_bootstrap_utils.py::TestApplyStratumCentering::
+        test_bit_parity_vs_pre_refactor_inline_block`` (which only
+        covers the HAD sup-t ``psu_axis=0`` layout). This test closes
+        the disconnection-detection gap surfaced by PR #432 R2 review."""
+        import diff_diff.had_pretests as hp
+        from diff_diff import SurveyDesign
+
+        calls: list = []
+        real_helper = hp.apply_stratum_centering
+
+        def spy(*args, **kwargs):
+            # Record psu_axis from kwarg or positional (the call sites
+            # use kwarg, but be defensive).
+            psu_axis = kwargs.get("psu_axis", args[3] if len(args) > 3 else 0)
+            calls.append(psu_axis)
+            return real_helper(*args, **kwargs)
+
+        monkeypatch.setattr(hp, "apply_stratum_centering", spy)
+
+        df = self._stratified_panel(n_strata=4, n_psu_per_stratum=4)
+        sd = SurveyDesign(weights="w", strata="stratum", psu="psu")
+        pre = df[df["time"] < 2].groupby("unit", as_index=False)["y"].mean()
+        post = df[df["time"] >= 2].groupby("unit", as_index=False)["y"].mean()
+        merged = pre.merge(post, on="unit", suffixes=("_pre", "_post"))
+        dose = df.groupby("unit", as_index=False)["d"].max()
+        merged = merged.merge(dose, on="unit")
+        dy = (merged["y_post"] - merged["y_pre"]).to_numpy(dtype=np.float64)
+        d_arr = merged["d"].to_numpy(dtype=np.float64)
+        unit_df = df.drop_duplicates(subset="unit")[["unit", "stratum", "psu", "w"]].sort_values(
+            "unit"
+        )
+        resolved = sd.resolve(unit_df)
+
+        # Single-horizon call site.
+        calls.clear()
+        stute_test(d=d_arr, dy=dy, survey_design=resolved, n_bootstrap=99, seed=0)
+        assert calls == [1], (
+            "stute_test did not invoke apply_stratum_centering on the "
+            f"Stute multiplier matrix (psu_axis=1). Recorded calls: {calls}. "
+            "The stratified clustered wild-bootstrap correction is "
+            "disconnected from had_pretests.py:1985."
+        )
+
+        # Multi-horizon call site.
+        calls.clear()
+        G = len(d_arr)
+        residuals_by_horizon = {
+            "0": np.random.default_rng(7).normal(size=G),
+            "1": np.random.default_rng(8).normal(size=G),
+        }
+        fitted_by_horizon = {"0": np.zeros(G), "1": np.zeros(G)}
+        design_matrix = np.column_stack([np.ones(G), d_arr])
+        stute_joint_pretest(
+            residuals_by_horizon=residuals_by_horizon,
+            fitted_by_horizon=fitted_by_horizon,
+            doses=d_arr,
+            design_matrix=design_matrix,
+            n_bootstrap=99,
+            seed=0,
+            survey=resolved,
+        )
+        assert calls == [1], (
+            "stute_joint_pretest did not invoke apply_stratum_centering on "
+            f"the joint Stute multiplier matrix (psu_axis=1). Recorded "
+            f"calls: {calls}. The stratified clustered wild-bootstrap "
+            "correction is disconnected from had_pretests.py:3312."
+        )
+
     def test_calibration_shift_non_strata_end_to_end_smoke(self):
         """End-to-end smoke for the non-strata Stute path after the
         single-implicit-stratum centering lands. The post-PR path

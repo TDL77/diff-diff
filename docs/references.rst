@@ -52,11 +52,11 @@ Wild Cluster Bootstrap
 
 - **Davidson, R., & Flachaire, E. (2008).** "The Wild Bootstrap, Tamed at Last." *Journal of Econometrics*, 146(1), 162-169. https://doi.org/10.1016/j.jeconom.2008.08.003
 
-  Source of the within-stratum demean requirement on cluster-level multipliers under stratified sampling (Davidson-Flachaire 2008 §2.3). Combined with Wu (1986) Bessel rescale, drives the stratified clustered wild-bootstrap correction in :func:`diff_diff.bootstrap_utils.apply_stratum_centering` (HAD sup-t event-study cband + HAD Stute survey-bootstrap family).
+  Wild bootstrap for heteroskedastic regression. Cited as an ingredient — the within-cluster mean-zero requirement on the multipliers (the canonical ``η_g`` centering that makes the wild bootstrap recover heteroskedasticity-robust inference) is the analog applied within each stratum in :func:`diff_diff.bootstrap_utils.apply_stratum_centering`. The paper does NOT cover stratified-survey designs directly; the stratification extension is the library synthesis (see REGISTRY § "Note (Stute stratified survey-bootstrap calibration)").
 
 - **Kreiss, J.-P., & Lahiri, S. N. (2012).** "Bootstrap Methods for Time Series." In *Time Series Analysis: Methods and Applications* (Vol. 30, pp. 3-26). Elsevier. https://doi.org/10.1016/B978-0-444-53858-1.00001-6
 
-  Extends the cluster-wild bootstrap to stratified PSU sampling — within-stratum-independent multipliers + within-stratum centering preserves wild-bootstrap consistency for empirical-process functionals under stratification.
+  Bootstrap methods for time series. Cited as a methodological touchstone for the family of block-bootstrap / within-block centering arguments that underpins the wild-cluster-bootstrap extension to stratified PSU sampling. The exact composition (within-stratum demean + ``sqrt(n_h/(n_h-1))`` Bessel rescale on PSU multipliers applied before the per-obs broadcast in a wild-residual refit-in-loop bootstrap for a nonlinear empirical-process functional like the Stute CvM) is NOT in any single paper — it is a library synthesis of these ingredients.
 
 - **Webb, M. D. (2014).** "Reworking Wild Bootstrap Based Inference for Clustered Errors." Queen's Economics Department Working Paper No. 1315. https://www.econ.queensu.ca/sites/econ.queensu.ca/files/qed_wp_1315.pdf
 
