@@ -620,6 +620,32 @@ class TestHADDispatch:
                     f"event-study panels."
                 )
 
+    def test_had_step_4_accepts_first_treat_inf_encoding(
+        self, mock_had_results, mock_had_event_study_results
+    ):
+        """The HAD -> ContinuousDiD inverse handoff at Step 4 must
+        accommodate both `first_treat == 0` and `first_treat == inf`
+        as never-treated encodings (ContinuousDiD normalizes
+        `inf -> 0` internally). Without this, a HAD user contemplating
+        the switch to ContinuousDiD could misclassify an `inf`-encoded
+        panel as ineligible. Mirror of
+        `test_handle_continuous_step_4_accepts_first_treat_inf_encoding`.
+        """
+        for fixture in (mock_had_results, mock_had_event_study_results):
+            output = practitioner_next_steps(fixture, verbose=False)
+            step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+            assert len(step_4_steps) >= 1
+            text = " ".join(
+                (s.get("why", "") + " " + s.get("code", "")) for s in step_4_steps
+            ).lower()
+            # Either the explicit `inf` encoding is mentioned, or the
+            # encoding-agnostic "dose == 0 throughout" framing is used.
+            assert "inf" in text or "dose == 0 throughout" in text, (
+                "HAD Step-4 ContinuousDiD-handoff rationale must accommodate "
+                "both first_treat == 0 and first_treat == inf as never-treated "
+                "encodings, or mention 'dose == 0 throughout' framing."
+            )
+
     def test_handle_continuous_step_4_routes_to_had(self, mock_continuous_results):
         # Symmetric pair: ContinuousDiD users with no untreated units
         # should be routed to HeterogeneousAdoptionDiD.
@@ -692,6 +718,113 @@ class TestHADDispatch:
             code = step.get("code", "")
             if code.strip():
                 ast.parse(code)  # raises SyntaxError on failure
+
+    def test_handle_continuous_step_4_honors_had_panel_shape_contract(
+        self, mock_continuous_results
+    ):
+        """The ContinuousDiD -> HAD Step-4 handoff must respect HAD's
+        panel-shape contract: `aggregate="overall"` (default) is
+        two-period only; multi-period panels MUST set
+        `aggregate="event_study"`; staggered panels yield last-
+        cohort-only WAS. Without surfacing those distinctions, a
+        copy-paste on a valid multi-period ContinuousDiD result
+        either raises at fit time or silently shifts estimand.
+        """
+        output = practitioner_next_steps(mock_continuous_results, verbose=False)
+        step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+        assert len(step_4_steps) >= 1
+        had_step = next(
+            (s for s in step_4_steps if "HeterogeneousAdoptionDiD" in s.get("code", "")),
+            None,
+        )
+        assert had_step is not None, "Step 4 must include a HAD handoff snippet for ContinuousDiD"
+        text = (had_step.get("why", "") + " " + had_step.get("code", "")).lower()
+        # Snippet or rationale must call out the multi-period event-study path.
+        assert "aggregate='event_study'" in text or 'aggregate="event_study"' in text, (
+            "ContinuousDiD -> HAD handoff must show aggregate='event_study' "
+            "for multi-period panels; otherwise copy-paste on a multi-period "
+            "ContinuousDiD result raises at HAD fit time."
+        )
+        # And the staggered last-cohort-only caveat must be surfaced.
+        assert "last-cohort" in text or "last cohort" in text, (
+            "Step-4 rationale must surface HAD's last-cohort-only event-study "
+            "behavior on staggered panels so agents understand the estimand "
+            "shift before recommending the handoff."
+        )
+        # And the ChaisemartinDHaultfoeuille pointer for full multi-cohort
+        # staggered continuous support must be present.
+        assert "chaisemartindhaultfoeuille" in text, (
+            "Step-4 rationale must point at ChaisemartinDHaultfoeuille as the "
+            "alternative when full multi-cohort staggered continuous support "
+            "is required."
+        )
+
+    def test_handle_continuous_step_4_accepts_first_treat_inf_encoding(
+        self, mock_continuous_results
+    ):
+        """`ContinuousDiD.fit` accepts both `first_treat == 0` and
+        `first_treat == inf` (the latter is normalized to 0 internally).
+        Step-4 guidance must not hard-code "first_treat == 0" as the
+        only never-treated encoding, or agents will misclassify
+        inf-encoded panels.
+        """
+        output = practitioner_next_steps(mock_continuous_results, verbose=False)
+        step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+        had_step = next(
+            (s for s in step_4_steps if "HeterogeneousAdoptionDiD" in s.get("code", "")),
+            None,
+        )
+        assert had_step is not None
+        text = (had_step.get("why", "") + " " + had_step.get("code", "")).lower()
+        # Either the explicit `inf` encoding is mentioned, or the
+        # encoding-agnostic "dose == 0 throughout" framing is used.
+        assert "inf" in text or "dose = 0" in text or "dose == 0" in text, (
+            "Step-4 rationale must accommodate both first_treat == 0 and "
+            "first_treat == inf as never-treated encodings, or mention the "
+            "encoding-agnostic 'dose == 0 throughout' framing."
+        )
+
+    def test_handle_continuous_step_4_recodes_first_treat_inf_for_had(
+        self, mock_continuous_results
+    ):
+        """R10 P1: the ContinuousDiD -> HAD Step-4 handoff must include
+        an explicit `first_treat=inf -> 0` recode in the emitted code
+        snippet. ContinuousDiD silently normalizes `inf` to `0`, but
+        HAD's _validate_had_panel rejects any first_treat value outside
+        {0, t_post} at the front door (had.py:1096-1102). Without the
+        recode, a copy-paste of the advertised handoff on a valid
+        inf-encoded ContinuousDiD panel raises
+        `ValueError: first_treat_col='first_treat' contains value(s)
+        [inf] outside the allowed set {0, t_post}`.
+        """
+        output = practitioner_next_steps(mock_continuous_results, verbose=False)
+        step_4_steps = [s for s in output["next_steps"] if s["baker_step"] == 4]
+        had_step = next(
+            (s for s in step_4_steps if "HeterogeneousAdoptionDiD" in s.get("code", "")),
+            None,
+        )
+        assert had_step is not None
+        code = had_step.get("code", "")
+        # The snippet must show the recode BEFORE the had.fit() call.
+        # Accept any of: pandas `.replace({np.inf: 0})`, mask-style
+        # `.where(~np.isinf(...), 0)`, or an explicit comment naming
+        # the requirement on the panel preparation step.
+        recode_present = (
+            "np.inf: 0" in code or "np.isinf" in code or "first_treat=0" in code.replace(" ", "")
+        )
+        assert recode_present, (
+            "Step-4 ContinuousDiD->HAD snippet must include an explicit "
+            "first_treat=inf -> 0 recode (HAD requires first_treat in "
+            "{0, t_post}; ContinuousDiD's inf-encoding is rejected at the "
+            f"HAD front door). Snippet:\n{code}"
+        )
+        # And the snippet must mention the underlying contract so users
+        # who recode by other means know why.
+        why = had_step.get("why", "") + " " + code
+        assert "first_treat" in why and ("0" in why) and ("inf" in why.lower()), (
+            "Step-4 rationale/code must reference both first_treat=0 "
+            "and first_treat=inf so the recode step is self-explanatory."
+        )
 
     def test_had_event_study_sup_t_snippet_uses_hc1_for_mass_point_survey_compatibility(
         self, mock_had_event_study_results

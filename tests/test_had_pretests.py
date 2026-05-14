@@ -2297,6 +2297,23 @@ class TestMultiPeriodWorkflow:
         # Phase 3 step-2 gap string STILL present on the overall path
         assert "paper step 2 deferred" in report.verdict
 
+    def test_overall_aggregate_rejects_multi_period(self):
+        """Registry/docstring contract: aggregate='overall' is two-period only.
+
+        REGISTRY claims `aggregate="overall"` requires a balanced two-period
+        panel and that multi-period panels are rejected with a pointer to
+        `aggregate="event_study"`. This test pins the front-door rejection
+        so the registry text and the validator stay in lock-step.
+        """
+        df = _make_multi_period_panel(
+            G=40,
+            periods=[1997, 1998, 1999, 2000],
+            first_treat_period=1999,
+            seed=313,
+        )
+        with pytest.raises(ValueError, match=r"aggregate='event_study'"):
+            did_had_pretest_workflow(df, "y", "d", "period", "unit", n_bootstrap=199, seed=0)
+
     def test_event_study_linear_dgp_all_pass(self):
         df = self._linear_panel(seed=101)
         report = did_had_pretest_workflow(
