@@ -14,7 +14,7 @@ shipped with ``se=NaN`` / ``conf_int=NaN`` in the methods-appendix table.
 from __future__ import annotations
 
 import math
-from dataclasses import fields
+from dataclasses import asdict, fields
 
 import numpy as np
 import pandas as pd
@@ -304,6 +304,56 @@ def test_aliases_are_read_only(cls, ovr):
     for name in ("att", "se", "conf_int", "p_value", "t_stat"):
         with pytest.raises(AttributeError):
             setattr(res, name, object())
+
+
+@pytest.mark.parametrize(
+    "cls",
+    [CallawaySantAnnaResults, ContinuousDiDResults, MultiPeriodDiDResults],
+    ids=lambda v: v.__name__,
+)
+def test_aliases_excluded_from_dataclass_fields_and_asdict(cls):
+    """Aliases must not appear in ``dataclasses.fields()`` or
+    ``dataclasses.asdict()`` output. This is the contract the registry
+    documents (PR for v3.3.3 + REGISTRY note), but the existing alias
+    suite only locks read-through and read-only semantics — a future
+    refactor that converted an `@property` to a real dataclass field
+    would silently surface aliases to serializers and field-walkers
+    without this regression catching it.
+
+    Three representative classes cover the three alias patterns:
+    Pattern B (`CallawaySantAnnaResults`), the double-alias case
+    (`ContinuousDiDResults`), and the `avg_*` mapping
+    (`MultiPeriodDiDResults`).
+    """
+    ovr = {
+        CallawaySantAnnaResults: {
+            "overall_att": _ATT,
+            "overall_se": _SE,
+            "overall_t_stat": _T,
+            "overall_p_value": _P,
+            "overall_conf_int": _CI,
+        },
+        ContinuousDiDResults: _continuous_did_overrides(),
+        MultiPeriodDiDResults: {
+            "avg_att": _ATT,
+            "avg_se": _SE,
+            "avg_t_stat": _T,
+            "avg_p_value": _P,
+            "avg_conf_int": _CI,
+        },
+    }[cls]
+    res = cls(**_required_init_kwargs(cls, ovr))
+    field_names = {f.name for f in fields(res)}
+    asdict_keys = set(asdict(res).keys())
+    for alias in ("att", "se", "conf_int", "p_value", "t_stat"):
+        assert alias not in field_names, (
+            f"{cls.__name__}: flat alias {alias!r} surfaced in "
+            f"dataclasses.fields() output - aliases must remain "
+            f"@property descriptors, never real fields."
+        )
+        assert alias not in asdict_keys, (
+            f"{cls.__name__}: flat alias {alias!r} surfaced in " f"dataclasses.asdict() output."
+        )
 
 
 # ============================================================================
