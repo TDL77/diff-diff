@@ -2988,6 +2988,19 @@ through). diff-diff matches this asymmetry exactly for R parity. Independent
 temporal kernel choice would be a follow-up API extension if user demand
 emerges.
 
+**Note (deviation from R conleyreg literal: time-label normalization):**
+R `conleyreg` uses raw `time` values directly in the lag computation
+(`time_dist.cpp`'s `t_diff = abs(times - times[i])`). On non-dense time
+encodings (e.g., `time = 202012, 202101` for monthly panels), the raw
+difference is 89, so a `lag_cutoff=1` request silently drops valid lag-1
+serial pairs in R. diff-diff normalizes `time` to dense panel-period codes
+`0..T-1` via `np.unique(return_inverse=True)` before the lag computation,
+so `conley_lag_cutoff` always counts panel periods regardless of label
+encoding (int year, YYYYMM, datetime64, `pd.Period`, strings). On dense
+integer labels (the parity-test convention), the two paths produce
+bit-identical results. For non-dense encodings, diff-diff is the more
+robust default; pass `time` as a dense integer index for bit-exact R parity.
+
 **Kernel functions:**
 - `conley_kernel="bartlett"` (default): `K(u) = max(0, 1 - |u|)` evaluated on the pairwise distance `d_ij/h`. The radial 1-D form on pairwise distance, matching R `conleyreg`, Stata `acreg` (Colella et al. 2019), and Hsiang (2010).
 - `conley_kernel="uniform"`: `K(u) = 1{|u| ≤ 1}`. Conley 1999 page 11; spectral window negative in regions (footnote 11).

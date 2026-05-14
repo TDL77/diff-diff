@@ -56,11 +56,7 @@ def _format_vcov_label(
     """Compose a human-readable variance-family label for summary output.
 
     Returns None when vcov_type is not recognized so the caller can skip the
-    line silently (backward-compat). vcov_type='conley' is intentionally
-    not labeled here: DifferenceInDifferences / MultiPeriodDiD / TwoWayFixedEffects
-    all reject vcov_type='conley' at fit-time (Phase 1 supports cross-sectional
-    Conley only via direct compute_robust_vcov / LinearRegression), so a
-    Conley label cannot be reached on these result classes.
+    line silently (backward-compat).
     """
     if vcov_type == "classical":
         return "Classical OLS SEs (non-robust)"
@@ -77,6 +73,11 @@ def _format_vcov_label(
             return f"CR2 Bell-McCaffrey cluster-robust at {cluster_name}{suffix}"
         suffix = f", n={n_obs}" if n_obs else ""
         return f"HC2 + Bell-McCaffrey DOF (one-way{suffix})"
+    if vcov_type == "conley":
+        # Cross-sectional Conley on direct LinearRegression / compute_robust_vcov,
+        # or panel block-decomposed Conley (within-period spatial + within-unit
+        # Bartlett serial) on MultiPeriodDiD / TwoWayFixedEffects.
+        return "Conley spatial HAC (1999)"
     return None
 
 

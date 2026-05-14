@@ -342,12 +342,25 @@ def _compute_conley_vcov(
         # Phase 2 panel block-decomposed path (matches R conleyreg).
         time_arr = np.asarray(time)
         unit_arr = np.asarray(unit)
+        # Normalize time labels to dense panel-period codes (0..T-1) so that
+        # `conley_lag_cutoff` always refers to a count of panel periods, not
+        # a raw-label difference. Works for any orderable encoding (year ints
+        # like 2020/2021, YYYYMM like 202012/202101, datetime64, pd.Period,
+        # strings). np.unique returns sorted unique values and `return_inverse`
+        # gives the position of each row in that sort.
+        # **Note (deviation from R-conleyreg literal):** R conleyreg uses raw
+        # `time` values for the lag computation directly, which silently
+        # mishandles non-dense encodings (e.g. lag 1 between 202012 and 202101
+        # is 89 in raw integer differences). diff-diff normalizes first so
+        # `conley_lag_cutoff` is meaningfully a "number of observed panel
+        # periods" regardless of label scale.
+        _, time_codes = np.unique(time_arr, return_inverse=True)
         k = X.shape[1]
         meat = np.zeros((k, k))
         # Spatial component: within-period sandwich, summed across periods.
         with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
-            for t_val in np.unique(time_arr):
-                mask_t = time_arr == t_val
+            for t_code in np.unique(time_codes):
+                mask_t = time_codes == t_code
                 S_t = S[mask_t]
                 D_t = _pairwise_distance_matrix(coords_arr[mask_t], metric)
                 K_t = _kernel_fn(D_t / cutoff)
@@ -362,7 +375,8 @@ def _compute_conley_vcov(
                 for u_val in np.unique(unit_arr):
                     mask_u = unit_arr == u_val
                     S_u = S[mask_u]
-                    t_u = np.asarray(time_arr[mask_u], dtype=np.float64)
+                    # Use dense panel-period codes (NOT raw labels) for lag math.
+                    t_u = time_codes[mask_u].astype(np.float64)
                     lag_mat = np.abs(t_u[:, None] - t_u[None, :])
                     K_u = ((lag_mat <= L) & (lag_mat != 0)).astype(np.float64) * (
                         1.0 - lag_mat / (L + 1.0)

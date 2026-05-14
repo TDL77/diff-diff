@@ -1316,6 +1316,40 @@ class TestConleyTWFE:
                 conley_cutoff_km=2000.0,
             ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
 
+    def test_twfe_conley_binary_post_label_normalization(self, panel):
+        """TWFE with binary `post` (values {0,1}) + `conley_lag_cutoff=1`
+        produces the same finite vcov as the equivalent dense-period-index
+        fit. Closes the Codex P1 example — the time-label normalization
+        means lag is counted in panel periods regardless of how `time` is
+        encoded (binary post indicator vs. dense period index).
+        """
+        from diff_diff import TwoWayFixedEffects
+
+        # `panel` fixture uses `time` in {0, 1}, identical to a binary post.
+        # Rename to `post` to make the test scenario explicit.
+        df_post = panel.rename(columns={"time": "post"})
+        res = TwoWayFixedEffects(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df_post, outcome="y", treatment="treated", time="post", unit="unit")
+        assert np.isfinite(res.se) and res.se > 0
+
+    def test_twfe_conley_summary_emits_conley_label(self, panel):
+        """Panel result summary must label the variance family as Conley
+        spatial HAC when vcov_type='conley'. Closes Codex P3."""
+        from diff_diff import TwoWayFixedEffects
+
+        res = TwoWayFixedEffects(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
+        summary = res.summary()
+        assert "Conley spatial HAC" in summary
+
     def test_twfe_conley_within_vs_dummy_expansion_equivalence(self, panel):
         """FWL composability: TWFE (within-transform) + Conley should produce
         the SAME ATT SE as a dummy-expansion design with the same Conley
@@ -1829,6 +1863,76 @@ class TestConleyPanelHelper:
                 lag_cutoff=L,
             )
             np.testing.assert_allclose(V_helper, V_ref, atol=1e-12)
+
+    def test_time_label_normalization_non_unit_spaced_int(self):
+        """Year-like int labels (2020, 2021, 2022) and YYYYMM labels
+        (202011, 202012, 202101) produce the same vcov as the equivalent
+        dense codes (0, 1, 2). Closes Codex P1: `conley_lag_cutoff` is a
+        count of panel periods, not raw label difference."""
+        X, residuals, coords, _, unit, bread, cutoff = self._panel_fixture(n_units=8, T=3, k=2)
+        time_dense = np.tile([1, 2, 3], 8)
+        time_years = np.tile([2020, 2021, 2022], 8)
+        time_yyyymm = np.tile([202011, 202012, 202101], 8)
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "haversine",
+            "bartlett",
+            bread,
+            time=time_dense,
+            unit=unit,
+            lag_cutoff=1,
+        )
+        for time_alt in (time_years, time_yyyymm):
+            V_alt = _compute_conley_vcov(
+                X,
+                residuals,
+                coords,
+                cutoff,
+                "haversine",
+                "bartlett",
+                bread,
+                time=time_alt,
+                unit=unit,
+                lag_cutoff=1,
+            )
+            np.testing.assert_allclose(V_alt, V_dense, atol=1e-12)
+
+    def test_time_label_normalization_datetime64(self):
+        """datetime64 time labels normalize to dense codes via np.unique."""
+        X, residuals, coords, _, unit, bread, cutoff = self._panel_fixture(n_units=6, T=3, k=2)
+        time_dense = np.tile([0, 1, 2], 6)
+        time_dt = np.tile(
+            np.array(["2024-01-01", "2024-04-01", "2024-08-01"], dtype="datetime64[D]"),
+            6,
+        )
+        V_dense = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "haversine",
+            "bartlett",
+            bread,
+            time=time_dense,
+            unit=unit,
+            lag_cutoff=1,
+        )
+        V_dt = _compute_conley_vcov(
+            X,
+            residuals,
+            coords,
+            cutoff,
+            "haversine",
+            "bartlett",
+            bread,
+            time=time_dt,
+            unit=unit,
+            lag_cutoff=1,
+        )
+        np.testing.assert_allclose(V_dt, V_dense, atol=1e-12)
 
     def test_serial_kernel_bartlett_hardcoded_even_when_kernel_uniform(self):
         """conleyreg::time_dist hardcodes Bartlett-style temporal kernel
