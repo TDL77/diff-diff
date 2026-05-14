@@ -1912,7 +1912,7 @@ mirroring `MultiPeriodDiD.fit(unit=...)` / `TwoWayFixedEffects.fit(unit=...)`.
 ```python
 import numpy as np
 from diff_diff.linalg import LinearRegression
-from diff_diff import MultiPeriodDiD, TwoWayFixedEffects
+from diff_diff import DifferenceInDifferences, MultiPeriodDiD, TwoWayFixedEffects
 
 # Cross-sectional design: 1 row per unit, n × 2 lat/lon coords.
 reg = LinearRegression(
@@ -2028,7 +2028,7 @@ SE range.
 - `SyntheticDiD(vcov_type="conley")` → `TypeError` (uses bootstrap, not analytical sandwich).
 - Any-mode `vcov_type="conley"` `+ weights=` / `survey_design=` on `LinearRegression` / `compute_robust_vcov` → `NotImplementedError` (Bertanha-Imbens 2014 weighted-Conley deferred to follow-up PR).
 - A sparse k-d-tree fast path auto-activates for `n > 5_000` with `conley_kernel="bartlett"` AND `conley_metric` in `{"haversine", "euclidean"}` (Wave A #120); callable metrics and uniform kernel fall back to the dense path. `n > 20_000` with the dense fallback still emits a memory-OOM `UserWarning`.
-- Callable `conley_metric` is validated at the boundary (shape, finite, non-negative, symmetric to `atol=1e-10`); each failure raises a targeted `ValueError` (Wave A #123).
+- Callable `conley_metric` is validated at the boundary (shape `(n, n)`, finite, non-negative, symmetric to `atol=1e-10`, AND zero on the diagonal `|d(i, i)| ≤ 1e-10` so the kernel reduces to `K(0) = 1` on the HC0 contribution); each failure raises a targeted `ValueError` (Wave A #123).
 
 **Parity:** matches R `conleyreg` (Düsterhöft 2021, CRAN v0.1.9) to ≤ 1e-6
 on six benchmark fixtures in

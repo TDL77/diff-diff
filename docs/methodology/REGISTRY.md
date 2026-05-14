@@ -3193,7 +3193,7 @@ metrics (`"haversine"`, `"euclidean"`) satisfy this by construction.
 - `n > 20_000` with `conley_kernel='uniform'` or callable metric: emits `UserWarning` about O(n²) distance-matrix memory (sparse fast path doesn't apply; consider switching to bartlett or projecting to euclidean for performance).
 - `conley_cutoff_km ≤ 0`, `nan`, or `inf`: rejected with `ValueError`. The HC0 reduction at h→0 is documented but not the sanctioned path; users should pass `vcov_type="hc1"`.
 - Identical coordinates (`d_ij = 0` for `i ≠ j`): `K(0) = 1`, contributing the full HC0 weight per Conley 1999 page 19. Documented behavior; no warning.
-- Callable `conley_metric` returning a non-(n,n)/NaN/inf/negative/asymmetric matrix raises `ValueError` naming the violated invariant.
+- Callable `conley_metric` returning a non-(n,n)/NaN/inf/negative/asymmetric/non-zero-diagonal matrix raises `ValueError` naming the violated invariant. The zero-diagonal contract (`|d(i, i)| ≤ 1e-10`) is load-bearing for the Conley sandwich's HC0 reduction `K(0) = 1`; see "Callable conley_metric validation" subsection above.
 
 **Reference implementations:**
 - R: `conleyreg::conleyreg(...)` (Düsterhöft 2021, CRAN v0.1.9) — **parity benchmark for diff-diff**
