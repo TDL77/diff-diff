@@ -271,7 +271,8 @@ def _covariates_step() -> Dict[str, Any]:
             "# Re-estimate without covariates and compare:\n"
             "result_no_cov = estimator.fit(data, ..., covariates=None)\n"
             "# Compare ATT with and without covariates.\n"
-            "# Use .att (basic DiD) or .overall_att (staggered estimators)."
+            "# Use .att (basic DiD; also a read-only flat-alias on staggered\n"
+            "# classes) or .overall_att (canonical name on staggered results)."
         ),
         priority="medium",
         step_name="robustness",
