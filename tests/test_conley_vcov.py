@@ -1078,6 +1078,27 @@ class TestConleyEstimatorIntegration:
                 conley_lag_cutoff=1,
             ).fit(two_period_panel, outcome="y", treatment="treated", time="time")
 
+    def test_did_conley_unknown_unit_column_raises(self, two_period_panel):
+        """vcov_type='conley' with `unit=<name>` referring to an absent column
+        raises a clear estimator-level ValueError, NOT a raw pandas KeyError.
+        Front-door check mirrors MultiPeriodDiD / TwoWayFixedEffects.
+        Codex CI R1 P1 #1."""
+        from diff_diff import DifferenceInDifferences
+
+        with pytest.raises(ValueError, match="Unit column 'missing_unit' not found"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                two_period_panel,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="missing_unit",
+            )
+
     def test_did_conley_missing_lag_cutoff_raises(self, two_period_panel):
         """vcov_type='conley' without conley_lag_cutoff raises ValueError."""
         from diff_diff import DifferenceInDifferences
@@ -3157,3 +3178,132 @@ class TestConleyCluster:
         assert res.cluster_name == "region"
         d = res.to_dict()
         assert d.get("cluster_name") == "region"
+
+    def _multi_period_panel_with_region(self, n_units=12, T=4, seed=41):
+        """Multi-period panel with a time-invariant `region` column for
+        combined-kernel estimator tests."""
+        import pandas as _pd
+
+        rng = np.random.default_rng(seed=seed)
+        rows = []
+        for u in range(n_units):
+            treated = u >= n_units // 2
+            lat = rng.uniform(-30, 30)
+            lon = rng.uniform(-100, 100)
+            region = u // 3  # time-invariant within unit; spans multiple units
+            for t in range(T):
+                effect = 1.0 if (treated and t >= T // 2) else 0.0
+                yv = 0.2 * t + effect + rng.normal(0, 0.3)
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": yv,
+                        "treated": int(treated),
+                        "lat": lat,
+                        "lon": lon,
+                        "region": region,
+                    }
+                )
+        return _pd.DataFrame(rows)
+
+    def test_did_combined_kernel_finite_se_and_cluster_name(self):
+        """DifferenceInDifferences(vcov_type='conley', cluster='region') on
+        a 2-period panel produces a finite SE, propagates `region` to
+        res.cluster_name and to_dict(), and differs from the no-cluster
+        baseline (combined kernel zeros out cross-cluster off-diagonals)."""
+        from diff_diff import DifferenceInDifferences
+
+        df = self._multi_period_panel_with_region(n_units=12, T=2, seed=43)
+        kwargs = dict(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        )
+        res_combined = DifferenceInDifferences(cluster="region", **kwargs).fit(
+            df, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        res_bare = DifferenceInDifferences(**kwargs).fit(
+            df, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        assert np.isfinite(res_combined.att)
+        assert np.isfinite(res_combined.se) and res_combined.se > 0
+        assert res_combined.cluster_name == "region"
+        d = res_combined.to_dict()
+        assert d.get("cluster_name") == "region"
+        # Combined kernel zeros out off-cluster pairs → SE differs from bare
+        assert not np.isclose(res_combined.se, res_bare.se, atol=1e-8)
+
+    def test_did_combined_kernel_time_varying_cluster_raises(self):
+        """DiD + Conley + cluster=<col> on the panel block-decomposed path
+        must raise when the cluster column varies across periods within a
+        unit (time-invariance contract). Codex CI R1 P1 #2."""
+        from diff_diff import DifferenceInDifferences
+
+        df = self._multi_period_panel_with_region(n_units=10, T=2, seed=47)
+        # Make region time-varying for unit 0 (different region in t=1)
+        mask_u0_t1 = (df["unit"] == 0) & (df["time"] == 1)
+        df.loc[mask_u0_t1, "region"] = 99
+        with pytest.raises(ValueError, match="constant within each unit"):
+            DifferenceInDifferences(
+                vcov_type="conley",
+                cluster="region",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(df, outcome="y", treatment="treated", time="time", unit="unit")
+
+    def test_mpd_combined_kernel_finite_se_and_cluster_name(self):
+        """MultiPeriodDiD(vcov_type='conley', cluster='region') on a 4-period
+        panel produces a finite SE and propagates `region` to cluster_name
+        on the result + to_dict()."""
+        from diff_diff import MultiPeriodDiD
+
+        df = self._multi_period_panel_with_region(n_units=12, T=4, seed=53)
+        res = MultiPeriodDiD(
+            vcov_type="conley",
+            cluster="region",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
+            post_periods=[2, 3],
+            reference_period=0,
+        )
+        assert np.isfinite(res.avg_att)
+        assert np.isfinite(res.avg_se) and res.avg_se > 0
+        assert res.cluster_name == "region"
+        d = res.to_dict()
+        assert d.get("cluster_name") == "region"
+
+    def test_mpd_combined_kernel_time_varying_cluster_raises(self):
+        """MultiPeriodDiD + Conley + cluster=<col> with a cluster that
+        varies across periods within a unit raises ValueError (same time-
+        invariance contract as the linalg validator). Codex CI R1 P1 #2."""
+        from diff_diff import MultiPeriodDiD
+
+        df = self._multi_period_panel_with_region(n_units=10, T=3, seed=59)
+        mask_violator = (df["unit"] == 2) & (df["time"] == 2)
+        df.loc[mask_violator, "region"] = 77
+        with pytest.raises(ValueError, match="constant within each unit"):
+            MultiPeriodDiD(
+                vcov_type="conley",
+                cluster="region",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                df,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+                post_periods=[1, 2],
+                reference_period=0,
+            )

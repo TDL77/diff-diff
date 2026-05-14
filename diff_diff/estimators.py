@@ -399,6 +399,8 @@ class DifferenceInDifferences:
                     "sandwich needs the unit identifier to compute the per-unit "
                     "serial sum. Pass DiD(...).fit(data, ..., unit='<col>')."
                 )
+            if unit not in data.columns:
+                raise ValueError(f"Unit column '{unit}' not found in data")
             if self.conley_lag_cutoff is None:
                 raise ValueError(
                     "DifferenceInDifferences(vcov_type='conley') requires "
