@@ -345,15 +345,25 @@ def test_aliases_excluded_from_dataclass_fields_and_asdict(cls):
     res = cls(**_required_init_kwargs(cls, ovr))
     field_names = {f.name for f in fields(res)}
     asdict_keys = set(asdict(res).keys())
-    for alias in ("att", "se", "conf_int", "p_value", "t_stat"):
+    alias_names = ["att", "se", "conf_int", "p_value", "t_stat"]
+    # ContinuousDiDResults is the documented double-alias case: it
+    # also exposes `overall_se` / `overall_conf_int` / `overall_p_value`
+    # / `overall_t_stat` aliases pointing at the ATT side (the native
+    # field is `overall_att_*`). Lock those out of fields()/asdict() too
+    # so a future refactor cannot silently surface them as dataclass
+    # fields (which would duplicate the native `overall_att_*` keys in
+    # serializer output).
+    if cls is ContinuousDiDResults:
+        alias_names += ["overall_se", "overall_conf_int", "overall_p_value", "overall_t_stat"]
+    for alias in alias_names:
         assert alias not in field_names, (
-            f"{cls.__name__}: flat alias {alias!r} surfaced in "
+            f"{cls.__name__}: alias {alias!r} surfaced in "
             f"dataclasses.fields() output - aliases must remain "
             f"@property descriptors, never real fields."
         )
-        assert alias not in asdict_keys, (
-            f"{cls.__name__}: flat alias {alias!r} surfaced in " f"dataclasses.asdict() output."
-        )
+        assert (
+            alias not in asdict_keys
+        ), f"{cls.__name__}: alias {alias!r} surfaced in dataclasses.asdict() output."
 
 
 # ============================================================================
