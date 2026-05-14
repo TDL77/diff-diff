@@ -561,9 +561,16 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         # `self.cluster is None` AND the vcov family is cluster-compatible.
         # One-way families (`classical`, `hc2`) disable the auto-cluster (see
         # the `cluster_var` block above); report None so summary() labels the
-        # one-way family instead of "CR1 cluster-robust at unit".
-        if self.cluster is not None:
-            _twfe_cluster_label: Optional[str] = self.cluster
+        # one-way family instead of "CR1 cluster-robust at unit". The Conley
+        # path drops the auto-cluster too (`_conley_cluster_override = None`
+        # above); mirror that here so the variance-provenance metadata
+        # (`res.cluster_name`, serialized `to_dict()["cluster_name"]`)
+        # accurately reflects the cluster IDs actually passed to
+        # `LinearRegression` — i.e. None on the Conley path.
+        if _fit_vcov_type == "conley":
+            _twfe_cluster_label: Optional[str] = None
+        elif self.cluster is not None:
+            _twfe_cluster_label = self.cluster
         elif cluster_var is None:
             # One-way family path: auto-cluster was intentionally dropped.
             _twfe_cluster_label = None

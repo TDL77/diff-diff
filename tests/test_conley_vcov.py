@@ -1484,6 +1484,26 @@ class TestConleyTWFE:
         assert d["vcov_type"] == "conley"
         assert d["conley_lag_cutoff"] == 1
 
+    def test_twfe_conley_cluster_name_is_none(self, panel):
+        """Closes Codex re-review round 5 P1 (Maintainability): TWFE drops
+        its auto-unit-cluster on the Conley path (`_conley_cluster_override =
+        None`), so the variance-provenance metadata must reflect that. The
+        result's `cluster_name` is None and `to_dict()` does not advertise
+        `cluster_name` — otherwise downstream consumers would be told the
+        SEs were CR1-clustered when they're actually Conley spatial HAC.
+        """
+        from diff_diff import TwoWayFixedEffects
+
+        res = TwoWayFixedEffects(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(panel, outcome="y", treatment="treated", time="time", unit="unit")
+        assert res.cluster_name is None
+        d = res.to_dict()
+        assert "cluster_name" not in d
+
     def test_twfe_conley_non_numeric_time_fails(self, panel):
         """TWFE's `_treatment_post = treated * time` design step requires
         numeric `time`. Non-numeric labels (datetime64, pd.Period, strings)
