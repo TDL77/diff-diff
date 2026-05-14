@@ -2696,18 +2696,26 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         ("setup.py", r"\bsetup\.py\b"),
     )
 
-    # Explicit allowlist of /tmp/<file>.py paths that the workflow
-    # legitimately executes. Each entry MUST be staged from BASE_SHA
-    # via `git show "${BASE_SHA}":<path> > /tmp/<file>.py` in the same
-    # workflow run; the staging-existence test below verifies this.
-    # Adding to this list requires both adding the path here AND
-    # confirming the staging command exists in the workflow YAML.
+    # Explicit allowlist mapping `/tmp/<file>.py` paths to their
+    # trusted BASE_SHA source paths. Each entry MUST have a
+    # corresponding `git show "${BASE_SHA}":<source> > <tmp-path>`
+    # staging command in the same workflow run; the staging-existence
+    # test below verifies this AS AN EXACT COMMAND, not as independent
+    # substrings. Adding to this list requires both adding the
+    # mapping here AND confirming the exact staging command exists.
+    #
     # R2 fix for PR #436: prior blanket /tmp/ whitelist let any
     # `python3 /tmp/<anything>.py` pass even if a future edit
     # `cp`-staged a PR-head file to /tmp first.
-    ALLOWED_TMP_PYTHON_EXECUTIONS = (
-        "/tmp/notebook_md_extract.py",
-    )
+    # R3 fix for PR #436: prior allowlist was a tuple with
+    # independent BASE_SHA + redirect substring checks; both
+    # appeared throughout the workflow, so CI passed even if
+    # staging was rewritten to `cp diff_diff/foo.py /tmp/...`.
+    # The mapping below pairs each tmp path with its exact base
+    # source so the staging-test asserts the FULL command line.
+    ALLOWED_TMP_PYTHON_EXECUTIONS = {
+        "/tmp/notebook_md_extract.py": "tools/notebook_md_extract.py",
+    }
 
     @pytest.fixture
     def workflow_text(self):
@@ -2890,27 +2898,48 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         self, workflow_text
     ):
         """Each entry in ALLOWED_TMP_PYTHON_EXECUTIONS must correspond
-        to a `git show "${BASE_SHA}":<source> > <allowed-path>` staging
-        command in the same workflow. This is what makes /tmp execution
-        safe: the file content comes from BASE (trusted), not PR head.
+        to an EXACT `git show "${BASE_SHA}":<source> > <tmp-path>`
+        staging command in the same workflow. This is what makes /tmp
+        execution safe: the file content comes from BASE (trusted),
+        not PR head.
 
-        R2 fix for PR #436: without this test, a future edit could
-        leave an entry in the allowlist while removing/changing the
-        staging command, silently re-opening the dismissal hole."""
-        for allowed_path in self.ALLOWED_TMP_PYTHON_EXECUTIONS:
-            # The staging command pattern: `git show "${BASE_SHA}":<source>
-            # > <allowed_path>` (or similar redirect form). We require
-            # both `BASE_SHA` AND a redirect to the exact allowed path.
-            redirect = f"> {allowed_path}"
-            assert "BASE_SHA" in workflow_text and redirect in workflow_text, (
-                f"ALLOWED_TMP_PYTHON_EXECUTIONS entry {allowed_path!r} "
-                f"requires a BASE_SHA staging command in the same "
-                f"workflow (`git show \"${{BASE_SHA}}\":<source> > "
-                f"{allowed_path}`). Found BASE_SHA reference: "
-                f"{('BASE_SHA' in workflow_text)!r}; found redirect "
-                f"`{redirect}`: {(redirect in workflow_text)!r}. Either "
-                f"add the staging command or remove the entry from "
-                f"the allowlist."
+        R2 fix for PR #436: introduced as a separate assertion.
+        R3 fix for PR #436: prior version asserted independent
+        substring presence (`"BASE_SHA" in text and "> <path>" in
+        text`), which would pass even if a future edit replaced the
+        staging with `cp diff_diff/foo.py /tmp/...` while leaving
+        unrelated `BASE_SHA` references elsewhere in the workflow.
+        Now uses a regex anchored to the exact command form, with the
+        base source explicitly paired in ALLOWED_TMP_PYTHON_EXECUTIONS."""
+        import re
+
+        for tmp_path, base_source in self.ALLOWED_TMP_PYTHON_EXECUTIONS.items():
+            # Match the full staging command — must appear as a single
+            # contiguous shell command (no newlines between tokens).
+            # Use `[ \t]+` (NOT `\s+`, which would match newlines and
+            # let the regex span unrelated lines) for inter-token
+            # whitespace. Allows arbitrary leading prefix (`if`,
+            # leading whitespace, etc.) and arbitrary trailing content
+            # (`2>/dev/null; then`, etc.) so long as the exact
+            # `git show "${BASE_SHA}":<source> > <tmp-path>` token
+            # sequence appears on one line.
+            staging_re = re.compile(
+                r'git[ \t]+show[ \t]+"\$\{BASE_SHA\}":'
+                + re.escape(base_source)
+                + r'[ \t]+>[ \t]+'
+                + re.escape(tmp_path)
+                + r'\b',
+            )
+            assert staging_re.search(workflow_text), (
+                f"ALLOWED_TMP_PYTHON_EXECUTIONS[{tmp_path!r}] = "
+                f"{base_source!r} requires an EXACT staging command in "
+                f"the workflow on a single line:\n  "
+                f'git show "${{BASE_SHA}}":{base_source} > {tmp_path}\n'
+                f"Found no matching line. Either add the exact staging "
+                f"command, fix the source-path mapping, or remove the "
+                f"entry from the allowlist (in which case the "
+                f"python-execution test will fail any /tmp use of this "
+                f"path, forcing structural review)."
             )
 
     def test_workflow_dismissal_comment_block_present(self, workflow_text):
