@@ -2665,6 +2665,103 @@ class TestWorkflowForkSkip:
         )
 
 
+class TestWorkflowDoesNotExecutePRHeadCode:
+    """Guards CodeQL #14 dismissal — see the workflow comment block above
+    the resolve-pr step in `.github/workflows/ai_pr_review.yml` for the
+    full rationale and invalidation conditions. The dismissal accepts
+    that the workflow CHECKS OUT PR-head content but is valid only
+    while the workflow does not EXECUTE that content."""
+
+    FORBIDDEN_EXECUTION_PATTERNS = (
+        "pip install",
+        "pytest",
+        "npm install",
+        "yarn install",
+        "cargo run",
+        "cargo test",
+        "make ",
+        "./configure",
+        "bundle exec",
+        "rake ",
+        "go test",
+        "go run",
+        "maturin develop",
+        "maturin build",
+        "poetry install",
+        "poetry run",
+        "pdm install",
+        "pdm run",
+        "uv sync",
+        "uv run",
+        "tox",
+        "setup.py",
+    )
+
+    @pytest.fixture
+    def workflow_text(self):
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
+        if not wf.exists():
+            pytest.skip("workflow not found")
+        return wf.read_text()
+
+    def test_workflow_run_blocks_have_no_forbidden_execution_patterns(
+        self, workflow_text
+    ):
+        """If this fails, the CodeQL #14 dismissal is invalid. Either
+        remove the offending step or restructure per the dismissed plan
+        (checkout BASE_SHA only + git show for PR-head)."""
+        import re
+
+        # Match every `run: |` block's body. The body is the indented
+        # content following `run: |` until the next step (next `      - `
+        # at 6-space indent) or end of file. Body lines are at 10+ space
+        # indent (the `run: |` itself is at 8-space step-property indent;
+        # block scalars indent further).
+        run_block_re = re.compile(
+            r"^\s+run:\s*\|\s*\n((?:^(?:[ ]{8,}|\s*$).*\n?)*)",
+            re.MULTILINE,
+        )
+        run_blocks = run_block_re.findall(workflow_text)
+        assert run_blocks, "No `run:` blocks found — extraction regex broke"
+
+        violations = []
+        for i, block in enumerate(run_blocks):
+            for pattern in self.FORBIDDEN_EXECUTION_PATTERNS:
+                if pattern in block:
+                    snippet = next(
+                        (line for line in block.splitlines() if pattern in line),
+                        "",
+                    ).strip()
+                    violations.append(
+                        f"run-block #{i}: forbidden pattern {pattern!r} in: {snippet}"
+                    )
+        assert not violations, (
+            "CodeQL #14 dismissal invalidated by forbidden execution "
+            "patterns in workflow run blocks:\n" + "\n".join(violations)
+            + "\nSee `.github/workflows/ai_pr_review.yml` comment block "
+            "above the resolve-pr step for context."
+        )
+
+    def test_workflow_dismissal_comment_block_present(self, workflow_text):
+        """The comment block that documents the #14 dismissal must stay
+        attached to the workflow file. If a future edit removes it, the
+        rationale lives only in the GitHub Security UI's
+        dismissed_comment field — easy to lose track of."""
+        assert "CodeQL alert #14" in workflow_text, (
+            "Workflow must keep the #14 dismissal rationale comment "
+            "block above the resolve-pr step."
+        )
+        assert "won't fix" in workflow_text, (
+            "Comment block must cite the dismissal reason for grep-ability."
+        )
+        assert "TestWorkflowDoesNotExecutePRHeadCode" in workflow_text, (
+            "Workflow comment must reference this guard test by name so "
+            "future maintainers can find it."
+        )
+
+
 class TestExtractResponseText:
     def test_prefers_output_text_field(self, review_mod):
         result = {"output_text": "Direct text.", "output": []}

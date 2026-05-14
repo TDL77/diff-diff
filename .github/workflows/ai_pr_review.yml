@@ -55,6 +55,40 @@ jobs:
       )
 
     steps:
+      # ─────────────────────────────────────────────────────────────────
+      # CodeQL alert #14 (untrusted-checkout-toctou/critical) was
+      # dismissed on 2026-05-14 as "won't fix" with the rationale
+      # documented below. The dismissal is valid ONLY while ALL of
+      # the following hold:
+      #   1. The Codex action runs with sandbox: read-only (see the
+      #      Run Codex step below). No step EXECUTES PR-head FILE
+      #      BYTES — no `pip install -e .`, `pytest`, `npm install`,
+      #      `cargo run`, `make`, `./configure`, `maturin develop`,
+      #      or `python3 <pr-file>.py` against checked-out PR-head
+      #      files. Inline `python3 -c '...'` invocations operating
+      #      on sanitized environment variables (PR_TITLE, PR_BODY,
+      #      PREV_REVIEW) are SAFE — the script body comes from base,
+      #      not from PR head.
+      #   2. The fork-skip gate (`is_fork == 'false'`) gates every
+      #      post-resolve step, including both actions/checkout
+      #      invocations.
+      #   3. The author_association check on issue_comment /
+      #      review-comment events restricts triggers to
+      #      OWNER/MEMBER/COLLABORATOR.
+      #   4. head_sha is API-pinned in this resolve-pr step before
+      #      checkout.
+      #
+      # If you are adding a step that VIOLATES any of these
+      # invariants, this dismissal is invalid. Either remove the
+      # offending step OR restructure the workflow to checkout
+      # BASE_SHA only and use `git show` for PR-head reads (degrades
+      # reviewer quality — see plan archive).
+      #
+      # Guard test: tests/test_openai_review.py
+      #   ::TestWorkflowDoesNotExecutePRHeadCode
+      # CI fails closed if a forbidden execution pattern is
+      # introduced.
+      # ─────────────────────────────────────────────────────────────────
       - name: Resolve PR number + metadata
         id: pr
         uses: actions/github-script@v9
