@@ -2717,6 +2717,29 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         "/tmp/notebook_md_extract.py": "tools/notebook_md_extract.py",
     }
 
+    # Literal allowlist of single-line `python3 -c <body>` payloads.
+    # Any single-line `python3 -c '<body>'` whose body is NOT in this
+    # set is classified as `python_c_unsafe` and fails the
+    # python-file-execution test.
+    #
+    # R9 fix for PR #436: prior versions blanket-exempted all
+    # `python3 -c` invocations. A future edit could write
+    #   python3 -c 'exec(open("diff_diff/evil.py").read())'
+    # which would NOT have been classified as a python_exec
+    # (because `-c` disabled script-mode classification), silently
+    # bypassing the dismissal.
+    #
+    # Initially empty because the workflow's existing `-c` bodies
+    # (PR_TITLE / PR_BODY / PREV_REVIEW / SANITIZED_PROSE
+    # sanitization at lines 248-283, 403-408, 466-471 of
+    # ai_pr_review.yml) are MULTI-LINE strings — shlex can't
+    # tokenize them from a single physical line, so they're
+    # invisible to the line-by-line classifier and exempt by
+    # virtue of not being detected. Any FUTURE single-line `-c`
+    # body would be detected and must be added here with explicit
+    # review of why the body is safe.
+    ALLOWED_PYTHON_C_PAYLOADS = ()
+
     @pytest.fixture
     def workflow_text(self):
         assert _SCRIPT_PATH is not None
@@ -2939,6 +2962,10 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         LEADING_KEYWORDS = {
             "if", "then", "else", "elif", "do", "while", "for",
             "done", "fi", "until", "case", "esac",
+            # R9 fix for #436: shell negation `!` in command position.
+            # `if ! python3 evil.py; then ... fi` would otherwise have
+            # cmd=`!`, evading every classifier branch.
+            "!",
         }
         # R8 fix for #436: shell group-delimiter tokens. shlex with
         # `punctuation_chars=True` tokenizes `(` and `)` as separate
@@ -3018,9 +3045,22 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             # PR #436. Without this, `bash -c "python3
             # diff_diff/evil.py"` would classify only as `bash`
             # (no python_exec), bypassing the allowlist.
+            #
+            # R9 fix: also handle COMPOUND short flags that contain
+            # `c` — `-lc`, `-ec`, `-exc`, etc. are valid bash
+            # shorthand for "set various options AND -c". So any
+            # short-flag bundle (single `-` not `--`) containing `c`
+            # in the chars after `-` triggers the inline-script
+            # recursion.
             if cmd in ("bash", "sh"):
                 for i in range(1, len(tokens)):
-                    if tokens[i] == "-c" and i + 1 < len(tokens):
+                    t = tokens[i]
+                    is_c_flag = (
+                        t.startswith("-")
+                        and not t.startswith("--")
+                        and "c" in t[1:]
+                    )
+                    if is_c_flag and i + 1 < len(tokens):
                         inner = tokens[i + 1]
                         seg_actions.extend(
                             TestWorkflowDoesNotExecutePRHeadCode._classify_shell_line(inner)
@@ -3031,27 +3071,27 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             # positional regardless of extension — `python3 /tmp/foo.py.bak`
             # IS a python execution of /tmp/foo.py.bak (allowlist
             # check then differentiates allowed from forbidden).
-            # If `-c` or `-m` is seen, the script-execution path is
-            # bypassed (inline string / module mode); subsequent
-            # positionals are args to that mode, not a script path.
-            #
-            # NOTE: `python3 -c '<inline-payload>'` is NOT inspected
-            # for what the payload itself does (e.g.,
-            # `python3 -c 'exec(open("diff_diff/evil.py").read())'`).
-            # Catching that would require Python AST inspection or a
-            # literal allowlist of every existing `-c` body in the
-            # workflow — both brittle. The current workflow's `-c`
-            # payloads operate on sanitized env vars (PR_TITLE etc.)
-            # set from base-controlled values; the dismissal accepts
-            # the residual that future `-c` payloads could embed
-            # malicious shell. Surface to user before iterating
-            # further on this if it re-fires.
+            # `-c <body>` is captured as a `python_c_payload` action
+            # for the literal-allowlist test; `-m` skips both flag
+            # and module-name (no python_exec).
             elif cmd in ("python", "python3", "python2"):
                 script_mode_disabled = False
                 i = 1
                 while i < len(tokens):
                     t = tokens[i]
-                    if t in FLAGS_WITH_ARG:
+                    if t == "-c" and i + 1 < len(tokens):
+                        # R9 fix for #436: capture -c body for the
+                        # literal-allowlist check. Without this, a
+                        # future single-line
+                        #   python3 -c 'exec(open("evil.py").read())'
+                        # would be silently accepted.
+                        seg_actions.append(
+                            ("python_c_payload", tokens[i + 1])
+                        )
+                        script_mode_disabled = True
+                        i += 2
+                        continue
+                    if t == "-m":
                         script_mode_disabled = True
                         i += 2
                         continue
@@ -3138,21 +3178,35 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             joined = self._join_shell_continuations(content.splitlines())
             for _start_idx, joined_line in joined:
                 for action, target in self._classify_shell_line(joined_line):
-                    if action != "python_exec":
-                        continue
-                    if target in self.ALLOWED_TMP_PYTHON_EXECUTIONS:
-                        continue
-                    violations.append(
-                        f"{label}: non-allowlisted python file "
-                        f"execution {target!r} in: {joined_line.strip()[:120]}"
-                    )
+                    if action == "python_exec":
+                        if target in self.ALLOWED_TMP_PYTHON_EXECUTIONS:
+                            continue
+                        violations.append(
+                            f"{label}: non-allowlisted python file "
+                            f"execution {target!r} in: {joined_line.strip()[:120]}"
+                        )
+                    elif action == "python_c_payload":
+                        # R9 fix: literal allowlist of -c bodies.
+                        # Existing multi-line bodies aren't tokenized
+                        # by shlex so they're invisible (exempt).
+                        # New single-line bodies must be added to
+                        # ALLOWED_PYTHON_C_PAYLOADS with explicit
+                        # safety review.
+                        if target in self.ALLOWED_PYTHON_C_PAYLOADS:
+                            continue
+                        violations.append(
+                            f"{label}: non-allowlisted python -c "
+                            f"payload {target[:80]!r} in: "
+                            f"{joined_line.strip()[:120]}"
+                        )
         assert not violations, (
-            "CodeQL #14 dismissal invalidated by python file execution "
-            "of non-allowlisted paths. Either use a path in "
-            "ALLOWED_TMP_PYTHON_EXECUTIONS (after staging it from "
-            "BASE_SHA via `git show`), refactor to `python3 -c '...'` "
-            "with sanitized env vars, or add the new path to the "
-            "allowlist explicitly with a BASE_SHA staging command.\n"
+            "CodeQL #14 dismissal invalidated by python execution. "
+            "Either: (a) use a path in ALLOWED_TMP_PYTHON_EXECUTIONS "
+            "after staging from BASE_SHA; (b) for `-c` payloads, add "
+            "to ALLOWED_PYTHON_C_PAYLOADS with explicit review of "
+            "why the payload is safe (no exec/eval/open of "
+            "non-/tmp paths); (c) refactor to a base-staged `/tmp` "
+            "script.\n"
             + "\n".join(violations)
         )
 
@@ -3583,6 +3637,60 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         assert py_targets(
             'bash -c "( python3 diff_diff/evil.py )"'
         ) == ["diff_diff/evil.py"]
+
+    def test_classify_handles_bash_compound_flags_and_shell_negation(self):
+        """R9 regression: bash/sh `-c`-containing compound flags
+        (`-lc`, `-ec`, `-exc`) recurse like bare `-c`. Shell
+        negation `!` in command position is stripped so the
+        following command is classified."""
+        cls = self._classify_shell_line
+
+        def py_targets(line):
+            return [t for a, t in cls(line) if a == "python_exec"]
+
+        # bash compound flags containing `c`
+        assert py_targets('bash -lc "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        assert py_targets('bash -ec "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        assert py_targets('bash -exc "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        assert py_targets('sh -lc "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        # sh -c without bundle
+        assert py_targets('sh -c "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        # bash flags without `c` should NOT trigger recursion
+        # (no -c means no inline-script body)
+        assert py_targets("bash -l") == []
+        assert py_targets("bash -i") == []
+
+        # Shell negation `!` in command position
+        assert py_targets("if ! python3 diff_diff/evil.py; then echo ok; fi") == ["diff_diff/evil.py"]
+        assert py_targets("! python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+
+    def test_classify_python_c_payload_against_allowlist(self):
+        """R9 regression: `python3 -c <body>` is captured as a
+        `python_c_payload` action with the body as target. The
+        python-file-execution test then rejects any body not in
+        ALLOWED_PYTHON_C_PAYLOADS.
+
+        Without this, `python3 -c 'exec(open("evil.py").read())'`
+        would be silently exempted (script_mode_disabled prevented
+        any python_exec action from being recorded)."""
+        cls = self._classify_shell_line
+
+        def c_payloads(line):
+            return [t for a, t in cls(line) if a == "python_c_payload"]
+
+        # Single-line -c body captured
+        assert c_payloads('python3 -c \'exec(open("diff_diff/evil.py").read())\'') == [
+            'exec(open("diff_diff/evil.py").read())'
+        ]
+        assert c_payloads("python3 -c 'print(1)'") == ["print(1)"]
+        # -m doesn't capture
+        assert c_payloads("python3 -m unittest discover") == []
+        # No -c at all
+        assert c_payloads("python3 /tmp/foo.py") == []
+        # -c inside bash -c recursion
+        assert c_payloads(
+            'bash -c "python3 -c \'exec(open(\\"evil.py\\").read())\'"'
+        ) == ['exec(open("evil.py").read())']
 
     def test_classify_git_show_redirect(self):
         """The BASE_SHA staging command must produce a
