@@ -11173,13 +11173,20 @@ class TestByPathPredictHetPlacebo:
             "from path_heterogeneity_effects negative-key lookup."
         )
 
-    def test_predict_het_placebo_survey_design_raises(self):
-        """survey_design + placebo + predict_het raises NotImplementedError.
+    def test_predict_het_placebo_survey_design_warns_and_skips_backward(self):
+        """survey_design + placebo + heterogeneity warns + emits forward-only.
 
-        The Binder TSL cell-period allocator's REGISTRY justification
-        is post-period; pre-period (backward-horizon) attribution is
-        deferred to a separate methodology PR. Forward-horizon
-        predict_het + survey continues to work.
+        Per codex R1 P1 #1: the previous eager-at-function-entry gate
+        broke the previously-supported forward-horizon survey + predict_het
+        path under the default `placebo=True` setting. Replaced with a
+        per-iteration backstop in `_compute_heterogeneity_test` (raises
+        only when actually computing a backward iteration under survey)
+        plus fit-time warn+skip at the global and per-path call sites
+        that pass `placebo=0` when survey is active. User gets a
+        UserWarning and forward-horizon results, NOT an exception.
+
+        The defensive direct-call gate is exercised separately by
+        `test_compute_heterogeneity_test_direct_call_raises_on_backward_survey`.
         """
         from diff_diff.survey import SurveyDesign
 
@@ -11193,17 +11200,99 @@ class TestByPathPredictHetPlacebo:
         est = ChaisemartinDHaultfoeuille(
             drop_larger_lower=False, by_path=3, placebo=True
         )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+                heterogeneity="het_x", survey_design=sd,
+            )
+        # Warning fired with the expected substring
+        het_warnings = [
+            w for w in caught
+            if "backward-horizon (placebo) predict_het" in str(w.message)
+        ]
+        assert het_warnings, (
+            "Expected UserWarning about backward-horizon survey gate. "
+            f"Got: {[str(w.message) for w in caught]}"
+        )
+        # Forward-horizon heterogeneity ran successfully
+        assert res.heterogeneity_effects is not None
+        # Only positive-int keys (forward); no negative (placebo) keys
+        het_keys = sorted(res.heterogeneity_effects.keys())
+        assert all(h > 0 for h in het_keys), (
+            f"Expected only positive horizons under survey gate, got: {het_keys}"
+        )
+        # Per-path heterogeneity also forward-only
+        assert res.path_heterogeneity_effects is not None
+        for path, horizons in res.path_heterogeneity_effects.items():
+            path_keys = sorted(horizons.keys())
+            assert all(h > 0 for h in path_keys), (
+                f"path={path}: expected only positive horizons, got {path_keys}"
+            )
+
+    def test_compute_heterogeneity_test_direct_call_raises_on_backward_survey(
+        self,
+    ):
+        """Direct calls to `_compute_heterogeneity_test` with survey +
+        backward horizon raise NotImplementedError.
+
+        Defensive backstop: fit() gates this case upstream, so the
+        function-level raise is unreachable via the normal flow. This
+        test exercises the per-iteration gate directly to lock the API
+        contract for any future internal call site.
+        """
+        from diff_diff.chaisemartin_dhaultfoeuille import (
+            _compute_heterogeneity_test,
+        )
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_het_data()
+        df["sw"] = 1.0
+        df["stratum"] = df["group"] % 4
+        df["psu_id"] = df["group"]
+        sd = SurveyDesign(
+            weights="sw", strata="stratum", psu="psu_id",
+        )
+        # Build a minimal valid obs_survey_info dict matching the
+        # function's contract. SurveyDesign.resolve() takes only the
+        # dataframe; group/time are inferred from the design context.
+        resolved = sd.resolve(df)
+        groups = sorted(df["group"].unique())
+        periods = sorted(df["period"].unique())
+        n_groups = len(groups)
+        n_periods = len(periods)
+        Y_mat = np.zeros((n_groups, n_periods))
+        N_mat = np.ones((n_groups, n_periods))
+        baselines = np.zeros(n_groups)
+        first_switch_idx = np.full(n_groups, 3, dtype=int)
+        switch_direction = np.ones(n_groups)
+        T_g = np.full(n_groups, n_periods - 1, dtype=int)
+        X_het = np.zeros(n_groups)
+        obs_survey_info = {
+            "group_ids": df["group"].to_numpy(),
+            "time_ids": df["period"].to_numpy(),
+            "weights": df["sw"].to_numpy(dtype=np.float64),
+            "resolved": resolved,
+            "periods": np.asarray(periods),
+        }
         with pytest.raises(
             NotImplementedError,
-            match=r"survey_design with placebo predict_het",
+            match=r"backward-horizon \(placebo\) predict_het",
         ):
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", UserWarning)
-                est.fit(
-                    df, outcome="outcome", group="group", time="period",
-                    treatment="treatment", L_max=3,
-                    heterogeneity="het_x", survey_design=sd,
-                )
+            _compute_heterogeneity_test(
+                Y_mat=Y_mat,
+                N_mat=N_mat,
+                baselines=baselines,
+                first_switch_idx=first_switch_idx,
+                switch_direction=switch_direction,
+                T_g=T_g,
+                X_het=X_het,
+                L_max=2,
+                placebo=2,
+                group_ids_order=np.asarray(groups),
+                obs_survey_info=obs_survey_info,
+            )
 
     def test_predict_het_placebo_survey_forward_only_still_works(self):
         """survey + predict_het without placebo continues to work."""

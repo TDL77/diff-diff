@@ -1684,3 +1684,111 @@ class TestDCDHDynRParityByPathHeterogeneityWithPlacebo:
             f"path={path_key} h={h} ci_hi: "
             f"py={py_h['conf_int'][1]:.6f} vs r={r_h['ci_hi']:.6f}"
         )
+
+
+class TestDCDHDynRParityHeterogeneityWithPlacebo:
+    """Parity tests for global ``predict_het`` + ``placebo`` (no by_path).
+
+    Per codex R1 P1 #2: the Phase 1A change extended the global
+    `_compute_heterogeneity_test` loop to cover backward horizons, so
+    `results.heterogeneity_effects` now includes negative-int keys when
+    ``placebo=True`` and ``heterogeneity=`` are co-set. This class pins
+    the global surface independently of the per-path version
+    (``TestDCDHDynRParityByPathHeterogeneityWithPlacebo``).
+
+    Fixture: scenario 23 (``multi_path_reversible_predict_het_with_placebo_global``)
+    — same DGP as scenarios 20-22 (reuses ``d20``) so per-horizon
+    tolerances inherit from ``TestDCDHDynRParityHeterogeneity``.
+
+    R syntax note: ``predict_het = list("X", c(-1))`` triggers
+    "compute heterogeneity for ALL forward (1..effects) AND ALL placebo
+    (1..placebo) positions" — same sentinel as scenario 22.
+    """
+
+    BETA_RTOL = 1e-6
+    BETA_ATOL = 1e-9
+    SE_RTOL = 1e-5
+    INFERENCE_RTOL = 1e-4
+
+    def test_parity_multi_path_reversible_predict_het_with_placebo_global(
+        self, golden_values
+    ):
+        """Global heterogeneity on forward + backward horizons."""
+        import warnings
+
+        scenario = golden_values.get(
+            "multi_path_reversible_predict_het_with_placebo_global"
+        )
+        if scenario is None:
+            pytest.skip(
+                "scenario 'multi_path_reversible_predict_het_with_placebo_global' "
+                "not in golden values"
+            )
+
+        df = _golden_to_df_with_extra(scenario["data"], extra_cols=["het_x"])
+        # Python's `placebo=True` triggers all-backward-horizons
+        # (1..L_max) placebo computation; the parity check iterates only
+        # R's emitted subset (placebo=2 in scenario 23 -> backward
+        # horizons -1, -2). Python's extra backward horizons (e.g., -3
+        # if eligible) are allowed and not parity-checked.
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, placebo=True
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            results = est.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+                heterogeneity="het_x",
+            )
+
+        assert results.heterogeneity_effects is not None
+        py_het = results.heterogeneity_effects
+
+        # Forward horizons (positive int keys).
+        r_predict_het = scenario["results"]["predict_het"]
+        for h_str, r_h in r_predict_het.items():
+            h = int(h_str)
+            assert h > 0
+            assert h in py_het, f"forward horizon {h} missing"
+            self._assert_horizon_parity(h, py_het[h], r_h)
+
+        # Placebo horizons (negative int keys).
+        r_placebo_het = scenario["results"].get("placebo_predict_het", {})
+        for h_str, r_h in r_placebo_het.items():
+            h = int(h_str)
+            assert h < 0
+            assert h in py_het, (
+                f"placebo horizon {h} missing from Python heterogeneity_effects"
+            )
+            self._assert_horizon_parity(h, py_het[h], r_h)
+
+    def _assert_horizon_parity(self, h, py_h, r_h):
+        """Pin all 6 inference fields against R."""
+        assert py_h["beta"] == pytest.approx(
+            r_h["beta"], rel=self.BETA_RTOL, abs=self.BETA_ATOL
+        ), f"h={h} beta: py={py_h['beta']:.6f} vs r={r_h['beta']:.6f}"
+        assert py_h["se"] == pytest.approx(r_h["se"], rel=self.SE_RTOL), (
+            f"h={h} se: py={py_h['se']:.6f} vs r={r_h['se']:.6f}"
+        )
+        assert py_h["t_stat"] == pytest.approx(r_h["t"], rel=self.SE_RTOL), (
+            f"h={h} t_stat: py={py_h['t_stat']:.6f} vs r={r_h['t']:.6f}"
+        )
+        assert int(py_h["n_obs"]) == int(r_h["n_obs"]), (
+            f"h={h} n_obs: py={py_h['n_obs']} vs r={r_h['n_obs']}"
+        )
+        assert py_h["p_value"] == pytest.approx(
+            r_h["p_value"], rel=self.INFERENCE_RTOL
+        ), (
+            f"h={h} p_value: py={py_h['p_value']:.6e} vs r={r_h['p_value']:.6e}"
+        )
+        assert py_h["conf_int"][0] == pytest.approx(
+            r_h["ci_lo"], rel=self.INFERENCE_RTOL
+        ), f"h={h} ci_lo: py={py_h['conf_int'][0]:.6f} vs r={r_h['ci_lo']:.6f}"
+        assert py_h["conf_int"][1] == pytest.approx(
+            r_h["ci_hi"], rel=self.INFERENCE_RTOL
+        ), f"h={h} ci_hi: py={py_h['conf_int'][1]:.6f} vs r={r_h['ci_hi']:.6f}"

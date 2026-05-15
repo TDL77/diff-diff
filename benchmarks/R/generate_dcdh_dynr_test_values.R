@@ -1231,6 +1231,41 @@ cat("  Scenarios 20/21: multi_path_reversible_predict_het + by_path version\n")
     results = extract_dcdh_by_path_predict_het(res21, n_effects = 3)
   )
 
+  # Scenario 23: GLOBAL predict_het + placebo (no by_path). Mirrors
+  # scenario 22's syntax minus by_path so we have a parity anchor for
+  # the GLOBAL `results.heterogeneity_effects` surface emitting both
+  # forward and backward (placebo) horizons. Resolves codex R1 P1 #2:
+  # the Phase 1A change extended the global heterogeneity loop to
+  # cover backward horizons, so a global-surface parity test was
+  # required to lock that contract independently of the per-path
+  # dispatcher. Same `c(-1)` sentinel as scenario 22 (computes ALL
+  # forward + ALL placebo positions); reuses `d20` for DGP parity.
+  res23 <- did_multiplegt_dyn(
+    df = d20, outcome = "outcome", group = "group", time = "period",
+    treatment = "treatment", effects = 3, placebo = 2,
+    dont_drop_larger_lower = TRUE,
+    predict_het = list("het_x", c(-1)),
+    ci_level = 95, graph_off = TRUE
+  )
+  scenarios$multi_path_reversible_predict_het_with_placebo_global <- list(
+    data = list(
+      group = as.numeric(d20$group),
+      period = as.numeric(d20$period),
+      treatment = as.numeric(d20$treatment),
+      outcome = as.numeric(d20$outcome),
+      het_x = as.numeric(d20$het_x)
+    ),
+    params = list(pattern = "multi_path_reversible_predict_het_with_placebo_global",
+                  n_switchers = n_switchers20, n_controls = n_controls20,
+                  n_groups = n_groups20, n_periods = n_periods20,
+                  seed = 120L, effects = 3, placebo = 2,
+                  predict_het_var = "het_x",
+                  predict_het_horizons = c(-1),
+                  ci_level = 95,
+                  dont_drop_larger_lower = TRUE),
+    results = extract_dcdh_predict_het(res23, n_effects = 3)
+  )
+
   # Scenario 22: by_path + predict_het + placebo (probes TODO #422). Reuses
   # d20 from scenarios 20/21 for DGP parity. Tests whether R's
   # did_multiplegt_dyn(by_path=k, predict_het, placebo=N) per-by_level

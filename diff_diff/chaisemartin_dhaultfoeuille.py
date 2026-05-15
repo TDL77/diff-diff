@@ -3875,6 +3875,28 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
             # event_study_effects but the het test uses level outcomes.
             Y_het = Y_mat if not _is_trends_linear else y_pivot.to_numpy()
             N_het = N_mat_orig
+            # Survey + placebo + heterogeneity: backward-horizon
+            # (placebo) predict_het is deferred under survey designs
+            # because the Binder TSL cell-period allocator's REGISTRY
+            # justification is tied to post-period attribution
+            # (pre-period cell allocator derivation gap). Compute
+            # forward-horizon heterogeneity only and warn so the user
+            # knows backward-horizon results are NOT silently produced.
+            _het_placebo = L_max if self.placebo else 0
+            if _het_placebo > 0 and _obs_survey_info is not None:
+                warnings.warn(
+                    "survey_design + heterogeneity + placebo=True: "
+                    "backward-horizon (placebo) predict_het is not yet "
+                    "supported under survey designs (pre-period cell "
+                    "allocator deferred — see REGISTRY.md "
+                    "ChaisemartinDHaultfoeuille placebo predict_het "
+                    "Note). Forward-horizon predict_het is computed "
+                    "normally. Drop placebo, drop heterogeneity, or "
+                    "drop survey_design to silence this warning.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                _het_placebo = 0
             heterogeneity_effects = _compute_heterogeneity_test(
                 Y_mat=Y_het,
                 N_mat=N_het,
@@ -3884,7 +3906,7 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                 T_g=T_g_arr,
                 X_het=X_het,
                 L_max=L_max,
-                placebo=L_max if self.placebo else 0,
+                placebo=_het_placebo,
                 alpha=self.alpha,
                 rank_deficient_action=self.rank_deficient_action,
                 group_ids_order=np.array(all_groups),
@@ -3903,6 +3925,17 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
         if heterogeneity is not None and (
             self.by_path is not None or self.paths_of_interest is not None
         ):
+            # Per-path placebo predict_het under survey: same gating
+            # rationale as the global call above. The global call's
+            # warning already fired (heterogeneity is computed at both
+            # surfaces in the same fit() flow), so per-path skips
+            # silently — no duplicate warning. Forward-horizon per-path
+            # predict_het + survey continues to work via the existing
+            # _compute_path_heterogeneity_test → _compute_heterogeneity_test
+            # forward path.
+            _path_het_placebo = L_max if self.placebo else 0
+            if _path_het_placebo > 0 and _obs_survey_info is not None:
+                _path_het_placebo = 0
             path_heterogeneity_effects = _compute_path_heterogeneity_test(
                 Y_mat=Y_het,
                 N_mat=N_het,
@@ -3915,7 +3948,7 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                 by_path=self.by_path,
                 paths_of_interest=self.paths_of_interest,
                 D_mat=D_mat,
-                placebo=L_max if self.placebo else 0,
+                placebo=_path_het_placebo,
                 alpha=self.alpha,
                 rank_deficient_action=self.rank_deficient_action,
                 group_ids_order=np.array(all_groups),
@@ -5004,28 +5037,15 @@ def _compute_heterogeneity_test(
     results: Dict[int, Dict[str, Any]] = {}
 
     # Survey setup (once, before horizon loop). When inactive, df_s=None and
-    # the existing plain-OLS path runs unchanged.
+    # the existing plain-OLS path runs unchanged. Forward-horizon survey
+    # heterogeneity is supported; the per-iteration backward-horizon gate
+    # below catches the unsupported case (survey + l_h < 0) defensively.
+    # Under normal `fit()` flow the global / per-path call sites pass
+    # `placebo=0` when survey is active (with a UserWarning), so the
+    # backward iterations are never reached and the gate is a defensive
+    # backstop only — direct callers passing `placebo > 0 + survey` get
+    # the explicit raise.
     use_survey = obs_survey_info is not None and group_ids_order is not None
-    if use_survey and placebo > 0:
-        # The Binder TSL cell-period allocator's justification (REGISTRY.md
-        # ChaisemartinDHaultfoeuille survey IF expansion Note) is tied to
-        # post-period attribution: ψ_g is placed in the cell
-        # (g, F_g-1+l) for l > 0. Backward (placebo) horizons would place
-        # ψ_g mass on a pre-period cell (g, F_g-1+l) with l < 0, which is
-        # a separate library-extension claim — not mechanical reuse — and
-        # needs its own derivation. Forward-horizon predict_het + survey
-        # is supported; this gate forces the user to choose between
-        # "survey + no placebo het" and "no survey + placebo het" until
-        # the pre-period allocator is derived in a follow-up PR.
-        raise NotImplementedError(
-            "survey_design with placebo predict_het is not yet supported. "
-            "The Binder TSL cell-period allocator is derived for post-"
-            "period attribution (REGISTRY.md ChaisemartinDHaultfoeuille "
-            "survey IF expansion Note); pre-period (backward-horizon) "
-            "attribution requires a separate methodology derivation. "
-            "Forward-horizon predict_het + survey_design is supported. "
-            "Either drop placebo or drop survey_design to proceed."
-        )
     if use_survey:
         from diff_diff.survey import (
             compute_replicate_if_variance,
@@ -5071,6 +5091,24 @@ def _compute_heterogeneity_test(
     # `effect = matrix(-i, ...)` rbind site).
     horizons_to_compute = list(range(1, L_max + 1)) + list(range(-1, -placebo - 1, -1))
     for l_h in horizons_to_compute:
+        # Per-iteration survey gate (defensive backstop). Forward
+        # iterations under survey work; backward iterations raise
+        # because the Binder TSL cell-period allocator's REGISTRY
+        # justification is tied to post-period attribution. fit() gates
+        # this upstream by passing `placebo=0` when survey is active
+        # (with a UserWarning when the user requested placebo het), so
+        # the raise is reachable only via direct callers.
+        if use_survey and l_h < 0:
+            raise NotImplementedError(
+                "survey_design with backward-horizon (placebo) "
+                "predict_het is not yet supported. The Binder TSL "
+                "cell-period allocator is derived for post-period "
+                "attribution (REGISTRY.md ChaisemartinDHaultfoeuille "
+                "survey IF expansion Note); pre-period (l < 0) "
+                "attribution requires a separate methodology "
+                "derivation. Forward-horizon predict_het + "
+                "survey_design is supported."
+            )
         # Eligible switchers at this horizon (same logic as multi-horizon DID)
         eligible = []
         dep_var = []
