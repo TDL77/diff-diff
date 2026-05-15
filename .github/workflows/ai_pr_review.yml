@@ -86,8 +86,34 @@ jobs:
       #
       # Guard test: tests/test_openai_review.py
       #   ::TestWorkflowDoesNotExecutePRHeadCode
-      # CI fails closed if a forbidden execution pattern is
-      # introduced.
+      # Catches the common ACCIDENTAL-regression forms: pip / npm /
+      # yarn / cargo / make / maturin / poetry / pdm / uv / tox /
+      # setup.py install/run, python file execution against PR-head
+      # paths, bash -c / sh -c (including compound flags -lc/-ec/-exc)
+      # with python/cp inside, env-var prefixes (`VAR=1 python3 ...`),
+      # wrapper commands (`env`, `nohup`, `exec`, `time`, `command`),
+      # shell negation (`!`), backslash line continuations, single-line
+      # `python3 -c` payloads (literal-allowlisted, currently empty),
+      # subshell `(...)`, brace group `{ ...; }`, and write-overwrites
+      # of allowlisted /tmp paths between staging and execution
+      # (`>`, `>>`, `cp`, `mv`, `tee`, `ln`).
+      #
+      # NOT exhaustive against an adversarial maintainer. Known
+      # unmodeled paths (any of these CAN execute PR-head bytes
+      # without tripping CI; a maintainer reviewing this workflow
+      # MUST refuse changes that introduce them):
+      #   - bash <script> / sh <script> / ./<script> / source <script>
+      #     / . <script>  — direct shell-script execution
+      #   - multi-line `python3 -c` bodies (line-by-line shlex can't
+      #     reassemble across newlines; the workflow's existing 5
+      #     sanitizer bodies are therefore exempt by invisibility)
+      #   - variable expansion: `SCRIPT="$X"; python3 "$SCRIPT"`
+      #   - `eval`, `find -exec`, `xargs -I {}`
+      # The dismissal's primary defense is THIS comment block plus
+      # the `dismissed_comment` field on alert #14. The guard test
+      # is belt-and-suspenders for accidental regressions, not a
+      # complete adversarial parser.
+      # See TODO.md for the long-term tracking of this gap.
       # ─────────────────────────────────────────────────────────────────
       - name: Resolve PR number + metadata
         id: pr

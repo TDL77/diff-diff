@@ -2670,7 +2670,51 @@ class TestWorkflowDoesNotExecutePRHeadCode:
     the resolve-pr step in `.github/workflows/ai_pr_review.yml` for the
     full rationale and invalidation conditions. The dismissal accepts
     that the workflow CHECKS OUT PR-head content but is valid only
-    while the workflow does not EXECUTE that content."""
+    while the workflow does not EXECUTE that content.
+
+    SCOPE — what this test modelS:
+    - Common installer/runner commands (pip, npm, yarn, cargo, make,
+      maturin, poetry, pdm, uv, tox, setup.py, etc.) via word-boundary
+      regex with shell-tokenization
+    - Python file execution against PR-head paths (any first non-flag
+      positional after `python`/`python3`/`python2`)
+    - Allowlisted /tmp python execution paired with EXACT BASE_SHA
+      staging command (`git show "${BASE_SHA}":<src> > <tmp>`),
+      ordering check (staging before exec), and overwrite check (no
+      cp/mv/tee/ln/redirect to the path between staging and exec)
+    - bash/sh -c (and compound flags -lc/-ec/-exc) recursively
+      classified
+    - Subshell `(...)` and brace group `{...}` strip
+    - Env-var prefixes (`VAR=1 cmd ...`) and wrapper commands
+      (`env`, `nohup`, `exec`, `time`, `command`)
+    - Shell negation `!`
+    - Backslash line continuations folded before classification
+    - Single-line `python3 -c <body>` bodies via literal allowlist
+      (`ALLOWED_PYTHON_C_PAYLOADS`), currently empty
+    - Step-scoped invariants: Codex `sandbox: read-only`, resolve-pr
+      `head_sha = pr.data.head.sha` (API-pinned), open-PR checkout
+      pins to `head_repo_full_name` + `head_sha`, comment-trigger
+      `author_association` gating
+
+    SCOPE — what this test does NOT model (residuals tracked in
+    TODO.md, accepted as the cost of static-shell-parsing limits):
+    - bash <script> / sh <script> / ./<script> / source <script> /
+      . <script> direct shell-script execution
+    - Multi-line `python3 -c` bodies (line-by-line shlex can't
+      reassemble across newlines; the workflow's 5 sanitizer bodies
+      are exempt by invisibility)
+    - Variable expansion (`SCRIPT="$X"; python3 "$SCRIPT"`)
+    - `eval`, `find -exec`, `xargs -I {}`
+
+    The dismissal's PRIMARY defense is the human-readable comment
+    block above the resolve-pr step + the `dismissed_comment` field
+    on alert #14, NOT this test. The test catches accidental
+    regressions of common forms; it is not a complete adversarial
+    parser, and would require modeling more shell semantics than is
+    productive in a unit test to become one. See TODO.md for the
+    long-term tracking of unmodeled paths and PR #436's review
+    history (rounds R0–R10) for the rationale of where the line
+    was drawn."""
 
     # Word-boundary regexes (label, pattern). Using regex with `\b`
     # boundaries instead of substring matches catches command tokens
