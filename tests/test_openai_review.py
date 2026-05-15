@@ -2665,6 +2665,1174 @@ class TestWorkflowForkSkip:
         )
 
 
+class TestWorkflowDoesNotExecutePRHeadCode:
+    """Guards CodeQL #14 dismissal — see the workflow comment block above
+    the resolve-pr step in `.github/workflows/ai_pr_review.yml` for the
+    full rationale and invalidation conditions. The dismissal accepts
+    that the workflow CHECKS OUT PR-head content but is valid only
+    while the workflow does not EXECUTE that content.
+
+    SCOPE — what this test modelS:
+    - Common installer/runner commands (pip, npm, yarn, cargo, make,
+      maturin, poetry, pdm, uv, tox, setup.py, etc.) via word-boundary
+      regex with shell-tokenization
+    - Python file execution against PR-head paths (any first non-flag
+      positional after `python`/`python3`/`python2`)
+    - Allowlisted /tmp python execution paired with EXACT BASE_SHA
+      staging command (`git show "${BASE_SHA}":<src> > <tmp>`),
+      ordering check (staging before exec), and overwrite check (no
+      cp/mv/tee/ln/redirect to the path between staging and exec)
+    - bash/sh -c (and compound flags -lc/-ec/-exc) recursively
+      classified
+    - Subshell `(...)` and brace group `{...}` strip
+    - Env-var prefixes (`VAR=1 cmd ...`) and wrapper commands
+      (`env`, `nohup`, `exec`, `time`, `command`)
+    - Shell negation `!`
+    - Backslash line continuations folded before classification
+    - Single-line `python3 -c <body>` bodies via literal allowlist
+      (`ALLOWED_PYTHON_C_PAYLOADS`), currently empty
+    - Step-scoped invariants: Codex `sandbox: read-only`, resolve-pr
+      `head_sha = pr.data.head.sha` (API-pinned), open-PR checkout
+      pins to `head_repo_full_name` + `head_sha`, comment-trigger
+      `author_association` gating
+
+    SCOPE — what this test does NOT model (residuals tracked in
+    TODO.md, accepted as the cost of static-shell-parsing limits):
+    - bash <script> / sh <script> / ./<script> / source <script> /
+      . <script> direct shell-script execution
+    - Multi-line `python3 -c` bodies (line-by-line shlex can't
+      reassemble across newlines; the workflow's 5 sanitizer bodies
+      are exempt by invisibility)
+    - Variable expansion (`SCRIPT="$X"; python3 "$SCRIPT"`)
+    - `eval`, `find -exec`, `xargs -I {}`
+
+    The dismissal's PRIMARY defense is the human-readable comment
+    block above the resolve-pr step + the `dismissed_comment` field
+    on alert #14, NOT this test. The test catches accidental
+    regressions of common forms; it is not a complete adversarial
+    parser, and would require modeling more shell semantics than is
+    productive in a unit test to become one. See TODO.md for the
+    long-term tracking of unmodeled paths and PR #436's review
+    history (rounds R0–R10) for the rationale of where the line
+    was drawn."""
+
+    # Word-boundary regexes (label, pattern). Using regex with `\b`
+    # boundaries instead of substring matches catches command tokens
+    # cleanly: `\bmake\b` matches `make` AND `make build` but not
+    # `bookmaker`. R2 fix for PR #436: prior `"make "` substring missed
+    # bare `run: make` invocations.
+    FORBIDDEN_COMMAND_REGEXES = (
+        ("pip install", r"\bpip3?\s+install\b"),
+        ("pytest", r"\bpytest\b"),
+        ("npm install/ci", r"\bnpm\s+(install|ci)\b"),
+        ("yarn install", r"\byarn\s+install\b"),
+        ("cargo run/test", r"\bcargo\s+(run|test)\b"),
+        ("make", r"\bmake\b"),
+        ("./configure", r"\./configure\b"),
+        ("bundle exec", r"\bbundle\s+exec\b"),
+        ("rake", r"\brake\b"),
+        ("go run/test", r"\bgo\s+(test|run)\b"),
+        ("maturin develop/build", r"\bmaturin\s+(develop|build)\b"),
+        ("poetry install/run", r"\bpoetry\s+(install|run)\b"),
+        ("pdm install/run", r"\bpdm\s+(install|run)\b"),
+        ("uv sync/run", r"\buv\s+(sync|run)\b"),
+        ("tox", r"\btox\b"),
+        ("setup.py", r"\bsetup\.py\b"),
+    )
+
+    # Explicit allowlist mapping `/tmp/<file>.py` paths to their
+    # trusted BASE_SHA source paths. Each entry MUST have a
+    # corresponding `git show "${BASE_SHA}":<source> > <tmp-path>`
+    # staging command in the same workflow run; the staging-existence
+    # test below verifies this AS AN EXACT COMMAND, not as independent
+    # substrings. Adding to this list requires both adding the
+    # mapping here AND confirming the exact staging command exists.
+    #
+    # R2 fix for PR #436: prior blanket /tmp/ whitelist let any
+    # `python3 /tmp/<anything>.py` pass even if a future edit
+    # `cp`-staged a PR-head file to /tmp first.
+    # R3 fix for PR #436: prior allowlist was a tuple with
+    # independent BASE_SHA + redirect substring checks; both
+    # appeared throughout the workflow, so CI passed even if
+    # staging was rewritten to `cp diff_diff/foo.py /tmp/...`.
+    # The mapping below pairs each tmp path with its exact base
+    # source so the staging-test asserts the FULL command line.
+    ALLOWED_TMP_PYTHON_EXECUTIONS = {
+        "/tmp/notebook_md_extract.py": "tools/notebook_md_extract.py",
+    }
+
+    # Literal allowlist of single-line `python3 -c <body>` payloads.
+    # Any single-line `python3 -c '<body>'` whose body is NOT in this
+    # set is classified as `python_c_unsafe` and fails the
+    # python-file-execution test.
+    #
+    # R9 fix for PR #436: prior versions blanket-exempted all
+    # `python3 -c` invocations. A future edit could write
+    #   python3 -c 'exec(open("diff_diff/evil.py").read())'
+    # which would NOT have been classified as a python_exec
+    # (because `-c` disabled script-mode classification), silently
+    # bypassing the dismissal.
+    #
+    # Initially empty because the workflow's existing `-c` bodies
+    # (PR_TITLE / PR_BODY / PREV_REVIEW / SANITIZED_PROSE
+    # sanitization at lines 248-283, 403-408, 466-471 of
+    # ai_pr_review.yml) are MULTI-LINE strings — shlex can't
+    # tokenize them from a single physical line, so they're
+    # invisible to the line-by-line classifier and exempt by
+    # virtue of not being detected. Any FUTURE single-line `-c`
+    # body would be detected and must be added here with explicit
+    # review of why the body is safe.
+    ALLOWED_PYTHON_C_PAYLOADS = ()
+
+    @pytest.fixture
+    def workflow_text(self):
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
+        if not wf.exists():
+            pytest.skip("workflow not found")
+        return wf.read_text()
+
+    @staticmethod
+    def _extract_all_run_content(workflow_text):
+        """Extract `run:` field content across ALL three GitHub Actions
+        scalar styles so the forbidden-pattern scan is fail-closed:
+
+        1. Literal block scalar:  `run: |` / `run: |-` / `run: |+`
+        2. Folded block scalar:   `run: >` / `run: >-` / `run: >+`
+        3. Inline scalar:         `run: <single-line-command>`
+
+        Returns a list of (label, content) tuples for error reporting.
+        Without inline-scalar coverage, `run: pytest` would bypass the
+        scan entirely (P1 from PR #436 R1)."""
+        import re
+
+        results = []
+
+        # Block scalars (literal `|` and folded `>`, optional chomping).
+        # Body lines are indented relative to the `run:` key; we accept
+        # 8+ spaces (next-step boundary is `      - ` at 6 spaces).
+        block_re = re.compile(
+            r"^\s+run:\s*[|>][-+]?\s*\n((?:^(?:[ ]{8,}|\s*$).*\n?)*)",
+            re.MULTILINE,
+        )
+        for i, body in enumerate(block_re.findall(workflow_text)):
+            results.append((f"run-block #{i}", body))
+
+        # Inline scalars: `run: <cmd>` on a single line, where <cmd>
+        # does NOT start with `|` or `>` (those are block-scalar
+        # markers). Negative lookahead handles `run:|` (rare) too.
+        inline_re = re.compile(
+            r"^\s+run:[ \t]+(?![|>])([^\n]+)$",
+            re.MULTILINE,
+        )
+        for i, line in enumerate(inline_re.findall(workflow_text)):
+            results.append((f"run-inline #{i}", line))
+
+        return results
+
+    @staticmethod
+    def _extract_step_block(workflow_text, step_name):
+        """Extract a step's full YAML block by `name:` value.
+
+        Matches `      - name: <step_name>` at 6-space indent and
+        captures lines through the next `      - ` (next step's
+        list-item marker) or end of file. Returns the captured text
+        or None if not found.
+
+        Used by step-scoped invariant tests (R2 fix for PR #436):
+        global substring assertions can be satisfied by stray
+        occurrences in comment blocks; step-scoped extraction proves
+        the invariant holds in the actual step that needs it."""
+        import re
+
+        pattern = re.compile(
+            rf"^      - name:\s*{re.escape(step_name)}\s*\n"
+            r"((?:[ ]{8,}.*\n|[ ]*\n)*)",
+            re.MULTILINE,
+        )
+        m = pattern.search(workflow_text)
+        return m.group(0) if m else None
+
+    @staticmethod
+    def _extract_open_pr_checkout_block(workflow_text):
+        """Extract the open-PR `actions/checkout` step (the one whose
+        `if:` includes `state == 'open'`) — there are TWO checkout
+        steps; this discriminates by the if-condition. Returns the
+        captured block or None if not found."""
+        import re
+
+        pattern = re.compile(
+            r"^      - uses: actions/checkout@\S+\s*\n"
+            r"        if: [^\n]*state == 'open'[^\n]*\n"
+            r"((?:[ ]{8,}.*\n|[ ]*\n)*)",
+            re.MULTILINE,
+        )
+        m = pattern.search(workflow_text)
+        return m.group(0) if m else None
+
+    def test_workflow_run_blocks_have_no_forbidden_execution_patterns(
+        self, workflow_text
+    ):
+        """If this fails, the CodeQL #14 dismissal is invalid. Either
+        remove the offending step or restructure per the dismissed plan
+        (checkout BASE_SHA only + git show for PR-head)."""
+        import re
+
+        run_contents = self._extract_all_run_content(workflow_text)
+        assert run_contents, (
+            "No `run:` content found — extraction broke. The workflow "
+            "must contain at least the resolve-pr's downstream run "
+            "blocks; if extraction returns empty, the regex needs fixing."
+        )
+
+        violations = []
+        for label, content in run_contents:
+            for cmd_label, regex in self.FORBIDDEN_COMMAND_REGEXES:
+                cmd_re = re.compile(regex)
+                if cmd_re.search(content):
+                    match_obj = cmd_re.search(content)
+                    snippet = next(
+                        (
+                            line
+                            for line in content.splitlines()
+                            if cmd_re.search(line)
+                        ),
+                        match_obj.group(0)[:120] if match_obj else "",
+                    ).strip()
+                    violations.append(
+                        f"{label}: forbidden command {cmd_label!r} "
+                        f"(regex {regex!r}) in: {snippet}"
+                    )
+        assert not violations, (
+            "CodeQL #14 dismissal invalidated by forbidden execution "
+            "patterns in workflow `run:` content:\n" + "\n".join(violations)
+            + "\nSee `.github/workflows/ai_pr_review.yml` comment block "
+            "above the resolve-pr step for context."
+        )
+
+    @staticmethod
+    def _join_shell_continuations(lines):
+        """Fold backslash-continued shell lines into single logical
+        commands. Returns a list of `(start_line_idx, joined_text)`
+        tuples where `start_line_idx` is the line where the logical
+        command begins (preserved so the staging test can still
+        report meaningful line numbers in ordering errors).
+
+        R7 fix for PR #436: prior version processed each physical
+        line independently. A future workflow edit could split a
+        forbidden command across lines via `\\` continuation:
+            python3 \\
+              diff_diff/evil.py \\
+              --arg foo
+        and bypass the classifier (each line is incomplete).
+        """
+        joined = []
+        i = 0
+        while i < len(lines):
+            start_idx = i
+            text = lines[i].rstrip()
+            while text.endswith("\\"):
+                text = text[:-1].rstrip()
+                i += 1
+                if i >= len(lines):
+                    break
+                text = text + " " + lines[i].strip()
+            joined.append((start_idx, text))
+            i += 1
+        return joined
+
+    @staticmethod
+    def _classify_shell_line(line):
+        """Tokenize a shell line via shlex and return a list of
+        (action, target) tuples for known operations.
+
+        Actions:
+          'python_exec':       target is the script path (str)
+          'cp_dest':           target is the destination path
+          'mv_dest':           target is the destination path
+          'tee_dest':          target is the destination path
+                               (multiple if tee writes to N files)
+          'ln_dest':           target is the link path (destination)
+          'redirect_write':    target is the path after `>` or `>>`
+          'git_show_redirect': target is (base_source, dest_path) tuple
+                               for `git show "${BASE_SHA}":<src> > <dest>`
+
+        Returns [] for empty/comment/unparseable lines.
+
+        Handles multi-command lines by splitting on shell operators
+        (`|`, `;`, `&&`, `||`) into segments and classifying each
+        segment independently. Required so e.g. `echo x | tee /tmp/foo`
+        recognizes `tee /tmp/foo` as the second-segment command.
+
+        Handles env-var assignment and wrapper-command prefixes
+        (`VAR=1 python3 ...`, `env FOO=1 python3 ...`) by stripping
+        them before classifying the underlying command. R7 fix for
+        PR #436.
+
+        R6 fix: shlex-based tokenization replacing raw-text regex.
+        R7 fix: prefix-unwrap for env-var / wrapper-cmd forms.
+        """
+        import re
+        import shlex
+
+        line = line.strip()
+        if not line or line.startswith("#"):
+            return []
+        # Strip trailing backslash (shell line continuation) for
+        # single-line callers. The _join_shell_continuations helper
+        # is the proper way to fold continuations across body lines;
+        # this fallback handles the edge case of a stray-trailing-`\`
+        # passed in directly.
+        if line.endswith("\\"):
+            line = line[:-1].rstrip()
+            if not line:
+                return []
+        try:
+            # `punctuation_chars=True` treats `();<>|&` as separate
+            # tokens even without surrounding whitespace, so
+            # `cmd1;cmd2` tokenizes as ['cmd1', ';', 'cmd2'] (not
+            # ['cmd1;', 'cmd2']) and `>>` stays grouped as one token.
+            sh = shlex.shlex(line, posix=True, punctuation_chars=True)
+            sh.whitespace_split = True
+            all_tokens = list(sh)
+        except ValueError:
+            # Unmatched quotes / unparseable — be conservative.
+            return []
+        if not all_tokens:
+            return []
+
+        OPERATORS = {"|", ";", "&&", "||"}
+        LEADING_KEYWORDS = {
+            "if", "then", "else", "elif", "do", "while", "for",
+            "done", "fi", "until", "case", "esac",
+            # R9 fix for #436: shell negation `!` in command position.
+            # `if ! python3 evil.py; then ... fi` would otherwise have
+            # cmd=`!`, evading every classifier branch.
+            "!",
+        }
+        # R8 fix for #436: shell group-delimiter tokens. shlex with
+        # `punctuation_chars=True` tokenizes `(` and `)` as separate
+        # words; brace groups `{ ... }` produce `{` and `}` as
+        # whitespace-separated word tokens. None of these are
+        # legitimate file paths or command names, so we filter them
+        # out of every segment before classification. Without this,
+        # `( cp evil /tmp/foo )` would treat `)` as the cp_dest.
+        GROUP_DELIMS = {"(", ")", "{", "}"}
+        WRAPPER_CMDS = {"env", "command", "nohup", "exec", "time"}
+        ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+        FLAGS_WITH_ARG = {"-c", "-m"}
+
+        # Split into shell command segments by operator tokens.
+        segments = []
+        current = []
+        for t in all_tokens:
+            if t in OPERATORS:
+                if current:
+                    segments.append(current)
+                    current = []
+            else:
+                current.append(t)
+        if current:
+            segments.append(current)
+
+        actions = []
+        for tokens in segments:
+            # Strip group-delimiter tokens that are syntactic (not
+            # arguments or commands). R8 fix.
+            tokens = [t for t in tokens if t not in GROUP_DELIMS]
+            # Strip leading shell control keywords
+            while tokens and tokens[0] in LEADING_KEYWORDS:
+                tokens.pop(0)
+            if not tokens:
+                continue
+
+            # Strip env-var assignments (`VAR=1`, `FOO_BAR=baz`) and
+            # wrapper commands (`env`, `command`, `nohup`, etc.) until
+            # we reach the actual underlying command. R7 fix for #436.
+            #   `VAR=1 python3 foo.py`         -> `python3 foo.py`
+            #   `env FOO=1 python3 foo.py`     -> `python3 foo.py`
+            #   `env -i FOO=1 python3 foo.py`  -> `python3 foo.py`
+            #   `nohup python3 foo.py`         -> `python3 foo.py`
+            #   `command python3 foo.py`       -> `python3 foo.py`
+            #   `time python3 foo.py`          -> `python3 foo.py`
+            # Known wrapper flags that consume a positional arg (so
+            # we skip the right number of tokens):
+            WRAPPER_FLAGS_WITH_ARG = {"-u", "-S"}
+            while tokens:
+                if tokens[0] in WRAPPER_CMDS:
+                    tokens.pop(0)
+                    # Skip wrapper flags (e.g., `env -i`, `env -u VAR`).
+                    while tokens and tokens[0].startswith("-"):
+                        flag = tokens.pop(0)
+                        if flag in WRAPPER_FLAGS_WITH_ARG and tokens:
+                            tokens.pop(0)
+                    # `env`/`command` may be followed by NAME=value
+                    # tokens before the underlying command; strip
+                    # those in the next loop iteration via ENV_VAR_RE.
+                    continue
+                if ENV_VAR_RE.match(tokens[0]):
+                    tokens.pop(0)
+                    continue
+                break
+            if not tokens:
+                continue
+
+            cmd = tokens[0]
+            seg_actions = []
+
+            # bash/sh -c <inline-script>: recursively classify the
+            # quoted inline script. Shlex strips the outer quotes when
+            # it tokenizes, so `bash -c "python3 evil.py"` becomes
+            # tokens `['bash', '-c', 'python3 evil.py']` and the
+            # third token IS the inner shell command. R8 fix for
+            # PR #436. Without this, `bash -c "python3
+            # diff_diff/evil.py"` would classify only as `bash`
+            # (no python_exec), bypassing the allowlist.
+            #
+            # R9 fix: also handle COMPOUND short flags that contain
+            # `c` — `-lc`, `-ec`, `-exc`, etc. are valid bash
+            # shorthand for "set various options AND -c". So any
+            # short-flag bundle (single `-` not `--`) containing `c`
+            # in the chars after `-` triggers the inline-script
+            # recursion.
+            if cmd in ("bash", "sh"):
+                for i in range(1, len(tokens)):
+                    t = tokens[i]
+                    is_c_flag = (
+                        t.startswith("-")
+                        and not t.startswith("--")
+                        and "c" in t[1:]
+                    )
+                    if is_c_flag and i + 1 < len(tokens):
+                        inner = tokens[i + 1]
+                        seg_actions.extend(
+                            TestWorkflowDoesNotExecutePRHeadCode._classify_shell_line(inner)
+                        )
+                        break
+
+            # python file execution. Classify the FIRST non-flag
+            # positional regardless of extension — `python3 /tmp/foo.py.bak`
+            # IS a python execution of /tmp/foo.py.bak (allowlist
+            # check then differentiates allowed from forbidden).
+            # `-c <body>` is captured as a `python_c_payload` action
+            # for the literal-allowlist test; `-m` skips both flag
+            # and module-name (no python_exec).
+            elif cmd in ("python", "python3", "python2"):
+                script_mode_disabled = False
+                i = 1
+                while i < len(tokens):
+                    t = tokens[i]
+                    if t == "-c" and i + 1 < len(tokens):
+                        # R9 fix for #436: capture -c body for the
+                        # literal-allowlist check. Without this, a
+                        # future single-line
+                        #   python3 -c 'exec(open("evil.py").read())'
+                        # would be silently accepted.
+                        seg_actions.append(
+                            ("python_c_payload", tokens[i + 1])
+                        )
+                        script_mode_disabled = True
+                        i += 2
+                        continue
+                    if t == "-m":
+                        script_mode_disabled = True
+                        i += 2
+                        continue
+                    if t.startswith("-"):
+                        i += 1
+                        continue
+                    if not script_mode_disabled:
+                        seg_actions.append(("python_exec", t))
+                    break
+
+            # cp / mv: destination is the LAST positional argument
+            elif cmd in ("cp", "mv"):
+                positional = [t for t in tokens[1:] if not t.startswith("-")]
+                if positional:
+                    seg_actions.append((f"{cmd}_dest", positional[-1]))
+
+            # tee: every positional is a destination
+            elif cmd == "tee":
+                for t in tokens[1:]:
+                    if not t.startswith("-"):
+                        seg_actions.append(("tee_dest", t))
+
+            # ln: destination is the last positional
+            elif cmd == "ln":
+                positional = [t for t in tokens[1:] if not t.startswith("-")]
+                if len(positional) >= 2:
+                    seg_actions.append(("ln_dest", positional[-1]))
+
+            # git show staging: `git show "${BASE_SHA}":<src> > <dest>`
+            elif cmd == "git" and len(tokens) >= 3 and tokens[1] == "show":
+                target_arg = tokens[2]
+                base_source = None
+                if target_arg.startswith("${BASE_SHA}:"):
+                    base_source = target_arg[len("${BASE_SHA}:"):]
+                elif target_arg.startswith("$BASE_SHA:"):
+                    base_source = target_arg[len("$BASE_SHA:"):]
+                if base_source is not None:
+                    for i, t in enumerate(tokens):
+                        if t in (">", ">>"):
+                            if i + 1 < len(tokens):
+                                seg_actions.append((
+                                    "git_show_redirect",
+                                    (base_source, tokens[i + 1]),
+                                ))
+                            break
+
+            # Redirects within this segment. Dedup against this
+            # segment's git_show_redirect to avoid double-counting
+            # the staging line's own `>` redirect as an overwrite.
+            seg_git_show_dests = {
+                tgt[1] for a, tgt in seg_actions if a == "git_show_redirect"
+            }
+            for i, t in enumerate(tokens):
+                if t in (">", ">>"):
+                    if i + 1 < len(tokens):
+                        dest = tokens[i + 1]
+                        if dest not in seg_git_show_dests:
+                            seg_actions.append(("redirect_write", dest))
+
+            actions.extend(seg_actions)
+
+        return actions
+
+    def test_workflow_python_file_execution_uses_only_allowlisted_paths(
+        self, workflow_text
+    ):
+        """`python <path>.py` invocations against PR-controlled paths
+        execute PR-head Python file bytes — invalidating the dismissal.
+        Inline scripts (`python3 -c '...'`) and module invocations
+        (`python3 -m foo`) don't have a `.py` script positional, so
+        they're naturally excluded by the classifier.
+
+        R2 fix: explicit ALLOWED_TMP_PYTHON_EXECUTIONS allowlist.
+        R5 fix: token-boundary handling so `.py.bak` doesn't match.
+        R6 fix: replaced regex matching with shlex-based shell
+        tokenization via `_classify_shell_line`. Now handles quoted
+        paths (`python3 "diff_diff/evil.py"`) which the prior regex
+        captured with quotes intact, evading the unquoted allowlist."""
+        run_contents = self._extract_all_run_content(workflow_text)
+        assert run_contents, "No `run:` content extracted"
+
+        violations = []
+        for label, content in run_contents:
+            joined = self._join_shell_continuations(content.splitlines())
+            for _start_idx, joined_line in joined:
+                for action, target in self._classify_shell_line(joined_line):
+                    if action == "python_exec":
+                        if target in self.ALLOWED_TMP_PYTHON_EXECUTIONS:
+                            continue
+                        violations.append(
+                            f"{label}: non-allowlisted python file "
+                            f"execution {target!r} in: {joined_line.strip()[:120]}"
+                        )
+                    elif action == "python_c_payload":
+                        # R9 fix: literal allowlist of -c bodies.
+                        # Existing multi-line bodies aren't tokenized
+                        # by shlex so they're invisible (exempt).
+                        # New single-line bodies must be added to
+                        # ALLOWED_PYTHON_C_PAYLOADS with explicit
+                        # safety review.
+                        if target in self.ALLOWED_PYTHON_C_PAYLOADS:
+                            continue
+                        violations.append(
+                            f"{label}: non-allowlisted python -c "
+                            f"payload {target[:80]!r} in: "
+                            f"{joined_line.strip()[:120]}"
+                        )
+        assert not violations, (
+            "CodeQL #14 dismissal invalidated by python execution. "
+            "Either: (a) use a path in ALLOWED_TMP_PYTHON_EXECUTIONS "
+            "after staging from BASE_SHA; (b) for `-c` payloads, add "
+            "to ALLOWED_PYTHON_C_PAYLOADS with explicit review of "
+            "why the payload is safe (no exec/eval/open of "
+            "non-/tmp paths); (c) refactor to a base-staged `/tmp` "
+            "script.\n"
+            + "\n".join(violations)
+        )
+
+    BUILD_PROMPT_STEP_NAME = "Build review prompt with PR context + diff"
+
+    def test_workflow_allowlisted_tmp_python_executions_have_base_sha_staging(
+        self, workflow_text
+    ):
+        """Each entry in ALLOWED_TMP_PYTHON_EXECUTIONS must correspond
+        to a `git show "${BASE_SHA}":<source> > <tmp-path>` staging
+        command IN THE BUILD-PROMPT STEP'S BODY, AND the python
+        execution of <tmp-path> must come AFTER the staging line, AND
+        no intervening write (cp/mv/tee/ln/redirect) may overwrite
+        <tmp-path> between them.
+
+        R2 fix: introduced.
+        R3 fix: exact staging command, not independent substrings.
+        R4 fix: scope to build-prompt step body, ordering, overwrite.
+        R5 fix: token-boundary handling.
+        R6 fix: replaced regex matching with shlex-based classifier
+        (`_classify_shell_line`). Now handles quoted paths, option-
+        bearing cp/mv (`cp -f src dst`), quoted redirect destinations
+        (`> "/tmp/foo"`), and ln-symlinks. Each non-comment line in
+        the step body is tokenized once; actions are extracted by
+        argv position rather than regex substring."""
+        build_block = self._extract_step_block(
+            workflow_text, self.BUILD_PROMPT_STEP_NAME
+        )
+        assert build_block is not None, (
+            f"Could not find `- name: {self.BUILD_PROMPT_STEP_NAME}` "
+            f"step block."
+        )
+        body_lines = build_block.splitlines()
+
+        # Fold backslash-continuations into logical commands BEFORE
+        # classification, then pre-classify each logical line once.
+        # The start_line_idx from `_join_shell_continuations` is
+        # preserved for ordering errors. R7 fix for PR #436.
+        line_actions = []  # list of (start_line_idx, [actions])
+        for start_idx, joined_line in self._join_shell_continuations(body_lines):
+            if joined_line.lstrip().startswith("#"):
+                continue
+            actions = self._classify_shell_line(joined_line)
+            if actions:
+                line_actions.append((start_idx, actions))
+
+        for tmp_path, base_source in self.ALLOWED_TMP_PYTHON_EXECUTIONS.items():
+            staging_indices = []
+            py_exec_indices = []
+            overwrite_indices = []
+            for i, actions in line_actions:
+                line_writes_path = False
+                line_stages_path = False
+                for action, target in actions:
+                    if action == "git_show_redirect":
+                        src, dest = target
+                        if src == base_source and dest == tmp_path:
+                            line_stages_path = True
+                    elif action == "python_exec":
+                        if target == tmp_path:
+                            py_exec_indices.append(i)
+                    elif action in (
+                        "cp_dest", "mv_dest", "tee_dest",
+                        "ln_dest", "redirect_write",
+                    ):
+                        if target == tmp_path:
+                            line_writes_path = True
+                if line_stages_path:
+                    staging_indices.append(i)
+                # Only record as overwrite if it writes to tmp_path AND
+                # didn't stage to it (the staging line's own `>`
+                # redirect would otherwise self-flag).
+                if line_writes_path and not line_stages_path:
+                    overwrite_indices.append(i)
+
+            assert staging_indices, (
+                f"ALLOWED_TMP_PYTHON_EXECUTIONS[{tmp_path!r}] = "
+                f"{base_source!r}: expected a staging command in the "
+                f"`{self.BUILD_PROMPT_STEP_NAME}` step:\n  "
+                f'git show "${{BASE_SHA}}":{base_source} > {tmp_path}\n'
+                f"No line in the step body classifies as "
+                f"`git_show_redirect` with src={base_source!r} and "
+                f"dest={tmp_path!r}."
+            )
+            assert py_exec_indices, (
+                f"ALLOWED_TMP_PYTHON_EXECUTIONS[{tmp_path!r}] declared "
+                f"but no `python3 {tmp_path}` invocation found in the "
+                f"build-prompt step. If you're staging this path "
+                f"without executing it, remove the allowlist entry."
+            )
+            for py_idx in py_exec_indices:
+                prior_stagings = [s for s in staging_indices if s < py_idx]
+                assert prior_stagings, (
+                    f"python execution at body line {py_idx} has NO "
+                    f"prior BASE_SHA staging command for {tmp_path!r}. "
+                    f"Staging must precede execution so the executed "
+                    f"file content is BASE-anchored."
+                )
+                latest_staging = max(prior_stagings)
+                intervening = [
+                    w
+                    for w in overwrite_indices
+                    if latest_staging < w < py_idx
+                ]
+                if intervening:
+                    snippets = [body_lines[w].strip() for w in intervening]
+                    raise AssertionError(
+                        f"{tmp_path!r} is overwritten between BASE_SHA "
+                        f"staging (body line {latest_staging}) and "
+                        f"python execution (line {py_idx}) by:\n"
+                        + "\n".join(snippets)
+                        + f"\nThis would replace the trusted BASE-"
+                        f"staged content with arbitrary bytes before "
+                        f"execution, invalidating the dismissal."
+                    )
+
+    def test_workflow_dismissal_comment_block_present(self, workflow_text):
+        """The comment block that documents the #14 dismissal must stay
+        attached to the workflow file. If a future edit removes it, the
+        rationale lives only in the GitHub Security UI's
+        dismissed_comment field — easy to lose track of."""
+        assert "CodeQL alert #14" in workflow_text, (
+            "Workflow must keep the #14 dismissal rationale comment "
+            "block above the resolve-pr step."
+        )
+        assert "won't fix" in workflow_text, (
+            "Comment block must cite the dismissal reason for grep-ability."
+        )
+        assert "TestWorkflowDoesNotExecutePRHeadCode" in workflow_text, (
+            "Workflow comment must reference this guard test by name so "
+            "future maintainers can find it."
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Dismissal-invariant pins. The comment block above the resolve-pr
+    # step claims four invariants hold; the guard test above only pins
+    # invariant #1's "no execution" half. The tests below pin the
+    # remaining structural invariants. If any of these tests fails, the
+    # CodeQL #14 dismissal is invalid for the same reason a forbidden
+    # execution pattern would invalidate it.
+    # ──────────────────────────────────────────────────────────────────
+
+    def test_workflow_codex_step_uses_read_only_sandbox(self, workflow_text):
+        """Invariant #1 (other half): Codex action runs sandbox: read-only.
+        If a future edit relaxes this to workspace-write or
+        danger-full-access, Codex could write or execute PR-head bytes
+        — the dismissal premise breaks.
+
+        R2 fix for PR #436: prior version was a global substring check
+        which the comment block itself satisfied (it contains the
+        literal `sandbox: read-only`). Now scoped to the actual Run
+        Codex step block extracted by name."""
+        codex_block = self._extract_step_block(workflow_text, "Run Codex")
+        assert codex_block is not None, (
+            "Could not find `- name: Run Codex` step block. The "
+            "extraction regex needs updating, or the step was renamed "
+            "(both invalidate the dismissal premise — review)."
+        )
+        assert "sandbox: read-only" in codex_block, (
+            "Run Codex step must include `sandbox: read-only` in its "
+            "`with:` stanza per dismissal rationale invariant #1. "
+            "Without read-only sandbox, Codex can write or execute "
+            "PR-head content and the CodeQL #14 dismissal is invalid."
+        )
+
+    def test_workflow_resolve_pr_sets_head_sha_from_api(self, workflow_text):
+        """Invariant #4: head_sha is API-pinned in the resolve-pr step.
+        If a future edit reads head_sha from the event payload (which
+        is mutable for issue_comment events) instead of the API, the
+        TOCTOU window grows."""
+        resolve_block = self._extract_step_block(
+            workflow_text, "Resolve PR number + metadata"
+        )
+        assert resolve_block is not None, (
+            "Could not find `- name: Resolve PR number + metadata` "
+            "step block."
+        )
+        assert (
+            'core.setOutput("head_sha", pr.data.head.sha)' in resolve_block
+        ), (
+            "Resolve-pr step must pin `head_sha` from the API "
+            "(`pr.data.head.sha`), not from the event payload. See "
+            "dismissal rationale invariant #4."
+        )
+
+    def test_workflow_open_pr_checkout_uses_head_repo_and_head_sha(
+        self, workflow_text
+    ):
+        """Open-PR checkout invariant: must use `repository:
+        head_repo_full_name` + `ref: head_sha` (the API-pinned values
+        from the resolve-pr step). If a future edit drops the
+        repository pin or reads ref from the event payload, the
+        TOCTOU window grows AND the head-repo determination is no
+        longer authoritatively from the API.
+
+        R2 addition for PR #436: invariant was previously implicit
+        (resolve-pr setting head_sha doesn't prove the checkout uses
+        it). This test scopes to the open-PR checkout step
+        specifically (discriminating from the closed-PR checkout via
+        `state == 'open'` in the if-clause)."""
+        checkout_block = self._extract_open_pr_checkout_block(workflow_text)
+        assert checkout_block is not None, (
+            "Could not find the open-PR `actions/checkout` step "
+            "(matched by `if: ... state == 'open' ...`). Either the "
+            "step was removed or the if-condition was rewritten."
+        )
+        assert (
+            "repository: ${{ steps.pr.outputs.head_repo_full_name }}"
+            in checkout_block
+        ), (
+            "Open-PR checkout must pin `repository:` to "
+            "`steps.pr.outputs.head_repo_full_name` (the API-resolved "
+            "head repo). Found checkout block:\n" + checkout_block
+        )
+        assert (
+            "ref: ${{ steps.pr.outputs.head_sha }}" in checkout_block
+        ), (
+            "Open-PR checkout must pin `ref:` to "
+            "`steps.pr.outputs.head_sha` (the API-pinned head SHA). "
+            "Found checkout block:\n" + checkout_block
+        )
+
+    def test_classify_python_exec_handles_quotes_flags_suffixes(self):
+        """Regression for the python_exec classification across
+        bypass forms previous regex versions missed:
+        - quoted paths (R6): `python3 "foo.py"` → exact path
+        - flags before script: `python3 -u foo.py` (-u, -O, etc.)
+        - -c / -m don't yield python_exec (no .py script positional)
+        - suffixed paths (R5): `foo.py.bak` not classified as `foo.py`
+        """
+        cls = self._classify_shell_line
+
+        def py_targets(line):
+            return [tgt for a, tgt in cls(line) if a == "python_exec"]
+
+        # Legit forms: exact path captured
+        assert py_targets("python3 /tmp/foo.py") == ["/tmp/foo.py"]
+        assert py_targets('python3 "diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        assert py_targets("python3 'diff_diff/evil.py'") == ["diff_diff/evil.py"]
+        assert py_targets("python3 -u /tmp/foo.py --input bar") == ["/tmp/foo.py"]
+        assert py_targets("python3 /tmp/foo.py --input bar") == ["/tmp/foo.py"]
+
+        # Inline scripts and modules: no .py positional, not classified
+        assert py_targets('python3 -c \'import os; print(os.environ)\'') == []
+        assert py_targets("python3 -m unittest discover") == []
+
+        # Suffix bypasses (R5): different files, not the allowlisted prefix.
+        # Each is captured as the EXACT path; allowlist test then
+        # rejects them (none are in ALLOWED_TMP_PYTHON_EXECUTIONS).
+        # Stricter than the regex version which gated on `.py` suffix
+        # — `python3 /tmp/foo.pyc` is a legitimate python execution
+        # of a compiled file and should not silently slip through.
+        assert py_targets("python3 /tmp/foo.py.bak") == ["/tmp/foo.py.bak"]
+        assert py_targets("python3 /tmp/foo.py~") == ["/tmp/foo.py~"]
+        assert py_targets("python3 /tmp/foo.pyc") == ["/tmp/foo.pyc"]
+
+        # Bash control prefixes (if/&&/etc.) are stripped
+        assert py_targets("if python3 /tmp/foo.py; then echo ok; fi") == ["/tmp/foo.py"]
+        assert py_targets("&& python3 /tmp/foo.py") == ["/tmp/foo.py"]
+
+    def test_classify_overwrite_handles_quotes_flags_lns(self):
+        """Regression for write-action classification: cp/mv with
+        flags (`cp -f src dst`), tee/ln variants, quoted destinations
+        (`> "/tmp/foo.py"`). All must produce the appropriate
+        action with the destination as bare path token."""
+        cls = self._classify_shell_line
+
+        def write_dests(line, action_filter=None):
+            return [
+                tgt for a, tgt in cls(line)
+                if (action_filter is None or a == action_filter)
+                and a in (
+                    "cp_dest", "mv_dest", "tee_dest",
+                    "ln_dest", "redirect_write",
+                )
+            ]
+
+        # Quoted redirect destinations
+        assert write_dests('echo x > "/tmp/foo.py"') == ["/tmp/foo.py"]
+        assert write_dests("echo x >> '/tmp/foo.py'") == ["/tmp/foo.py"]
+
+        # cp/mv with flags
+        assert write_dests("cp -f src.py /tmp/foo.py", "cp_dest") == ["/tmp/foo.py"]
+        assert write_dests("cp -fv src.py /tmp/foo.py", "cp_dest") == ["/tmp/foo.py"]
+        assert write_dests("mv -f src.py /tmp/foo.py", "mv_dest") == ["/tmp/foo.py"]
+        assert write_dests('cp -f "src.py" "/tmp/foo.py"', "cp_dest") == ["/tmp/foo.py"]
+
+        # tee variants
+        assert write_dests("echo x | tee /tmp/foo.py", "tee_dest") == ["/tmp/foo.py"]
+        assert write_dests("echo x | tee -a /tmp/foo.py", "tee_dest") == ["/tmp/foo.py"]
+
+        # ln variants
+        assert write_dests("ln -sf evil.py /tmp/foo.py", "ln_dest") == ["/tmp/foo.py"]
+        assert write_dests("ln -s evil.py /tmp/foo.py", "ln_dest") == ["/tmp/foo.py"]
+        assert write_dests("ln evil.py /tmp/foo.py", "ln_dest") == ["/tmp/foo.py"]
+
+    def test_classify_unwraps_envvar_and_wrapper_prefixes(self):
+        """R7 regression: env-var assignments and wrapper commands
+        before the actual command must be stripped so the underlying
+        python/cp/etc. is correctly classified.
+
+        Without unwrapping, `VAR=1 python3 evil.py` would have token[0]
+        of `VAR=1` (not in any classifier branch) — silent bypass.
+        """
+        cls = self._classify_shell_line
+
+        def py_targets(line):
+            return [t for a, t in cls(line) if a == "python_exec"]
+
+        # Single env-var prefix
+        assert py_targets("VAR=1 python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        # Multiple env-var prefixes
+        assert py_targets("VAR1=1 VAR2=2 python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        # `env` wrapper with NAME=value args
+        assert py_targets("env FOO=1 python3 -u diff_diff/evil.py") == ["diff_diff/evil.py"]
+        assert py_targets("env -i FOO=1 python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        # `command` / `nohup` / `time` wrappers
+        assert py_targets("command python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        assert py_targets("nohup python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        assert py_targets("time python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        # `exec` wrapper (replaces shell with command)
+        assert py_targets("exec python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        # Combined: `if VAR=1 python3 ...; then`
+        assert py_targets("if VAR=1 python3 diff_diff/evil.py; then echo ok; fi") == ["diff_diff/evil.py"]
+
+        # cp prefix-unwrap as well
+        def cp_targets(line):
+            return [t for a, t in cls(line) if a == "cp_dest"]
+
+        assert cp_targets("VAR=1 cp -f src.py /tmp/notebook_md_extract.py") == ["/tmp/notebook_md_extract.py"]
+        assert cp_targets("env FOO=1 cp src.py /tmp/notebook_md_extract.py") == ["/tmp/notebook_md_extract.py"]
+
+    def test_join_shell_continuations_folds_backslash_lines(self):
+        """R7 regression: backslash-continued lines must be folded
+        into a single logical command before classification, so a
+        future workflow edit can't bypass the guard by splitting
+        a forbidden command across lines."""
+        cls = self._classify_shell_line
+        join = self._join_shell_continuations
+
+        # Continued python invocation: script path on next line
+        lines = [
+            "python3 \\",
+            "  diff_diff/evil.py \\",
+            "  --arg foo",
+        ]
+        joined = join(lines)
+        assert len(joined) == 1, f"Expected 1 logical line, got {joined}"
+        start_idx, joined_text = joined[0]
+        assert start_idx == 0
+        py_targets = [t for a, t in cls(joined_text) if a == "python_exec"]
+        assert py_targets == ["diff_diff/evil.py"], (
+            f"Continued python script not detected: {joined_text!r} -> {py_targets!r}"
+        )
+
+        # Continued cp -f overwrite
+        lines = [
+            "cp -f \\",
+            "  diff_diff/poison.py \\",
+            "  /tmp/notebook_md_extract.py",
+        ]
+        joined = join(lines)
+        assert len(joined) == 1
+        _, joined_text = joined[0]
+        cp_targets = [t for a, t in cls(joined_text) if a == "cp_dest"]
+        assert cp_targets == ["/tmp/notebook_md_extract.py"], (
+            f"Continued cp -f not detected: {joined_text!r} -> {cp_targets!r}"
+        )
+
+        # Mix: continuation + non-continuation lines
+        lines = [
+            "echo before",
+            "python3 \\",
+            "  diff_diff/evil.py",
+            "echo after",
+        ]
+        joined = join(lines)
+        assert len(joined) == 3
+        assert [start for start, _ in joined] == [0, 1, 3]
+        py_targets = [
+            t for _, line in joined
+            for a, t in cls(line) if a == "python_exec"
+        ]
+        assert py_targets == ["diff_diff/evil.py"]
+
+    def test_classify_unwraps_shell_indirection(self):
+        """R8 regression: `bash -c <inline>` / `sh -c <inline>`
+        recursively classify the inline script. Subshell `(...)` and
+        brace-group `{ ...; }` strip the delimiters so the wrapped
+        command classifies normally.
+
+        Without this, `bash -c "python3 diff_diff/evil.py"` would
+        classify only as `bash` (no underlying command detection)
+        and pass the allowlist check.
+        """
+        cls = self._classify_shell_line
+
+        def py_targets(line):
+            return [t for a, t in cls(line) if a == "python_exec"]
+
+        def cp_targets(line):
+            return [t for a, t in cls(line) if a == "cp_dest"]
+
+        # bash -c / sh -c with python execution
+        assert py_targets('bash -c "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        assert py_targets("bash -c 'python3 diff_diff/evil.py'") == ["diff_diff/evil.py"]
+        assert py_targets('sh -c "python3 diff_diff/evil.py --arg foo"') == ["diff_diff/evil.py"]
+
+        # bash -c with overwrite
+        assert cp_targets(
+            'bash -c "cp diff_diff/poison.py /tmp/notebook_md_extract.py"'
+        ) == ["/tmp/notebook_md_extract.py"]
+
+        # bash -c with multiple commands inside
+        assert py_targets(
+            'bash -c "cp evil.py /tmp/foo.py; python3 diff_diff/evil.py"'
+        ) == ["diff_diff/evil.py"]
+
+        # Subshell `( ... )`
+        assert py_targets("( python3 diff_diff/evil.py )") == ["diff_diff/evil.py"]
+        assert cp_targets("( cp evil /tmp/notebook_md_extract.py )") == ["/tmp/notebook_md_extract.py"]
+
+        # Brace group `{ ...; }`
+        assert py_targets("{ python3 diff_diff/evil.py; }") == ["diff_diff/evil.py"]
+        assert cp_targets("{ cp evil /tmp/notebook_md_extract.py; }") == ["/tmp/notebook_md_extract.py"]
+
+        # Nested: bash -c containing a subshell
+        assert py_targets(
+            'bash -c "( python3 diff_diff/evil.py )"'
+        ) == ["diff_diff/evil.py"]
+
+    def test_classify_handles_bash_compound_flags_and_shell_negation(self):
+        """R9 regression: bash/sh `-c`-containing compound flags
+        (`-lc`, `-ec`, `-exc`) recurse like bare `-c`. Shell
+        negation `!` in command position is stripped so the
+        following command is classified."""
+        cls = self._classify_shell_line
+
+        def py_targets(line):
+            return [t for a, t in cls(line) if a == "python_exec"]
+
+        # bash compound flags containing `c`
+        assert py_targets('bash -lc "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        assert py_targets('bash -ec "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        assert py_targets('bash -exc "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        assert py_targets('sh -lc "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        # sh -c without bundle
+        assert py_targets('sh -c "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        # bash flags without `c` should NOT trigger recursion
+        # (no -c means no inline-script body)
+        assert py_targets("bash -l") == []
+        assert py_targets("bash -i") == []
+
+        # Shell negation `!` in command position
+        assert py_targets("if ! python3 diff_diff/evil.py; then echo ok; fi") == ["diff_diff/evil.py"]
+        assert py_targets("! python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+
+    def test_classify_python_c_payload_against_allowlist(self):
+        """R9 regression: `python3 -c <body>` is captured as a
+        `python_c_payload` action with the body as target. The
+        python-file-execution test then rejects any body not in
+        ALLOWED_PYTHON_C_PAYLOADS.
+
+        Without this, `python3 -c 'exec(open("evil.py").read())'`
+        would be silently exempted (script_mode_disabled prevented
+        any python_exec action from being recorded)."""
+        cls = self._classify_shell_line
+
+        def c_payloads(line):
+            return [t for a, t in cls(line) if a == "python_c_payload"]
+
+        # Single-line -c body captured
+        assert c_payloads('python3 -c \'exec(open("diff_diff/evil.py").read())\'') == [
+            'exec(open("diff_diff/evil.py").read())'
+        ]
+        assert c_payloads("python3 -c 'print(1)'") == ["print(1)"]
+        # -m doesn't capture
+        assert c_payloads("python3 -m unittest discover") == []
+        # No -c at all
+        assert c_payloads("python3 /tmp/foo.py") == []
+        # -c inside bash -c recursion
+        assert c_payloads(
+            'bash -c "python3 -c \'exec(open(\\"evil.py\\").read())\'"'
+        ) == ['exec(open("evil.py").read())']
+
+    def test_classify_git_show_redirect(self):
+        """The BASE_SHA staging command must produce a
+        git_show_redirect action with (source, dest) tuple, matched
+        regardless of leading `if`, quotes around the BASE_SHA target,
+        or trailing `2>/dev/null` style stderr redirects."""
+        cls = self._classify_shell_line
+
+        def staging(line):
+            return [
+                tgt for a, tgt in cls(line) if a == "git_show_redirect"
+            ]
+
+        # Real workflow form
+        assert staging(
+            'if git show "${BASE_SHA}":tools/notebook_md_extract.py > /tmp/notebook_md_extract.py 2>/dev/null; then'
+        ) == [("tools/notebook_md_extract.py", "/tmp/notebook_md_extract.py")]
+        # Bare form (no `if`)
+        assert staging(
+            'git show "${BASE_SHA}":tools/foo.py > /tmp/foo.py'
+        ) == [("tools/foo.py", "/tmp/foo.py")]
+        # Without curly braces ($BASE_SHA)
+        assert staging(
+            'git show "$BASE_SHA":tools/foo.py > /tmp/foo.py'
+        ) == [("tools/foo.py", "/tmp/foo.py")]
+        # Echo of literal staging command: NOT classified as git_show
+        # (cmd is `echo`, not `git`)
+        assert staging(
+            'echo \'git show "${BASE_SHA}":tools/foo.py > /tmp/foo.py\''
+        ) == []
+
+        # Same line should also produce a redirect_write — but the
+        # classifier de-duplicates so a git_show_redirect line does
+        # NOT also produce a generic redirect_write for the same dest.
+        actions = cls('git show "${BASE_SHA}":tools/foo.py > /tmp/foo.py')
+        redirect_writes = [tgt for a, tgt in actions if a == "redirect_write"]
+        assert redirect_writes == [], (
+            "git_show_redirect should suppress the generic "
+            "redirect_write to the same destination"
+        )
+
+    def test_workflow_comment_triggers_require_author_association(
+        self, workflow_text
+    ):
+        """Invariant #3: comment-triggered events (issue_comment,
+        pull_request_review_comment) require author_association in
+        OWNER/MEMBER/COLLABORATOR. If a future edit drops or weakens
+        this gate in EITHER branch, random commenters could trigger
+        the workflow.
+
+        R2 fix for PR #436: prior version was a global substring
+        check (3 asserts on whole-workflow presence). It would pass
+        if one branch had all three values and the other had none.
+        Now branch-scoped: extract each comment-trigger event's
+        if-section and assert each contains all three values."""
+        import re
+
+        # Extract the workflow-level `if: |` block. The block body is
+        # at 6-space indent; ends at the next non-indented field (e.g.,
+        # `    steps:` at 4-space indent).
+        if_block_re = re.compile(
+            r"^    if:\s*\|\s*\n((?:^      .*\n|^[ ]*\n)*)",
+            re.MULTILINE,
+        )
+        if_match = if_block_re.search(workflow_text)
+        assert if_match is not None, (
+            "Could not extract workflow-level `if: |` block. The "
+            "structure changed; review."
+        )
+        if_block = if_match.group(1)
+
+        for trigger in ("issue_comment", "pull_request_review_comment"):
+            marker = f"github.event_name == '{trigger}'"
+            idx = if_block.find(marker)
+            assert idx >= 0, (
+                f"Branch for {trigger!r} not found in workflow `if:` "
+                f"block. Either the trigger was dropped or the "
+                f"comparison form changed."
+            )
+            # Take from the trigger marker to the next `github.event_name ==`
+            # or end of block (whichever comes first).
+            next_idx = if_block.find("github.event_name ==", idx + 1)
+            segment = (
+                if_block[idx:next_idx]
+                if next_idx > idx
+                else if_block[idx:]
+            )
+            for value in ("OWNER", "MEMBER", "COLLABORATOR"):
+                check = f"author_association == '{value}'"
+                assert check in segment, (
+                    f"Branch for {trigger!r} does not check "
+                    f"`{check}`. Without this, the {trigger} branch "
+                    f"would let unauthorized commenters trigger the "
+                    f"workflow with secrets in scope. Branch segment:\n"
+                    + segment
+                )
+
+
 class TestExtractResponseText:
     def test_prefers_output_text_field(self, review_mod):
         result = {"output_text": "Direct text.", "output": []}
