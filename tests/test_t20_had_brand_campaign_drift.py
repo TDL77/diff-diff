@@ -270,3 +270,53 @@ def test_event_study_pre_placebos_cover_zero(event_study_result):
         i = event_times.index(e)
         assert abs(atts[i]) < 0.1, (e, atts[i])
         assert ci_lows[i] <= 0.0 <= ci_highs[i], (e, ci_lows[i], ci_highs[i])
+
+
+# =============================================================================
+# Notebook-narrative cross-check
+# =============================================================================
+#
+# Mirror of the T21 notebook cross-check (PR #409 holistic re-audit).
+# The asserts above re-derive numbers from the locked DGP+seed but
+# never verify that the rendered T20 tutorial actually quotes those
+# same numbers. Because ``nbsphinx_execute = "never"`` in
+# ``docs/conf.py``, CI cannot detect drift between the pinned drift
+# constants and the committed tutorial via notebook re-execution.
+# Use the shared helper from ``tests/_tutorial_drift.py`` to assert
+# each load-bearing quote is present in the rendered notebook
+# surface (markdown prose + executed output cells).
+
+
+T20_NOTEBOOK = "docs/tutorials/20_had_brand_campaign.ipynb"
+
+
+def test_notebook_quotes_match_pinned_constants():
+    """Every load-bearing T20 verdict / number must appear verbatim
+    in the rendered notebook (markdown prose + executed output cells).
+
+    Closes the same gap fixed for T21 in the PR #409 holistic
+    re-audit: the file-level docstring claimed "check against the
+    values quoted in the tutorial markdown" but every prior assert
+    re-derived numbers from the DGP and compared them to a hardcoded
+    constant, leaving the notebook completely uncross-checked.
+    """
+    from tests._tutorial_drift import assert_quotes_in_rendered
+
+    expected_quotes = [
+        # Headline WAS estimate quoted in cell 10 narrative.
+        "100 weekly visits",
+        # CI quoted alongside the headline.
+        "98.6 to 101.4",
+        # Design auto-detect outcome.
+        "continuous_near_d_lower",
+        # Target parameter label used across cells 8 / 12 / 13.
+        "WAS_d_lower",
+        # Placebo-magnitude prose claim (locked analytically above by
+        # test_event_study_pre_atts_near_zero with the ±0.1 envelope).
+        "±0.06",
+        # Sample-summary phrase in the design-fit narrative. Use the
+        # exact tilde-prefixed form so a future drift in the sentence
+        # (e.g. "median around $25K") would surface here.
+        "median ~$25K",
+    ]
+    assert_quotes_in_rendered(T20_NOTEBOOK, expected_quotes, surface="rendered")
