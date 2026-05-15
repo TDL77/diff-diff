@@ -91,10 +91,10 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | ConleySpatialHAC | `conley.py`, `linalg.py` | `conleyreg` (R) / `acreg` (Stata) | **In Progress** | — |
 | Survey Data Support | `survey.py`, `bootstrap_utils.py` | `survey` package (R) | **In Progress** | — |
 
-**Status legend:**
-- **Not Started**: Implementation exists but no formal review or paper-vs-code audit on file.
-- **In Progress**: REGISTRY entry, tests, or paper review on file, but no formal Verified Components walk-through has been captured here yet. Most are formally pending — see per-section "Outstanding for promotion".
-- **Complete**: Verified Components, Corrections Made, and Deviations are all captured in this document.
+**Status legend** (matches the contract in [§ What "Complete" means in this tracker](#what-complete-means-in-this-tracker) above):
+- **Not Started**: No REGISTRY.md entry yet. Reserved for future surfaces; this tracker currently carries no Not Started rows.
+- **In Progress**: REGISTRY.md entry and unit-test coverage exist, but no formal walk-through has been captured in this document yet. The band is wide — see each entry's "Documentation in place" / "Outstanding for promotion" sub-sections for specifics.
+- **Complete**: A documented review pass against the primary academic source is captured here (minimum: Corrections Made, Deviations or `(None)`, and Verified Components / Edge Cases Verified / R Comparison Results in some form).
 
 ---
 
@@ -1154,7 +1154,7 @@ For each estimator, complete the following steps:
 3. **When identifying issues**: Add to "Outstanding Concerns" for future investigation
 4. **When deviating from reference**: Document the deviation and rationale; cross-reference the REGISTRY.md `Note (deviation from R)` block
 5. **When promoting from In Progress to Complete**: Replace the "Documentation in place" / "Outstanding for promotion" pair with the full Verified Components / Corrections Made / Deviations structure used by Complete entries
-6. **When adding a new estimator to the library**: Add a row to the appropriate Status Summary table and a "Not Started" stub under the matching category in Detailed Review Notes — same PR that introduces the estimator
+6. **When adding a new estimator to the library**: Add a row to the appropriate Status Summary table marked **In Progress** and a stub section under the matching category in Detailed Review Notes (Documentation in place / Outstanding for promotion) — same PR that introduces the estimator. New surfaces enter as In Progress because they ship with a REGISTRY.md entry and unit tests by definition.
 
 ### Deviation Documentation
 
