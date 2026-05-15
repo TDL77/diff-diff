@@ -68,7 +68,7 @@ plotly = [
 ]
 docs = [
     "sphinx>=6.0",
-    "pydata-sphinx-theme>=0.15",
+    "pydata-sphinx-theme>=0.16.1",
     "sphinxext-opengraph>=0.9",
     "sphinx-sitemap>=2.5",
     "nbsphinx>=0.9",

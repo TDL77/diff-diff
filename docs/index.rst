@@ -59,8 +59,8 @@ Quick Links
    :caption: For Data Scientists
    :hidden:
 
-   practitioner_getting_started
-   practitioner_decision_tree
+   Practitioner Guide <practitioner_getting_started>
+   Decision Tree <practitioner_decision_tree>
 
 .. toctree::
    :maxdepth: 2
@@ -68,7 +68,7 @@ Quick Links
    :hidden:
 
    quickstart
-   choosing_estimator
+   Estimator Guide <choosing_estimator>
    troubleshooting
    references
 
