@@ -1279,7 +1279,8 @@ class ChaisemartinDHaultfoeuilleResults:
         lines.extend(
             [
                 thin,
-                "Note: Post-treatment regressions only (no placebo/joint test).",
+                "Note: Per-horizon regressions only (no joint F-test). "
+                "Negative l = placebo (backward) horizon when placebo=True.",
                 "",
             ]
         )
@@ -1872,6 +1873,16 @@ class ChaisemartinDHaultfoeuilleResults:
                     # path placebo cumulation surface (placebo under
                     # trends_lin returns RAW per-horizon values per R).
                     ph_cband = ph_entry.get("cband_conf_int", (np.nan, np.nan))
+                    # Per-path placebo heterogeneity (TODO #422). R-
+                    # verified: did_multiplegt_dyn(..., by_path,
+                    # predict_het, placebo) emits per-path predict_het
+                    # rows on backward (negative) horizons. Negative
+                    # `lag_key` indexes into `path_het` to look up the
+                    # placebo het entry; absent key (placebo > 0 but
+                    # this (path, lag) is rank-deficient or has < 3
+                    # eligible groups) -> NaN columns.
+                    ph_het_entry = path_het.get(lag_key, {}) if path_het else {}
+                    ph_het_ci = ph_het_entry.get("conf_int", (np.nan, np.nan))
                     rows.append(
                         {
                             "path": path,
@@ -1889,19 +1900,12 @@ class ChaisemartinDHaultfoeuilleResults:
                             "cband_upper": ph_cband[1] if ph_cband else np.nan,
                             "cumulated_effect": np.nan,
                             "cumulated_se": np.nan,
-                            # Heterogeneity is forward-only in this release.
-                            # Per-path placebo heterogeneity is not exposed
-                            # yet; R may emit placebo het rows under
-                            # did_multiplegt_dyn(..., by_path, predict_het)
-                            # but R-parity for that surface has not been
-                            # validated, so we emit NaN on placebo rows
-                            # rather than claim parity. See REGISTRY note.
-                            "het_beta": np.nan,
-                            "het_se": np.nan,
-                            "het_t_stat": np.nan,
-                            "het_p_value": np.nan,
-                            "het_conf_int_lower": np.nan,
-                            "het_conf_int_upper": np.nan,
+                            "het_beta": ph_het_entry.get("beta", np.nan),
+                            "het_se": ph_het_entry.get("se", np.nan),
+                            "het_t_stat": ph_het_entry.get("t_stat", np.nan),
+                            "het_p_value": ph_het_entry.get("p_value", np.nan),
+                            "het_conf_int_lower": ph_het_ci[0] if ph_het_ci else np.nan,
+                            "het_conf_int_upper": ph_het_ci[1] if ph_het_ci else np.nan,
                         }
                     )
                 for l_h in sorted(horizons.keys()):

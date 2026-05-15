@@ -622,12 +622,23 @@ extract_dcdh_by_path <- function(res, n_effects, n_placebos = 0) {
 # res$results$predict_het, a data.frame with columns
 # {effect, covariate, Estimate, SE, t, LB, UB, N, pF}. Estimate is the
 # WLS coefficient on the heterogeneity covariate.
+#
+# `n_effects` retained for backward-compat with scenarios 20/21 callers
+# but unused: we iterate ALL rows in ph$effect and partition by sign so
+# placebo (negative-effect) rows are captured separately. Scenario 22
+# probes whether R emits negative-effect rows when called with
+# `predict_het + placebo`; resolves TODO #422.
 extract_dcdh_predict_het <- function(res, n_effects) {
   ph <- res$results$predict_het
-  horizons <- list()
-  if (is.null(ph) || nrow(ph) == 0) return(list(predict_het = horizons))
-  for (h in seq_len(min(n_effects, nrow(ph)))) {
-    horizons[[as.character(ph$effect[h])]] <- list(
+  forward_horizons <- list()
+  placebo_horizons <- list()
+  if (is.null(ph) || nrow(ph) == 0) {
+    return(list(predict_het = forward_horizons,
+                placebo_predict_het = placebo_horizons))
+  }
+  for (h in seq_len(nrow(ph))) {
+    effect_val <- as.numeric(ph$effect[h])
+    entry <- list(
       beta = as.numeric(ph$Estimate[h]),
       se = as.numeric(ph$SE[h]),
       t = as.numeric(ph$t[h]),
@@ -636,8 +647,15 @@ extract_dcdh_predict_het <- function(res, n_effects) {
       n_obs = as.numeric(ph$N[h]),
       p_value = as.numeric(ph$pF[h])
     )
+    if (effect_val > 0) {
+      forward_horizons[[as.character(effect_val)]] <- entry
+    } else if (effect_val < 0) {
+      placebo_horizons[[as.character(effect_val)]] <- entry
+    }
+    # effect_val == 0: skip (not a valid event-study horizon).
   }
-  list(predict_het = horizons)
+  list(predict_het = forward_horizons,
+       placebo_predict_het = placebo_horizons)
 }
 
 # Helper: extract per-path predict_het results. Under by_path=k +
@@ -650,10 +668,15 @@ extract_dcdh_by_path_predict_het <- function(res, n_effects) {
   for (i in seq_along(by_levels)) {
     slot <- res[[paste0("by_level_", i)]]
     ph <- slot$results$predict_het
-    horizons <- list()
+    forward_horizons <- list()
+    placebo_horizons <- list()
     if (!is.null(ph) && nrow(ph) > 0) {
-      for (h in seq_len(min(n_effects, nrow(ph)))) {
-        horizons[[as.character(ph$effect[h])]] <- list(
+      # Iterate ALL rows; partition by sign so placebo (negative-effect)
+      # rows are captured under `placebo_horizons`. Scenario 22 probes
+      # whether R emits negative-effect rows on the per-path surface.
+      for (h in seq_len(nrow(ph))) {
+        effect_val <- as.numeric(ph$effect[h])
+        entry <- list(
           beta = as.numeric(ph$Estimate[h]),
           se = as.numeric(ph$SE[h]),
           t = as.numeric(ph$t[h]),
@@ -662,12 +685,18 @@ extract_dcdh_by_path_predict_het <- function(res, n_effects) {
           n_obs = as.numeric(ph$N[h]),
           p_value = as.numeric(ph$pF[h])
         )
+        if (effect_val > 0) {
+          forward_horizons[[as.character(effect_val)]] <- entry
+        } else if (effect_val < 0) {
+          placebo_horizons[[as.character(effect_val)]] <- entry
+        }
       }
     }
     out[[i]] <- list(
       path = by_levels[i],
       frequency_rank = i,
-      horizons = horizons
+      horizons = forward_horizons,
+      placebo_horizons = placebo_horizons
     )
   }
   list(by_path_predict_het = out)
@@ -1200,6 +1229,52 @@ cat("  Scenarios 20/21: multi_path_reversible_predict_het + by_path version\n")
                   ci_level = 95,
                   dont_drop_larger_lower = TRUE),
     results = extract_dcdh_by_path_predict_het(res21, n_effects = 3)
+  )
+
+  # Scenario 22: by_path + predict_het + placebo (probes TODO #422). Reuses
+  # d20 from scenarios 20/21 for DGP parity. Tests whether R's
+  # did_multiplegt_dyn(by_path=k, predict_het, placebo=N) per-by_level
+  # dispatcher emits predict_het rows on backward (placebo) horizons.
+  #
+  # R's predict_het syntax with `placebo > 0` (per did_multiplegt_main
+  # source `DIDmultiplegtDYN:::did_multiplegt_main` lines 1907 / 2030):
+  # the SAME horizon vector is used for BOTH forward effects AND placebo
+  # positions. Passing `c(1, 2, 3)` with `placebo=2` errors because
+  # `max(c(1, 2, 3)) > placebo=2`. The `c(-1)` sentinel triggers "compute
+  # heterogeneity for ALL forward (1..effects) AND ALL placebo
+  # (1..placebo) positions" by replacing `het_effects` with `1:l_XX` in
+  # the forward block and `1:l_placebo_XX` in the placebo block. Forward
+  # rows are emitted with positive `effect` values (1, 2, 3); placebo
+  # rows with NEGATIVE values (-1, -2) per `effect = matrix(-i, ...)` at
+  # the placebo block's rbind site.
+  #
+  # The extended extract_dcdh_by_path_predict_het partitions the per-path
+  # predict_het table by `effect` sign: forward into `horizons`, placebo
+  # into `placebo_horizons`.
+  res22 <- did_multiplegt_dyn(
+    df = d20, outcome = "outcome", group = "group", time = "period",
+    treatment = "treatment", effects = 3, placebo = 2, by_path = 3,
+    dont_drop_larger_lower = TRUE,
+    predict_het = list("het_x", c(-1)),
+    ci_level = 95, graph_off = TRUE
+  )
+  scenarios$multi_path_reversible_predict_het_with_placebo <- list(
+    data = list(
+      group = as.numeric(d20$group),
+      period = as.numeric(d20$period),
+      treatment = as.numeric(d20$treatment),
+      outcome = as.numeric(d20$outcome),
+      het_x = as.numeric(d20$het_x)
+    ),
+    params = list(pattern = "multi_path_reversible_predict_het_with_placebo",
+                  n_switchers = n_switchers20, n_controls = n_controls20,
+                  n_groups = n_groups20, n_periods = n_periods20,
+                  seed = 120L, effects = 3, placebo = 2, by_path = 3,
+                  predict_het_var = "het_x",
+                  predict_het_horizons = c(-1),
+                  ci_level = 95,
+                  dont_drop_larger_lower = TRUE),
+    results = extract_dcdh_by_path_predict_het(res22, n_effects = 3)
   )
 }
 
