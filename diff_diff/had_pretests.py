@@ -76,7 +76,10 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from diff_diff.bootstrap_utils import generate_survey_multiplier_weights_batch
+from diff_diff.bootstrap_utils import (
+    apply_stratum_centering,
+    generate_survey_multiplier_weights_batch,
+)
 from diff_diff.had import (
     _aggregate_first_difference,
     _aggregate_unit_resolved_survey,
@@ -1912,36 +1915,19 @@ def stute_test(
         # CvM recompute. Routes via synthetic trivial ResolvedSurveyDesign
         # for the weights= shortcut to share the same kernel.
         resolved_for_boot = survey if survey is not None else make_pweight_design(w_arr)
-        # R10 P1: reject stratified designs explicitly until a derived
-        # Stute-specific correction lands. The HAD sup-t bootstrap
-        # (had.py:2120+) applies a within-stratum demean +
-        # sqrt(n_h/(n_h-1)) small-sample correction AFTER
-        # generate_survey_multiplier_weights_batch returns, to make the
-        # bootstrap variance match the Binder-TSL stratified target.
-        # That same correction has NOT been derived for the Stute CvM
-        # functional, so applying the helper's raw multipliers directly
-        # to residual perturbations on stratified designs leaves the
-        # bootstrap p-value silently miscalibrated. Pweight-only,
-        # PSU-only, and FPC-only designs are still supported (the
-        # helper's output is appropriately scaled for those).
-        if resolved_for_boot.strata is not None:
-            raise NotImplementedError(
-                "stute_test: SurveyDesign(strata=...) with stratified "
-                "sampling is not yet supported. The Stute CvM bootstrap "
-                "calibration on stratified designs requires a within-"
-                "stratum demean + sqrt(n_h/(n_h-1)) small-sample "
-                "correction analogous to the HAD sup-t bootstrap, but "
-                "the matching derivation for the Stute functional has "
-                "not been completed. Pweight-only or PSU-only "
-                "(SurveyDesign(weights=..., psu=...)) designs are "
-                "supported; pre-process stratified designs to remove "
-                "the strata column or wait for the derivation in a "
-                "follow-up PR."
-            )
-        # R5 P1: reject lonely_psu='adjust' singleton-strata designs
-        # explicitly (now redundant with the strata guard above; kept
-        # for defense in depth and for residual non-stratified
-        # singleton-strata edge cases).
+        # Stratified designs are supported via the standard stratified
+        # clustered wild-bootstrap correction on the PSU multipliers
+        # (within-stratum demean + sqrt(n_h/(n_h-1)) Bessel rescale),
+        # applied uniformly before the per-obs broadcast eta_obs =
+        # psu_mults[b, psu_col_idx] below. See REGISTRY
+        # § "Note (Stute stratified survey-bootstrap calibration)" and
+        # ``apply_stratum_centering`` (bootstrap_utils.py) for the
+        # derivation; the same helper backs the HAD sup-t event-study
+        # bootstrap at had.py:2151+.
+        # R5 P1: reject lonely_psu='adjust' singleton-strata designs.
+        # This pseudo-stratum centering transform has not been derived
+        # for the Stute CvM (same gap as the HAD sup-t deviation at
+        # REGISTRY § 'Note (HAD sup-t lonely_psu="adjust") deviation').
         if _has_lonely_psu_adjust_singletons(resolved_for_boot):
             raise NotImplementedError(
                 "stute_test: SurveyDesign(lonely_psu='adjust') with "
@@ -1988,6 +1974,15 @@ def stute_test(
         psu_mults, psu_ids = generate_survey_multiplier_weights_batch(
             n_bootstrap, resolved_for_boot, weight_type="mammen", rng=rng
         )
+        # Stratum centering + Bessel rescale on the PSU multipliers
+        # before broadcast. Same algebra as the HAD sup-t bootstrap at
+        # had.py:2151+ (applied to the influence tensor there), but
+        # applied here to ``psu_mults`` because the Stute bootstrap is a
+        # wild-residual / refit-in-loop bootstrap (no precomputed
+        # influence tensor exists). See REGISTRY § "Note (Stute
+        # stratified survey-bootstrap calibration)" for the derivation
+        # and the non-strata calibration shift it introduces.
+        apply_stratum_centering(psu_mults, resolved_for_boot, psu_ids, psu_axis=1)
         # Build per-obs PSU-column index. When psu is None (trivial path),
         # each obs is its own PSU and psu_ids = arange(G) - so psu_col_idx
         # is just arange(G).
@@ -3253,25 +3248,18 @@ def stute_joint_pretest(
         # vector-valued empirical-process unit-level dependence (paper
         # convention) AND PSU clustering (Krieger-Pfeffermann 1997).
         resolved_for_boot = survey if survey is not None else make_pweight_design(w_arr)
-        # R10 P1: reject stratified designs explicitly until a derived
-        # Stute-specific correction lands (mirrors stute_test
-        # single-horizon).
-        if resolved_for_boot.strata is not None:
-            raise NotImplementedError(
-                "stute_joint_pretest: SurveyDesign(strata=...) with "
-                "stratified sampling is not yet supported. The Stute "
-                "CvM bootstrap calibration on stratified designs "
-                "requires a within-stratum demean + sqrt(n_h/(n_h-1)) "
-                "small-sample correction analogous to the HAD sup-t "
-                "bootstrap, but the matching derivation for the joint "
-                "Stute functional has not been completed. Pweight-only "
-                "or PSU-only designs are supported; pre-process "
-                "stratified designs to remove the strata column or wait "
-                "for the derivation in a follow-up PR."
-            )
-        # R5 P1: reject lonely_psu='adjust' singleton-strata designs
-        # explicitly (now redundant with the strata guard above; kept
-        # for defense in depth).
+        # Stratified designs are supported via the standard stratified
+        # clustered wild-bootstrap correction on the PSU multipliers
+        # (within-stratum demean + sqrt(n_h/(n_h-1)) Bessel rescale),
+        # applied uniformly before the per-obs broadcast eta_obs =
+        # psu_mults[b, psu_col_idx] below. The joint variant shares the
+        # SAME multiplier row across horizons within each replicate, so
+        # the stratum correction applies once and inherits across
+        # horizons (preserving cross-horizon empirical-process
+        # dependence per Hlávka & Huškova 2020 § 3). See REGISTRY
+        # § "Note (Stute stratified survey-bootstrap calibration)".
+        # R5 P1: reject lonely_psu='adjust' singleton-strata designs.
+        # Same pseudo-stratum centering gap as stute_test / HAD sup-t.
         if _has_lonely_psu_adjust_singletons(resolved_for_boot):
             raise NotImplementedError(
                 "stute_joint_pretest: SurveyDesign(lonely_psu='adjust') "
@@ -3314,6 +3302,14 @@ def stute_joint_pretest(
         psu_mults, psu_ids = generate_survey_multiplier_weights_batch(
             n_bootstrap, resolved_for_boot, weight_type="mammen", rng=rng
         )
+        # Stratum centering + Bessel rescale on the PSU multipliers
+        # before broadcast. Single application here (shared with the
+        # per-horizon loop below) propagates the same centered
+        # multipliers across all horizons in each replicate, preserving
+        # the joint Stute's cross-horizon empirical-process dependence.
+        # See REGISTRY § "Note (Stute stratified survey-bootstrap
+        # calibration)".
+        apply_stratum_centering(psu_mults, resolved_for_boot, psu_ids, psu_axis=1)
         if resolved_for_boot.psu is None:
             psu_col_idx = np.arange(G)
         else:

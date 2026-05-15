@@ -9929,6 +9929,169 @@ class TestByPathSurveyDesignAnalytical:
             for w in caught
         )
 
+    @pytest.mark.slow
+    def test_paths_of_interest_replicate_weight_per_path_se_finite(self):
+        """Sibling-surface coverage for `paths_of_interest + survey_design`
+        under REPLICATE WEIGHTS (Rao-Wu / JK1).
+
+        The Wave-4 PR shipped replicate-weight regressions for `by_path`
+        (`test_per_path_replicate_se_finite`,
+        `test_per_path_inference_refreshes_to_lower_final_df`) but the
+        parallel `paths_of_interest` selector only had analytical-path
+        / gate / unobserved-path tests. This regression locks the
+        replicate-weight branch for `paths_of_interest` end-to-end:
+        per-path finite SE and `_refresh_path_inference` propagation
+        of the final `df_survey` to every populated per-path entry.
+        """
+        from diff_diff.survey import SurveyDesign
+        from diff_diff.utils import safe_inference
+
+        df = _by_path_survey_data()
+        n_obs = len(df)
+        rng = np.random.default_rng(2026)
+        rep_cols = [f"rep_{i}" for i in range(20)]
+        for col in rep_cols:
+            df[col] = df["survey_weights"] * (1.0 + 0.05 * rng.standard_normal(n_obs))
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        est = ChaisemartinDHaultfoeuille(
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+            drop_larger_lower=False,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+                survey_design=sd,
+            )
+        assert res.path_effects is not None
+        # Both requested paths must be present.
+        assert (0, 1, 1, 1) in res.path_effects
+        assert (0, 1, 0, 0) in res.path_effects
+        # At least one populated horizon must have finite SE — pin the
+        # replicate-weight variance machinery actually firing.
+        any_finite = False
+        for entry in res.path_effects.values():
+            for vals in entry["horizons"].values():
+                if vals["n_obs"] > 0 and np.isfinite(vals["se"]):
+                    any_finite = True
+        assert any_finite, (
+            "paths_of_interest + survey_design + replicate_weights produced "
+            "no finite per-horizon SE — the replicate-weight Rao-Wu path "
+            "for path-restricted IFs did not fire."
+        )
+        # _refresh_path_inference contract: every populated per-path
+        # entry's inference must use the FINAL df_survey, not a stale
+        # snapshot from before the per-path replicate fits appended to
+        # the shared _replicate_n_valid_list.
+        final_df = res.survey_metadata.df_survey
+        for entry in res.path_effects.values():
+            for vals in entry["horizons"].values():
+                if vals["n_obs"] > 0 and np.isfinite(vals["se"]) and np.isfinite(vals["effect"]):
+                    exp_t, exp_p, exp_ci = safe_inference(vals["effect"], vals["se"], df=final_df)
+                    t_matches = vals["t_stat"] == exp_t or (
+                        np.isnan(vals["t_stat"]) and np.isnan(exp_t)
+                    )
+                    p_matches = vals["p_value"] == exp_p or (
+                        np.isnan(vals["p_value"]) and np.isnan(exp_p)
+                    )
+                    ci_matches = vals["conf_int"] == exp_ci or all(
+                        np.isnan(a) == np.isnan(b)
+                        for a, b in zip(vals["conf_int"], exp_ci, strict=True)
+                    )
+                    assert t_matches and p_matches and ci_matches, (
+                        "Per-path inference fields do not match safe_inference at "
+                        f"final df_survey={final_df} — refresh did not propagate "
+                        "(t/p/conf_int must update jointly per safe_inference contract)"
+                    )
+
+    @pytest.mark.slow
+    def test_paths_of_interest_survey_design_placebo_replicate_weight(self):
+        """Sibling-surface coverage for `paths_of_interest + survey_design +
+        placebo=True` under REPLICATE WEIGHTS.
+
+        The Wave-4 PR's per-path placebo branch (`_compute_path_placebos`)
+        threads survey weights through the same cell-period IF allocator
+        used for the event-study branch. Existing tests cover by_path
+        replicate-placebo and paths_of_interest analytical placebo, but
+        the (paths_of_interest, replicate-weight, placebo=True)
+        combination — the selector-symmetric branch of the replicate-
+        weight placebo path — was unpinned. Pins finite negative-horizon
+        SE on `results.path_placebo_event_study` and final-df_survey
+        inference consistency.
+        """
+        from diff_diff.survey import SurveyDesign
+        from diff_diff.utils import safe_inference
+
+        df = _by_path_survey_data()
+        n_obs = len(df)
+        rng = np.random.default_rng(99)
+        rep_cols = [f"rep_{i}" for i in range(20)]
+        for col in rep_cols:
+            df[col] = df["survey_weights"] * (1.0 + 0.05 * rng.standard_normal(n_obs))
+        sd = SurveyDesign(
+            weights="survey_weights",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        est = ChaisemartinDHaultfoeuille(
+            paths_of_interest=[(0, 1, 1, 1), (0, 1, 0, 0)],
+            drop_larger_lower=False,
+            placebo=True,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df,
+                outcome="outcome",
+                group="group",
+                time="period",
+                treatment="treatment",
+                L_max=3,
+                survey_design=sd,
+            )
+        # Both requested paths must be present in the placebo surface —
+        # a regression that silently drops one requested path would slip
+        # through an "at least one finite entry" check.
+        assert res.path_placebo_event_study is not None
+        assert (0, 1, 1, 1) in res.path_placebo_event_study
+        assert (0, 1, 0, 0) in res.path_placebo_event_study
+        any_finite_placebo = False
+        for entry in res.path_placebo_event_study.values():
+            for vals in entry.values():
+                if vals["n_obs"] > 0 and np.isfinite(vals["se"]):
+                    any_finite_placebo = True
+        assert any_finite_placebo, (
+            "paths_of_interest + survey_design + replicate_weights + placebo "
+            "produced no finite per-horizon placebo SE — the replicate-weight "
+            "placebo IF path for path-restricted IFs did not fire."
+        )
+        # _refresh_path_inference contract on placebos: every populated
+        # entry must use the FINAL df_survey for safe_inference.
+        final_df = res.survey_metadata.df_survey
+        for entry in res.path_placebo_event_study.values():
+            for vals in entry.values():
+                if vals["n_obs"] > 0 and np.isfinite(vals["se"]) and np.isfinite(vals["effect"]):
+                    exp_t, _, _ = safe_inference(vals["effect"], vals["se"], df=final_df)
+                    matches = vals["t_stat"] == exp_t or (
+                        np.isnan(vals["t_stat"]) and np.isnan(exp_t)
+                    )
+                    assert matches, (
+                        "Per-path placebo t_stat does not match safe_inference at "
+                        f"final df_survey={final_df} — refresh did not propagate "
+                        "to path_placebo_event_study"
+                    )
+
 
 class TestByPathSurveyDesignTelescope:
     """Single-path telescope invariants — by_path SE matches global SE."""

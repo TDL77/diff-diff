@@ -4197,21 +4197,25 @@ class TestPhase45CR1Regressions:
             lonely_psu=lonely_psu,
         )
 
-    def test_stute_test_stratified_design_raises(self):
-        """R10 P1: Stute survey path explicitly rejects ANY stratified
-        design (`SurveyDesign(strata=...)`) -- the matching Stute-CvM
-        stratified-correction derivation is not yet completed. This
-        guard supersedes the prior R5 P1 lonely_psu='adjust' guard,
-        which only fired on the singleton-stratum subset of stratified
-        designs. PSU-only and pweight-only designs remain supported."""
+    def test_stute_test_lonely_psu_adjust_singleton_still_raises(self):
+        """Stratified designs (``SurveyDesign(strata=...)``) are now
+        supported via the stratified clustered wild-bootstrap correction
+        (within-stratum demean + ``sqrt(n_h/(n_h-1))`` on PSU
+        multipliers; see REGISTRY § "Note (Stute stratified survey-
+        bootstrap calibration)"). But the ``lonely_psu='adjust'`` +
+        singleton-strata subcase remains rejected — the pseudo-stratum
+        centering transform has not been derived for the Stute CvM (same
+        gap as the HAD sup-t deviation at REGISTRY:2382). This test
+        verifies the preserved gate."""
         d, dy = _linear_dgp(G=30)
         resolved = self._make_singleton_strata_resolved(G=30, lonely_psu="adjust")
-        with pytest.raises(NotImplementedError, match="stratified"):
+        with pytest.raises(NotImplementedError, match="lonely_psu='adjust'"):
             stute_test(d, dy, survey=resolved, n_bootstrap=199, seed=0)
 
-    def test_stute_joint_pretest_stratified_design_raises(self):
-        """R10 P1: joint-Stute survey path explicitly rejects stratified
-        designs (mirrors stute_test single-horizon)."""
+    def test_stute_joint_pretest_lonely_psu_adjust_singleton_still_raises(self):
+        """``lonely_psu='adjust'`` + singleton-strata stays rejected on
+        the joint Stute path after stratified-design support lands
+        (mirrors the single-horizon ``stute_test`` regression above)."""
         G = 20
         residuals_by_horizon = {
             "0": np.random.default_rng(0).normal(size=G),
@@ -4221,7 +4225,7 @@ class TestPhase45CR1Regressions:
         doses = np.linspace(0.1, 1.0, G)
         design_matrix = np.column_stack([np.ones(G), doses])
         resolved = self._make_singleton_strata_resolved(G=G, lonely_psu="adjust")
-        with pytest.raises(NotImplementedError, match="stratified"):
+        with pytest.raises(NotImplementedError, match="lonely_psu='adjust'"):
             stute_joint_pretest(
                 residuals_by_horizon=residuals_by_horizon,
                 fitted_by_horizon=fitted_by_horizon,
@@ -4294,27 +4298,37 @@ class TestPhase45CR1Regressions:
         assert np.isfinite(r.cvm_stat_joint)
         assert 0.0 <= r.p_value <= 1.0
 
-    def test_joint_homogeneity_test_stratified_raises(self):
-        """R10 P1: stratified designs raise NotImplementedError on
-        joint_homogeneity_test (propagates via stute_joint_pretest)."""
+    def test_joint_homogeneity_test_stratified_design_supported(self):
+        """Stratified designs (``SurveyDesign(weights, strata, psu)``)
+        now run end-to-end on ``joint_homogeneity_test`` via the inner
+        ``stute_joint_pretest`` -> ``apply_stratum_centering`` chain.
+        Previously raised ``NotImplementedError`` (pre-this-PR Phase 4.5
+        C gate). Now expected to return a finite, well-formed
+        ``StuteJointResult`` for a non-singleton stratified design."""
         from diff_diff import SurveyDesign
 
         df = self._make_event_study_panel_with_psu_strata(
             n_strata=2, n_psu_per_stratum=3, n_units_per_psu=2
         )
-        with pytest.raises(NotImplementedError, match="stratified"):
-            joint_homogeneity_test(
-                df,
-                "y",
-                "d",
-                "time",
-                "unit",
-                post_periods=[2, 3],
-                base_period=1,
-                n_bootstrap=199,
-                seed=0,
-                survey=SurveyDesign(weights="w", strata="stratum", psu="psu"),
-            )
+        result = joint_homogeneity_test(
+            df,
+            "y",
+            "d",
+            "time",
+            "unit",
+            post_periods=[2, 3],
+            base_period=1,
+            n_bootstrap=199,
+            seed=0,
+            survey=SurveyDesign(weights="w", strata="stratum", psu="psu"),
+        )
+        # Sanity: a stratified joint Stute on a linear DGP should produce
+        # a finite p-value (the test exercises the survey-bootstrap path,
+        # not a specific value pin).
+        assert np.isfinite(result.p_value)
+        assert 0.0 <= result.p_value <= 1.0
+        assert result.n_horizons == 2
+        assert result.n_bootstrap == 199
 
     def test_workflow_event_study_psu_only_survey_smoke(self):
         """R6 P1 + R10 P1: positive coverage on did_had_pretest_workflow
@@ -5454,3 +5468,432 @@ class TestHADFitTrendsLin:
         np.testing.assert_array_equal(r1.att, r2.att)
         # get_params unchanged (no fit-time mutation).
         assert est.get_params() == HeterogeneousAdoptionDiD().get_params()
+
+
+class TestStuteStratifiedSurveyBootstrap:
+    """Phase 4.5 C strata-extension regression suite.
+
+    Locks the behavior of the stratified clustered wild-bootstrap
+    correction (within-stratum demean + sqrt(n_h/(n_h-1)) Bessel
+    rescale) added in this PR. See REGISTRY § HeterogeneousAdoptionDiD
+    "Note (Stute stratified survey-bootstrap calibration)" for the
+    derivation.
+
+    Coverage:
+    - Stute single-horizon + stratified design: positive smoke
+      (was NotImplementedError pre-PR).
+    - did_had_pretest_workflow + stratified design: end-to-end
+      smoke; QUG silently skipped, joint Stute + Yatchew run
+      survey-aware; verdict carries the C0 deferral substring.
+    - Trivial-stratum reduction: ``SurveyDesign(strata="all_ones")``
+      vs ``SurveyDesign(strata=None)`` — the deterministic CvM
+      statistic is bit-equal (atol=1e-14, the algebraic-identity
+      claim); the bootstrap p-value matches only within
+      bootstrap-noise (≤0.15 abs) because
+      ``generate_survey_multiplier_weights_batch`` takes different
+      RNG-consumption paths for strata-Some vs strata-None.
+    - Non-strata calibration-shift end-to-end smoke: finite + range
+      check that the non-strata Stute path runs after the
+      single-implicit-stratum centering lands. A direction-pin via
+      pre-PR baseline capture was considered but is redundant with
+      the helper-level bit-parity regression at atol=1e-14 (which
+      catches any revert of apply_stratum_centering's algebra) AND
+      the call-site wiring regression below (which catches
+      disconnection of the helper from the Stute call sites).
+    - Stute call-site wiring regression: monkey-patches
+      ``apply_stratum_centering`` and asserts both Stute call sites
+      (``stute_test`` at had_pretests.py:1985,
+      ``stute_joint_pretest`` at :3312) invoke it with psu_axis=1.
+      Catches the disconnection case the helper bit-parity test
+      cannot.
+    - MC oracle consistency (``@pytest.mark.slow``): empirical Type
+      I error under a stratified null DGP at α=0.05 sits in
+      [0.0, 0.10] (3σ at 200 draws).
+    - MC power (``@pytest.mark.slow``): rejection rate > 0.50 under
+      a stratified known-alternative DGP.
+    """
+
+    def _stratified_panel(
+        self,
+        *,
+        n_strata=4,
+        n_psu_per_stratum=8,
+        T_pre=2,
+        T_post=2,
+        true_slope=0.0,
+        nonlinear=False,
+        noise_sd=0.3,
+        nonlinear_coef=5.0,
+        seed=11,
+    ):
+        """One unit per PSU; balanced stratified design. Under the null
+        ``nonlinear=False`` the post-period outcome is linear in dose
+        (Stute linearity null holds); under ``nonlinear=True`` the
+        post-period outcome adds a quadratic term to violate the null.
+        Tightened noise + larger n compared to the prior fixture: 0.3
+        SD per-period noise and 8 PSUs/stratum (G=32 after per-unit
+        aggregation) keeps the MC oracle Type I in the 3σ band while
+        giving the alternative DGP enough signal to exceed the 0.50
+        power threshold at 200 draws."""
+        rng = np.random.default_rng(seed)
+        rows = []
+        unit_id = 0
+        for h in range(n_strata):
+            for p in range(n_psu_per_stratum):
+                psu_global = h * n_psu_per_stratum + p
+                d_post = rng.uniform(0.1, 1.0)
+                w_unit = rng.uniform(0.7, 1.5)
+                for t in range(T_pre + T_post):
+                    is_post = t >= T_pre
+                    d_t = d_post if is_post else 0.0
+                    treat_term = (true_slope * d_post) if is_post else 0.0
+                    if is_post and nonlinear:
+                        treat_term = treat_term + nonlinear_coef * d_post * d_post
+                    y_t = rng.normal(0.0, noise_sd) + treat_term
+                    rows.append(
+                        {
+                            "unit": unit_id,
+                            "time": t,
+                            "y": y_t,
+                            "d": d_t,
+                            "stratum": h,
+                            "psu": psu_global,
+                            "w": w_unit,
+                        }
+                    )
+                unit_id += 1
+        return pd.DataFrame(rows)
+
+    def test_stute_test_stratified_positive_smoke(self):
+        """Stute single-horizon under stratified survey design runs
+        end-to-end (pre-PR: ``NotImplementedError``)."""
+        from diff_diff import SurveyDesign
+        from diff_diff.survey import make_pweight_design  # noqa: F401
+
+        df = self._stratified_panel(n_strata=4, n_psu_per_stratum=8)
+        sd = SurveyDesign(weights="w", strata="stratum", psu="psu")
+        # Aggregate to per-unit dy = Y_post - Y_pre, per-unit dose.
+        pre = df[df["time"] < 2].groupby("unit", as_index=False)["y"].mean()
+        post = df[df["time"] >= 2].groupby("unit", as_index=False)["y"].mean()
+        merged = pre.merge(post, on="unit", suffixes=("_pre", "_post"))
+        dose = df.groupby("unit", as_index=False)["d"].max()
+        merged = merged.merge(dose, on="unit")
+        dy_arr = (merged["y_post"] - merged["y_pre"]).to_numpy(dtype=np.float64)
+        d_arr = merged["d"].to_numpy(dtype=np.float64)
+        unit_df = df.drop_duplicates(subset="unit")[["unit", "stratum", "psu", "w"]].sort_values(
+            "unit"
+        )
+        resolved = sd.resolve(unit_df)
+        r = stute_test(d=d_arr, dy=dy_arr, survey_design=resolved, n_bootstrap=199, seed=0)
+        assert np.isfinite(r.p_value)
+        assert 0.0 <= r.p_value <= 1.0
+        assert r.n_bootstrap == 199
+
+    def test_workflow_stratified_event_study_end_to_end_smoke(self):
+        """``did_had_pretest_workflow(survey_design=stratified_sd)`` runs
+        the full event-study workflow under stratified sampling: QUG is
+        silently skipped per Phase 4.5 C0, Stute + Yatchew run via the
+        survey-aware path with the new stratum centering, and the joint
+        variants populate. Verdict carries the C0 deferral substring
+        verbatim."""
+        from diff_diff import SurveyDesign
+
+        df = self._stratified_panel(n_strata=4, n_psu_per_stratum=5)
+        # The workflow needs ``first_treat`` per unit (HAD panel contract).
+        # All units adopt at t=T_pre=2 in this fixture.
+        df = df.copy()
+        df["F"] = 2
+        sd = SurveyDesign(weights="w", strata="stratum", psu="psu")
+        with pytest.warns(UserWarning, match="QUG step skipped"):
+            report = did_had_pretest_workflow(
+                data=df,
+                outcome_col="y",
+                dose_col="d",
+                time_col="time",
+                unit_col="unit",
+                first_treat_col="F",
+                survey_design=sd,
+                aggregate="event_study",
+                n_bootstrap=199,
+                seed=0,
+                alpha=0.05,
+            )
+        # QUG silently skipped on the survey path (per C0).
+        assert report.qug is None
+        # Joint pretrends + joint homogeneity populate.
+        assert report.pretrends_joint is not None
+        assert report.homogeneity_joint is not None
+        # Both joint tests should produce finite p-values.
+        assert np.isfinite(report.pretrends_joint.p_value)
+        assert np.isfinite(report.homogeneity_joint.p_value)
+        # Verdict carries the C0 deferral substring verbatim per
+        # feedback_no_silent_failures.
+        assert "QUG-under-survey deferred per Phase 4.5 C0" in report.verdict
+
+    def test_trivial_stratum_reduces_to_strata_none(self):
+        """``SurveyDesign(weights, psu, strata="all_ones")`` (single
+        explicit stratum) is *algebraically* equivalent to
+        ``SurveyDesign(weights, psu, strata=None)`` (single implicit
+        stratum) after the PR — both apply the same within-implicit-
+        stratum demean + sqrt(n_psu/(n_psu-1)) Bessel rescale.
+
+        The DETERMINISTIC CvM statistic matches bit-exactly between the
+        two fits — that is the algebraic-identity claim.
+
+        The BOOTSTRAP p-value does NOT match bit-exactly because
+        ``generate_survey_multiplier_weights_batch`` takes structurally
+        different code paths based on ``strata`` (see
+        ``bootstrap_utils.py:556+`` strata-None branch vs ``:579+``
+        stratified branch — different RNG-consumption patterns and the
+        strata-None branch additionally routes through the Rust backend
+        when available, while the stratified per-stratum loop uses
+        ``..._numpy``). Bootstrap p-values are expected to differ at
+        the order of bootstrap noise — we assert a loose closeness band
+        as a SMOKE, not bit-equality."""
+        from diff_diff import SurveyDesign
+
+        df = self._stratified_panel(n_strata=1, n_psu_per_stratum=20)
+        df = df.copy()
+        df["all_ones"] = 1
+        sd_explicit = SurveyDesign(weights="w", psu="psu", strata="all_ones")
+        sd_implicit = SurveyDesign(weights="w", psu="psu")
+
+        pre = df[df["time"] < 2].groupby("unit", as_index=False)["y"].mean()
+        post = df[df["time"] >= 2].groupby("unit", as_index=False)["y"].mean()
+        merged = pre.merge(post, on="unit", suffixes=("_pre", "_post"))
+        dose = df.groupby("unit", as_index=False)["d"].max()
+        merged = merged.merge(dose, on="unit")
+        dy_arr = (merged["y_post"] - merged["y_pre"]).to_numpy(dtype=np.float64)
+        d_arr = merged["d"].to_numpy(dtype=np.float64)
+        unit_df = df.drop_duplicates(subset="unit")[
+            ["unit", "stratum", "psu", "w", "all_ones"]
+        ].sort_values("unit")
+        resolved_explicit = sd_explicit.resolve(unit_df)
+        resolved_implicit = sd_implicit.resolve(unit_df)
+
+        # Use the same seed for both. The CvM is deterministic; the
+        # bootstrap p-value depends on the multiplier RNG path, which
+        # differs between the two helper branches (see docstring).
+        r_explicit = stute_test(
+            d=d_arr, dy=dy_arr, survey_design=resolved_explicit, n_bootstrap=199, seed=42
+        )
+        r_implicit = stute_test(
+            d=d_arr, dy=dy_arr, survey_design=resolved_implicit, n_bootstrap=199, seed=42
+        )
+        # CvM statistic is deterministic — bit-exact match (the
+        # algebraic-identity claim).
+        np.testing.assert_allclose(r_explicit.cvm_stat, r_implicit.cvm_stat, atol=1e-14)
+        # Bootstrap p-values: loose closeness band (within bootstrap
+        # noise), NOT bit-equality. At B=199 the bootstrap SD on the
+        # uniform p-value is ~sqrt(0.25/199) ≈ 0.035; a ±0.15 band is
+        # ~4σ and decisively distinguishes "two fits of the same
+        # statistic" from "the algebraic-equivalence claim is broken"
+        # (which would push p-values to opposite tails).
+        assert abs(float(r_explicit.p_value) - float(r_implicit.p_value)) < 0.15, (
+            f"Trivial-stratum reduction smoke: explicit p={r_explicit.p_value!r} "
+            f"vs implicit p={r_implicit.p_value!r} differ by more than the "
+            f"bootstrap-noise band (0.15). The algebraic equivalence between "
+            f"SurveyDesign(strata='all_ones') and SurveyDesign(strata=None) "
+            f"may be broken; check apply_stratum_centering's strata-None branch."
+        )
+
+    def test_stute_call_sites_invoke_apply_stratum_centering(self, monkeypatch):
+        """Regression: ensure the Stute survey-bootstrap call sites
+        actually invoke ``apply_stratum_centering`` on the PSU multipliers
+        before the per-obs broadcast. A future change that silently
+        removed the calls at ``had_pretests.py:1985`` (``stute_test``)
+        or ``had_pretests.py:3312`` (``stute_joint_pretest``) would
+        disable the stratified clustered wild-bootstrap correction
+        without failing the helper-level bit-parity regression at
+        ``tests/test_bootstrap_utils.py::TestApplyStratumCentering::
+        test_bit_parity_vs_pre_refactor_inline_block`` (which only
+        covers the HAD sup-t ``psu_axis=0`` layout). This test closes
+        the disconnection-detection gap surfaced by PR #432 R2 review."""
+        import diff_diff.had_pretests as hp
+        from diff_diff import SurveyDesign
+
+        calls: list = []
+        real_helper = hp.apply_stratum_centering
+
+        def spy(*args, **kwargs):
+            # Record psu_axis from kwarg or positional (the call sites
+            # use kwarg, but be defensive).
+            psu_axis = kwargs.get("psu_axis", args[3] if len(args) > 3 else 0)
+            calls.append(psu_axis)
+            return real_helper(*args, **kwargs)
+
+        monkeypatch.setattr(hp, "apply_stratum_centering", spy)
+
+        df = self._stratified_panel(n_strata=4, n_psu_per_stratum=4)
+        sd = SurveyDesign(weights="w", strata="stratum", psu="psu")
+        pre = df[df["time"] < 2].groupby("unit", as_index=False)["y"].mean()
+        post = df[df["time"] >= 2].groupby("unit", as_index=False)["y"].mean()
+        merged = pre.merge(post, on="unit", suffixes=("_pre", "_post"))
+        dose = df.groupby("unit", as_index=False)["d"].max()
+        merged = merged.merge(dose, on="unit")
+        dy = (merged["y_post"] - merged["y_pre"]).to_numpy(dtype=np.float64)
+        d_arr = merged["d"].to_numpy(dtype=np.float64)
+        unit_df = df.drop_duplicates(subset="unit")[["unit", "stratum", "psu", "w"]].sort_values(
+            "unit"
+        )
+        resolved = sd.resolve(unit_df)
+
+        # Single-horizon call site.
+        calls.clear()
+        stute_test(d=d_arr, dy=dy, survey_design=resolved, n_bootstrap=99, seed=0)
+        assert calls == [1], (
+            "stute_test did not invoke apply_stratum_centering on the "
+            f"Stute multiplier matrix (psu_axis=1). Recorded calls: {calls}. "
+            "The stratified clustered wild-bootstrap correction is "
+            "disconnected from had_pretests.py:1985."
+        )
+
+        # Multi-horizon call site.
+        calls.clear()
+        G = len(d_arr)
+        residuals_by_horizon = {
+            "0": np.random.default_rng(7).normal(size=G),
+            "1": np.random.default_rng(8).normal(size=G),
+        }
+        fitted_by_horizon = {"0": np.zeros(G), "1": np.zeros(G)}
+        design_matrix = np.column_stack([np.ones(G), d_arr])
+        stute_joint_pretest(
+            residuals_by_horizon=residuals_by_horizon,
+            fitted_by_horizon=fitted_by_horizon,
+            doses=d_arr,
+            design_matrix=design_matrix,
+            n_bootstrap=99,
+            seed=0,
+            survey=resolved,
+        )
+        assert calls == [1], (
+            "stute_joint_pretest did not invoke apply_stratum_centering on "
+            f"the joint Stute multiplier matrix (psu_axis=1). Recorded "
+            f"calls: {calls}. The stratified clustered wild-bootstrap "
+            "correction is disconnected from had_pretests.py:3312."
+        )
+
+    def test_calibration_shift_non_strata_end_to_end_smoke(self):
+        """End-to-end smoke for the non-strata Stute path after the
+        single-implicit-stratum centering lands. The post-PR path
+        applies the ``sqrt(n_psu / (n_psu - 1))`` Bessel rescale (and
+        within-implicit-stratum demean) on the PSU multipliers, where
+        the pre-PR Phase 4.5 C path applied no correction.
+
+        This test is a finite + range smoke — NOT a baseline-capture
+        direction pin. A heavier worktree-based pre/post comparison was
+        considered but is redundant with the helper-level bit-parity
+        regression at ``tests/test_bootstrap_utils.py::TestApplyStratumCentering::
+        test_bit_parity_vs_pre_refactor_inline_block`` (locked at
+        ``atol=1e-14``), which fails the instant ``apply_stratum_centering``
+        stops centering — regardless of which call site consumes it.
+        That helper-level invariant lock catches any revert of the
+        non-strata calibration end-to-end.
+
+        See REGISTRY § "Note (Stute stratified survey-bootstrap
+        calibration)" non-strata calibration improvement subsection."""
+        from diff_diff.survey import make_pweight_design
+
+        rng = np.random.default_rng(11)
+        G = 80
+        d_arr = rng.uniform(0.5, 5.0, size=G)
+        # Linear dy under H0 (linearity null holds): no quadratic term.
+        dy_arr = 2.0 * d_arr + rng.normal(0, 0.5, size=G)
+        w_arr = rng.uniform(0.7, 1.5, size=G)
+        w_arr = w_arr / w_arr.mean()
+        resolved = make_pweight_design(w_arr)
+        r = stute_test(d=d_arr, dy=dy_arr, survey_design=resolved, n_bootstrap=999, seed=11)
+        assert np.isfinite(r.p_value)
+        assert 0.0 <= r.p_value <= 1.0, f"Stute p-value out of valid range: {r.p_value}"
+
+    @pytest.mark.slow
+    def test_stratified_mc_type1_error_in_band(self):
+        """MC oracle consistency: 200-draw simulation under a stratified
+        null DGP. Empirical Type I error at α=0.05 should fall in
+        [0.0, 0.10] (3σ width at n=200, ≈ ±3·0.0154). Seed-set for
+        reproducibility. See reviewer Medium #1 — 1.6σ band was too
+        tight; 3σ is the standard well-calibrated-test allowance."""
+        from diff_diff import SurveyDesign
+
+        n_draws = 200
+        rejections = 0
+        for sim in range(n_draws):
+            df = self._stratified_panel(
+                n_strata=4,
+                n_psu_per_stratum=6,
+                true_slope=2.0,  # post-period true linear effect
+                nonlinear=False,  # null holds (linear E[dY|D])
+                seed=1000 + sim,
+            )
+            sd = SurveyDesign(weights="w", strata="stratum", psu="psu")
+            pre = df[df["time"] < 2].groupby("unit", as_index=False)["y"].mean()
+            post = df[df["time"] >= 2].groupby("unit", as_index=False)["y"].mean()
+            merged = pre.merge(post, on="unit", suffixes=("_pre", "_post"))
+            dose = df.groupby("unit", as_index=False)["d"].max()
+            merged = merged.merge(dose, on="unit")
+            dy = (merged["y_post"] - merged["y_pre"]).to_numpy(dtype=np.float64)
+            d_arr = merged["d"].to_numpy(dtype=np.float64)
+            unit_df = df.drop_duplicates(subset="unit")[
+                ["unit", "stratum", "psu", "w"]
+            ].sort_values("unit")
+            resolved = sd.resolve(unit_df)
+            r = stute_test(
+                d=d_arr,
+                dy=dy,
+                survey_design=resolved,
+                n_bootstrap=199,
+                seed=sim,
+            )
+            if r.reject:
+                rejections += 1
+        empirical_type_1 = rejections / n_draws
+        assert 0.0 <= empirical_type_1 <= 0.10, (
+            f"Empirical Type I error under stratified null DGP: "
+            f"{empirical_type_1:.3f} (target ≈ 0.05; 3σ band "
+            f"[0.0, 0.10] at n_draws={n_draws})"
+        )
+
+    @pytest.mark.slow
+    def test_stratified_mc_power_under_alternative(self):
+        """MC power: 200-draw simulation under a stratified known-
+        alternative DGP (quadratic E[dY|D]). Rejection rate at α=0.05
+        should exceed 0.50. Seed-set for reproducibility. Validates
+        that the stratified centering doesn't kill power."""
+        from diff_diff import SurveyDesign
+
+        n_draws = 200
+        rejections = 0
+        for sim in range(n_draws):
+            df = self._stratified_panel(
+                n_strata=4,
+                n_psu_per_stratum=6,
+                true_slope=2.0,
+                nonlinear=True,  # alternative: post quadratic term
+                seed=2000 + sim,
+            )
+            sd = SurveyDesign(weights="w", strata="stratum", psu="psu")
+            pre = df[df["time"] < 2].groupby("unit", as_index=False)["y"].mean()
+            post = df[df["time"] >= 2].groupby("unit", as_index=False)["y"].mean()
+            merged = pre.merge(post, on="unit", suffixes=("_pre", "_post"))
+            dose = df.groupby("unit", as_index=False)["d"].max()
+            merged = merged.merge(dose, on="unit")
+            dy = (merged["y_post"] - merged["y_pre"]).to_numpy(dtype=np.float64)
+            d_arr = merged["d"].to_numpy(dtype=np.float64)
+            unit_df = df.drop_duplicates(subset="unit")[
+                ["unit", "stratum", "psu", "w"]
+            ].sort_values("unit")
+            resolved = sd.resolve(unit_df)
+            r = stute_test(
+                d=d_arr,
+                dy=dy,
+                survey_design=resolved,
+                n_bootstrap=199,
+                seed=sim,
+            )
+            if r.reject:
+                rejections += 1
+        power = rejections / n_draws
+        assert power > 0.50, (
+            f"Stratified Stute power under known alternative: "
+            f"{power:.3f} (target > 0.50 at n_draws={n_draws})"
+        )

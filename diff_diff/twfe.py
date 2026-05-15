@@ -79,12 +79,16 @@ class TwoWayFixedEffects(DifferenceInDifferences):
     within-transformed scores ``S = X_demeaned * residuals_demeaned`` form
     the same meat as the full-dummy-expansion design. The temporal kernel
     is hardcoded Bartlett regardless of ``conley_kernel`` (matches
-    ``conleyreg::time_dist``). Restrictions:
+    ``conleyreg::time_dist``). Explicit ``cluster=<col>`` + Conley
+    enables the combined spatial + cluster product kernel
+    ``K_total[i, j] = K_space(d_ij/h) · 1{cluster_i = cluster_j}``;
+    cluster membership must be constant within each unit across periods
+    (validator-enforced on the panel block-decomposed path). When
+    ``cluster=`` is unset, TWFE's default auto-cluster at the unit level
+    is silently dropped on the Conley path — Conley spatial HAC alone is
+    applied, not the combined kernel. Restrictions:
     ``inference="wild_bootstrap"`` + Conley raises (incompatible inference
-    modes); explicit ``cluster=...`` + Conley raises (combined spatial-
-    cluster kernel deferred to a follow-up PR; auto-cluster on the Conley
-    path is silently dropped); ``survey_design=`` + Conley raises (Phase 5
-    follow-up).
+    modes); ``survey_design=`` + Conley raises (Phase 5 follow-up).
 
     Warning: TWFE can be biased with staggered treatment timing
     and heterogeneous treatment effects. Consider using
@@ -169,36 +173,19 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         # with the original (un-demeaned) time / unit vectors and coords
         # yields the correct block-decomposed sandwich.
         if self.vcov_type == "conley":
-            if self.conley_lag_cutoff is None:
-                raise ValueError(
-                    "TwoWayFixedEffects(vcov_type='conley') requires "
-                    "conley_lag_cutoff (non-negative int; 0 means spatial-"
-                    "within-period only, no serial component). See R "
-                    "conleyreg's `lag_cutoff` argument for the convention."
-                )
-            if self.conley_coords is None or self.conley_cutoff_km is None:
-                raise ValueError(
-                    "TwoWayFixedEffects(vcov_type='conley') requires "
-                    "conley_coords=(lat_col, lon_col) and "
-                    "conley_cutoff_km on the constructor."
-                )
-            if self.cluster is not None:
-                raise NotImplementedError(
-                    "TwoWayFixedEffects(vcov_type='conley', cluster=...) "
-                    "is not supported: the combined spatial-kernel + cluster "
-                    "indicator product kernel is deferred to a follow-up PR "
-                    "(see TODO.md). Use vcov_type='hc1' with cluster= for "
-                    "cluster-robust without spatial HAC, or drop cluster= "
-                    "for panel-Conley alone."
-                )
-            if self.inference == "wild_bootstrap":
-                raise NotImplementedError(
-                    "TwoWayFixedEffects(vcov_type='conley', "
-                    "inference='wild_bootstrap') is not supported: the "
-                    "wild bootstrap is a separate inference path that does "
-                    "not consume the analytical Conley sandwich. Use "
-                    "inference='analytical' for Conley SEs."
-                )
+            from diff_diff.conley import _validate_conley_estimator_inputs
+
+            _validate_conley_estimator_inputs(
+                estimator_name="TwoWayFixedEffects",
+                data=data,
+                unit=unit,
+                conley_coords=self.conley_coords,
+                conley_cutoff_km=self.conley_cutoff_km,
+                conley_lag_cutoff=self.conley_lag_cutoff,
+                survey_design=survey_design,
+                inference=self.inference,
+                cluster=self.cluster,
+            )
 
         # Check for staggered treatment timing and warn if detected
         self._check_staggered_treatment(data, treatment, time, unit)
@@ -374,11 +361,16 @@ class TwoWayFixedEffects(DifferenceInDifferences):
             # string encodings before the normalizer runs.
             _conley_time_arr: Optional[np.ndarray] = np.asarray(data[time].values)
             _conley_unit_arr: Optional[np.ndarray] = data[unit].values
-            # vcov_type="conley" + cluster_ids raises at the linalg validator
-            # (combined kernel deferred). TWFE's auto-cluster would force that
-            # path; drop the cluster on the Conley path. The user's explicit
-            # cluster also conflicts and is rejected upstream.
-            _conley_cluster_override = None
+            # Combined spatial + cluster product kernel: thread the user's
+            # EXPLICIT cluster=<col> through when set. TWFE's default auto-
+            # cluster at the unit level is silently dropped on the Conley
+            # path — combining Conley with the unit-cluster mask zeros out
+            # all between-unit pairs (defeating Conley's spatial pooling).
+            # Users who want the combined kernel must pass an above-unit
+            # cluster (e.g. region) explicitly.
+            _conley_cluster_override = (
+                data[self.cluster].values if self.cluster is not None else None
+            )
         else:
             _conley_coords_arr = None
             _conley_time_arr = None
@@ -561,14 +553,16 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         # `self.cluster is None` AND the vcov family is cluster-compatible.
         # One-way families (`classical`, `hc2`) disable the auto-cluster (see
         # the `cluster_var` block above); report None so summary() labels the
-        # one-way family instead of "CR1 cluster-robust at unit". The Conley
-        # path drops the auto-cluster too (`_conley_cluster_override = None`
-        # above); mirror that here so the variance-provenance metadata
-        # (`res.cluster_name`, serialized `to_dict()["cluster_name"]`)
-        # accurately reflects the cluster IDs actually passed to
-        # `LinearRegression` — i.e. None on the Conley path.
+        # one-way family instead of "CR1 cluster-robust at unit". On the
+        # Conley path, the auto-cluster is silently dropped (combining with
+        # unit-level clusters would zero out all between-unit pairs and
+        # defeat the spatial pooling); when the user passes an explicit
+        # `cluster=<col>` ALONGSIDE Conley, the combined spatial + cluster
+        # product kernel applies and the label tracks the user's column.
+        # Either way, the cluster_name reflects the cluster IDs actually
+        # passed to LinearRegression.
         if _fit_vcov_type == "conley":
-            _twfe_cluster_label: Optional[str] = None
+            _twfe_cluster_label: Optional[str] = self.cluster if self.cluster is not None else None
         elif self.cluster is not None:
             _twfe_cluster_label = self.cluster
         elif cluster_var is None:

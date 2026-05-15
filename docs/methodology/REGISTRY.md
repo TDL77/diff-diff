@@ -2,7 +2,7 @@
 
 This document provides the academic foundations and key implementation requirements for each estimator in diff-diff. It serves as a reference for contributors and users who want to understand the theoretical basis of the methods.
 
-**Result-class field naming.** Headline scalar inference fields appear under one of four native naming patterns: flat `att` / `se` / `conf_int` / `p_value` / `t_stat` (`DiDResults`, `SyntheticDiDResults`, `TROPResults`, `TripleDifferenceResults`, `HeterogeneousAdoptionDiDResults`); `overall_*` (`CallawaySantAnnaResults` and the rest of the staggered family); `overall_att_*` (`ContinuousDiDResults`, where `att` and `acrt` are parallel response curves); and `avg_*` (`MultiPeriodDiDResults`). Every scalar treatment-effect result class covered by this naming contract additionally exposes the flat `att` / `se` / `conf_int` / `p_value` / `t_stat` names as read-only `@property` aliases for adapter / external-consumer compatibility (see PR for v3.3.3, motivated by `balance.interop.diff_diff`); `ContinuousDiDResults` further exposes `overall_*` aliases pointing at the ATT side. The native field is canonical for documentation, semantics, and computation — aliases are pure read-throughs and inherit the `safe_inference()` joint-NaN consistency contract automatically. Because aliases are `@property` descriptors (not dataclass fields), they do NOT appear in `dataclasses.fields()` or `dataclasses.asdict()` output, and assignment to an alias raises `AttributeError`; serializers and field-walkers continue to see only the canonical field set.
+**Result-class field naming.** Headline scalar inference fields appear under one of four native naming patterns: flat `att` / `se` / `conf_int` / `p_value` / `t_stat` (`DiDResults`, `SyntheticDiDResults`, `TROPResults`, `TripleDifferenceResults`, `HeterogeneousAdoptionDiDResults`); `overall_*` (`CallawaySantAnnaResults` and the rest of the staggered family); `overall_att_*` (`ContinuousDiDResults`, where `att` and `acrt` are parallel response curves); and `avg_*` (`MultiPeriodDiDResults`). Result classes in the prefixed `overall_*` / `overall_att_*` / `avg_*` families additionally expose the flat `att` / `se` / `conf_int` / `p_value` / `t_stat` names as read-only `@property` aliases over their canonical fields, for adapter / external-consumer compatibility (see PR for v3.3.3, motivated by `balance.interop.diff_diff`). The flat-native classes (`DiDResults`, `SyntheticDiDResults`, `TROPResults`, `TripleDifferenceResults`, `HeterogeneousAdoptionDiDResults`) already carry these names as native dataclass fields and are unchanged by this contract. `ContinuousDiDResults` further exposes `overall_*` aliases pointing at the ATT side (so `result.overall_se` reads `result.overall_att_se`, etc.). The native field is canonical for documentation, semantics, and computation — aliases are pure read-throughs and inherit the `safe_inference()` joint-NaN consistency contract automatically. Because aliases are `@property` descriptors (not dataclass fields), they do NOT appear in `dataclasses.fields()` or `dataclasses.asdict()` output, and assignment to an alias raises `AttributeError`; serializers and field-walkers continue to see only the canonical field set.
 
 ## Table of Contents
 
@@ -2353,7 +2353,7 @@ Under `survey=SurveyDesign(weights, strata, psu, fpc)`, the variance composes vi
 - **Note:** Monte Carlo oracle consistency — `tests/test_had_mc.py` validates that the weighted estimator recovers the oracle τ under informative sampling, with coverage near nominal and visible bias reduction vs unweighted. Slow-gated; 4 tests.
 - **Note:** Auto-bandwidth selection (Phase 1b MSE-DPI via `lpbwselect_mse_dpi`) remains UNWEIGHTED in this phase; users who want a weight-aware bandwidth should pass `h`/`b` explicitly. The auto path with uniform weights reduces to the existing unweighted bandwidth selector, so the uniform-weights bit-parity chain is preserved.
 - **Note:** Replicate-weight SurveyDesigns (BRR / Fay / JK1 / JKn / SDR) on the HAD continuous path raise `NotImplementedError` in this PR; Rao-Wu-style rescaled bootstrap is deferred to Phase 4.5 C (survey-under-pretests).
-- **Note:** `HeterogeneousAdoptionDiD.fit()` dispatch matrix after Phase 4.5 B + 4.5 C — survey/weights are supported on ALL design × aggregate combinations (continuous × {overall, event-study}, mass-point × {overall, event-study}). The HAD pretests (`qug_test`, `stute_test`, `yatchew_hr_test`, joint Stute variants, `did_had_pretest_workflow`) ship survey support in Phase 4.5 C (PR #370) — `qug_test` permanently rejects (Phase 4.5 C0 deferral; see "QUG Null Test" §); the linearity family supports pweight + PSU + FPC via PSU-level Mammen multipliers (Stute) + closed-form weighted variance components (Yatchew); replicate-weight and stratified designs raise `NotImplementedError` (parallel follow-ups). The canonical kwarg on all 8 HAD surfaces is `survey_design=` (see "Note (HAD survey-design API consolidation)" below); `survey=` / `weights=` remain accepted as deprecated aliases for one minor cycle.
+- **Note:** `HeterogeneousAdoptionDiD.fit()` dispatch matrix after Phase 4.5 B + 4.5 C — survey/weights are supported on ALL design × aggregate combinations (continuous × {overall, event-study}, mass-point × {overall, event-study}). The HAD pretests (`qug_test`, `stute_test`, `yatchew_hr_test`, joint Stute variants, `did_had_pretest_workflow`) ship survey support in Phase 4.5 C (PR #370) and the Phase 4.5 C strata extension (this PR) — `qug_test` permanently rejects (Phase 4.5 C0 deferral; see "QUG Null Test" §); the linearity family supports pweight + PSU + FPC + strata via PSU-level Mammen multipliers with within-stratum demean + Bessel rescale (Stute, see "Note (Stute stratified survey-bootstrap calibration)" below) + closed-form weighted variance components (Yatchew). Replicate-weight designs raise `NotImplementedError` (parallel follow-up); `lonely_psu='adjust'` + singleton-strata raises `NotImplementedError` on the Stute family (same pseudo-stratum centering gap as the HAD sup-t deviation, parallel follow-up). The canonical kwarg on all 8 HAD surfaces is `survey_design=` (see "Note (HAD survey-design API consolidation)" below); `survey=` / `weights=` remain accepted as deprecated aliases for one minor cycle.
 - **Note (HAD survey-design API consolidation):** All 8 HAD surfaces — `HeterogeneousAdoptionDiD.fit`, `did_had_pretest_workflow`, `qug_test`, `stute_test`, `yatchew_hr_test`, `stute_joint_pretest`, `joint_pretrends_test`, `joint_homogeneity_test` — accept the canonical kwarg `survey_design=` (matching `ContinuousDiD`, `EfficientDiD`, `ChaisemartinDHaultfoeuille`). The pre-existing dual `survey=` and `weights=` kwargs become deprecated aliases (`DeprecationWarning`); both will be removed in the next minor release. Internal back-end behavior is UNCHANGED (the legacy paths for `weights=np.ndarray` and `survey=SurveyDesign(...)` still execute the same code; only the entry signature wraps them). Mutex semantics extend from 2-way (`survey + weights`) to 3-way (`survey_design + survey + weights`) — at most one may be non-None per call. Distinct mutex error messages by surface group: data-in surfaces (HAD.fit + workflow + joint data-in wrappers) point users to `survey_design=SurveyDesign(weights='col_name', ...)`; the three array-in linearity helpers (`stute_test` / `yatchew_hr_test` / `stute_joint_pretest`) point to `survey_design=make_pweight_design(arr)` (for pweight-only) or `survey_design=<pre-resolved ResolvedSurveyDesign>` (for full PSU/strata/FPC). The 8th surface — `qug_test` — has its own qug-specific mutex message that does NOT advertise `make_pweight_design(arr)` as a migration target; QUG-under-survey is permanently rejected (Phase 4.5 C0 deferral, see "QUG Null Test" §) regardless of which kwarg variant the caller uses, so the migration path doesn't apply. Array-in helpers reject `survey_design=SurveyDesign(...)` with `TypeError` since they have no `data` to resolve column names against. The `make_pweight_design(weights: np.ndarray) -> ResolvedSurveyDesign` factory is exported from the `diff_diff` top level (formerly `survey._make_trivial_resolved`, kept as a permanent private alias for back-compat); `weights` must be 1-D (scalar / 0-D / column-vector inputs raise `ValueError` at the front door).
 
 *Weighted 2SLS (Phase 4.5 B):* `_fit_mass_point_2sls(..., weights=, return_influence=)` extends the Wald-IV / 2SLS sandwich with pweight semantics:
@@ -2451,7 +2451,25 @@ Tuning-parameter-free test of `H_0: d̲ = 0` versus `H_1: d̲ > 0`. Shipped in `
     - `aggregate="event_study"`: `True` iff `pretrends_joint` is non-None and conclusive, `homogeneity_joint` is conclusive, AND neither rejects. Both joint variants must be conclusive on the event-study path (same step-2 + step-3 closure as the unweighted aggregate, just without the QUG step).
   - **Replicate-weight survey designs (BRR/Fay/JK1/JKn/SDR) deferred** to a parallel follow-up. Each helper raises `NotImplementedError` on `survey.replicate_weights is not None` (defense in depth: workflow + every direct-helper entry rejects, mirroring the reciprocal-guard discipline from PR #346). The per-replicate weight-ratio rescaling for the OLS-on-residuals refit step is not covered by the multiplier-bootstrap composition above.
   - **`lonely_psu='adjust'` with singleton strata is rejected** with `NotImplementedError` on the Stute family (mirrors HAD sup-t bootstrap at `had.py:2081-2118`). The bootstrap multiplier helper pools singleton strata into a pseudo-stratum with nonzero multipliers, but the analytical variance target requires a pseudo-stratum centering transform that has not been derived for the Stute CvM. Use `lonely_psu='remove'` (drops singleton contributions) or `'certainty'` (zero-variance singletons); both produce all-zero singleton multipliers that match a well-defined analytical target. Variance-unidentified designs (`df_survey <= 0` after the adjust+singleton case is handled) return `NaN` with a `UserWarning` (single-PSU unstratified or one-PSU-per-stratum under remove/certainty).
-  - **Stratified designs (`SurveyDesign(strata=...)`) are rejected** with `NotImplementedError` on `stute_test` and `stute_joint_pretest` (and propagate to `did_had_pretest_workflow`). The HAD sup-t bootstrap (had.py:2120+) applies a within-stratum demean + `sqrt(n_h/(n_h-1))` small-sample correction AFTER `generate_survey_multiplier_weights_batch` to make the bootstrap variance match the Binder-TSL stratified target. That same correction has NOT been derived for the Stute CvM functional, so applying the helper's raw multipliers directly to residual perturbations on stratified designs would leave the bootstrap p-value silently miscalibrated. Phase 4.5 C narrows Stute-family survey support to **pweight-only** (no strata, no PSU), **PSU-only** (`SurveyDesign(weights=, psu=)`), and **FPC-only** (`SurveyDesign(weights=, fpc=)`) designs. Stratified designs are a follow-up after the matching Stute-CvM stratified-correction derivation lands.
+  - **Stratified designs (`SurveyDesign(strata=...)`) are supported** via the standard stratified clustered wild bootstrap correction on the PSU multipliers (Cameron-Gelbach-Miller 2008; Davidson-Flachaire 2008; Djogbenou-MacKinnon-Nielsen 2019; Kreiss-Lahiri 2012; Wu 1986; Liu 1988). See the dedicated **"Note: Stute stratified survey-bootstrap calibration"** below for the algorithm. Remaining deferrals: `lonely_psu='adjust'` + singleton strata (same pseudo-stratum centering gap as the HAD sup-t deviation documented above; requires a separate analytical-target derivation) and replicate-weight designs (BRR/Fay/JK1/JKn/SDR; separate Rao-Wu/JKn bootstrap composition).
+
+- **Note (Stute stratified survey-bootstrap calibration):** The Stute survey-bootstrap is a wild residual bootstrap (Hlávka-Hušková 2020) with cluster-level multipliers (Cameron, Gelbach & Miller 2008). The per-replicate loop is `eta_obs = psu_mults[b, psu_col_idx]; dy_b = fitted + eps * eta_obs; refit weighted OLS; recompute weighted CvM` (`had_pretests.py:2001-2005` for `stute_test`, `:3314-3344` for `stute_joint_pretest`). Under stratified PSU sampling, the multipliers `psu_mults[b, :]` exit `generate_survey_multiplier_weights_batch` as within-stratum-independent draws with the `(1 - f_h)` FPC factor already baked in (`bootstrap_utils.py:579-651`). To make the bootstrap CvM variance match the analytical Binder-TSL stratified target `V_S = sum_h (1 - f_h) * (n_h / (n_h - 1)) * sum_{j in h} (psi_hj - psi_h_bar)²`, two additional corrections are applied to the multipliers BEFORE the per-obs broadcast. **Citations below are ingredients, not direct papers on this exact composition** — the specific recipe (within-stratum demean + Bessel rescale on PSU multipliers applied before broadcast in a wild-residual refit-in-loop bootstrap for the Stute CvM functional) is a library synthesis; no single paper covers all of it.
+
+    1. **Within-stratum demean**: for each stratum `h`, `psu_mults[b, cols_h] -= psu_mults[b, cols_h].mean()`. The within-cluster mean-zero requirement is the canonical wild-bootstrap centering for heteroskedastic regression (Davidson & Flachaire 2008); applying it within each stratum (rather than across all clusters) under stratified PSU sampling is the library synthesis. The Kreiss-Lahiri (2012) block-bootstrap family supplies the methodological analogy for within-block centering under hierarchical sampling but does not cover stratified-survey designs directly.
+
+    2. **Bessel rescale**: multiply by `sqrt(n_h / (n_h - 1))`. Standard small-sample correction (Wu 1986; Liu 1988) — makes the bootstrap variance match the unbiased within-stratum variance estimator and bakes the remaining `(n_h / (n_h - 1))` factor of `V_S`.
+
+    The combined correction is *algebraically identical* to the HAD sup-t event-study bootstrap's stratum centering (`had.py:2188-2204`), applied to PSU multipliers instead of the PSU-aggregated influence tensor. Both call sites consume the shared helper `bootstrap_utils.apply_stratum_centering(psu_mults, resolved_survey, psu_ids)` to lock the algebraic identity architecturally rather than relying on parallel code blocks staying in sync.
+
+    The pipeline-position difference between Stute and HAD sup-t is forced by the bootstrap structure, NOT a difference in the correction algebra: HAD sup-t is a multiplier bootstrap on a *precomputed* PSU influence tensor (the sup-t statistic is a linear functional of that tensor — `perturbations = psu_weights @ Psi_psu_scaled`), so the demean + Bessel rescale can be applied to the tensor after PSU aggregation. Stute is a wild residual bootstrap that *refits* OLS and recomputes the *nonlinear* CvM functional inside the per-draw loop, so there is no precomputed PSU influence tensor to scale; the correction has to be applied at the multiplier-generation step, before the per-obs broadcast.
+
+    Consistency of the resulting bootstrap CvM distribution under stratified PSU sampling follows from Djogbenou, MacKinnon & Nielsen (2019) Theorem 2 (empirical-process consistency of the cluster wild bootstrap), with the Krieger-Pfeffermann (1997) survey-weighted multiplier-bootstrap extension routed through the multiplier draws rather than the influence tensor. For the multi-horizon joint Stute (`stute_joint_pretest`), the same `psu_mults[b, :]` row is shared across horizons within each replicate, preserving cross-horizon empirical-process dependence (Hlávka-Hušková 2020 §3 condition) and PSU clustering. The combined correction is the standard non-parametric requirement and does not depend on the CvM functional shape — it works for any nonlinear smooth-functional bootstrap consumer of `eta_obs = psu_mults[b, psu_col_idx]`.
+
+    **Non-strata calibration improvement.** When `strata=None`, the correction is applied uniformly with a single implicit stratum (`n_h = n_psu`): demean across all PSUs, multiply by `sqrt(n_psu / (n_psu - 1))`. This mirrors the HAD sup-t convention at `had.py:2199-2204` and brings Stute non-strata into line with the sibling event-study path. The pre-PR Phase 4.5 C non-strata path applied no centering or rescaling — multipliers were raw iid draws. The bootstrap CvM p-values on non-strata designs (pweight-only, PSU-only, FPC-only) **shift by approximately `sqrt(n_psu / (n_psu - 1)) - 1`** relative to the pre-PR path (≈ 1.7% for `n_psu = 60`, decreasing to ≈ 0.5% for `n_psu = 100`). This is a calibration improvement, NOT a regression: the pre-PR path was under-corrected by exactly this factor. Two complementary regressions cover any revert of the helper or its wiring: (1) the helper bit-parity regression at `tests/test_bootstrap_utils.py::TestApplyStratumCentering::test_bit_parity_vs_pre_refactor_inline_block` (locked at `atol=1e-14`) catches any change to the helper's axis-0 algebra; (2) a wired-in regression at `tests/test_had_pretests.py::TestStuteStratifiedSurveyBootstrap::test_stute_call_sites_invoke_apply_stratum_centering` monkey-patches the helper and asserts both Stute call sites (`stute_test` at `had_pretests.py:1985` and `stute_joint_pretest` at `:3312`) invoke it with `psu_axis=1`, which catches the disconnection case the helper bit-parity test does not. End-to-end Stute non-strata fit is exercised as a finite + range smoke (`tests/test_had_pretests.py::TestStuteStratifiedSurveyBootstrap::test_calibration_shift_non_strata_end_to_end_smoke`); a heavier worktree-based pre/post baseline comparison was considered and intentionally skipped as redundant with the helper-level bit-parity lock and the call-site wiring regression.
+
+    **Validated via:** MC oracle consistency under a stratified null DGP (200 draws, 4 strata × 6 PSUs/stratum, weights+strata+PSU design — no FPC at the panel level; the helper's FPC bake-in is covered separately by `tests/test_bootstrap_utils.py::TestApplyStratumCentering::test_fpc_baked_in_helper_is_fpc_agnostic`); empirical Type I error at α=0.05 in `[0.0, 0.10]` (3σ band, seed-set). MC power under a stratified known-alternative DGP (same shape, quadratic `E[ΔY|D]`); rejection rate > 0.50 at α=0.05.
+
+    **Known parity gap.** No R reference implements stratified Stute under survey weights — `chaisemartin::did_had` does not run pretests at all, and `nprobust` has no weight argument. Methodology confidence comes from the algebraic-identity reduction to the existing HAD sup-t centering (locked at `atol=1e-14` by the shared-helper unit test + HAD sup-t bit-parity regression) + the MC oracle + power simulations above. Same parity-ceiling acknowledgment as Phase 4.5 A0 (no public weighted-CCF reference for the bias-corrected local-linear).
   - **Constant-within-unit invariant**: per-row `weights=` / `survey=col` are aggregated to per-unit `(G,)` arrays via the existing HAD helpers `_aggregate_unit_weights` / `_aggregate_unit_resolved_survey` (had.py:1604, :1671); these enforce constant-within-unit invariant on weights and on every survey design column (strata, psu, fpc) and raise on violation. Direct callers passing already-resolved `ResolvedSurveyDesign` (or per-unit `weights` array) bypass this aggregation; the invariant is the caller's responsibility on that path.
   - **Distributional parity, NOT bit-exact**: at `weights=ones(G)` the survey path produces a different bootstrap p-value than the unweighted path because RNG consumption differs (batched `generate_survey_multiplier_weights_batch` vs per-iteration `_generate_mammen_weights`). The two paths agree DISTRIBUTIONALLY at large B (`|p_avg_diff| < 0.03` over 100 reps at `B=5000`); they DO NOT agree numerically at `atol=1e-10`. The unweighted code path is preserved bit-exactly (stability invariant; the new `weights=`/`survey=` arms are separate `if` branches).
 
@@ -2944,18 +2962,32 @@ Newey-West-style Bartlett temporal HAC on panel data.
   estimator's `time` / `unit` column-name arguments; only
   `conley_lag_cutoff` is set on the constructor.
 
-**Panel API restrictions (Phase 2):**
-- `DifferenceInDifferences(vcov_type="conley")` continues to raise
-  `NotImplementedError`. DiD.fit() has no `unit` column declaration, and the
-  block-decomposed sandwich requires unit membership for the per-unit serial
-  sum. Use `MultiPeriodDiD` or `TwoWayFixedEffects` instead.
+**Panel API restrictions (Phase 2 + Wave A):**
+- `DifferenceInDifferences(vcov_type="conley")` is supported (Wave A #118):
+  pass `unit=<col>` as a fit-time argument to `fit(...)` (NOT on `__init__`;
+  unused unless Conley is set). DiD inherits the same panel block-decomposed
+  sandwich as MPD/TWFE on the two-period design.
 - `SyntheticDiD(vcov_type="conley")` raises `TypeError`. SyntheticDiD uses
   bootstrap/jackknife/placebo variance, not the analytical sandwich.
 - TWFE's default auto-cluster on the Conley path is silently dropped (no
-  combined kernel). Explicit `cluster=...` with Conley raises (deferred
-  follow-up PR).
+  combined kernel from auto-cluster). Explicit `cluster=<col>` + Conley
+  enables the **combined spatial + cluster product kernel** (Wave A #119;
+  see "Combined spatial + cluster product kernel" subsection below). On
+  the panel path the validator enforces that cluster membership is
+  constant within each unit across periods.
 - `inference="wild_bootstrap"` + Conley raises (wild bootstrap is a separate
   inference path that does not consume the analytical sandwich).
+
+**Note (DiD vs TWFE cluster asymmetry on the Conley path):** TWFE auto-clusters
+at the unit level by default, so combining with Conley silently drops the
+auto-cluster (otherwise every between-unit pair would be zeroed out, defeating
+the spatial pooling). To opt into the combined kernel, the user must pass an
+explicit `cluster=<col>` that is constant within each unit (typically an
+above-unit grouping like region). DiD has no auto-cluster — combining with
+Conley is fully opt-in: absent `cluster=`, pure Conley spatial HAC applies;
+with `cluster=`, the combined kernel applies. This asymmetry preserves the
+existing TWFE auto-cluster contract while making the cluster intent explicit
+on the Conley path.
 
 **Variance estimator — cross-sectional (Phase 1, Conley 1999 Eq 4.2 in pairwise-distance form, OLS specialization):**
 
@@ -3036,19 +3068,133 @@ cross-sectional (Phase 1) plus three panel fixtures with `lag_cutoff > 0`
 `conleyreg::haversine_dist`. Regeneration:
 `cd benchmarks/R && Rscript generate_conley_golden.R`.
 
+### Combined spatial + cluster product kernel (Wave A #119)
+
+When `cluster_ids` is supplied alongside `vcov_type="conley"`, the meat
+applies the combined product kernel:
+
+    K_total[i, j] = K_space(d_ij/h) · 1{cluster_i = cluster_j}
+
+On the panel block-decomposed path the cluster indicator multiplies BOTH
+the within-period spatial sandwich AND the within-unit serial sandwich:
+
+    XeeX_spatial = Σ_t Σ_{i,j∈units}    K_space(d_ij/h) · 1{c_{i,t}=c_{j,t}} · X_{i,t} ε_{i,t} ε_{j,t} X_{j,t}'
+    XeeX_serial  = Σ_u Σ_{|t-s|≤L, t≠s} (1 - |t-s|/(L+1))  · 1{c_{u,t}=c_{u,s}}  · X_{u,t} ε_{u,t} ε_{u,s} X_{u,s}'
+
+**Cluster-time-invariance contract:** on the panel block-decomposed path
+the validator REQUIRES that `cluster_ids` be constant within each unit
+across periods. The within-unit serial sandwich's cluster mask is then
+trivially all-ones, and the math simplifies to the bare serial Bartlett
+HAC weighted by the spatial mask only. If a unit's cluster changes
+across periods (e.g. a unit migrating between regions), the within-unit
+mask would zero out adjacent-time pairs that should contribute,
+producing a methodologically-muddled meat — the validator raises
+`ValueError` naming the violating unit(s). The cross-sectional path
+has no time dimension, so no invariance constraint applies.
+
+**Note:** R `conleyreg` does not support a combined spatial + cluster
+product kernel; this is a diff-diff convention validated by two limit
+fixtures rather than R parity:
+1. **All-unique-clusters reduction:** when every observation is in its
+   own cluster, the cluster mask is the identity, and the meat reduces
+   to the diagonal HC0 contribution `Σ_i X_i ε_i² X_i'`.
+2. **Huge-cutoff reduction:** when `conley_cutoff_km` is large enough
+   that `K_space = 1` on every pair, the meat reduces to the pure
+   within-cluster sum `Σ_g X_g' ε_g ε_g' X_g` (CR1 without the
+   Liang-Zeger small-sample correction). This exact reduction holds
+   only for `conley_kernel="uniform"` (`K_uniform(u) = 1` for `|u| ≤ 1`).
+   The Bartlett kernel gives `K_bartlett(u) = 1 - |u|`, which is
+   strictly less than 1 for `0 < |u| ≤ 1`, so the huge-cutoff limit
+   under Bartlett is asymptotic (`K → 1` as `cutoff → ∞` only at finite
+   off-diagonal distances), not exact at any finite cutoff. The fixture
+   anchor uses uniform for an exact identity check.
+
+The combined-kernel meat is well-defined either way; the two fixture
+limits anchor the math, and the panel time-invariance contract
+guarantees the serial component is unaffected by the cluster choice.
+
+### Performance / scale (Wave A #120)
+
+A sparse k-d-tree fast path auto-activates for the spatial Bartlett meat
+when `n > _CONLEY_SPARSE_N_THRESHOLD` (default 5,000) AND `conley_metric`
+is `"haversine"` or `"euclidean"` (NOT a callable) AND `conley_kernel`
+is `"bartlett"`. The dense O(n²) distance matrix is replaced with a CSR
+sparse kernel matrix built from `scipy.spatial.cKDTree.query_ball_tree`
+neighbor queries.
+
+**Why bartlett-only:** Bartlett at `u = 1.0` returns exactly `0.0`, so
+pairs at exactly the cutoff distance contribute zero to the meat — the
+sparse path can safely drop them. Uniform at `u = 1.0` returns `1.0`,
+which would require a closed-interval query semantic that the haversine
+chord-projection roundoff cannot reliably preserve. The auto-toggle
+falls back to the dense path for uniform regardless of n. Callable
+metrics also fall back (kd-tree needs a vectorizable Minkowski distance).
+
+For haversine, the kd-tree operates on a 3-D unit-sphere projection
+(`x = cos(lat)cos(lon), y = cos(lat)sin(lon), z = sin(lat)`) with the
+chord radius matching the arc-length cutoff; the exact great-circle
+distance is recomputed only for in-range neighbors before the kernel
+evaluation. The numerical tolerance vs the dense path is typically
+~1e-12 in absolute terms; R parity at `atol=1e-6` is preserved on the
+existing fixtures under the auto-toggle.
+
+The `_CONLEY_DENSE_OOM_WARN_N = 20_000` constant remains as a separate
+warning threshold for the dense fallback (callable metrics, uniform
+kernel) where O(n²) memory is at material risk. The two thresholds are
+independent — sparse auto-toggle at 5,000 is a compute optimization;
+dense OOM warning at 20,000 is a memory caution.
+
+**Density gate (`_CONLEY_SPARSE_DENSITY_THRESHOLD = 0.3`):** the sparse
+path's CSR storage carries ~12 bytes per non-zero (data + indices +
+indptr) vs 8 bytes per cell for dense float64. The memory crossover
+is at ~67% density, but at high density the CSR overhead loses its
+advantage well before that. The sparse helper measures actual neighbor
+density via `cKDTree.count_neighbors` (shares tree traversal with
+`query_ball_tree`, no extra allocation) and falls back to the dense
+path with a `UserWarning` when neighbor density exceeds 30%. This
+prevents the "sparse" path from silently using MORE memory than dense
+when cutoffs are large relative to the data span (e.g. cutoffs above
+half-Earth circumference on a global panel, or unit-scale cutoffs on
+a clustered dataset). Users see one line explaining the fallback so
+they can either reduce `conley_cutoff_km` or accept the dense path.
+
+### Callable conley_metric validation (Wave A #123)
+
+When `conley_metric` is a user-supplied callable, the result is
+validated at the boundary via `_validate_callable_metric_result`:
+
+1. Result casts to a float64 array (raises `ValueError` if not).
+2. Shape is exactly `(n, n)` (raises if mismatched).
+3. All entries are finite (NaN/inf raises).
+4. All entries are non-negative (negative distances raise).
+5. Symmetric to within `atol=1e-10` (asymmetric matrix raises).
+6. Zero diagonal: `|d(i, i)| ≤ 1e-10` for all `i` (nonzero diagonal raises).
+
+Each failure produces a `ValueError` naming the violated invariant.
+Sub-tolerance asymmetry (eps-level roundoff) is accepted. The zero-
+diagonal invariant is load-bearing for the Conley sandwich: the
+`i = j` term contributes `K(d_ii / h) · X_i ε_i² X_i'`, which must
+reduce to the HC0 diagonal `X_i ε_i² X_i'` (i.e., `K(0) = 1`). A
+callable with positive self-distance would attenuate the HC0 term
+by `K(d_ii / h) < 1` and silently misstate Conley SEs. Built-in
+metrics (`"haversine"`, `"euclidean"`) satisfy this by construction.
+
 **Edge cases / restrictions:**
-- `DifferenceInDifferences(vcov_type="conley")` → `NotImplementedError` at fit-time. DiD.fit() has no `unit` column declaration; redirect users to `MultiPeriodDiD` / `TwoWayFixedEffects` which take `unit` natively.
-- `MultiPeriodDiD` / `TwoWayFixedEffects` `+ vcov_type="conley"` without `conley_lag_cutoff` → `ValueError` (no defensible default; explicit user choice required per Conley 1999 Section 5 sensitivity-grid recommendation).
-- `MultiPeriodDiD(vcov_type="conley")` without `unit=` at fit-time → `ValueError`.
-- `TwoWayFixedEffects(vcov_type="conley", cluster=...)` → `NotImplementedError` (combined spatial + cluster product kernel deferred to follow-up PR). TWFE's auto-cluster on the Conley path is silently dropped.
-- `TwoWayFixedEffects(vcov_type="conley", inference="wild_bootstrap")` → `NotImplementedError` (wild bootstrap does not consume the analytical sandwich).
-- `SyntheticDiD(vcov_type="conley")` → `TypeError` (SyntheticDiD uses bootstrap/jackknife/placebo variance, not the analytical sandwich; tracked in TODO.md)
-- Cross-sectional `LinearRegression` / `compute_robust_vcov` `+ vcov_type="conley"` `+ cluster_ids=` → `NotImplementedError` (combined product kernel deferred to follow-up PR)
-- Any-mode `vcov_type="conley"` `+ weights=` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up)
-- Panel path: partial `conley_time` / `conley_unit` / `conley_lag_cutoff` (not all three set) → `ValueError` at validator
-- `n > 20_000`: emits `UserWarning` about O(n²) distance-matrix memory (sparse k-d-tree fast path queued as follow-up)
-- `conley_cutoff_km ≤ 0`, `nan`, or `inf`: rejected with `ValueError`. The HC0 reduction at h→0 is documented but not the sanctioned path; users should pass `vcov_type="hc1"`
-- Identical coordinates (`d_ij = 0` for `i ≠ j`): `K(0) = 1`, contributing the full HC0 weight per Conley 1999 page 19. Documented behavior; no warning
+- `DifferenceInDifferences(vcov_type="conley")` is supported (Wave A #118): pass `unit=<col>` to `fit(...)` (NOT on `__init__`; unused unless Conley is set; not part of `get_params()` / `set_params()`).
+- `MultiPeriodDiD` / `TwoWayFixedEffects` / `DifferenceInDifferences` `+ vcov_type="conley"` without `conley_lag_cutoff` → `ValueError`.
+- `MultiPeriodDiD` / `DifferenceInDifferences` `(vcov_type="conley")` without `unit=` at fit-time → `ValueError`.
+- `TwoWayFixedEffects(vcov_type="conley", cluster=<col>)` is supported (Wave A #119): combined spatial + cluster product kernel applies. The cluster must be time-invariant within each unit on the panel path (validator-enforced). TWFE's default auto-cluster is silently dropped on the Conley path; explicit cluster is required to opt in.
+- `DifferenceInDifferences(vcov_type="conley", cluster=<col>)`: combined kernel applies; same time-invariance contract on the panel path. DiD has no auto-cluster, so the cluster choice is fully explicit.
+- `DifferenceInDifferences` / `MultiPeriodDiD` / `TwoWayFixedEffects` `(vcov_type="conley", inference="wild_bootstrap")` → `NotImplementedError`. (MPD's pre-Conley analytical-fallback `UserWarning` is suppressed when `vcov_type="conley"` so the user gets one consistent error message.)
+- `DifferenceInDifferences` / `MultiPeriodDiD` / `TwoWayFixedEffects` `(vcov_type="conley")` + `survey_design=` → `NotImplementedError` at the estimator level (deferred to Bertanha-Imbens 2014 weighted-Conley follow-up).
+- `SyntheticDiD(vcov_type="conley")` → `TypeError` (SyntheticDiD uses bootstrap/jackknife/placebo variance, not the analytical sandwich; tracked in TODO.md).
+- Any-mode `vcov_type="conley"` `+ weights=` / `survey_design=` → `NotImplementedError` (Bertanha-Imbens 2014 territory; Phase 5 follow-up).
+- Panel path: partial `conley_time` / `conley_unit` / `conley_lag_cutoff` (not all three set) → `ValueError` at validator.
+- Panel path with `cluster_ids` that vary across periods within a unit → `ValueError` (time-invariance contract).
+- `n > 20_000` with `conley_kernel='uniform'` or callable metric: emits `UserWarning` about O(n²) distance-matrix memory (sparse fast path doesn't apply; consider switching to bartlett or projecting to euclidean for performance).
+- `conley_cutoff_km ≤ 0`, `nan`, or `inf`: rejected with `ValueError`. The HC0 reduction at h→0 is documented but not the sanctioned path; users should pass `vcov_type="hc1"`.
+- Identical coordinates (`d_ij = 0` for `i ≠ j`): `K(0) = 1`, contributing the full HC0 weight per Conley 1999 page 19. Documented behavior; no warning.
+- Callable `conley_metric` returning a non-(n,n)/NaN/inf/negative/asymmetric/non-zero-diagonal matrix raises `ValueError` naming the violated invariant. The zero-diagonal contract (`|d(i, i)| ≤ 1e-10`) is load-bearing for the Conley sandwich's HC0 reduction `K(0) = 1`; see "Callable conley_metric validation" subsection above.
 
 **Reference implementations:**
 - R: `conleyreg::conleyreg(...)` (Düsterhöft 2021, CRAN v0.1.9) — **parity benchmark for diff-diff**

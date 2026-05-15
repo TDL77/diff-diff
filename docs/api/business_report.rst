@@ -47,7 +47,8 @@ pretest to opt in.
 
 Methodology deviations (no traffic-light gates, pre-trends verdict
 thresholds, power-aware phrasing, unit-translation policy, schema
-stability) are documented in ``docs/methodology/REPORTING.md``.
+stability) are documented in `docs/methodology/REPORTING.md
+<https://github.com/igerber/diff-diff/blob/main/docs/methodology/REPORTING.md>`_.
 
 The schema carries a top-level ``target_parameter`` block
 (experimental) naming what the headline scalar represents per
@@ -62,8 +63,9 @@ distinguishes the populated-surface subcase (per-horizon table
 available on ``linear_trends_effects``) from the empty-surface
 subcase (no horizons survived estimation; re-fit with a larger
 ``L_max`` or with ``trends_linear=False``). See the "Target
-parameter" section of ``docs/methodology/REPORTING.md`` for the
-full per-estimator dispatch table and schema shape.
+parameter" section of `docs/methodology/REPORTING.md
+<https://github.com/igerber/diff-diff/blob/main/docs/methodology/REPORTING.md>`_
+for the full per-estimator dispatch table and schema shape.
 
 Example
 -------
