@@ -630,8 +630,15 @@ extract_dcdh_by_path <- function(res, n_effects, n_placebos = 0) {
 # `predict_het + placebo`; resolves TODO #422.
 extract_dcdh_predict_het <- function(res, n_effects) {
   ph <- res$results$predict_het
-  forward_horizons <- list()
-  placebo_horizons <- list()
+  # `structure(list(), names = character(0))` produces a named list with
+  # zero entries; jsonlite serializes it as `{}` (object) rather than
+  # `[]` (array). Plain `list()` would serialize as `[]`, which gives
+  # the JSON contract a type-unstable shape (object when populated, array
+  # when empty). Type stability matters for generic consumers — see
+  # `tests/test_chaisemartin_dhaultfoeuille_parity.py::_as_dict` for the
+  # defensive Python-side coercion that backstops this.
+  forward_horizons <- structure(list(), names = character(0))
+  placebo_horizons <- structure(list(), names = character(0))
   if (is.null(ph) || nrow(ph) == 0) {
     return(list(predict_het = forward_horizons,
                 placebo_predict_het = placebo_horizons))
@@ -668,8 +675,9 @@ extract_dcdh_by_path_predict_het <- function(res, n_effects) {
   for (i in seq_along(by_levels)) {
     slot <- res[[paste0("by_level_", i)]]
     ph <- slot$results$predict_het
-    forward_horizons <- list()
-    placebo_horizons <- list()
+    # See extract_dcdh_predict_het comment for the named-list rationale.
+    forward_horizons <- structure(list(), names = character(0))
+    placebo_horizons <- structure(list(), names = character(0))
     if (!is.null(ph) && nrow(ph) > 0) {
       # Iterate ALL rows; partition by sign so placebo (negative-effect)
       # rows are captured under `placebo_horizons`. Scenario 22 probes

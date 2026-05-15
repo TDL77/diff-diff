@@ -1489,7 +1489,7 @@
             "p_value": 0.13394537794
           }
         },
-        "placebo_predict_het": []
+        "placebo_predict_het": {}
       }
     },
     "multi_path_reversible_by_path_predict_het": {
@@ -1548,7 +1548,7 @@
                 "p_value": 0.53612734365
               }
             },
-            "placebo_horizons": []
+            "placebo_horizons": {}
           },
           {
             "path": "0,1,1,0",
@@ -1582,7 +1582,7 @@
                 "p_value": 0.096124084653
               }
             },
-            "placebo_horizons": []
+            "placebo_horizons": {}
           },
           {
             "path": "0,1,1,1",
@@ -1616,7 +1616,7 @@
                 "p_value": 8.1857621596e-11
               }
             },
-            "placebo_horizons": []
+            "placebo_horizons": {}
           }
         ]
       }

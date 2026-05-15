@@ -1551,11 +1551,20 @@ class ChaisemartinDHaultfoeuilleResults:
               (always-present, NaN-when-None — same convention as
               ``cband_*``). The ``het_*`` columns surface the per-path
               heterogeneity coefficient (Web Appendix Section 1.5,
-              Lemma 7) when ``heterogeneity="<col>"`` is also set;
-              populated for positive-horizon rows and NaN for placebo
-              rows / non-heterogeneity fits / the requested-but-empty
-              fallback DataFrame (always-present, NaN-when-None — same
-              convention as ``cband_*`` and ``cumulated_*``).
+              Lemma 7) when ``heterogeneity="<col>"`` is also set.
+              Populated for positive-horizon (forward) rows whenever
+              heterogeneity is requested, AND for negative-horizon
+              (placebo) rows when ``placebo=True`` is also set
+              (post-2026-05-15: per-path placebo predict_het R-parity
+              against ``did_multiplegt_dyn(by_path, predict_het, placebo)``).
+              NaN for non-heterogeneity fits / the requested-but-empty
+              fallback DataFrame, AND for placebo rows under
+              ``survey_design`` (forward-only fallback — backward-horizon
+              survey predict_het is deferred until the pre-period cell
+              allocator is derived; a ``UserWarning`` fires at fit-time
+              when ``survey_design + placebo + heterogeneity`` are
+              co-set). Always-present, NaN-when-None — same convention
+              as ``cband_*`` and ``cumulated_*``.
 
         Returns
         -------

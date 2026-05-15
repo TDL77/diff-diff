@@ -38,6 +38,23 @@ GOLDEN_VALUES_PATH = (
 )
 
 
+def _as_dict(slot):
+    """Coerce a fixture slot to a dict for type-stable iteration.
+
+    R's ``jsonlite::toJSON`` serializes empty named lists (``list()``)
+    as JSON arrays (``[]``); populated named lists serialize as JSON
+    objects (``{}``). The dCDH `predict_het` extractors return empty
+    lists for the no-rows case (e.g., scenarios without ``placebo`` set
+    have empty ``placebo_predict_het`` slots), so consumers iterating
+    ``.items()`` need to handle the array form. This helper coerces
+    empty list ``[]``, ``None`` (missing slot), or any non-dict value
+    to ``{}``; populated dicts pass through unchanged. Used by all
+    parity-test classes that read the optional ``placebo_predict_het``
+    / ``placebo_horizons`` slots.
+    """
+    return slot if isinstance(slot, dict) else {}
+
+
 @pytest.fixture(scope="module")
 def golden_values():
     """
@@ -1632,8 +1649,8 @@ class TestDCDHDynRParityByPathHeterogeneityWithPlacebo:
             # Placebo horizons (negative int keys). R-verified: scenario 22
             # has 2 placebo rows per path (-1, -2); Python mirrors with
             # negative-int keys in path_heterogeneity_effects.
-            for h_str, r_h in r_path_entry.get(
-                "placebo_horizons", {}
+            for h_str, r_h in _as_dict(
+                r_path_entry.get("placebo_horizons")
             ).items():
                 h = int(h_str)
                 assert h < 0
@@ -1758,7 +1775,7 @@ class TestDCDHDynRParityHeterogeneityWithPlacebo:
             self._assert_horizon_parity(h, py_het[h], r_h)
 
         # Placebo horizons (negative int keys).
-        r_placebo_het = scenario["results"].get("placebo_predict_het", {})
+        r_placebo_het = _as_dict(scenario["results"].get("placebo_predict_het"))
         for h_str, r_h in r_placebo_het.items():
             h = int(h_str)
             assert h < 0
