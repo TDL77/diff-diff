@@ -2940,6 +2940,14 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             "if", "then", "else", "elif", "do", "while", "for",
             "done", "fi", "until", "case", "esac",
         }
+        # R8 fix for #436: shell group-delimiter tokens. shlex with
+        # `punctuation_chars=True` tokenizes `(` and `)` as separate
+        # words; brace groups `{ ... }` produce `{` and `}` as
+        # whitespace-separated word tokens. None of these are
+        # legitimate file paths or command names, so we filter them
+        # out of every segment before classification. Without this,
+        # `( cp evil /tmp/foo )` would treat `)` as the cp_dest.
+        GROUP_DELIMS = {"(", ")", "{", "}"}
         WRAPPER_CMDS = {"env", "command", "nohup", "exec", "time"}
         ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
         FLAGS_WITH_ARG = {"-c", "-m"}
@@ -2959,6 +2967,9 @@ class TestWorkflowDoesNotExecutePRHeadCode:
 
         actions = []
         for tokens in segments:
+            # Strip group-delimiter tokens that are syntactic (not
+            # arguments or commands). R8 fix.
+            tokens = [t for t in tokens if t not in GROUP_DELIMS]
             # Strip leading shell control keywords
             while tokens and tokens[0] in LEADING_KEYWORDS:
                 tokens.pop(0)
@@ -2999,6 +3010,23 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             cmd = tokens[0]
             seg_actions = []
 
+            # bash/sh -c <inline-script>: recursively classify the
+            # quoted inline script. Shlex strips the outer quotes when
+            # it tokenizes, so `bash -c "python3 evil.py"` becomes
+            # tokens `['bash', '-c', 'python3 evil.py']` and the
+            # third token IS the inner shell command. R8 fix for
+            # PR #436. Without this, `bash -c "python3
+            # diff_diff/evil.py"` would classify only as `bash`
+            # (no python_exec), bypassing the allowlist.
+            if cmd in ("bash", "sh"):
+                for i in range(1, len(tokens)):
+                    if tokens[i] == "-c" and i + 1 < len(tokens):
+                        inner = tokens[i + 1]
+                        seg_actions.extend(
+                            TestWorkflowDoesNotExecutePRHeadCode._classify_shell_line(inner)
+                        )
+                        break
+
             # python file execution. Classify the FIRST non-flag
             # positional regardless of extension — `python3 /tmp/foo.py.bak`
             # IS a python execution of /tmp/foo.py.bak (allowlist
@@ -3006,7 +3034,19 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             # If `-c` or `-m` is seen, the script-execution path is
             # bypassed (inline string / module mode); subsequent
             # positionals are args to that mode, not a script path.
-            if cmd in ("python", "python3", "python2"):
+            #
+            # NOTE: `python3 -c '<inline-payload>'` is NOT inspected
+            # for what the payload itself does (e.g.,
+            # `python3 -c 'exec(open("diff_diff/evil.py").read())'`).
+            # Catching that would require Python AST inspection or a
+            # literal allowlist of every existing `-c` body in the
+            # workflow — both brittle. The current workflow's `-c`
+            # payloads operate on sanitized env vars (PR_TITLE etc.)
+            # set from base-controlled values; the dismissal accepts
+            # the residual that future `-c` payloads could embed
+            # malicious shell. Surface to user before iterating
+            # further on this if it re-fires.
+            elif cmd in ("python", "python3", "python2"):
                 script_mode_disabled = False
                 i = 1
                 while i < len(tokens):
@@ -3497,6 +3537,52 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             for a, t in cls(line) if a == "python_exec"
         ]
         assert py_targets == ["diff_diff/evil.py"]
+
+    def test_classify_unwraps_shell_indirection(self):
+        """R8 regression: `bash -c <inline>` / `sh -c <inline>`
+        recursively classify the inline script. Subshell `(...)` and
+        brace-group `{ ...; }` strip the delimiters so the wrapped
+        command classifies normally.
+
+        Without this, `bash -c "python3 diff_diff/evil.py"` would
+        classify only as `bash` (no underlying command detection)
+        and pass the allowlist check.
+        """
+        cls = self._classify_shell_line
+
+        def py_targets(line):
+            return [t for a, t in cls(line) if a == "python_exec"]
+
+        def cp_targets(line):
+            return [t for a, t in cls(line) if a == "cp_dest"]
+
+        # bash -c / sh -c with python execution
+        assert py_targets('bash -c "python3 diff_diff/evil.py"') == ["diff_diff/evil.py"]
+        assert py_targets("bash -c 'python3 diff_diff/evil.py'") == ["diff_diff/evil.py"]
+        assert py_targets('sh -c "python3 diff_diff/evil.py --arg foo"') == ["diff_diff/evil.py"]
+
+        # bash -c with overwrite
+        assert cp_targets(
+            'bash -c "cp diff_diff/poison.py /tmp/notebook_md_extract.py"'
+        ) == ["/tmp/notebook_md_extract.py"]
+
+        # bash -c with multiple commands inside
+        assert py_targets(
+            'bash -c "cp evil.py /tmp/foo.py; python3 diff_diff/evil.py"'
+        ) == ["diff_diff/evil.py"]
+
+        # Subshell `( ... )`
+        assert py_targets("( python3 diff_diff/evil.py )") == ["diff_diff/evil.py"]
+        assert cp_targets("( cp evil /tmp/notebook_md_extract.py )") == ["/tmp/notebook_md_extract.py"]
+
+        # Brace group `{ ...; }`
+        assert py_targets("{ python3 diff_diff/evil.py; }") == ["diff_diff/evil.py"]
+        assert cp_targets("{ cp evil /tmp/notebook_md_extract.py; }") == ["/tmp/notebook_md_extract.py"]
+
+        # Nested: bash -c containing a subshell
+        assert py_targets(
+            'bash -c "( python3 diff_diff/evil.py )"'
+        ) == ["diff_diff/evil.py"]
 
     def test_classify_git_show_redirect(self):
         """The BASE_SHA staging command must produce a
