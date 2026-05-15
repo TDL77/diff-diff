@@ -249,7 +249,7 @@ class DiDResults:
 
         cv = self.coef_var
         if np.isfinite(cv):
-            lines.append(f"{'CV (SE/|ATT|):':<25} {cv:>10.4f}")
+            lines.append(f"{'CV (SE/abs(ATT)):':<25} {cv:>10.4f}")
 
         # Add significance codes
         lines.extend(
@@ -656,7 +656,7 @@ class MultiPeriodDiDResults:
 
         cv = self.coef_var
         if np.isfinite(cv):
-            lines.append(f"{'CV (SE/|ATT|):':<25} {cv:>10.4f}")
+            lines.append(f"{'CV (SE/abs(ATT)):':<25} {cv:>10.4f}")
 
         # Add significance codes
         lines.extend(
@@ -1052,7 +1052,7 @@ class SyntheticDiDResults:
 
         cv = self.coef_var
         if np.isfinite(cv):
-            lines.append(f"{'CV (SE/|ATT|):':<25} {cv:>10.4f}")
+            lines.append(f"{'CV (SE/abs(ATT)):':<25} {cv:>10.4f}")
 
         # Show top unit weights
         if self.unit_weights:
