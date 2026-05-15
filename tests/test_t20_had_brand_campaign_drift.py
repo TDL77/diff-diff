@@ -314,8 +314,9 @@ def test_notebook_quotes_match_pinned_constants():
         # Placebo-magnitude prose claim (locked analytically above by
         # test_event_study_pre_atts_near_zero with the ±0.1 envelope).
         "±0.06",
-        # Sample summary in the design-fit narrative.
-        "median",
-        "$25K",
+        # Sample-summary phrase in the design-fit narrative. Use the
+        # exact tilde-prefixed form so a future drift in the sentence
+        # (e.g. "median around $25K") would surface here.
+        "median ~$25K",
     ]
     assert_quotes_in_rendered(T20_NOTEBOOK, expected_quotes, surface="rendered")

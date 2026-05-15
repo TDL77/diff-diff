@@ -20,8 +20,24 @@ from typing import Iterable
 
 
 def _read_notebook(nb_relpath: str) -> dict:
-    """Load a notebook by repo-relative path (e.g. ``docs/tutorials/X.ipynb``)."""
+    """Load a notebook by repo-relative path (e.g. ``docs/tutorials/X.ipynb``).
+
+    Skips the calling test via ``pytest.skip(...)`` when the notebook file
+    is not present. The Rust-test CI job (and the isolated-install job)
+    copies only ``tests/`` to ``/tmp/tests`` and runs from there, without
+    ``docs/`` available. The repo convention is to skip cleanly when
+    artifacts are absent rather than fail (see e.g.
+    ``tests/test_notebook_md_extract.py`` and ``tests/test_nprobust_port.py``).
+    """
+    import pytest
+
     nb_path = Path(__file__).resolve().parents[1] / nb_relpath
+    if not nb_path.exists():
+        pytest.skip(
+            f"Notebook {nb_relpath!r} not available in this CI environment "
+            "(isolated-install job copies only tests/, not docs/); "
+            "rendered-surface cross-check requires a full repo checkout."
+        )
     return json.loads(nb_path.read_text())
 
 

@@ -434,7 +434,10 @@ def test_notebook_quotes_match_pinned_constants():
         "0.2899",  # Yatchew side-panel null=mean_independence p-value
         # Design auto-detect outcome (also pinned by overall-path tests).
         "continuous_at_zero",
-        "WAS",
+        # Use the exact paper-step-1 phrasing with target=`WAS` so we
+        # don't false-pass on the many incidental occurrences of "WAS"
+        # elsewhere in the prose.
+        "target = `WAS`",
         # Overall Yatchew p-value (analytical short-circuit on this DGP).
         "1.0000",
         # Overall Yatchew sigma2_lin in the rendered output.
