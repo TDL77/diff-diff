@@ -404,13 +404,18 @@ def test_event_study_plot_uses_stored_pointwise_ci_endpoints():
 
     This is a static check on the notebook source — the plot cell
     runs but produces no return value we can introspect, so we lock
-    the construction at the source level."""
+    the construction at the source level. Skipped on isolated-install
+    CI jobs where ``docs/`` is not copied alongside ``tests/`` and
+    ``nbformat`` is not in the runtime deps (per
+    ``feedback_golden_file_pytest_skip``)."""
     from pathlib import Path
-    import nbformat
+    nbformat = pytest.importorskip("nbformat")
 
     nb_path = (
         Path(__file__).resolve().parents[1] / "docs" / "tutorials" / "22_had_survey_design.ipynb"
     )
+    if not nb_path.exists():
+        pytest.skip(f"Notebook not present at {nb_path} (isolated-install CI)")
     nb = nbformat.read(nb_path, as_version=4)
     plot_cell_src = None
     for cell in nb.cells:
