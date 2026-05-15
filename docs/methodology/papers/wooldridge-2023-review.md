@@ -176,7 +176,7 @@ Two approaches:
 ### Data Structure Requirements
 - Balanced or unbalanced panel: N units observed over T fixed time periods
 - Required: outcome `Y_{it}`, unit ID, time period, cohort indicator `D_g` (or `first_treat`), time-varying treatment `W_{it}`
-- Optional: time-constant covariates `X_i`
+- Optional covariates (paper notation `X_i` is time-constant; shipped `diff_diff/wooldridge.py:394-411` supports a richer set): `exovar` (time-invariant, no interaction or demeaning), `xtvar` (time-varying, demeaned within cohort×period cells when `demean_covariates=True`), `xgvar` (covariates interacted with each cohort indicator). See `docs/methodology/REGISTRY.md` under WooldridgeDiD "Covariates".
 - `W_{it}` is absorbing: once treated, always treated (no exit unless using Section 7.2 extension)
 - Cohorts defined by first treatment period `g ∈ {q, q+1, ..., T, ∞}`
 
@@ -195,7 +195,7 @@ Two approaches:
 | `G(·)` | function | identity (OLS) | Dictated by outcome type: logistic for binary/fractional, exponential for counts/nonneg |
 | control_group | str | "not_yet_treated" (matches `diff_diff/wooldridge.py:305`) | Use "never_treated" only when a pure never-treated group is available and required |
 | anticipation | int | 0 | Domain knowledge; test with pre-treatment indicators |
-| covariates | list | None | Pre-intervention, time-constant variables only (Section 7.3 for time-varying) |
+| exovar / xtvar / xgvar | list / list / list | None / None / None | `exovar` for time-invariant, `xtvar` for time-varying (Section 7.3; demeaned via `demean_covariates=True`, default), `xgvar` for cohort-interacted. See `diff_diff/wooldridge.py:394-411`. |
 
 ### Relation to Existing diff-diff Estimators
 

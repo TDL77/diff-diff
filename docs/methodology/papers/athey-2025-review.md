@@ -322,8 +322,8 @@ Key finding (Section 4.3, pages 18-19): Substantial heterogeneity across applica
 
 ## Simulation Design Details
 
-The paper uses semi-synthetic simulations (Section 3.1, pages 9-11) based on 7 real datasets:
-1. CPS (Current Population Survey): N=50, T=40
+The paper uses semi-synthetic simulations (Section 3.1, pages 9-11) based on 6 real datasets (7 simulation applications, since CPS is used for two outcomes: logwage and urate):
+1. CPS (Current Population Survey): N=50, T=40 — used for both CPS logwage and CPS urate applications
 2. PWT (Penn World Table): N=111, T=48
 3. Germany reunification: N=17, T=44
 4. Basque country: N=18, T=43
@@ -350,7 +350,7 @@ The paper uses semi-synthetic simulations (Section 3.1, pages 9-11) based on 7 r
 
 5. **Weight normalization**: Section 5 (page 20) states weights sum to one (`1^T omega = 1^T theta = 1`), but the weight specification in Equation 3 (page 7) uses unnormalized exponential weights. It is unclear whether normalization is applied before or after the optimization, or whether the theoretical results in Section 5 assume normalized weights while the practical algorithm uses unnormalized weights. The existing diff-diff implementation uses unnormalized weights in the optimization (matching Equation 2).
 
-6. **Nuclear norm penalty in Equation 13**: Agent 2's extraction of Equation 13 writes `lambda_nn ||L||_*^2` (squared nuclear norm) while Agent 1 and the Equation 2 formulation write `lambda_nn ||L||_*` (unsquared). The paper likely uses the unsquared nuclear norm consistently (matching Equation 2), but this should be verified against pages 26-27 of the PDF.
+6. **Nuclear norm penalty in Equation 13**: Equation 13's penalty term should be rechecked against pages 26-27 of the PDF to confirm whether it uses the unsquared nuclear norm `lambda_nn ||L||_*` (matching Equation 2) or a squared variant `lambda_nn ||L||_*^2`. The shipped implementation uses the unsquared form per Equation 2.
 
 7. **General assignment patterns**: Section 6.1 generalizes beyond block assignment, but the inference results (Section 5.3) and theoretical guarantees (Theorem 5.1) are stated under block assignment. The extent to which theoretical results carry over to general patterns is not fully characterized.
 
