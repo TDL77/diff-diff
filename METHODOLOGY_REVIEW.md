@@ -1098,8 +1098,9 @@ These are not estimators but variance/inference plumbing used across many estima
 
 **Documentation in place (R parity):**
 - R `conleyreg` goldens committed: `benchmarks/data/r_conleyreg_conley_golden.json`, generator `benchmarks/R/generate_conley_golden.R`
-- Cross-sectional parity asserted at `atol=1e-6` in `tests/test_conley_vcov.py` (`TestConleyParityR`, `TestConleySparseRParityForced`)
-- Panel space-time parity asserted at `~1e-14` on the panel parity fixtures (`TestConleyParitySpacetime`, matches `conleyreg::time_dist.cpp` form)
+- Cross-sectional R parity at `atol=1e-6`: `tests/test_conley_vcov.py::TestConleyParityR`
+- Panel (space-time) R parity at `atol=1e-6`: `TestConleyParitySpacetime` (dense path) and `TestConleySparseRParityForced` (sparse path forced)
+- Internal block-decomposition cross-check at machine precision (matches `conleyreg::time_dist.cpp`): `TestConleyParitySpacetime::test_panel_matches_block_decomposed_reference` (inner tolerance `atol=1e-12`)
 
 **Outstanding for promotion:**
 - Dedicated `tests/test_methodology_conley.py` with paper-equation-numbered Verified Components walk-through (Equation 8 score-covariance, Bartlett kernel, Andrews-style truncation) consolidating the parity tests into a methodology checklist
@@ -1128,7 +1129,7 @@ These are not estimators but variance/inference plumbing used across many estima
 **Outstanding for promotion:**
 - Dedicated `tests/test_methodology_survey.py` (or split between TSL and replicate-weight surfaces) with Binder-equation-numbered Verified Components walk-through
 - R parity benchmark against `survey::svyglm` / `survey::svycontrast` for the linear DiD case (`tests/test_survey_r_crossvalidation.py` exists; needs to be wired into a documented "Reference results" table here)
-- Document deviations: PSU-level Hall-Mammen wild clustering as the bootstrap path when survey design is present (vs. R `survey`'s default analytical TSL); strata-vs-no-strata bit-equality not achievable due to RNG-path divergence (see TODO.md "Tech Debt from Code Reviews" for the documented impossibility)
+- Document deviations: PSU-level Hall-Mammen wild clustering as the bootstrap path when survey design is present (vs. R `survey`'s default analytical TSL); strata-vs-no-strata bit-equality not achievable due to RNG-path divergence between the per-stratum numpy loop and the batched `generate_survey_multiplier_weights_batch` call (see `docs/methodology/REGISTRY.md` HAD Stute survey-bootstrap section, "Distributional parity, NOT bit-exact" note, for the documented impossibility — distributional parity holds at large B, exact agreement at `atol=1e-10` does not)
 - Consolidated "Outstanding cross-estimator gaps" enumerating which estimators still raise `NotImplementedError` on which survey-design combinations (e.g., Conley + survey, SyntheticDiD + Conley, HAD replicate weights on Stute family)
 
 ---
