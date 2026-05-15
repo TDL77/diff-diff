@@ -12,8 +12,8 @@ Current limitations that may affect users:
 
 | Issue | Location | Priority | Notes |
 |-------|----------|----------|-------|
-| MultiPeriodDiD wild bootstrap not supported | `estimators.py:778-784` | Low | Edge case |
-| `predict()` raises NotImplementedError | `estimators.py:567-588` | Low | Rarely needed |
+| MultiPeriodDiD wild bootstrap not supported (falls back to analytical) | `estimators.py:1647` | Low | Edge case |
+| `predict()` raises NotImplementedError | `estimators.py:890-911` | Low | Rarely needed |
 
 For survey-specific limitations (NotImplementedError paths), see the
 [Current Limitations](docs/survey-roadmap.md#current-limitations) section
@@ -23,28 +23,46 @@ of survey-roadmap.md.
 
 ### Large Module Files
 
-Target: < 1000 lines per module for maintainability. Updated 2026-03-29.
+Target: ideally < 1000 lines per module; modules ≥3000 lines are candidates for splitting, 2000-3000 are monitored, 1000-2000 are accepted as a cohesion / scope trade-off. Updated 2026-05-15.
 
 | File | Lines | Action |
 |------|-------|--------|
-| `power.py` | 2588 | Consider splitting (power analysis + MDE + sample size) |
-| `linalg.py` | 2289 | Monitor — unified backend, splitting would hurt cohesion |
-| `staggered.py` | 2275 | Monitor — grew with survey support |
-| `imputation.py` | 2009 | Monitor |
-| `triple_diff.py` | 1921 | Monitor |
-| `utils.py` | 1902 | Monitor |
-| `two_stage.py` | 1708 | Monitor |
-| `survey.py` | 1646 | Monitor — grew with Phase 6 features |
-| `continuous_did.py` | 1626 | Monitor |
-| `honest_did.py` | 1511 | Acceptable |
-| `sun_abraham.py` | 1540 | Acceptable |
-| `estimators.py` | 1357 | Acceptable |
-| `trop_local.py` | 1261 | Acceptable |
-| `trop_global.py` | 1251 | Acceptable |
-| `prep.py` | 1225 | Acceptable |
-| `pretrends.py` | 1105 | Acceptable |
-| `trop.py` | 981 | Split done — trop_global.py + trop_local.py |
-| `visualization/` | 4172 | Subpackage (split across 7 files) — OK |
+| `chaisemartin_dhaultfoeuille.py` | 8636 | Consider splitting (per-path / placebos / survey IF / aggregation) |
+| `had_pretests.py` | 4951 | Consider splitting (Stute / Yatchew / QUG / joint pretests) |
+| `had.py` | 4593 | Consider splitting (continuous / mass-point / event-study / survey paths) |
+| `staggered.py` | 3963 | Consider splitting — grew through survey + aggregation features |
+| `linalg.py` | 3601 | Consider splitting (vcov surfaces) only if cohesion can be preserved — unified backend; vcov / solver paths are tightly coupled |
+| `diagnostic_report.py` | 3380 | Consider splitting (per-method renderers + provenance) |
+| `power.py` | 3196 | Consider splitting (power analysis + MDE + sample size) |
+| `synthetic_did.py` | 2819 | Monitor — variance methods + survey paths |
+| `honest_did.py` | 2785 | Monitor |
+| `business_report.py` | 2653 | Monitor — per-method narrative renderers |
+| `imputation.py` | 2475 | Monitor |
+| `survey.py` | 2466 | Monitor — grew with Phase 6 features |
+| `utils.py` | 2396 | Monitor |
+| `prep_dgp.py` | 2057 | Monitor |
+| `triple_diff.py` | 2053 | Monitor |
+| `estimators.py` | 1991 | Acceptable |
+| `two_stage.py` | 1985 | Acceptable |
+| `chaisemartin_dhaultfoeuille_results.py` | 1981 | Acceptable |
+| `prep.py` | 1876 | Acceptable |
+| `efficient_did.py` | 1793 | Acceptable |
+| `sun_abraham.py` | 1713 | Acceptable |
+| `continuous_did.py` | 1682 | Acceptable |
+| `results.py` | 1676 | Acceptable |
+| `staggered_triple_diff.py` | 1619 | Acceptable |
+| `_nprobust_port.py` | 1412 | Acceptable |
+| `practitioner.py` | 1402 | Acceptable |
+| `trop_global.py` | 1350 | Acceptable |
+| `trop_local.py` | 1339 | Acceptable |
+| `local_linear.py` | 1332 | Acceptable |
+| `wooldridge.py` | 1305 | Acceptable |
+| `chaisemartin_dhaultfoeuille_bootstrap.py` | 1175 | Acceptable |
+| `bacon.py` | 1144 | Acceptable |
+| `pretrends.py` | 1133 | Acceptable |
+| `stacked_did.py` | 1050 | Acceptable |
+| `conley.py` | 1006 | Acceptable |
+| `visualization/` | 4316 | Subpackage (split across 7 files) — OK |
 
 ---
 
@@ -57,7 +75,7 @@ Deferred items from PR reviews that were not addressed before merge.
 | Issue | Location | PR | Priority |
 |-------|----------|----|----------|
 | dCDH: Phase 1 per-period placebo DID_M^pl has NaN SE (no IF derivation for the per-period aggregation path). Multi-horizon placebos (L_max >= 1) have valid SE. | `chaisemartin_dhaultfoeuille.py` | #294 | Low |
-| dCDH: Survey cell-period allocator's post-period attribution is a library convention, not derived from the observation-level survey linearization. MC coverage is empirically close to nominal on the test DGP; a formal derivation (or a covariance-aware two-cell alternative) is deferred. Documented in REGISTRY.md survey IF expansion Note. | `chaisemartin_dhaultfoeuille.py`, `docs/methodology/REGISTRY.md` | PR 2 | Medium |
+| dCDH: Survey cell-period allocator's post-period attribution is a library convention, not derived from the observation-level survey linearization. MC coverage is empirically close to nominal on the test DGP; a formal derivation (or a covariance-aware two-cell alternative) is deferred. Documented in REGISTRY.md survey IF expansion Note. | `chaisemartin_dhaultfoeuille.py`, `docs/methodology/REGISTRY.md` | #408 | Medium |
 | dCDH: Parity test SE/CI assertions only cover pure-direction scenarios; mixed-direction SE comparison is structurally apples-to-oranges (cell-count vs obs-count weighting). | `test_chaisemartin_dhaultfoeuille_parity.py` | #294 | Low |
 | dCDH by_path: negative-baseline path regression (e.g. `(-1, 0, 0, 0)`) is not yet exercised. The existing negative-D test (`test_negative_integer_D_supported`) only covers paths with negative values in non-baseline positions like `(0, -1, -1, -1)`, which does not trigger the R `substr(path, 1, 1)` bug regime (the bug needs a multi-character baseline). Add a switcher fixture with `D_{g,1} = -1` and assert the resulting path tuple key. | `tests/test_chaisemartin_dhaultfoeuille.py` | #419 | Low |
 | dCDH by_path: per-path placebo heterogeneity (`predict_het` rows for negative horizons) is currently NaN-filled in `to_dataframe(level="by_path")` `het_*` columns and unpopulated in `path_heterogeneity_effects`. R `did_multiplegt_dyn(..., by_path, predict_het)` forwards `predict_het` into each per-path `did_multiplegt_main` call alongside `placebo`, so R likely emits placebo het rows we do not yet mirror. Validate R's actual placebo predict_het output, then either implement parity or document the deviation explicitly. | `diff_diff/chaisemartin_dhaultfoeuille.py`, `diff_diff/chaisemartin_dhaultfoeuille_results.py`, `tests/test_chaisemartin_dhaultfoeuille_parity.py` | #422 | Medium |
@@ -66,7 +84,6 @@ Deferred items from PR reviews that were not addressed before merge.
 | ImputationDiD dense `(A0'A0).toarray()` scales O((U+T+K)^2), OOM risk on large panels | `imputation.py` | #141 | Medium (deferred — only triggers when sparse solver fails) |
 | Multi-absorb weighted demeaning needs iterative alternating projections for N > 1 absorbed FE with survey weights; unweighted multi-absorb also uses single-pass (pre-existing, exact only for balanced panels) | `estimators.py` | #218 | Medium |
 | EfficientDiD `control_group="last_cohort"` trims at `last_g - anticipation` but REGISTRY says `t >= last_g`. With `anticipation=0` (default) these are identical. With `anticipation>0`, code is arguably more conservative (excludes anticipation-contaminated periods). Either align REGISTRY with code or change code to `t < last_g` — needs design decision. | `efficient_did.py` | #230 | Low |
-
 | TripleDifference power: `generate_ddd_data` is a fixed 2×2×2 cross-sectional DGP — no multi-period or unbalanced-group support. Add a `generate_ddd_panel_data` for panel DDD power analysis. | `prep_dgp.py`, `power.py` | #208 | Low |
 | Survey design resolution/collapse patterns are inconsistent across panel estimators — ContinuousDiD rebuilds unit-level design in SE code, EfficientDiD builds once in fit(), StackedDiD re-resolves on stacked data; extract shared helpers for panel-to-unit collapse, post-filter re-resolution, and metadata recomputation | `continuous_did.py`, `efficient_did.py`, `stacked_did.py` | #226 | Low |
 | Survey-weighted Silverman bandwidth in EfficientDiD conditional Omega* — `_silverman_bandwidth()` uses unweighted mean/std for bandwidth selection; survey-weighted statistics would better reflect the population distribution but is a second-order refinement | `efficient_did_covariates.py` | — | Low |
@@ -104,15 +121,12 @@ Deferred items from PR reviews that were not addressed before merge.
 | `HeterogeneousAdoptionDiD` mass-point: `vcov_type in {"hc2", "hc2_bm"}` raises `NotImplementedError` pending a 2SLS-specific leverage derivation. The OLS leverage `x_i' (X'X)^{-1} x_i` is wrong for 2SLS; the correct finite-sample correction uses `x_i' (Z'X)^{-1} (...) (X'Z)^{-1} x_i`. Needs derivation plus an R / Stata (`ivreg2 small robust`) parity anchor. | `diff_diff/had.py::_fit_mass_point_2sls` | Phase 2a | Medium |
 | `HeterogeneousAdoptionDiD` survey-design API consolidation, **next minor bump**: drop the deprecated `survey=` and `weights=` kwargs on all 8 HAD surfaces (`HeterogeneousAdoptionDiD.fit`, `did_had_pretest_workflow`, `qug_test`, `stute_test`, `yatchew_hr_test`, `stute_joint_pretest`, `joint_pretrends_test`, `joint_homogeneity_test`); only `survey_design=` remains. Also fold the legacy back-end `weights=` paths (e.g. `_aggregate_unit_weights` ad-hoc routing) into the unified `_resolve_survey_for_fit`-driven path. The `_make_trivial_resolved` underscore alias on `survey.py` stays (one-line, harmless). DeprecationWarning ships in this PR; the removal PR is ~50 LoC of cleanup. | `diff_diff/had.py`, `diff_diff/had_pretests.py` | next minor bump | Medium |
 | `HeterogeneousAdoptionDiD` continuous paths: thread `cluster=` through `bias_corrected_local_linear` (Phase 1c's wrapper already supports cluster; Phase 2a ignores it with a `UserWarning` on the continuous path to keep scope tight). | `diff_diff/had.py`, `diff_diff/local_linear.py` | Phase 2a | Low |
-| `HeterogeneousAdoptionDiD` Eq 17 / Eq 18 linear-trend detrending: SHIPPED in PR #389 (Phase 4 R-parity, 2026-04). Exposed as `trends_lin: bool = False` keyword-only kwarg on `HeterogeneousAdoptionDiD.fit(aggregate="event_study")`, `joint_pretrends_test`, `joint_homogeneity_test`. Mirrors R `DIDHAD::did_had(..., trends_lin=TRUE)`. Pierce-Schott published-number parity (paper p=0.51 / p=0.40) deferred indefinitely (LBD-restricted analysis panel); replaced by end-to-end R-package parity at `tests/test_did_had_parity.py`. | `diff_diff/had_pretests.py::joint_pretrends_test`, `diff_diff/had.py` | Phase 4 (shipped) | Done |
 | `HeterogeneousAdoptionDiD` `trends_lin × survey_design` follow-up: per-group linear-trend slope under survey weighting (weighted slope estimator? per-PSU slope?) is not derived from the paper. PR #389 raises `NotImplementedError` on the combination across all 3 trends_lin surfaces. If user demand emerges, derive the weighted variant and lift the gate. | `diff_diff/had.py::HeterogeneousAdoptionDiD.fit`, `diff_diff/had_pretests.py::joint_pretrends_test`, `diff_diff/had_pretests.py::joint_homogeneity_test` | follow-up | Low |
-| `HeterogeneousAdoptionDiD` `yatchew_hr_test(null="mean_independence")` mode: SHIPPED post-PR #392 (2026-04). Adds `null: Literal["linearity", "mean_independence"]` keyword-only kwarg mirroring R `YatchewTest::yatchew_test(order=0)`. Default `"linearity"` is bit-exact backcompat. `tests/test_did_had_parity.py::TestYatchewParity` now routes placebo rows through `null="mean_independence"` (R `order=0`) and effect rows through `null="linearity"` (R `order=1`); parity holds at `atol=1e-10` after the documented `× G/(G-1)` finite-sample convention shift. | `diff_diff/had_pretests.py::yatchew_hr_test` | follow-up (shipped) | Done |
 | `HeterogeneousAdoptionDiD` Stute family Stata-bridge parity: PR #389 R-parity covers the full HAD fit + Yatchew surfaces but skips Stute family (`stute_test`, `stute_joint_pretest`, `joint_pretrends_test`, `joint_homogeneity_test`) because no R `Stutetest` package exists publicly (chaisemartinPackages publishes only the Stata `stute_test` module; the paper cites a 2024c R Stutetest module that is not on GitHub or CRAN). Stata-bridge parity would add `benchmarks/stata/generate_stute_golden.do` + a Stata installation requirement. Low priority unless user demand emerges. | `benchmarks/stata/`, `tests/test_stute_test_parity.py` | follow-up | Low |
 | `HeterogeneousAdoptionDiD` Phase 3 Stute performance: Appendix D vectorized matrix form replaces the per-iteration OLS refit with a single precomputed `M = I - X(X'X)^{-1}X'` applied to `eps * eta`. Functionally identical, ~2x faster. Shipped literal-refit form in Phase 3 to match paper text and keep reviewer surface small. | `diff_diff/had_pretests.py::stute_test` | Phase 3 | Low |
 | `HeterogeneousAdoptionDiD` Phase 3 R-parity: Phase 3 ships coverage-rate validation on synthetic DGPs (not tight point parity against `chaisemartin::stute_test` / `yatchew_test`). Tight numerical parity requires aligning bootstrap seed semantics and `B` across numpy/R and is deferred. | `tests/test_had_pretests.py` | Phase 3 | Low |
 | `HeterogeneousAdoptionDiD` Phase 3 nprobust bandwidth for Stute: some Stute variants on continuous regressors use nprobust-style optimal bandwidth selection. Phase 3 uses OLS residuals from a 2-parameter linear fit (no bandwidth selection). nprobust integration is a future enhancement; not in paper scope. | `diff_diff/had_pretests.py::stute_test` | Phase 3 | Low |
 | `HeterogeneousAdoptionDiD` Phase 4: Pierce-Schott (2016) replication harness; reproduce paper Figure 2 values and Table 1 coverage rates. | `benchmarks/`, `tests/` | Phase 2a | Low |
-| `HeterogeneousAdoptionDiD` Phase 5 follow-up tutorial — SHIPPED. T22 (`docs/tutorials/22_had_survey_design.ipynb` + `tests/test_t22_had_survey_design_drift.py`) landed as the follow-up to PR #432; demonstrates the now-supported `SurveyDesign(strata=...)` path through HAD + `did_had_pretest_workflow` end-to-end on a BRFSS-shape household-panel design. T20 HAD brand-campaign (PR #394), T21 HAD pretest workflow (PR #409), and `practitioner_next_steps()` HAD handlers + `llms-full.txt` HeterogeneousAdoptionDiD section + Choosing-an-Estimator row (Phase 5 wave 1, PR #402) landed earlier. | `tutorials/`, `tests/test_t22_*_drift.py` | Phase 2a (shipped) | Done |
 | `HeterogeneousAdoptionDiD` time-varying dose on event study: Phase 2b REJECTS panels where `D_{g,t}` varies within a unit for `t >= F` (the aggregation uses `D_{g, F}` as the single regressor for all horizons, paper Appendix B.2 constant-dose convention). A follow-up PR could add a time-varying-dose estimator for these panels; current behavior is front-door rejection with a redirect to `ChaisemartinDHaultfoeuille`. | `diff_diff/had.py::_validate_had_panel_event_study` | Phase 2b | Low |
 | `HeterogeneousAdoptionDiD` repeated-cross-section support: paper Section 2 defines HAD on panel OR repeated cross-section, but Phase 2a is panel-only. RCS inputs (disjoint unit IDs between periods) are rejected by the balanced-panel validator with the generic "unit(s) do not appear in both periods" error. A follow-up PR will add an RCS identification path based on pre/post cell means (rather than unit-level first differences), with its own validator and a distinct `data_mode` / API surface. | `diff_diff/had.py::_validate_had_panel`, `diff_diff/had.py::_aggregate_first_difference` | Phase 2a | Medium |
 | SyntheticDiD: bootstrap cross-language parity anchor against R's default `synthdid::vcov(method="bootstrap")` (refit; rebinds `opts` per draw) or Julia `Synthdid.jl::src/vcov.jl::bootstrap_se` (refit by construction). Same-library validation (placebo-SE tracking, AER §6.3 MC truth) is in place; a cross-language anchor is desirable to bolster the methodology contract. Julia is the cleanest target — minimal wrapping work and refit-native vcov. Tolerance target: 1e-6 on Monte Carlo samples (different BLAS + RNG paths preclude 1e-10). The R-parity fixture from the previous release was deleted because it pinned the now-removed fixed-weight path. | `benchmarks/R/`, `benchmarks/julia/`, `tests/` | follow-up | Low |
@@ -146,18 +160,66 @@ Deferred items from PR reviews that were not addressed before merge.
 
 ---
 
+### Prioritized Tech-Debt Backlog
+
+Ordered paydown view across the tables above. Tier A → D is by effort × risk, not severity — every item here already carries its own `Low / Medium` priority in the source-of-truth tables. The intent is to give a flat ordering to draw from wave-by-wave without re-litigating priority each time. Anchors point to the location reference of the originating row.
+
+#### Tier A — Quick wins (≤1 day, ≤3 CI rounds expected)
+
+- Regenerate `benchmarks/data/clubsandwich_cr2_golden.json` from R via `benchmarks/R/generate_clubsandwich_golden.R` (currently `source: python_self_reference`)
+- HonestDiD `test_m0_short_circuit`: replace wall-clock `elapsed < 0.5s` proxy with a state flag (`tests/test_methodology_honest_did.py:246`)
+- EfficientDiD `control_group="last_cohort"` REGISTRY-vs-code alignment with `anticipation>0` (`efficient_did.py`, one design decision)
+- TripleDifference: add `generate_ddd_panel_data` for panel DDD power analysis (`prep_dgp.py`, `power.py`)
+- TROP: extract shared data-setup helper between `fit()` and `_fit_global()` (~150 LoC dedup; `trop.py`, `trop_global.py`, `trop_local.py`)
+- WooldridgeDiD: emit warning when canonical-link is violated (`wooldridge.py`; W2023 Prop 3.1)
+- HonestDiD vertex-rejection diagnostic counter on ARP enumeration exhaust (`honest_did.py:1907`)
+
+(SyntheticDiD `placebo_effects` → `variance_effects` rename moved to Tier B — the user-facing field rename + one-release deprecation alias is too large for ≤1 day / ≤3 CI rounds.)
+
+#### Tier B — Mid-size methodology (5-10 CI rounds expected, per memory cascade priors)
+
+- Thread `vcov_type` through 8 standalone estimators: `CallawaySantAnna`, `SunAbraham`, `ImputationDiD`, `TwoStageDiD`, `TripleDifference`, `StackedDiD`, `WooldridgeDiD`, `EfficientDiD` (none currently expose `self.vcov_type`)
+- SyntheticDiD: rename internal `placebo_effects` → `variance_effects` AND public `placebo_effects` field with deprecation alias retained for one release (`synthetic_did.py`, `results.py`)
+- StaggeredTripleDifference R parity: commit CSV fixtures + add covariate-adjusted scenarios + aggregation-SE assertions (`tests/test_methodology_staggered_triple_diff.py`, `benchmarks/R/benchmark_staggered_triplediff.R`)
+- StaggeredTripleDifference: per-cohort group-effect SE WIF override for exact R `triplediff` match (`staggered_triple_diff.py`)
+- WooldridgeDiD: QMLE Stata-parity `qmle` weight type + Stata golden values (`wooldridge.py`, `linalg.py`, `tests/test_wooldridge.py`)
+- WooldridgeDiD: optional `weights="cohort_share"` on `aggregate()` (`wooldridge_results.py`)
+- HAD survey-design API consolidation: drop deprecated `survey=`/`weights=` kwargs (`had.py`, `had_pretests.py`; gated on next minor bump)
+- Survey-design resolution / collapse helper extraction across `continuous_did.py`, `efficient_did.py`, `stacked_did.py`
+- dCDH heterogeneity df threading: t-distribution at heterogeneity surface (or formalize the tolerance constant) (`chaisemartin_dhaultfoeuille.py`)
+- dCDH by_path placebo `predict_het` parity vs R `did_multiplegt_dyn(..., by_path, predict_het)` (`chaisemartin_dhaultfoeuille.py`, `chaisemartin_dhaultfoeuille_results.py`)
+- Rust local-method solver path unification to `solve_wls_svd` + bootstrap-weight RNG parity audit (`rust/src/trop.rs`, `rust/src/bootstrap.rs`)
+- AI review CI workflow-contract pin test expansion (`tests/test_openai_review.py`)
+- In-site Sphinx render of `REPORTING.md` and `REGISTRY.md` (`docs/conf.py` + `:doc:` link migration)
+
+#### Tier C — Heavy / derivation required
+
+- HonestDiD Δ^RM ARP conditional/hybrid confidence sets (`honest_did.py`)
+- Weighted one-way Bell-McCaffrey + weighted CR2 Bell-McCaffrey + HC2/CR2 on absorbed-FE (linalg derivations + R parity harness) (`linalg.py`, `estimators.py::DifferenceInDifferences.fit`, `estimators.py::MultiPeriodDiD.fit`, `twfe.py::fit`)
+- Multi-absorb weighted demeaning: alternating-projection iteration for N>1 absorb + weights (`estimators.py`)
+- ImputationDiD dense `(A0'A0).toarray()` OOM: alternative dense fallback or richer sparse strategy (`imputation.py:1531`)
+- HAD mass-point `vcov_type ∈ {hc2, hc2_bm}`: 2SLS-specific leverage derivation (`had.py::_fit_mass_point_2sls`)
+- HAD repeated-cross-section identification path (`had.py::_validate_had_panel`)
+- HAD time-varying-dose event study estimator (`had.py::_validate_had_panel_event_study`)
+- Conley + `survey_design` (`linalg.py::_validate_vcov_args`, `conley.py`)
+- SyntheticDiD `vcov_type="conley"` (`synthetic_did.py::SyntheticDiD` — new analytical sandwich path OR spatial-block bootstrap)
+
+#### Tier D — Deferred / research (no active action planned)
+
+- HAD survey-aware support-endpoint test (`had_pretests.py::qug_test`; waits on literature — endpoint EVT × survey-aware functional CLT)
+- HAD joint cross-horizon analytical covariance / unweighted event-study sup-t band (low user demand)
+- HAD Phase 4.5 replicate-weight pretests (BRR/Fay/JK1/JKn/SDR composition derivation)
+- HAD Stute family Stata-bridge parity (no R `Stutetest` package exists publicly)
+- HAD `trends_lin × survey_design` weighted-slope derivation
+- Phase 1c lprobust follow-ups (`vce` modes, weights, multi-eval grid, clustered-DGP auto-bandwidth) — deferred to Phase 2+ of `bias_corrected_local_linear`
+- TestWorkflowDoesNotExecutePRHeadCode (CodeQL #14) residual bypass paths — diminishing return given documented threat model
+- All remaining `Low`-priority Performance and Testing/Docs rows (R-script-per-test, CS R covariate-adjusted IRLS benchmark, doc-deps integrity CI, Rust faer SVD overhead, etc.)
+
+---
+
 ### Standard Error Consistency
 
-Different estimators compute SEs differently. Consider unified interface.
-
-| Estimator | Default SE Type |
-|-----------|-----------------|
-| DifferenceInDifferences | HC1 or cluster-robust |
-| TwoWayFixedEffects | Always cluster-robust (unit level) |
-| CallawaySantAnna | Simple difference-in-means SE |
-| SyntheticDiD | Bootstrap or placebo-based |
-
-**Action**: Consider adding `se_type` parameter for consistency across estimators.
+`vcov_type` has subsumed the previously-proposed `se_type` knob. `DifferenceInDifferences` and `TwoWayFixedEffects` accept `vcov_type ∈ {"classical", "hc1", "hc2", "hc2_bm", "conley"}` (the validated set in `linalg.py::_VALID_VCOV_TYPES`); cluster-robust variance is obtained by passing `cluster=` alongside the heteroscedasticity kind (`hc1 + cluster` ⇒ CR1 Liang-Zeger; `hc2_bm + cluster` ⇒ CR2 Bell-McCaffrey, gated by the open weighted-CR2 / absorbed-FE rows in the table above); wild cluster bootstrap is a separate `inference="wild_bootstrap"` path on the same estimator. Threading `vcov_type` through the 8 standalone estimators (`CallawaySantAnna`, `SunAbraham`, `ImputationDiD`, `TwoStageDiD`, `TripleDifference`, `StackedDiD`, `WooldridgeDiD`, `EfficientDiD`) remains open and is tracked as a single methodology row in the table above (Phase 1a row).
 
 ### Type Annotations
 
@@ -176,7 +238,7 @@ Deprecated parameters still present for backward compatibility:
 
 ## Test Coverage
 
-**Note**: 21 visualization tests are skipped when matplotlib unavailable—this is expected.
+Visualization tests skip when matplotlib / plotly are not installed (see `pytest.importorskip` markers in `tests/test_visualization*.py`).
 
 ---
 
