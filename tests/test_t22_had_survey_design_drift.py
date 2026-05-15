@@ -473,14 +473,18 @@ def test_overall_report_all_pass_under_null(overall_report):
 
 
 def test_overall_report_stute_fails_to_reject(overall_report):
-    """Stute CvM fails-to-reject linearity. Bootstrap-derived p-value
-    pinned with abs band >= 0.25 per
-    ``feedback_strata_bootstrap_path_divergence`` (stratified Mammen
-    multiplier paths reduce effective dofs vs non-strata)."""
+    """Stute CvM fails-to-reject linearity. Anchored bootstrap-p band
+    centered on the seed=22 captured value (~0.42) with abs width
+    ~0.30 per ``feedback_strata_bootstrap_path_divergence``
+    (stratified Mammen multiplier reduces effective dofs vs
+    non-strata; PR #432 commit ``aef07020`` had to relax bit-equality
+    on this code path). Drift either toward rejection or toward an
+    even cleaner pass flags the §6 prose as stale rather than
+    silently passing."""
     assert overall_report.stute is not None
     assert overall_report.stute.reject is False
     p = float(overall_report.stute.p_value)
-    assert 0.10 <= p <= 0.95, p
+    assert 0.27 <= p <= 0.57, p
 
 
 def test_overall_report_yatchew_fails_to_reject(overall_report):
@@ -543,8 +547,12 @@ def test_event_study_report_homogeneity_horizons_correct(event_study_report):
 
 def test_event_study_report_pretrends_and_homogeneity_fail_to_reject(event_study_report):
     """Both joint pretrends and joint homogeneity fail-to-reject under
-    the linear-DGP null. Bootstrap-derived p-values pinned with abs
-    band >= 0.25 (same rationale as Stute overall)."""
+    the linear-DGP null. Anchored bootstrap-p bands centered on the
+    seed=22 captured values (pretrends ~0.39, homogeneity ~0.41) with
+    abs width ~0.30 per
+    ``feedback_strata_bootstrap_path_divergence`` (same rationale as
+    Stute overall). Tighter than 0.10-0.95: catches drift in either
+    direction rather than only rejecting on cross-the-line moves."""
     pj = event_study_report.pretrends_joint
     hj = event_study_report.homogeneity_joint
     assert pj is not None and hj is not None
@@ -552,8 +560,8 @@ def test_event_study_report_pretrends_and_homogeneity_fail_to_reject(event_study
     assert hj.reject is False
     p_pre = float(pj.p_value)
     p_hom = float(hj.p_value)
-    assert 0.10 <= p_pre <= 0.95, p_pre
-    assert 0.10 <= p_hom <= 0.95, p_hom
+    assert 0.24 <= p_pre <= 0.54, p_pre
+    assert 0.26 <= p_hom <= 0.56, p_hom
 
 
 # ============================================================================
