@@ -111,6 +111,14 @@ Composite pre-test walkthrough for `HeterogeneousAdoptionDiD`, building on Tutor
 - Side panel comparing `yatchew_hr_test` `null="linearity"` (default, paper Theorem 7) vs `null="mean_independence"` (Phase 4 R-parity with R `YatchewTest::yatchew_test(order=0)`)
 - Companion drift-test file (`tests/test_t21_had_pretest_workflow_drift.py`)
 
+### 22. HAD Survey-Weighted Workflow (`22_had_survey_design.ipynb`)
+End-to-end HAD walkthrough on a BRFSS-shape stratified survey design (5 strata x 6 PSUs/stratum x 2 states/PSU = 60 states; post-stratification raking weights with CV ~ 0.30; FPC = 30 PSUs/stratum). Demonstrates the `SurveyDesign(strata=...)` path through the Stute pretest family that PR #432 (2026-05-14) unblocked:
+- Naive vs survey-aware HAD headline fit on a two-period collapse, with side-by-side ATT / SE / CI table
+- Why the SE inflation is modest for HAD (local-linear at d_lower IF concentration vs full-panel regression coefficients)
+- Event-study fit with sup-t cband under the survey design
+- `did_had_pretest_workflow` on both overall and event-study paths under `survey_design=`, walking the Phase 4.5 C0 QUG-deferred verdict suffix and the stratified-clustered Stute multiplier bootstrap
+- Companion drift-test file (`tests/test_t22_had_survey_design_drift.py`)
+
 ## Running the Notebooks
 
 1. Install diff-diff with dependencies:

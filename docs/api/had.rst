@@ -116,6 +116,15 @@ Unit Remains Untreated" (arXiv:2405.04465v6), which:
      weighted-CR1 per-horizon), or drop ``cluster=`` (keeps
      weighted-HC1 sup-t).
 
+.. tip::
+
+   For an end-to-end walkthrough of the survey-aware HAD workflow on a
+   BRFSS-shape stratified household-survey panel - including the now-
+   supported ``SurveyDesign(strata=...)`` path through the Stute pretest
+   family (lifted in PR #432, 2026-05) - see
+   `Tutorial 22: Survey-Weighted HAD
+   <../tutorials/22_had_survey_design.ipynb>`_.
+
 HeterogeneousAdoptionDiD
 ------------------------
 

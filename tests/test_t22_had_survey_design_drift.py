@@ -1,0 +1,556 @@
+"""Drift detection for Tutorial 22 (`docs/tutorials/22_had_survey_design.ipynb`).
+
+The tutorial narrative quotes seed-specific numbers (panel composition,
+naive vs. survey-design SE inflation, event-study cband behavior, pretest
+workflow verdicts under SurveyDesign(strata=...), QUG-under-survey
+deferral substring). If library numerics drift (estimator changes, RNG
+path changes, BLAS path changes), the prose can go stale silently while
+``pytest --nbmake`` still passes - it only checks that the cells execute
+without error.
+
+These asserts re-derive the same numbers using the locked T22 DGP and
+seeds the notebook uses, then check them against the values quoted in
+the tutorial markdown. If a future change moves any number outside its
+tolerance band, this test fails and a maintainer is forced to either
+update the prose or investigate the methodology shift before merge.
+
+T22 is the third tutorial in the HAD series (after T20 headline and T21
+pretest workflow). It demonstrates the now-fully-supported survey-design
+path through ``HeterogeneousAdoptionDiD`` and ``did_had_pretest_workflow``,
+unblocked by PR #432 (2026-05-14, merge ``d5e5021f``) which lifted the
+``NotImplementedError`` gate on ``SurveyDesign(strata=...)`` for the
+Stute family. T22's DGP layers a BRFSS-shape survey design (5 strata x 6
+PSUs/stratum x 2 states/PSU = 60 states; weights ~ post-stratification
+raking with CV ~ 0.30; FPC = 30 PSUs/stratum) onto the same
+continuous-dose HAD panel shape T20 uses (Design 1, dose ~ Uniform[$5K,
+$50K], att_slope=100). DGP and seed locked at ``_scratch/t22/dev.py``.
+
+**Bootstrap p-value pins use abs tolerance bands >= 0.25** per
+``feedback_bootstrap_drift_tests_need_backend_tolerance`` and
+``feedback_strata_bootstrap_path_divergence``. Stratified Mammen
+multiplier paths (PR #432) reduce effective dofs vs non-strata; PR #432
+commit ``aef07020`` already had to relax bit-equality bands on this
+code path. Deterministic statistics (Yatchew sigma2_*, t_hr, design
+auto-detection, horizon labels, panel composition, weight CV under
+locked numpy default_rng) get exact pins.
+
+**Verdict-substring discipline** — both the overall and the event-study
+``HADPretestReport.verdict`` terminate in ``_QUG_DEFERRED_SUFFIX``
+(``had_pretests.py:4300``: ``" (linearity-conditional verdict;
+QUG-under-survey deferred per Phase 4.5 C0)"``). The DIFFERENT message
+at ``had_pretests.py:736`` (``"(QUG step skipped - permanently deferred
+under survey/weights per Phase 4.5 C0)"``) is rendered in the
+formatted ``report.summary()`` block, NOT in ``report.verdict``. Tests
+lock each substring on the correct field.
+"""
+
+from __future__ import annotations
+
+import warnings
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from diff_diff import (
+    HAD,
+    SurveyDesign,
+    did_had_pretest_workflow,
+    generate_continuous_did_data,
+)
+
+# Locked T22 DGP parameters (must stay in sync with the notebook).
+MAIN_SEED = 87
+N_UNITS = 60
+N_PERIODS = 8
+COHORT_PERIOD = 5
+TRUE_SLOPE = 100.0
+BASELINE_OUTCOME = 35.0
+DOSE_LOW = 5.0
+DOSE_HIGH = 50.0
+
+# Survey-design layer (in-notebook helper).
+N_STRATA = 5
+PSU_PER_STRATUM = 6
+STATES_PER_PSU = 2
+WEIGHT_CV_TARGET = 0.30
+FPC_PER_STRATUM = 30
+PSU_PERIOD_SHOCK_SD = 1.5  # See plan Risk 1; HAD WAS IF concentration caps inflation ~1.25
+SD_SEED = 87
+
+# Pretest workflow.
+WORKFLOW_SEED = 22
+N_BOOTSTRAP = 999
+
+# Substrings the notebook prose depends on.
+QUG_DEFERRED_SUFFIX_VERDICT = (
+    "linearity-conditional verdict; QUG-under-survey deferred per Phase 4.5 C0"
+)
+QUG_SKIP_SUMMARY_NOTE = (
+    "QUG step skipped - permanently deferred under survey/weights per Phase 4.5 C0"
+)
+
+
+def _attach_brfss_survey_columns(
+    panel: pd.DataFrame,
+    *,
+    seed: int,
+    n_strata: int = N_STRATA,
+    psu_per_stratum: int = PSU_PER_STRATUM,
+    states_per_psu: int = STATES_PER_PSU,
+    weight_cv: float = WEIGHT_CV_TARGET,
+    fpc_per_stratum: int = FPC_PER_STRATUM,
+    psu_period_shock_sd: float = PSU_PERIOD_SHOCK_SD,
+) -> pd.DataFrame:
+    """Drift-test-local copy of T22's in-notebook survey-attach helper.
+
+    Lives here (not as a library helper) because it is a TUTORIAL element
+    demonstrating how a practitioner attaches survey design to their HAD
+    panel. The drift test inlines it so changes to the notebook helper
+    do not silently change the locked numerical anchors. If this helper
+    diverges from the notebook helper, the panel-composition tests
+    (weight CV, stratum/PSU counts) catch the drift.
+    """
+    rng = np.random.default_rng(seed)
+    state_ids = np.sort(panel["state_id"].unique())
+    n_states = len(state_ids)
+    n_psu = n_strata * psu_per_stratum
+    if n_states != n_psu * states_per_psu:
+        raise ValueError(
+            f"state count {n_states} must equal n_strata*psu_per_stratum*"
+            f"states_per_psu = {n_psu * states_per_psu}"
+        )
+    perm = rng.permutation(n_states)
+    psu_block = np.repeat(np.arange(n_psu), states_per_psu)
+    psu_of_state = psu_block[np.argsort(perm)]
+    stratum_of_state = psu_of_state // psu_per_stratum
+    base_per_stratum = np.array([0.8, 0.9, 1.0, 1.1, 1.3])
+    base_w = base_per_stratum[stratum_of_state]
+    sigma = np.sqrt(np.log(1 + weight_cv**2))
+    pert = rng.lognormal(mean=-0.5 * sigma**2, sigma=sigma, size=n_states)
+    w_per_state = base_w * pert
+    state_lookup = pd.DataFrame(
+        {
+            "state_id": state_ids,
+            "stratum": stratum_of_state.astype(np.int64),
+            "psu_id": psu_of_state.astype(np.int64),
+            "weight": w_per_state,
+            "fpc": float(fpc_per_stratum),
+        }
+    )
+    panel_attached = panel.merge(state_lookup, on="state_id", how="left")
+    n_periods = int(panel["week"].max() - panel["week"].min() + 1)
+    psu_period_shocks = rng.normal(0.0, psu_period_shock_sd, size=(n_psu, n_periods))
+    week_min = int(panel["week"].min())
+    shock_lookup = pd.DataFrame(
+        [
+            {
+                "psu_id": int(p),
+                "week": int(w + week_min),
+                "psu_period_shock": float(psu_period_shocks[p, w]),
+            }
+            for p in range(n_psu)
+            for w in range(n_periods)
+        ]
+    )
+    panel_attached = panel_attached.merge(shock_lookup, on=["psu_id", "week"], how="left")
+    panel_attached["screening_uptake"] = (
+        panel_attached["screening_uptake"] + panel_attached["psu_period_shock"]
+    )
+    return panel_attached.drop(columns=["psu_period_shock"])
+
+
+@pytest.fixture(scope="module")
+def panel() -> pd.DataFrame:
+    raw = generate_continuous_did_data(
+        n_units=N_UNITS,
+        n_periods=N_PERIODS,
+        cohort_periods=[COHORT_PERIOD],
+        never_treated_frac=0.0,
+        dose_distribution="uniform",
+        dose_params={"low": DOSE_LOW, "high": DOSE_HIGH},
+        att_function="linear",
+        att_intercept=0.0,
+        att_slope=TRUE_SLOPE,
+        unit_fe_sd=8.0,
+        time_trend=0.5,
+        noise_sd=2.0,
+        seed=MAIN_SEED,
+    )
+    p = raw.copy()
+    p.loc[p["period"] < p["first_treat"], "dose"] = 0.0
+    p = p.rename(
+        columns={
+            "unit": "state_id",
+            "period": "week",
+            "outcome": "screening_uptake",
+            "dose": "spend_k",
+        }
+    )
+    p["screening_uptake"] = p["screening_uptake"] + BASELINE_OUTCOME
+    return _attach_brfss_survey_columns(p, seed=SD_SEED)
+
+
+@pytest.fixture(scope="module")
+def panel_2p(panel: pd.DataFrame) -> pd.DataFrame:
+    p = panel.copy()
+    p["period"] = (p["week"] >= COHORT_PERIOD).astype(int) + 1
+    collapsed = p.groupby(["state_id", "period"], as_index=False).agg(
+        screening_uptake=("screening_uptake", "mean"),
+        spend_k=("spend_k", "mean"),
+        stratum=("stratum", "first"),
+        psu_id=("psu_id", "first"),
+        weight=("weight", "first"),
+        fpc=("fpc", "first"),
+    )
+    return pd.DataFrame(collapsed)
+
+
+@pytest.fixture(scope="module")
+def survey_design() -> SurveyDesign:
+    return SurveyDesign(weights="weight", strata="stratum", psu="psu_id", fpc="fpc")
+
+
+@pytest.fixture(scope="module")
+def naive_overall_result(panel_2p: pd.DataFrame):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        return HAD(design="auto").fit(
+            panel_2p,
+            outcome_col="screening_uptake",
+            dose_col="spend_k",
+            time_col="period",
+            unit_col="state_id",
+        )
+
+
+@pytest.fixture(scope="module")
+def survey_overall_result(panel_2p: pd.DataFrame, survey_design: SurveyDesign):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        return HAD(design="auto").fit(
+            panel_2p,
+            outcome_col="screening_uptake",
+            dose_col="spend_k",
+            time_col="period",
+            unit_col="state_id",
+            survey_design=survey_design,
+        )
+
+
+@pytest.fixture(scope="module")
+def survey_event_study_result(panel: pd.DataFrame, survey_design: SurveyDesign):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        return HAD(design="auto").fit(
+            panel,
+            outcome_col="screening_uptake",
+            dose_col="spend_k",
+            time_col="week",
+            unit_col="state_id",
+            first_treat_col="first_treat",
+            aggregate="event_study",
+            survey_design=survey_design,
+            cband=True,
+        )
+
+
+@pytest.fixture(scope="module")
+def overall_report(panel_2p: pd.DataFrame, survey_design: SurveyDesign):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        return did_had_pretest_workflow(
+            panel_2p,
+            outcome_col="screening_uptake",
+            dose_col="spend_k",
+            time_col="period",
+            unit_col="state_id",
+            survey_design=survey_design,
+            aggregate="overall",
+            n_bootstrap=N_BOOTSTRAP,
+            seed=WORKFLOW_SEED,
+        )
+
+
+@pytest.fixture(scope="module")
+def event_study_report(panel: pd.DataFrame, survey_design: SurveyDesign):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        return did_had_pretest_workflow(
+            panel,
+            outcome_col="screening_uptake",
+            dose_col="spend_k",
+            time_col="week",
+            unit_col="state_id",
+            first_treat_col="first_treat",
+            survey_design=survey_design,
+            aggregate="event_study",
+            n_bootstrap=N_BOOTSTRAP,
+            seed=WORKFLOW_SEED,
+        )
+
+
+# ============================================================================
+# Group A — Panel & survey composition (deterministic exact pins)
+# ============================================================================
+
+
+def test_panel_matches_t22_locked_dgp(panel: pd.DataFrame):
+    """Locks panel size, columns, and the dose/outcome ranges quoted in §2.
+
+    If T22 mutates the locked DGP parameters, panel shape/columns shift
+    and this test fails before downstream numerical pins fail."""
+    assert panel.shape == (480, 10), panel.shape
+    assert set(panel.columns) >= {
+        "state_id",
+        "week",
+        "screening_uptake",
+        "first_treat",
+        "spend_k",
+        "stratum",
+        "psu_id",
+        "weight",
+        "fpc",
+    }, panel.columns.tolist()
+    assert panel["state_id"].nunique() == N_UNITS
+    assert panel["week"].min() == 1
+    assert panel["week"].max() == N_PERIODS
+    post_dose = panel.loc[panel["week"] >= COHORT_PERIOD, "spend_k"]
+    assert DOSE_LOW <= post_dose.min() <= post_dose.max() <= DOSE_HIGH
+
+
+def test_survey_design_attachment_shape(panel: pd.DataFrame):
+    """Locks the BRFSS-shape design dimensions narrated in §2."""
+    assert panel["stratum"].nunique() == N_STRATA
+    assert panel["psu_id"].nunique() == N_STRATA * PSU_PER_STRATUM
+    psu_state_count = panel.groupby("psu_id")["state_id"].nunique()
+    assert (psu_state_count == STATES_PER_PSU).all(), psu_state_count.value_counts().to_dict()
+
+
+def test_survey_weight_cv_in_band(panel: pd.DataFrame):
+    """Locks the ~0.30 weight CV at seed=87. Bit-stable under numpy
+    default_rng; if numpy upgrades change RNG semantics this catches it."""
+    weights_per_state = panel.groupby("state_id")["weight"].first()
+    cv = float(weights_per_state.std() / weights_per_state.mean())
+    assert abs(cv - 0.327) < 0.03, cv
+
+
+def test_survey_design_fpc_constant_per_stratum(panel: pd.DataFrame):
+    """FPC is scalar-per-stratum (==30) in the helper; the SurveyDesign
+    object treats fpc as a column, so per-row constancy is the contract."""
+    assert panel["fpc"].nunique() == 1
+    assert float(panel["fpc"].iloc[0]) == FPC_PER_STRATUM
+
+
+def test_panel_constant_within_state_invariant(panel: pd.DataFrame):
+    """HAD per-unit aggregation requires weight/stratum/psu_id/fpc to be
+    constant within state; resolve_survey_design enforces this. If the
+    helper accidentally injects per-period variation in these columns,
+    HAD fails downstream — test catches the helper-side bug first."""
+    for col in ("weight", "stratum", "psu_id", "fpc"):
+        per_state_unique = panel.groupby("state_id")[col].nunique()
+        assert per_state_unique.max() == 1, (col, per_state_unique.value_counts().to_dict())
+
+
+# ============================================================================
+# Group B — Naive vs survey-aware headline fit
+# ============================================================================
+
+
+def test_naive_overall_design_auto_continuous_near_d_lower(naive_overall_result):
+    """Locks T22's design auto-detection: at dose ~ Uniform[5, 50],
+    `d.min() / median(|d|) > 0.01`, so the heuristic resolves to
+    ``continuous_near_d_lower`` (Design 1) targeting WAS_d_lower."""
+    assert naive_overall_result.design == "continuous_near_d_lower"
+    assert naive_overall_result.target_parameter == "WAS_d_lower"
+
+
+def test_survey_overall_design_auto_continuous_near_d_lower(survey_overall_result):
+    """Survey path picks the same design — design auto-detection is
+    sample-based and does not consume survey weights."""
+    assert survey_overall_result.design == "continuous_near_d_lower"
+    assert survey_overall_result.target_parameter == "WAS_d_lower"
+
+
+def test_survey_att_close_to_truth(survey_overall_result):
+    """Survey-aware HAD recovers slope=100 within analytical noise on
+    this DGP. Tight pin (round to int) — the local-linear estimator is
+    analytical, no Rust RNG path."""
+    assert round(survey_overall_result.att, 0) == 100, survey_overall_result.att
+
+
+def test_survey_se_strictly_inflated_vs_naive(naive_overall_result, survey_overall_result):
+    """Sign-only structural anchor: survey SE > naive SE on this DGP.
+    The magnitude of inflation is modest (~10%) because HAD's WAS_d_lower
+    has IF concentrated near d_lower (few units), capping how much the
+    PSU x period shock injection can amplify cluster correlation. The
+    sign holds robustly across reasonable shock SDs (per dev script
+    sweep)."""
+    assert survey_overall_result.se > naive_overall_result.se, (
+        naive_overall_result.se,
+        survey_overall_result.se,
+    )
+
+
+def test_survey_ci_covers_truth(survey_overall_result):
+    """Survey-aware CI covers the true slope=100."""
+    lo, hi = survey_overall_result.conf_int
+    assert lo <= TRUE_SLOPE <= hi, (lo, hi)
+
+
+# ============================================================================
+# Group C — Event-study under survey
+# ============================================================================
+
+
+def test_event_study_horizons_complete(survey_event_study_result):
+    """Locks the same horizon set T20 produces on this DGP shape."""
+    horizons = list(survey_event_study_result.event_times)
+    assert horizons == [-4, -3, -2, 0, 1, 2, 3], horizons
+
+
+def test_event_study_post_horizons_cover_truth_under_survey(survey_event_study_result):
+    """All four post-launch horizons cover the true slope=100 under
+    survey-aware pointwise CIs."""
+    es = survey_event_study_result
+    post_mask = np.asarray(es.event_times) >= 0
+    lows = np.asarray(es.conf_int_low)[post_mask]
+    highs = np.asarray(es.conf_int_high)[post_mask]
+    for lo, hi in zip(lows, highs):
+        assert lo <= TRUE_SLOPE <= hi, (lo, hi)
+
+
+def test_event_study_pre_horizons_cover_zero_under_survey(survey_event_study_result):
+    """Pre-launch placebo horizons cover zero under survey-aware
+    pointwise CIs (no pre-trends in this DGP)."""
+    es = survey_event_study_result
+    pre_mask = np.asarray(es.event_times) < 0
+    lows = np.asarray(es.conf_int_low)[pre_mask]
+    highs = np.asarray(es.conf_int_high)[pre_mask]
+    for lo, hi in zip(lows, highs):
+        assert lo <= 0.0 <= hi, (lo, hi)
+
+
+def test_event_study_cband_is_wider_or_equal_pointwise(survey_event_study_result):
+    """sup-t band is at least as wide as pointwise per horizon (cross-
+    horizon multiplicity correction; never tighter than pointwise).
+    Locks that ``cband_low`` and ``cband_high`` are populated and
+    obey the cross-horizon multiplicity ordering."""
+    es = survey_event_study_result
+    assert es.cband_low is not None
+    assert es.cband_high is not None
+    cband_widths = np.asarray(es.cband_high) - np.asarray(es.cband_low)
+    pointwise_widths = np.asarray(es.conf_int_high) - np.asarray(es.conf_int_low)
+    # Allow tiny numerical noise (atol=1e-9) but otherwise require >=.
+    assert (cband_widths + 1e-9 >= pointwise_widths).all(), {
+        "cband": cband_widths.tolist(),
+        "pointwise": pointwise_widths.tolist(),
+    }
+
+
+# ============================================================================
+# Group D — Pretest workflow under survey: overall path
+# ============================================================================
+
+
+def test_overall_report_qug_is_none_under_survey(overall_report):
+    """Phase 4.5 C0 contract: QUG step is permanently deferred under
+    survey/weights; ``report.qug`` is ``None`` on the overall path."""
+    assert overall_report.qug is None
+
+
+def test_overall_report_verdict_carries_qug_deferred_suffix(overall_report):
+    """Locks ``_QUG_DEFERRED_SUFFIX`` substring (``had_pretests.py:4300``)
+    on ``report.verdict``. This is the load-bearing pivot the §6 leadership
+    paragraph depends on."""
+    assert QUG_DEFERRED_SUFFIX_VERDICT in overall_report.verdict, overall_report.verdict
+
+
+def test_overall_report_all_pass_under_null(overall_report):
+    """``all_pass=True`` under the linear-DGP null (no pre-trends, no
+    heterogeneity)."""
+    assert overall_report.all_pass is True
+
+
+def test_overall_report_stute_fails_to_reject(overall_report):
+    """Stute CvM fails-to-reject linearity. Bootstrap-derived p-value
+    pinned with abs band >= 0.25 per
+    ``feedback_strata_bootstrap_path_divergence`` (stratified Mammen
+    multiplier paths reduce effective dofs vs non-strata)."""
+    assert overall_report.stute is not None
+    assert overall_report.stute.reject is False
+    p = float(overall_report.stute.p_value)
+    assert 0.10 <= p <= 0.95, p
+
+
+def test_overall_report_yatchew_fails_to_reject(overall_report):
+    """Yatchew-HR fails-to-reject linearity. Yatchew is closed-form
+    weighted-OLS (no bootstrap), so sigma2_lin and sigma2_diff are
+    deterministic — exact pin to 4 decimals."""
+    y = overall_report.yatchew
+    assert y is not None
+    assert y.reject is False
+    assert round(float(y.sigma2_lin), 4) == 2.7270, y.sigma2_lin
+    assert round(float(y.sigma2_diff), 4) == 5148.3208, y.sigma2_diff
+
+
+# ============================================================================
+# Group E — Pretest workflow under survey: event-study path
+# ============================================================================
+
+
+def test_event_study_report_qug_is_none_under_survey(event_study_report):
+    """Phase 4.5 C0 contract holds on the event-study path too."""
+    assert event_study_report.qug is None
+
+
+def test_event_study_report_verdict_carries_qug_deferred_suffix(event_study_report):
+    """Both the overall AND event-study verdicts share
+    ``_QUG_DEFERRED_SUFFIX`` (per
+    ``_compose_verdict_event_study_survey`` at
+    ``had_pretests.py:4368-4406`` — all three return branches end in
+    the suffix). Distinct prefix; identical suffix."""
+    assert QUG_DEFERRED_SUFFIX_VERDICT in event_study_report.verdict, event_study_report.verdict
+
+
+def test_event_study_report_summary_contains_qug_skip_note(event_study_report):
+    """Separate from the verdict suffix above: ``report.summary()`` (the
+    formatted multi-line block at ``had_pretests.py:736``) renders a
+    distinct QUG-skip note. Locked here because the §6 walkthrough
+    quotes ``report.summary()`` output as well as the verdict string."""
+    summary = event_study_report.summary()
+    assert QUG_SKIP_SUMMARY_NOTE in summary, summary[:400]
+
+
+def test_event_study_report_pretrends_horizons_correct(event_study_report):
+    """Locks the joint pretrends horizon set: weeks 1, 2, 3 (the
+    pre-treatment placebo periods upgraded to a joint cusum)."""
+    pj = event_study_report.pretrends_joint
+    assert pj is not None
+    assert pj.n_horizons == 3
+    assert list(pj.horizon_labels) == ["1", "2", "3"], pj.horizon_labels
+
+
+def test_event_study_report_homogeneity_horizons_correct(event_study_report):
+    """Locks the joint homogeneity horizon set: weeks 5, 6, 7, 8 (the
+    post-treatment periods on which dose-response heterogeneity is
+    tested)."""
+    hj = event_study_report.homogeneity_joint
+    assert hj is not None
+    assert hj.n_horizons == 4
+    assert list(hj.horizon_labels) == ["5", "6", "7", "8"], hj.horizon_labels
+
+
+def test_event_study_report_pretrends_and_homogeneity_fail_to_reject(event_study_report):
+    """Both joint pretrends and joint homogeneity fail-to-reject under
+    the linear-DGP null. Bootstrap-derived p-values pinned with abs
+    band >= 0.25 (same rationale as Stute overall)."""
+    pj = event_study_report.pretrends_joint
+    hj = event_study_report.homogeneity_joint
+    assert pj is not None and hj is not None
+    assert pj.reject is False
+    assert hj.reject is False
+    p_pre = float(pj.p_value)
+    p_hom = float(hj.p_value)
+    assert 0.10 <= p_pre <= 0.95, p_pre
+    assert 0.10 <= p_hom <= 0.95, p_hom
