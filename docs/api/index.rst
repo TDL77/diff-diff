@@ -113,6 +113,10 @@ are documented in :doc:`profile`.
    :nosignatures:
 
    diff_diff.profile_panel
+   diff_diff.PanelProfile
+   diff_diff.OutcomeShape
+   diff_diff.TreatmentDoseShape
+   diff_diff.Alert
 
 Sensitivity Analysis
 --------------------
@@ -192,6 +196,36 @@ Power analysis for pre-trends tests (Roth 2022):
    diff_diff.PreTrendsPowerCurve
    diff_diff.compute_pretrends_power
    diff_diff.compute_mdv
+
+Reporting
+---------
+
+Stakeholder-facing report and diagnostic battery wrappers around fitted
+result objects:
+
+.. autosummary::
+   :toctree: _autosummary
+   :nosignatures:
+
+   diff_diff.BusinessReport
+   diff_diff.BusinessContext
+   diff_diff.DiagnosticReport
+   diff_diff.DiagnosticReportResults
+
+Boundary Local-Linear Estimators
+--------------------------------
+
+Calonico-Cattaneo-Farrell (2018) MSE-optimal bandwidth selector and
+Calonico-Cattaneo-Titiunik (2014) robust-bias-corrected local-linear fit
+used by the continuous-DiD boundary estimator:
+
+.. autosummary::
+   :toctree: _autosummary
+   :nosignatures:
+
+   diff_diff.LocalLinearFit
+   diff_diff.BandwidthResult
+   diff_diff.BiasCorrectedFit
 
 Data Preparation
 ----------------
