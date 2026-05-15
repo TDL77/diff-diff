@@ -622,20 +622,28 @@ def test_survey_att_differs_from_naive_att(naive_overall_result, survey_overall_
     )
 
 
-def test_survey_att_matches_weighted_denominator_contract(
+def test_survey_att_matches_weighted_local_linear_identity(
     panel_2p: pd.DataFrame, survey_overall_result
 ):
-    """The survey-aware ATT divided by the (weighted) sample weighted-
-    denominator should recover the bias-corrected `tau_bc` boundary
-    limit (`mean_w(dy) - tau_bc = att * den_w`). This is the
-    algebraic identity from `_fit_continuous` (`had.py:3804-3810`):
-    `att = (dy_mean - tau_bc) / den`. Locks the weighted-numerator /
-    weighted-denominator contract that §3 narrative now correctly
-    describes."""
-    # Re-build the per-state first-difference table the estimator sees
-    # internally, then compute the weighted denominator and check the
-    # algebraic identity holds. d_lower is the min observed dose on
-    # the post-period.
+    """Locks the actual `_fit_continuous` algebraic identity end-to-end
+    by recomputing every intermediate against the shipped estimator:
+
+    1. `effective_dose_mean` on the result equals
+       `np.average(d - d_lower, weights=w)` exactly.
+    2. Calling `bias_corrected_local_linear` directly with the same
+       inputs the HAD class uses (`d_reg = d_post - d_lower`, `dy`,
+       `weights`, default `kernel="epanechnikov"`, `alpha=0.05`,
+       `boundary=0.0`) recovers the SAME `tau_bc` boundary limit the
+       estimator used.
+    3. `att = (mean_w(dy) - tau_bc) / den_w` matches the fitted ATT
+       to ~1e-13 (FP precision; same float ops, same data).
+
+    Per CI AI review R2 P3: prior version of this test only checked
+    finiteness + scale of an inverted `implied_tau_bc`; that is too
+    weak to be called an "identity lock." This version actually
+    re-derives every step."""
+    from diff_diff.local_linear import bias_corrected_local_linear
+
     p2 = panel_2p.copy()
     pre = p2[p2["period"] == 1].set_index("state_id")
     post = p2[p2["period"] == 2].set_index("state_id")
@@ -646,24 +654,32 @@ def test_survey_att_matches_weighted_denominator_contract(
     d_post = post["spend_k"].to_numpy(dtype=float)
     weights = post["weight"].to_numpy(dtype=float)
     d_lower = float(d_post.min())
-    d_shifted = d_post - d_lower
-    den_w = float(np.average(d_shifted, weights=weights))
-    # ATT * den_w should equal dy_mean_w - tau_bc
+    d_reg = d_post - d_lower
+
+    # Identity 1: effective_dose_mean == weighted mean of d - d_lower
+    den_w = float(np.average(d_reg, weights=weights))
+    assert abs(den_w - survey_overall_result.effective_dose_mean) < 1e-10, (
+        den_w,
+        survey_overall_result.effective_dose_mean,
+    )
+    assert abs(survey_overall_result.d_lower - d_lower) < 1e-12, (
+        survey_overall_result.d_lower,
+        d_lower,
+    )
+
+    # Identity 2: direct bias_corrected_local_linear call recovers the
+    # SAME tau_bc the estimator used (HAD defaults: kernel epanechnikov,
+    # alpha 0.05, boundary 0).
+    bc = bias_corrected_local_linear(d_reg, dy, weights=weights, alpha=0.05, kernel="epanechnikov")
+    tau_bc = float(bc.estimate_bias_corrected)
+    assert np.isfinite(tau_bc), tau_bc
+
+    # Identity 3: att = (dy_mean_w - tau_bc) / den_w, bit-equal modulo
+    # FP precision.
     dy_mean_w = float(np.average(dy, weights=weights))
-    implied_tau_bc = dy_mean_w - survey_overall_result.att * den_w
-    # tau_bc is the bias-corrected boundary limit at d=d_lower; on the
-    # linear DGP with att_intercept=0 this is near zero (the
-    # pre-vs-post difference at the lightest-touch state is mostly
-    # time trend + noise). Lock it to a finite range — the exact value
-    # depends on the local-linear bandwidth selection at seed=87 but
-    # is a deterministic function of the panel.
-    assert np.isfinite(implied_tau_bc), implied_tau_bc
-    # The locked algebraic identity: ATT must satisfy
-    # ATT = (dy_mean_w - tau_bc) / den_w. The implied tau_bc here is
-    # what the estimator computed. Sanity-check the order of magnitude:
-    # |tau_bc| should be on the scale of |dy_mean_w| (both are
-    # outcome-scale, post - pre differences).
-    assert abs(implied_tau_bc) < 2.0 * abs(dy_mean_w) + 100.0, (
-        implied_tau_bc,
-        dy_mean_w,
+    manual_att = (dy_mean_w - tau_bc) / den_w
+    assert abs(manual_att - survey_overall_result.att) < 1e-10, (
+        manual_att,
+        survey_overall_result.att,
+        manual_att - survey_overall_result.att,
     )
