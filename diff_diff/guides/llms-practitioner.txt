@@ -193,7 +193,10 @@ see REGISTRY HeterogeneousAdoptionDiD edge cases):
 |        filters to the last cohort + never-treated (Appendix B.2)
 |        and the estimand becomes last-cohort-only WAS — use
 |        ChaisemartinDHaultfoeuille if full multi-cohort staggered
-|        support under continuous treatment is required.
+|        support under continuous treatment is required. For the
+|        survey-weighted HAD workflow on a stratified-PSU design
+|        (BRFSS / CPS / NHANES shape), see Tutorial 22:
+|        docs/tutorials/22_had_survey_design.ipynb.
 |
 Is treatment adoption staggered (multiple cohorts, different timing)?
 |-- YES: Do NOT use plain TWFE. Use one of:

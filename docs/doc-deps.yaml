@@ -391,6 +391,9 @@ sources:
       - path: docs/tutorials/21_had_pretest_workflow.ipynb
         type: tutorial
         note: "Drift-locks `HAD(design=\"auto\")` resolution to `continuous_at_zero` on T21's panel via `tests/test_t21_had_pretest_workflow_drift.py::test_had_design_auto_lands_on_continuous_at_zero`; changes to `_detect_design()` heuristic should re-validate T21"
+      - path: docs/tutorials/22_had_survey_design.ipynb
+        type: tutorial
+        note: "Survey-aware HAD walkthrough; drift-locked at `tests/test_t22_had_survey_design_drift.py`. Drift-locks `HAD(design=\"auto\")` resolution to `continuous_near_d_lower` on T22's panel and the `survey_design=` path's SE/CI behavior."
 
   diff_diff/had_pretests.py:
     drift_risk: medium
@@ -410,6 +413,9 @@ sources:
       - path: docs/tutorials/21_had_pretest_workflow.ipynb
         type: tutorial
         note: "Composite pre-test workflow walkthrough; drift-locked at tests/test_t21_had_pretest_workflow_drift.py"
+      - path: docs/tutorials/22_had_survey_design.ipynb
+        type: tutorial
+        note: "Survey-aware pretest workflow walkthrough (overall + event-study under SurveyDesign(strata=...)); drift-locks `_QUG_DEFERRED_SUFFIX`, the event-study summary QUG-skip note, and joint pretrends/homogeneity horizon labels under stratified-clustered Stute bootstrap (PR #432). Drift-locked at tests/test_t22_had_survey_design_drift.py"
 
   diff_diff/local_linear.py:
     drift_risk: low

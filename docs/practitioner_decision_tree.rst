@@ -315,7 +315,13 @@ identification rests on stronger structural assumptions (Design 1).
    For a full walkthrough including data setup, the design auto-detection
    diagnostic, the multi-week event study, and a stakeholder communication
    template, see `Tutorial 20: HAD for National Brand Campaign with Regional
-   Spend Intensity <tutorials/20_had_brand_campaign.ipynb>`_.
+   Spend Intensity <tutorials/20_had_brand_campaign.ipynb>`_. For the
+   composite pre-test diagnostic walkthrough on top of HAD, see
+   `Tutorial 21: HAD Pre-test Workflow
+   <tutorials/21_had_pretest_workflow.ipynb>`_. For the same workflow under
+   stratified survey weights (BRFSS-shape design), see
+   `Tutorial 22: Survey-Weighted HAD
+   <tutorials/22_had_survey_design.ipynb>`_.
 
 
 .. _section-few-markets:
@@ -412,7 +418,10 @@ See :doc:`practitioner_getting_started` for an end-to-end example.
 
    For a full walkthrough with brand funnel metrics and staggered rollouts, see
    `Tutorial 17: Brand Awareness Survey
-   <tutorials/17_brand_awareness_survey.ipynb>`_.
+   <tutorials/17_brand_awareness_survey.ipynb>`_. For the survey-design path
+   through HAD (universal-rollout, continuous dose, stratified survey weights),
+   see `Tutorial 22: Survey-Weighted HAD
+   <tutorials/22_had_survey_design.ipynb>`_.
 
 
 At a Glance

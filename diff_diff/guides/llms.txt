@@ -97,6 +97,7 @@ Full practitioner guide: call `diff_diff.get_llm_guide("practitioner")`
 - [15 Efficient DiD](https://diff-diff.readthedocs.io/en/stable/tutorials/15_efficient_did.html): Chen, Sant'Anna & Xie (2025) efficient DiD — optimal weighting, PT-All vs PT-Post, efficiency gains
 - [16 Survey DiD](https://diff-diff.readthedocs.io/en/stable/tutorials/16_survey_did.html): Survey-weighted DiD — SurveyDesign, strata/PSU/FPC, replicate weights, subpopulation analysis, DEFF diagnostics
 - [16 Wooldridge ETWFE](https://diff-diff.readthedocs.io/en/stable/tutorials/16_wooldridge_etwfe.html): Wooldridge (2023, 2025) ETWFE — saturated OLS, logit/Poisson (ASF-based ATT), aggregation types
+- [22 HAD Survey-Weighted Workflow](https://diff-diff.readthedocs.io/en/stable/tutorials/22_had_survey_design.html): HeterogeneousAdoptionDiD + did_had_pretest_workflow under SurveyDesign(strata, psu, weights, fpc) — BRFSS-shape panel, modest SE inflation explanation, Phase 4.5 C0 QUG-deferred verdict
 
 ## Survey Support
 

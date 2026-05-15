@@ -140,6 +140,35 @@ Supports both TSL and replicate-weight variance.
 See `docs/api/prep.rst` for the API reference and `docs/methodology/REGISTRY.md`
 for the methodology entry.
 
+### Phase 4.5 C: HAD Stute Survey Workflow ✅ Shipped
+
+The HeterogeneousAdoptionDiD pretest family (`stute_test`,
+`stute_joint_pretest`, `joint_pretrends_test`, `joint_homogeneity_test`,
+and the composite `did_had_pretest_workflow`) gained end-to-end
+support for `SurveyDesign(strata=..., psu=..., weights=..., fpc=...)`
+in PR #432 (2026-05). The Stute CvM bootstrap on stratified survey
+designs uses a documented synthesis of clustered-wild-bootstrap
+ingredients (Cameron-Gelbach-Miller 2008 cluster-level multipliers;
+Davidson-Flachaire 2008 wild-bootstrap centering; Wu 1986 / Liu 1988
+Bessel small-sample correction; Djogbenou-MacKinnon-Nielsen 2019
+cluster-wild consistency for nonlinear functionals): within-stratum
+demean + `sqrt(n_h/(n_h-1))` rescale on the PSU multipliers BEFORE
+the per-obs broadcast in the wild-residual loop. The shared helper
+`bootstrap_utils.apply_stratum_centering` backs both the new Stute
+path and the existing HAD sup-t event-study cband bootstrap. The QUG
+step remains permanently deferred under survey/weights (Phase 4.5
+C0); the workflow surfaces this in `report.qug=None` plus the
+`_QUG_DEFERRED_SUFFIX` substring on `report.verdict`. Tutorial 22
+(`docs/tutorials/22_had_survey_design.ipynb`) walks the workflow
+end-to-end on a BRFSS-shape state-rollout panel.
+
+Remaining HAD survey-path deferrals (separate follow-up PRs):
+`lonely_psu='adjust'` + singleton strata (pseudo-stratum centering
+transform not yet derived for the Stute functional — same gap as the
+HAD sup-t deviation at REGISTRY:2382); replicate-weight designs
+(BRR / Fay / JK1 / JKn / SDR — separate Rao-Wu / JKn bootstrap
+composition).
+
 ---
 
 ## Phase 10: Academic Grounding (History)
