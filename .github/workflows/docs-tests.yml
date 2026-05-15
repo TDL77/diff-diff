@@ -101,3 +101,34 @@ jobs:
         # PR #410 brought make html to 0 warnings; -W keeps it that way by
         # blocking any new warning from sneaking in.
         run: make -C docs html SPHINXOPTS="-W"
+
+  docs-deps-py39-smoke:
+    name: Validate docs deps install on Python 3.9 (floor compat)
+    if: >-
+      github.event_name != 'pull_request'
+      || contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v6
+        with:
+          # 3.9 is the project's declared floor (pyproject.toml requires-python
+          # >=3.9). The sphinx-build job above runs on 3.11; this job verifies
+          # the docs dependency set actually installs on the floor Python so
+          # we catch drift like pydata-sphinx-theme>=0.17.1 (which requires
+          # Python>=3.10) before it lands.
+          python-version: '3.9'
+
+      - name: Install docs dependencies
+        # Same pip install line as sphinx-build above. Just installs - does
+        # not run a Sphinx build (sphinx-build covers full rendering on 3.11).
+        # Failure here means the docs floor declared in pyproject.toml /
+        # .readthedocs.yaml / above is not installable on Python 3.9.
+        run: pip install "numpy>=1.20.0" "pandas>=1.3.0" "scipy>=1.7.0" "sphinx>=6.0" "pydata-sphinx-theme>=0.16.1" "sphinxext-opengraph>=0.9" "sphinx-sitemap>=2.5" "nbsphinx>=0.9" "matplotlib>=3.5" "ipython>=8.0"
+
+      - name: Confirm pydata-sphinx-theme version
+        # Surface the resolved version in the log for future debugging.
+        run: pip show pydata-sphinx-theme | head -3
