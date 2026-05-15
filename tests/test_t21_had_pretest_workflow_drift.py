@@ -366,3 +366,82 @@ def test_yatchew_side_panel_mean_independence_passes(yatchew_side_panel_inputs):
     assert res_mi.sigma2_lin > res_lin.sigma2_lin
     # And the differencing variance (sigma2_diff) is shared across modes.
     assert round(res_mi.sigma2_diff, 4) == round(res_lin.sigma2_diff, 4)
+
+
+# =============================================================================
+# Notebook-narrative cross-check
+# =============================================================================
+#
+# The asserts above re-derive numbers from the locked DGP+seed but do NOT
+# verify that the rendered tutorial actually quotes those same numbers.
+# Without this layer, the notebook prose can drift independently of the
+# library numerics (or vice versa) and CI stays green because
+# `nbsphinx_execute = "never"` in `docs/conf.py` (CI doesn't re-execute
+# notebooks during build). Use the shared tutorial-drift helper that
+# parses the notebook JSON and checks both markdown prose AND executed
+# output cells (since the load-bearing verdict strings appear in
+# print()-rendered output blocks, not just markdown prose).
+
+
+T21_NOTEBOOK = "docs/tutorials/21_had_pretest_workflow.ipynb"
+
+
+def test_notebook_quotes_match_pinned_constants():
+    """Every load-bearing verdict/value this file pins must appear
+    verbatim in the rendered T21 notebook surface (markdown prose +
+    executed output cells).
+
+    Closes the gap the file-level docstring claims to cover ("check
+    against the values quoted in the tutorial markdown") but the rest
+    of the file did not actually exercise — every prior assert
+    re-derives numbers from the DGP and compares them to a hardcoded
+    constant, leaving the notebook completely uncross-checked.
+    Without this test, the notebook can drift independently of the
+    library numerics (or vice versa) and CI stays green because
+    ``nbsphinx_execute = "never"`` in ``docs/conf.py``.
+    """
+    from tests._tutorial_drift import assert_quotes_in_rendered
+
+    expected_quotes = [
+        # ---- Verdict-string anchors ----
+        # Overall verdict substring (also pinned in test_overall_workflow_*).
+        # Appears in markdown prose AND in the verdict-print output cell.
+        "paper step 2 deferred to Phase 3 follow-up",
+        # Event-study verdict substring (rendered output of the
+        # aggregate='event_study' workflow + markdown reading-cell).
+        "TWFE admissible under Section 4 assumptions",
+        # Event-study output cell anchor — full verdict header.
+        "QUG, joint pre-trends, and joint linearity diagnostics fail-to-reject",
+        # ---- Structural-field anchors ----
+        "aggregate = 'event_study'",
+        "pretrends_joint populated? True",
+        "homogeneity_joint populated? True",
+        "aggregate = 'overall'",
+        "pretrends_joint populated? False",
+        # ---- Verdict-reading markdown anchors (cell 6) ----
+        "T = D_(1) / (D_(2) - D_(1)) ~ 3.86",
+        "1/alpha - 1 = 19",
+        # ---- Numeric anchors pinned analytically above ----
+        # Every value pinned via round(..., 4) == 0.NNNN in this file
+        # must also appear in the rendered notebook (otherwise the
+        # tutorial prose / output is showing a different number than
+        # the test claims to lock).
+        "0.2059",  # QUG p-value (test_overall_workflow_*)
+        "0.6860",  # Stute p-value tolerance band anchor
+        "0.0720",  # joint-pretrends Stute p-value (event-study)
+        "0.7630",  # joint-homogeneity Stute p-value (event-study)
+        "0.4917",  # Yatchew side-panel null=linearity p-value
+        "0.2899",  # Yatchew side-panel null=mean_independence p-value
+        # Design auto-detect outcome (also pinned by overall-path tests).
+        "continuous_at_zero",
+        "WAS",
+        # Overall Yatchew p-value (analytical short-circuit on this DGP).
+        "1.0000",
+        # Overall Yatchew sigma2_lin in the rendered output.
+        "6250.2569",
+        # Side-panel Yatchew sigma2_lin under null='linearity'.
+        "6.5340",
+        # Side-panel Yatchew sigma2_lin under null='mean_independence'.
+        "7.0076",
+    ]
+    assert_quotes_in_rendered(T21_NOTEBOOK, expected_quotes, surface="rendered")
