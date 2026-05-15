@@ -402,6 +402,7 @@ class BaconDecomposition:
         ----------
         weights : str, default="approximate"
             Weight calculation method:
+
             - "approximate": Fast simplified formula (default)
             - "exact": Variance-based weights from Goodman-Bacon (2021)
         """

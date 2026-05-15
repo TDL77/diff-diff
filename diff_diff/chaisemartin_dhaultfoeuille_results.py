@@ -893,7 +893,7 @@ class ChaisemartinDHaultfoeuilleResults:
 
         cv = self.coef_var
         if np.isfinite(cv):
-            cv_label = f"CV (SE/|{overall_row_label}|):"
+            cv_label = f"CV (SE/abs({overall_row_label})):"
             lines.append(f"{cv_label:<25} {cv:>10.4f}")
 
         lines.append("")
