@@ -24,9 +24,9 @@ A **Complete** entry has a documented review pass against the primary academic s
 
 The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
 
-**In Progress** entries have substantial scaffolding in place — REGISTRY.md section, paper review under `docs/methodology/papers/`, methodology test file, or R parity fixtures — but no formal walk-through has been captured here yet. The "Documentation in place" sub-section enumerates what already exists; the "Outstanding for promotion" sub-section enumerates what's needed to flip to Complete.
+**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have a paper review, a dedicated methodology test file, and R parity fixtures (e.g., DCDH, HAD); others have only the REGISTRY entry and unit tests (e.g., BaconDecomposition, PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
 
-**Not Started** entries have neither a tracker walk-through nor most of the prerequisite scaffolding. Substantive paper-vs-code audit work is required.
+**Not Started** entries have neither a tracker walk-through nor an REGISTRY.md section. This tracker no longer carries any Not Started rows; new estimators are expected to enter as In Progress when their REGISTRY entry lands.
 
 ---
 
@@ -78,11 +78,11 @@ The catalog grew incrementally over several quarters, so formats vary across the
 
 | Tool | Module | R Reference | Status | Last Review |
 |------|--------|-------------|--------|-------------|
-| BaconDecomposition | `bacon.py` | `bacondecomp::bacon()` | **Not Started** | — |
+| BaconDecomposition | `bacon.py` | `bacondecomp::bacon()` | **In Progress** | — |
 | HonestDiD | `honest_did.py` | `HonestDiD` package | **Complete** | 2026-04-01 |
-| PreTrendsPower | `pretrends.py` | `pretrends` package | **Not Started** | — |
-| PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | **Not Started** | — |
-| PlaceboTests | `diagnostics.py` | (no canonical reference) | **Not Started** | — |
+| PreTrendsPower | `pretrends.py` | `pretrends` package | **In Progress** | — |
+| PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | **In Progress** | — |
+| PlaceboTests | `diagnostics.py` | (no canonical reference) | **In Progress** | — |
 
 ### Cross-Cutting Inference Features
 
@@ -907,19 +907,18 @@ and covariate-adjusted specifications.)
 | Module | `bacon.py` |
 | Primary Reference | Goodman-Bacon (2021), *Difference-in-differences with variation in treatment timing*, J. Econometrics 225(2), 254-277 |
 | R Reference | `bacondecomp::bacon()` |
-| Status | **Not Started** |
+| Status | **In Progress** |
 | Last Review | — |
 
-**Current state:**
-- REGISTRY.md section: `## BaconDecomposition` (three comparison types, weight construction, TWFE reconstitution, weighted survey path under Phase 3)
-- Implementation: 31 unit tests in `tests/test_bacon.py`
-- No paper review on file under `docs/methodology/papers/`
-- No methodology test file under `tests/test_methodology_*.py`
-- No R parity fixture against `bacondecomp::bacon()`
-- REGISTRY Implementation Checklist has every row unchecked except the survey-design Phase 3 row — formal R-parity walk-through has not been done
+**Documentation in place:**
+- REGISTRY.md section: `## BaconDecomposition` (three comparison types — treated_vs_never, earlier_vs_later, later_vs_earlier; weight construction; TWFE reconstitution; weighted survey path under Phase 3)
+- Implementation: `tests/test_bacon.py` (basic decomposition, weight properties, integration with `TwoWayFixedEffects.decompose()`)
 
-**Next step for promotion:**
-- Substantive review pass — first target chosen during the 2026-05-15 methodology-review refresh session. Read Goodman-Bacon (2021), audit `bacon.py` against the paper's decomposition (Equation 11, weight construction in Section 3, three comparison types in Section 4), generate R parity fixtures via `bacondecomp::bacon()`, write `tests/test_methodology_bacon.py` with paper-equation-numbered assertions, populate Verified Components / Corrections Made / Deviations here.
+**Outstanding for promotion:**
+- **Substantive review pass — first target chosen during the 2026-05-15 methodology-review refresh session.** Read Goodman-Bacon (2021), audit `bacon.py` against the paper's decomposition (Equation 11, weight construction in Section 3, three comparison types in Section 4), generate R parity fixtures via `bacondecomp::bacon()`, write `tests/test_methodology_bacon.py` with paper-equation-numbered assertions, populate Verified Components / Corrections Made / Deviations here.
+- Paper review under `docs/methodology/papers/goodman-bacon-2021-review.md`
+- R parity fixture against `bacondecomp::bacon()` covering treated_vs_never, earlier_vs_later, later_vs_earlier weight buckets and their relative shares
+- Verify the REGISTRY Implementation Checklist (all rows currently unchecked except the survey-design Phase 3 row)
 
 ---
 
@@ -1019,19 +1018,18 @@ and covariate-adjusted specifications.)
 | Module | `pretrends.py` |
 | Primary Reference | Roth (2022), *Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends*, AER:I 4(3), 305-322 |
 | R Reference | `pretrends` package |
-| Status | **Not Started** |
+| Status | **In Progress** |
 | Last Review | — |
 
-**Current state:**
+**Documentation in place:**
 - REGISTRY.md section: `## PreTrendsPower` (MDV at target power, four violation types — linear/constant/last_period/custom, power curve plotting, HonestDiD integration)
-- Implementation: 63 unit tests in `tests/test_pretrends.py` plus event-study coverage in `tests/test_pretrends_event_study.py`
-- No paper review on file under `docs/methodology/papers/`
-- No methodology test file
-- No R parity fixture against the `pretrends` R package
-- REGISTRY Implementation Checklist all four items unchecked
+- Implementation: `tests/test_pretrends.py` (point-estimator, MDV, power curve, sensitivity) plus event-study coverage in `tests/test_pretrends_event_study.py`
 
-**Next step for promotion:**
-- Read Roth (2022); paper review under `docs/methodology/papers/`; R-parity walk-through against `pretrends` R package (the four power calculations); write `tests/test_methodology_pretrends.py`; populate Verified Components / Deviations.
+**Outstanding for promotion:**
+- Paper review under `docs/methodology/papers/roth-2022-review.md`
+- Dedicated `tests/test_methodology_pretrends.py` with paper-equation-numbered Verified Components walk-through
+- R parity fixture against the `pretrends` R package (the four power calculations: linear, constant, last-period, custom)
+- Verify the REGISTRY Implementation Checklist (all four items currently unchecked)
 
 ---
 
@@ -1040,20 +1038,20 @@ and covariate-adjusted specifications.)
 | Field | Value |
 |-------|-------|
 | Module | `power.py` |
-| Primary Reference | Bloom (1995); Burlig, Preonas & Woerman (2020) — clustered DiD power; needs primary-source confirmation in REGISTRY |
+| Primary References | Bloom (1995); Burlig, Preonas & Woerman (2020) — clustered DiD power (both listed in REGISTRY) |
 | R Reference | `pwr` (basic) / `DeclareDesign` (design-based simulation) |
-| Status | **Not Started** |
+| Status | **In Progress** |
 | Last Review | — |
 
-**Current state:**
-- REGISTRY.md section: `## PowerAnalysis` (MDE / power / sample size / simulation-based power / cluster adjustment) — but `Primary source:` line is blank
-- Implementation: 202 unit tests in `tests/test_power.py`
-- No paper review on file
-- No methodology test file
-- REGISTRY Implementation Checklist all five items unchecked
+**Documentation in place:**
+- REGISTRY.md section: `## PowerAnalysis` (MDE / power / sample size / simulation-based power / cluster adjustment); primary sources Bloom (1995) and Burlig et al. (2020) listed
+- Implementation: `tests/test_power.py` (MDE / power / sample-size / simulation paths plus cluster adjustment)
 
-**Next step for promotion:**
-- Confirm primary source (Bloom 1995 + Burlig et al. 2020 most likely); paper review under `docs/methodology/papers/`; closed-form walk-through against `pwr::pwr.t.test()` and against Burlig et al.'s clustered-DiD power formula; write `tests/test_methodology_power.py`; populate Verified Components / Deviations.
+**Outstanding for promotion:**
+- Paper review under `docs/methodology/papers/` (likely a combined review covering Bloom 1995 + Burlig et al. 2020)
+- Dedicated `tests/test_methodology_power.py` with closed-form walk-through against `pwr::pwr.t.test()` and Burlig et al.'s clustered-DiD power formula
+- Documented reference-validation harness against `pwr` / `DeclareDesign`
+- Verify the REGISTRY Implementation Checklist (all five items currently unchecked)
 
 ---
 
@@ -1062,17 +1060,18 @@ and covariate-adjusted specifications.)
 | Field | Value |
 |-------|-------|
 | Module | `diagnostics.py` |
-| Primary Reference | None canonical (general permutation/leave-one-out diagnostic) |
+| Primary Reference | None canonical (general permutation / leave-one-out diagnostic) |
 | R Reference | None canonical |
-| Status | **Not Started** |
+| Status | **In Progress** |
 | Last Review | — |
 
-**Current state:**
-- REGISTRY.md section: `## PlaceboTests` (NaN-inference edge cases for permutation_test and leave_one_out_test)
+**Documentation in place:**
+- REGISTRY.md section: `## PlaceboTests` (NaN-inference edge cases for `permutation_test` and `leave_one_out_test`)
 - Implementation: tests embedded in `tests/test_diagnostics.py`
 
-**Next step for promotion:**
-- Decide whether this surface needs a separate methodology review or whether it should be absorbed into per-estimator diagnostic sections. The diagnostic is methodologically lightweight; a brief Verified Components walk-through and a deviation log for the NaN-inference convention are likely sufficient.
+**Outstanding for promotion:**
+- Decide whether this surface warrants a standalone methodology review or whether the brief Verified Components walk-through + NaN-inference deviation log should live as a sub-section under each per-estimator diagnostic block instead
+- If kept standalone: brief Verified Components block + Deviations block for the NaN-inference convention
 
 ---
 
@@ -1175,24 +1174,27 @@ more graceful handling of edge cases while still signaling invalid inference to 
 
 ### Priority Order (2026-05-15)
 
-Substantive review pass priority for the **Not Started** entries:
+Promotion priority for the **In Progress** entries, ordered by what's blocked on substantive review work (top of list = needs review next) vs. consolidation pass (bottom of list = mostly tracker walk-through):
+
+**Substantive-review-blocked (no methodology test file, no paper review, no R parity):**
 
 1. **BaconDecomposition** — chosen for next substantive review during the 2026-05-15 tracker refresh session. Smaller scope than estimator reviews; R reference (`bacondecomp::bacon()`) available; methodology is well-understood (Goodman-Bacon 2021); REGISTRY checklist provides a ready-made target.
 2. **PreTrendsPower** — small surface, established R package (`pretrends`), Roth (2022) is short.
-3. **PowerAnalysis** — needs primary source confirmation first; larger surface (MDE / power / sample size / simulation paths); least urgent if the library's power-analysis utilities are not heavily used.
-4. **PlaceboTests** — likely absorbed into per-estimator diagnostic sections rather than tracked separately.
+3. **PowerAnalysis** — larger surface (MDE / power / sample size / simulation paths); REGISTRY already lists Bloom (1995) and Burlig et al. (2020) as primary sources; least urgent if the library's power-analysis utilities are not heavily used.
+4. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
+5. **EfficientDiD** — no paper review on file; substantial implementation work (`tests/test_efficient_did.py` + validation tests) needs paper-vs-code audit against Chen, Sant'Anna & Xie (2025).
+6. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
 
-Promotion priority for the **In Progress** entries (after `BaconDecomposition`):
+**Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
-1. **HeterogeneousAdoptionDiD (HAD)** — largest current surface, Phase 4.5 just shipped, no paper-review-equivalent walk-through here yet (despite 550+ tests and a comprehensive REGISTRY section).
-2. **ChaisemartinDHaultfoeuille (DCDH)** — paper review + 12 methodology tests + 24 R parity tests + 347 unit tests. Closest to ready; mostly a consolidation pass.
-3. **WooldridgeDiD (ETWFE)** — companion-paper review (Wooldridge 2023 nonlinear extension) merged in PR #443; primary-source review for Wooldridge (2025) ETWFE not yet on file, and no dedicated methodology test file. Solid unit-test coverage in `tests/test_wooldridge.py`.
-4. **ContinuousDiD** — 15 methodology tests already in place; mostly a consolidation pass with a documented boundary-knots deviation from R `contdid` v0.1.0.
-5. **TROP** — paper review recently merged (PR #443). 120 unit tests; needs methodology file and cross-language anchor (when paper-author reference becomes available).
-6. **EfficientDiD** — no paper review on file; substantial implementation work (130 + 12 tests) needs paper-vs-code audit and a fresh paper review.
-7. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture.
-8. **StaggeredTripleDifference** — shares paper review with TripleDifference; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
-9. **ConleySpatialHAC / Survey Data Support** — cross-cutting features; promotion requires the per-estimator integration paths to be locked down first.
+7. **HeterogeneousAdoptionDiD (HAD)** — largest current surface, Phase 4.5 just shipped; shares the de Chaisemartin (2026) paper review with DCDH; needs a dedicated Verified Components block.
+8. **ChaisemartinDHaultfoeuille (DCDH)** — paper review + 12 methodology tests + 24 R parity tests + 347 unit tests. Closest to ready; mostly a consolidation pass.
+9. **WooldridgeDiD (ETWFE)** — companion-paper review (Wooldridge 2023 nonlinear extension) merged in PR #443; primary-source review for Wooldridge (2025) ETWFE not yet on file, and no dedicated methodology test file.
+10. **ContinuousDiD** — 15 methodology tests already in place; mostly a consolidation pass with a documented boundary-knots deviation from R `contdid` v0.1.0.
+11. **TROP** — paper review recently merged (PR #443); needs methodology file and cross-language anchor (when paper-author reference becomes available).
+12. **StaggeredTripleDifference** — shares paper review with TripleDifference; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
+13. **ConleySpatialHAC** — paper review + committed R `conleyreg` goldens; needs dedicated methodology test file + summary R-parity table in this tracker.
+14. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
 
 ---
 
