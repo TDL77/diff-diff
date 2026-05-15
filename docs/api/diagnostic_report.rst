@@ -13,13 +13,15 @@ result.
 
 Methodology deviations (no traffic-light gates, opt-in placebo
 battery, estimator-native diagnostic routing, power-aware phrasing
-threshold) are documented in ``docs/methodology/REPORTING.md``.
+threshold) are documented in `docs/methodology/REPORTING.md
+<https://github.com/igerber/diff-diff/blob/main/docs/methodology/REPORTING.md>`_.
 
 The schema carries a top-level ``target_parameter`` block
 (experimental) naming what the headline scalar represents per
 estimator. See the "Target parameter" section of
-``docs/methodology/REPORTING.md`` for the per-estimator dispatch and
-schema shape.
+`docs/methodology/REPORTING.md
+<https://github.com/igerber/diff-diff/blob/main/docs/methodology/REPORTING.md>`_
+for the per-estimator dispatch and schema shape.
 
 Data-dependent checks (2x2 parallel trends on simple DiD,
 Goodman-Bacon decomposition on staggered estimators, the EfficientDiD
