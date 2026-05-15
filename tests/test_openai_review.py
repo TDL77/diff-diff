@@ -2845,6 +2845,37 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         )
 
     @staticmethod
+    def _join_shell_continuations(lines):
+        """Fold backslash-continued shell lines into single logical
+        commands. Returns a list of `(start_line_idx, joined_text)`
+        tuples where `start_line_idx` is the line where the logical
+        command begins (preserved so the staging test can still
+        report meaningful line numbers in ordering errors).
+
+        R7 fix for PR #436: prior version processed each physical
+        line independently. A future workflow edit could split a
+        forbidden command across lines via `\\` continuation:
+            python3 \\
+              diff_diff/evil.py \\
+              --arg foo
+        and bypass the classifier (each line is incomplete).
+        """
+        joined = []
+        i = 0
+        while i < len(lines):
+            start_idx = i
+            text = lines[i].rstrip()
+            while text.endswith("\\"):
+                text = text[:-1].rstrip()
+                i += 1
+                if i >= len(lines):
+                    break
+                text = text + " " + lines[i].strip()
+            joined.append((start_idx, text))
+            i += 1
+        return joined
+
+    @staticmethod
     def _classify_shell_line(line):
         """Tokenize a shell line via shlex and return a list of
         (action, target) tuples for known operations.
@@ -2867,22 +2898,25 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         segment independently. Required so e.g. `echo x | tee /tmp/foo`
         recognizes `tee /tmp/foo` as the second-segment command.
 
-        R6 fix for PR #436: replaced raw-text regex matching with
-        shlex-based shell tokenization. Catches bypasses regex missed:
-          - quoted paths: `python3 "diff_diff/evil.py"`
-          - option-bearing forms: `cp -f src dst`
-          - quoted redirect destinations: `> "/tmp/foo"`
-          - multi-command pipes: `echo x | tee /tmp/foo`
+        Handles env-var assignment and wrapper-command prefixes
+        (`VAR=1 python3 ...`, `env FOO=1 python3 ...`) by stripping
+        them before classifying the underlying command. R7 fix for
+        PR #436.
+
+        R6 fix: shlex-based tokenization replacing raw-text regex.
+        R7 fix: prefix-unwrap for env-var / wrapper-cmd forms.
         """
+        import re
         import shlex
 
         line = line.strip()
         if not line or line.startswith("#"):
             return []
-        # Strip trailing backslash (shell line continuation). shlex
-        # raises "No escaped character" otherwise. The command's
-        # identity (cmd, key positionals) is typically on the first
-        # line of a continuation; subsequent lines are usually args.
+        # Strip trailing backslash (shell line continuation) for
+        # single-line callers. The _join_shell_continuations helper
+        # is the proper way to fold continuations across body lines;
+        # this fallback handles the edge case of a stray-trailing-`\`
+        # passed in directly.
         if line.endswith("\\"):
             line = line[:-1].rstrip()
             if not line:
@@ -2906,6 +2940,8 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             "if", "then", "else", "elif", "do", "while", "for",
             "done", "fi", "until", "case", "esac",
         }
+        WRAPPER_CMDS = {"env", "command", "nohup", "exec", "time"}
+        ENV_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
         FLAGS_WITH_ARG = {"-c", "-m"}
 
         # Split into shell command segments by operator tokens.
@@ -2926,6 +2962,37 @@ class TestWorkflowDoesNotExecutePRHeadCode:
             # Strip leading shell control keywords
             while tokens and tokens[0] in LEADING_KEYWORDS:
                 tokens.pop(0)
+            if not tokens:
+                continue
+
+            # Strip env-var assignments (`VAR=1`, `FOO_BAR=baz`) and
+            # wrapper commands (`env`, `command`, `nohup`, etc.) until
+            # we reach the actual underlying command. R7 fix for #436.
+            #   `VAR=1 python3 foo.py`         -> `python3 foo.py`
+            #   `env FOO=1 python3 foo.py`     -> `python3 foo.py`
+            #   `env -i FOO=1 python3 foo.py`  -> `python3 foo.py`
+            #   `nohup python3 foo.py`         -> `python3 foo.py`
+            #   `command python3 foo.py`       -> `python3 foo.py`
+            #   `time python3 foo.py`          -> `python3 foo.py`
+            # Known wrapper flags that consume a positional arg (so
+            # we skip the right number of tokens):
+            WRAPPER_FLAGS_WITH_ARG = {"-u", "-S"}
+            while tokens:
+                if tokens[0] in WRAPPER_CMDS:
+                    tokens.pop(0)
+                    # Skip wrapper flags (e.g., `env -i`, `env -u VAR`).
+                    while tokens and tokens[0].startswith("-"):
+                        flag = tokens.pop(0)
+                        if flag in WRAPPER_FLAGS_WITH_ARG and tokens:
+                            tokens.pop(0)
+                    # `env`/`command` may be followed by NAME=value
+                    # tokens before the underlying command; strip
+                    # those in the next loop iteration via ENV_VAR_RE.
+                    continue
+                if ENV_VAR_RE.match(tokens[0]):
+                    tokens.pop(0)
+                    continue
+                break
             if not tokens:
                 continue
 
@@ -3028,15 +3095,16 @@ class TestWorkflowDoesNotExecutePRHeadCode:
 
         violations = []
         for label, content in run_contents:
-            for line in content.splitlines():
-                for action, target in self._classify_shell_line(line):
+            joined = self._join_shell_continuations(content.splitlines())
+            for _start_idx, joined_line in joined:
+                for action, target in self._classify_shell_line(joined_line):
                     if action != "python_exec":
                         continue
                     if target in self.ALLOWED_TMP_PYTHON_EXECUTIONS:
                         continue
                     violations.append(
                         f"{label}: non-allowlisted python file "
-                        f"execution {target!r} in: {line.strip()}"
+                        f"execution {target!r} in: {joined_line.strip()[:120]}"
                     )
         assert not violations, (
             "CodeQL #14 dismissal invalidated by python file execution "
@@ -3079,14 +3147,17 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         )
         body_lines = build_block.splitlines()
 
-        # Pre-classify each line once. Skip comment-only lines.
-        line_actions = []  # list of (line_idx, [actions])
-        for i, line in enumerate(body_lines):
-            if line.lstrip().startswith("#"):
+        # Fold backslash-continuations into logical commands BEFORE
+        # classification, then pre-classify each logical line once.
+        # The start_line_idx from `_join_shell_continuations` is
+        # preserved for ordering errors. R7 fix for PR #436.
+        line_actions = []  # list of (start_line_idx, [actions])
+        for start_idx, joined_line in self._join_shell_continuations(body_lines):
+            if joined_line.lstrip().startswith("#"):
                 continue
-            actions = self._classify_shell_line(line)
+            actions = self._classify_shell_line(joined_line)
             if actions:
-                line_actions.append((i, actions))
+                line_actions.append((start_idx, actions))
 
         for tmp_path, base_source in self.ALLOWED_TMP_PYTHON_EXECUTIONS.items():
             staging_indices = []
@@ -3337,6 +3408,95 @@ class TestWorkflowDoesNotExecutePRHeadCode:
         assert write_dests("ln -sf evil.py /tmp/foo.py", "ln_dest") == ["/tmp/foo.py"]
         assert write_dests("ln -s evil.py /tmp/foo.py", "ln_dest") == ["/tmp/foo.py"]
         assert write_dests("ln evil.py /tmp/foo.py", "ln_dest") == ["/tmp/foo.py"]
+
+    def test_classify_unwraps_envvar_and_wrapper_prefixes(self):
+        """R7 regression: env-var assignments and wrapper commands
+        before the actual command must be stripped so the underlying
+        python/cp/etc. is correctly classified.
+
+        Without unwrapping, `VAR=1 python3 evil.py` would have token[0]
+        of `VAR=1` (not in any classifier branch) — silent bypass.
+        """
+        cls = self._classify_shell_line
+
+        def py_targets(line):
+            return [t for a, t in cls(line) if a == "python_exec"]
+
+        # Single env-var prefix
+        assert py_targets("VAR=1 python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        # Multiple env-var prefixes
+        assert py_targets("VAR1=1 VAR2=2 python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        # `env` wrapper with NAME=value args
+        assert py_targets("env FOO=1 python3 -u diff_diff/evil.py") == ["diff_diff/evil.py"]
+        assert py_targets("env -i FOO=1 python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        # `command` / `nohup` / `time` wrappers
+        assert py_targets("command python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        assert py_targets("nohup python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        assert py_targets("time python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        # `exec` wrapper (replaces shell with command)
+        assert py_targets("exec python3 diff_diff/evil.py") == ["diff_diff/evil.py"]
+        # Combined: `if VAR=1 python3 ...; then`
+        assert py_targets("if VAR=1 python3 diff_diff/evil.py; then echo ok; fi") == ["diff_diff/evil.py"]
+
+        # cp prefix-unwrap as well
+        def cp_targets(line):
+            return [t for a, t in cls(line) if a == "cp_dest"]
+
+        assert cp_targets("VAR=1 cp -f src.py /tmp/notebook_md_extract.py") == ["/tmp/notebook_md_extract.py"]
+        assert cp_targets("env FOO=1 cp src.py /tmp/notebook_md_extract.py") == ["/tmp/notebook_md_extract.py"]
+
+    def test_join_shell_continuations_folds_backslash_lines(self):
+        """R7 regression: backslash-continued lines must be folded
+        into a single logical command before classification, so a
+        future workflow edit can't bypass the guard by splitting
+        a forbidden command across lines."""
+        cls = self._classify_shell_line
+        join = self._join_shell_continuations
+
+        # Continued python invocation: script path on next line
+        lines = [
+            "python3 \\",
+            "  diff_diff/evil.py \\",
+            "  --arg foo",
+        ]
+        joined = join(lines)
+        assert len(joined) == 1, f"Expected 1 logical line, got {joined}"
+        start_idx, joined_text = joined[0]
+        assert start_idx == 0
+        py_targets = [t for a, t in cls(joined_text) if a == "python_exec"]
+        assert py_targets == ["diff_diff/evil.py"], (
+            f"Continued python script not detected: {joined_text!r} -> {py_targets!r}"
+        )
+
+        # Continued cp -f overwrite
+        lines = [
+            "cp -f \\",
+            "  diff_diff/poison.py \\",
+            "  /tmp/notebook_md_extract.py",
+        ]
+        joined = join(lines)
+        assert len(joined) == 1
+        _, joined_text = joined[0]
+        cp_targets = [t for a, t in cls(joined_text) if a == "cp_dest"]
+        assert cp_targets == ["/tmp/notebook_md_extract.py"], (
+            f"Continued cp -f not detected: {joined_text!r} -> {cp_targets!r}"
+        )
+
+        # Mix: continuation + non-continuation lines
+        lines = [
+            "echo before",
+            "python3 \\",
+            "  diff_diff/evil.py",
+            "echo after",
+        ]
+        joined = join(lines)
+        assert len(joined) == 3
+        assert [start for start, _ in joined] == [0, 1, 3]
+        py_targets = [
+            t for _, line in joined
+            for a, t in cls(line) if a == "python_exec"
+        ]
+        assert py_targets == ["diff_diff/evil.py"]
 
     def test_classify_git_show_redirect(self):
         """The BASE_SHA staging command must produce a
