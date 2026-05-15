@@ -155,8 +155,9 @@ Testing the parallel trends assumption:
 HAD Pretest Workflow
 --------------------
 
-Companion pretest battery for ``HeterogeneousAdoptionDiD`` (Baker et al.
-2025 QUG/Stute/Yatchew tests + unified report wrapper):
+Companion pretest battery for ``HeterogeneousAdoptionDiD`` implementing the
+Section 4 QUG / Stute / Yatchew tests from de Chaisemartin, Ciccia,
+D'Haultfœuille & Knau (2026), plus a unified report wrapper:
 
 .. autosummary::
    :toctree: _autosummary
@@ -236,7 +237,8 @@ Boundary Local-Linear Estimators
 
 Calonico-Cattaneo-Farrell (2018) MSE-optimal bandwidth selector and
 Calonico-Cattaneo-Titiunik (2014) robust-bias-corrected local-linear fit
-used by the continuous-DiD boundary estimator:
+used by ``HeterogeneousAdoptionDiD``'s continuous-dose fit paths
+(``continuous_at_zero`` and ``continuous_near_d_lower``):
 
 .. autosummary::
    :toctree: _autosummary
