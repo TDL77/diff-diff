@@ -2,7 +2,7 @@
 
 **Authors:** Susan Athey, Guido Imbens, Zhaonan Qu, Davide Viviano
 **Citation:** Athey, S., Imbens, G.W., Qu, Z., & Viviano, D. (2025). Triply Robust Panel Estimators. *arXiv preprint arXiv:2508.21536v2*.
-**PDF reviewed:** https://arxiv.org/abs/2508.21536 (v2)
+**PDF reviewed:** https://arxiv.org/abs/2508.21536v2 (version-pinned arXiv abstract for v2)
 **Review date:** 2026-02-08
 
 ---
