@@ -25,7 +25,8 @@ raking with CV ~ 0.30; FPC = 30 PSUs/stratum) onto the same
 continuous-dose HAD panel shape T20 uses (Design 1, dose ~ Uniform[$5K,
 $50K], att_slope=100). DGP and seed locked at ``_scratch/t22/dev.py``.
 
-**Bootstrap p-value pins use abs tolerance bands >= 0.25** per
+**Bootstrap p-value pins use anchored windows of total width 0.30
+(± 0.15 around the seed=22 captured centers)** per
 ``feedback_bootstrap_drift_tests_need_backend_tolerance`` and
 ``feedback_strata_bootstrap_path_divergence``. Stratified Mammen
 multiplier paths (PR #432) reduce effective dofs vs non-strata; PR #432
@@ -392,6 +393,17 @@ def test_survey_se_strictly_inflated_vs_naive(naive_overall_result, survey_overa
     )
 
 
+def test_survey_se_inflation_ratio_in_band(naive_overall_result, survey_overall_result):
+    """Anchored band on the seeded SE-inflation ratio. T22 §3 narrative
+    quotes "around 1.10x" inflation; sign-only assertion above is too
+    weak to catch numerical drift in the magnitude (per CI AI review
+    R4 P3). Locks the seed=87 captured ratio (~1.0985) to a tight
+    window so the §3 prose can't go silently stale if the analytical
+    Binder/TSL composition drifts."""
+    ratio = float(survey_overall_result.se / naive_overall_result.se)
+    assert 1.00 <= ratio <= 1.20, ratio
+
+
 def test_survey_ci_covers_truth(survey_overall_result):
     """Survey-aware CI covers the true slope=100."""
     lo, hi = survey_overall_result.conf_int
@@ -474,8 +486,8 @@ def test_overall_report_all_pass_under_null(overall_report):
 
 def test_overall_report_stute_fails_to_reject(overall_report):
     """Stute CvM fails-to-reject linearity. Anchored bootstrap-p band
-    centered on the seed=22 captured value (~0.42) with abs width
-    ~0.30 per ``feedback_strata_bootstrap_path_divergence``
+    centered on the seed=22 captured value (~0.42) with total width
+    0.30 (± 0.15) per ``feedback_strata_bootstrap_path_divergence``
     (stratified Mammen multiplier reduces effective dofs vs
     non-strata; PR #432 commit ``aef07020`` had to relax bit-equality
     on this code path). Drift either toward rejection or toward an
@@ -549,7 +561,7 @@ def test_event_study_report_pretrends_and_homogeneity_fail_to_reject(event_study
     """Both joint pretrends and joint homogeneity fail-to-reject under
     the linear-DGP null. Anchored bootstrap-p bands centered on the
     seed=22 captured values (pretrends ~0.39, homogeneity ~0.41) with
-    abs width ~0.30 per
+    total width 0.30 (± 0.15) per
     ``feedback_strata_bootstrap_path_divergence`` (same rationale as
     Stute overall). Tighter than 0.10-0.95: catches drift in either
     direction rather than only rejecting on cross-the-line moves."""
