@@ -393,6 +393,42 @@ def test_survey_se_strictly_inflated_vs_naive(naive_overall_result, survey_overa
     )
 
 
+def test_event_study_plot_uses_stored_pointwise_ci_endpoints():
+    """The §5 matplotlib plot must build pointwise CI bars from the
+    estimator's stored ``conf_int_low`` / ``conf_int_high`` (which on
+    the survey path use ``t`` critical values with ``df_survey``),
+    NOT from hard-coded ``1.96 * es.se`` Normal-theory bands. The
+    earlier version of the plot used the latter and silently
+    understated uncertainty relative to the table printed in the
+    cell above it (CI AI review post-consolidation P1).
+
+    This is a static check on the notebook source — the plot cell
+    runs but produces no return value we can introspect, so we lock
+    the construction at the source level."""
+    from pathlib import Path
+    import nbformat
+
+    nb_path = (
+        Path(__file__).resolve().parents[1] / "docs" / "tutorials" / "22_had_survey_design.ipynb"
+    )
+    nb = nbformat.read(nb_path, as_version=4)
+    plot_cell_src = None
+    for cell in nb.cells:
+        if cell.cell_type != "code":
+            continue
+        src = cell.source if isinstance(cell.source, str) else "".join(cell.source)
+        if "HAD event-study under SurveyDesign" in src and "errorbar" in src:
+            plot_cell_src = src
+            break
+    assert plot_cell_src is not None, "T22 event-study plot cell not found"
+    # Must use stored endpoints
+    assert "conf_int_low" in plot_cell_src, plot_cell_src
+    assert "conf_int_high" in plot_cell_src, plot_cell_src
+    # Must NOT hard-code Normal-theory bars
+    assert "1.96 * np.asarray(es.se)" not in plot_cell_src, plot_cell_src
+    assert "1.96 * es.se" not in plot_cell_src, plot_cell_src
+
+
 def test_survey_se_inflation_ratio_in_band(naive_overall_result, survey_overall_result):
     """Anchored band on the seeded SE-inflation ratio. T22 §3 narrative
     quotes "around 1.10x" inflation; sign-only assertion above is too
