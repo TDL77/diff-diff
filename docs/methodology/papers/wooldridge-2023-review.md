@@ -51,7 +51,9 @@ where `Ȳ_{dt}` is the sample average for group `d` in period `t`. Special cases
     δ_2 ≡ G⁻¹(E[Y_2(1)|D=1]) - G⁻¹(E[Y_2(0)|D=1])
         = G⁻¹(E[Y_2(1)|D=1]) - (α + β + γ_2)
 
-When `G(z) = exp(z)`, `δ_2` is the log-odds ratio (logit) or log rate ratio (Poisson).
+Interpretation depends on the link function:
+- Exponential mean (`G(z) = exp(z)`, Poisson): `δ_2` is a log difference, i.e., a proportional/log rate effect on `E[Y|...]`.
+- Logistic mean (`G(z) = Λ(z) = 1/(1 + exp(-z))`, logit): `δ_2` is a change in log-odds of `E[Y|...]`.
 
 *Imputation estimator — staggered with covariates (Procedure 1, Eq 3.10-3.11):*
 
@@ -106,6 +108,7 @@ When all units are treated at the same time `g`, the model simplifies to:
 - **Calendar time:** weighted average across cohorts for each calendar period
 - **Group:** weighted average across periods for each cohort
 - SEs for all aggregations via delta method or panel bootstrap
+- **Note (current implementation deviation):** the shipped `WooldridgeDiD` aggregations use cell-level observation-count weights `n_{g,t}` (matching Stata `jwdid_estat`) rather than the paper's cohort-share weights from Eqs. 7.2-7.4. See `docs/methodology/REGISTRY.md` "Aggregations" under WooldridgeDiD and the corresponding line in `TODO.md` ("Tech Debt from Code Reviews") for the tracked deviation.
 
 *Testing parallel trends (Section 4):*
 
@@ -190,7 +193,7 @@ Two approaches:
 | Parameter | Type | Default | Selection Method |
 |-----------|------|---------|-----------------|
 | `G(·)` | function | identity (OLS) | Dictated by outcome type: logistic for binary/fractional, exponential for counts/nonneg |
-| control_group | str | "never_treated" | Use "not_yet_treated" when no pure never-treated group |
+| control_group | str | "not_yet_treated" (matches `diff_diff/wooldridge.py:305`) | Use "never_treated" only when a pure never-treated group is available and required |
 | anticipation | int | 0 | Domain knowledge; test with pre-treatment indicators |
 | covariates | list | None | Pre-intervention, time-constant variables only (Section 7.3 for time-varying) |
 
@@ -201,7 +204,7 @@ Two approaches:
 - **TwoStageDiD (Gardner):** Similar two-step logic (estimate FE on controls, impute counterfactuals). ETWFE pooled approach is a single-step alternative.
 - **SunAbraham:** Both produce interaction-weighted estimates. SA uses TWFE with saturated interactions; ETWFE generalises to nonlinear.
 - **EfficientDiD:** Chen, Sant'Anna & Xie (2025) achieve the semiparametric efficiency bound. ETWFE does not claim efficiency — but the pooled QMLE is typically more efficient than CS in simulations (SEs 45-69% smaller than CS for logit; 31-57% smaller for Poisson — Section 5).
-- **Existing `solve_logit` in `linalg.py`:** Currently used only for propensity scores in CallawaySantAnna. Can be reused for logit outcome estimation. A new `solve_poisson` IRLS solver would be needed for the Poisson path.
+- **Solvers in `linalg.py`:** `solve_logit` is reused for the logit outcome path; `solve_poisson` (`diff_diff/linalg.py:3431`) is the IRLS solver used by the Poisson path (`diff_diff/wooldridge.py:1085-1124`).
 - **`within_transform` in `utils.py`:** Can be used for the OLS path to absorb unit+time FE. NOT suitable for nonlinear paths — logit/Poisson require explicit cohort+time dummy columns (no within-transformation for nonlinear models due to incidental parameters).
 
 ---

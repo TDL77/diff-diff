@@ -2,7 +2,7 @@
 
 **Authors:** Susan Athey, Guido Imbens, Zhaonan Qu, Davide Viviano
 **Citation:** Athey, S., Imbens, G.W., Qu, Z., & Viviano, D. (2025). Triply Robust Panel Estimators. *arXiv preprint arXiv:2508.21536v2*.
-**PDF reviewed:** /Users/igerber/diff-diff/papers/2508.21536v2.pdf
+**PDF reviewed:** https://arxiv.org/abs/2508.21536 (v2)
 **Review date:** 2026-02-08
 
 ---
@@ -277,7 +277,8 @@ Note: Stratified bootstrap -- control and treated units resampled separately. Pr
 - **Treatment matrix**: W (N x T), binary treatment assignments where `W_it in {0, 1}`
 - **Covariates** (optional): X_it, observed covariates for each unit-period pair
 - Treatment must be an absorbing state for standard block assignment (W_it = 1{i > N_0} * 1{t > T_0})
-- General assignment patterns (treatment switching on/off) supported via Equation 13
+- **Paper scope (Equation 13):** the paper extends TROP to general assignment patterns including treatment switching on/off.
+- **Shipped implementation:** the current `diff_diff/trop.py` requires an absorbing-state treatment indicator and rejects non-absorbing/event-style inputs (gate in `diff_diff/trop.py:505-525`, also documented in `docs/methodology/REGISTRY.md` under TROP). Generalization to non-absorbing patterns is not in scope for the current implementation.
 
 ### Computational Considerations
 - **Main bottleneck**: LOOCV grid search -- for each grid point, every control observation requires a separate nuclear-norm penalized weighted least squares solve
@@ -310,7 +311,7 @@ Empirical guidance from Table 2 (cross-validated values, T_post=10, N_tr=10):
 Key finding (Section 4.3, pages 18-19): Substantial heterogeneity across applications in optimal tuning parameters. Removing regression adjustment (lambda_nn = infinity) or time weights (lambda_time = 0) increases RMSE significantly (up to 85% and 91% respectively). Removing unit weights (lambda_unit = 0) increases RMSE only modestly (max 10%).
 
 ### Relation to Existing diff-diff Estimators
-- **Direct implementation**: `diff_diff/trop.py` implements the TROP estimator with both "twostep" (per-observation, Algorithm 2) and "joint" (WLS, homogeneous effect) methods.
+- **Direct implementation**: `diff_diff/trop.py` implements the TROP estimator with two public methods (`diff_diff/trop.py:64-78`, validated at `diff_diff/trop.py:909`): `method="local"` is the per-treated-cell estimator (Algorithm 2), and `method="global"` fits a single weighted model on control observations and averages residual-based treated-cell effects into the ATT (`diff_diff/trop_global.py:554-585`).
 - **Existing Rust backend**: `rust/src/trop.rs` provides accelerated distance matrix computation, LOOCV grid search, and bootstrap variance estimation.
 - **Encompasses SyntheticDiD**: TROP with `lambda_nn = infinity` and specific weight choices reduces to SDID (`diff_diff/synthetic_did.py`).
 - **Encompasses TWFE**: TROP with `lambda_nn = infinity` and uniform weights reduces to DID/TWFE (`diff_diff/twfe.py`).
