@@ -60,24 +60,26 @@ def _required_init_kwargs(cls, overrides):
     Lets us build a minimal result instance for alias-mechanic tests without
     having to enumerate every estimator-specific field. Sentinel values for
     untouched fields are deliberately uninteresting (empty containers, zeros)
-    -- they are not exercised by these tests."""
+    -- they are not exercised by these tests.
+    """
+    import dataclasses as _dc
+
     kwargs = {}
     for f in fields(cls):
         if f.name in overrides:
             continue
-        # Skip fields with defaults; we only need to fill required positionals.
-        if f.default is not f.default_factory and f.default is not getattr(
-            __import__("dataclasses"), "MISSING", None
-        ):
-            # Field has a default value; let the dataclass apply it.
+        # A field is REQUIRED iff both default and default_factory are MISSING.
+        # When default_factory is set (e.g. list/dict factory), the dataclass
+        # will apply it; we must NOT pre-fill the field with a sentinel or we
+        # block the factory.
+        if f.default is not _dc.MISSING or f.default_factory is not _dc.MISSING:
             continue
         # Required field — supply a type-compatible sentinel.
+        # Order container annotations BEFORE the scalar `"float"` / `"int"`
+        # branches so that ``Tuple[float, float]`` is not mis-classified as
+        # scalar (``"float" in "Tuple[float, float]"`` is True).
         ann = str(f.type)
-        if "float" in ann:
-            kwargs[f.name] = 0.0
-        elif "int" in ann:
-            kwargs[f.name] = 0
-        elif "Tuple" in ann or "tuple" in ann:
+        if "Tuple" in ann or "tuple" in ann:
             kwargs[f.name] = (0.0, 0.0)
         elif "List" in ann or "list" in ann:
             kwargs[f.name] = []
@@ -87,10 +89,54 @@ def _required_init_kwargs(cls, overrides):
             kwargs[f.name] = pd.DataFrame()
         elif "ndarray" in ann or "np.ndarray" in ann:
             kwargs[f.name] = np.array([])
+        elif "float" in ann:
+            kwargs[f.name] = 0.0
+        elif "int" in ann:
+            kwargs[f.name] = 0
         else:
             kwargs[f.name] = None
     kwargs.update(overrides)
     return kwargs
+
+
+def test_required_init_kwargs_handles_default_factory_and_tuple_dispatch():
+    """Pin the two `_required_init_kwargs()` fixes from PR #437 R2 directly.
+
+    The helper had two latent bugs masked by the specific fields exercised
+    by the alias tests: factory-only required fields were pre-filled (so
+    the factory never ran), and the type-dispatch checked ``"float"``
+    before ``"Tuple"`` (so ``Tuple[float, float]`` annotations matched the
+    scalar branch). Both fixes are exercised here against a small local
+    dataclass so the contract stays pinned independent of production
+    result-dataclass shape.
+    """
+    from dataclasses import dataclass, field
+    from typing import Tuple
+
+    @dataclass
+    class _Probe:
+        # Required, must be filled with a tuple sentinel — NOT 0.0 — even
+        # though "float" appears in the annotation as a substring.
+        ci: Tuple[float, float]
+        # default_factory-backed: must be OMITTED from kwargs so the
+        # factory runs at construction time.
+        items: list = field(default_factory=list)
+        # default-valued: must also be omitted from kwargs.
+        x: float = 1.5
+
+    kwargs = _required_init_kwargs(_Probe, overrides={})
+    assert kwargs == {"ci": (0.0, 0.0)}, (
+        f"_required_init_kwargs() must (a) supply a tuple sentinel for "
+        f"Tuple[float, float] required fields (not a scalar 0.0), and "
+        f"(b) omit default_factory / default fields so the dataclass "
+        f"applies them at construction time. Got: {kwargs!r}"
+    )
+    # Round-trip: instance construction must succeed and the factory
+    # must have produced an empty list (not been displaced by a sentinel).
+    inst = _Probe(**kwargs)
+    assert inst.ci == (0.0, 0.0)
+    assert inst.items == []
+    assert inst.x == 1.5
 
 
 def _assert_pattern_b_aliases(res, *, att, se, t_stat, p_value, conf_int):
@@ -304,6 +350,15 @@ def test_aliases_are_read_only(cls, ovr):
     for name in ("att", "se", "conf_int", "p_value", "t_stat"):
         with pytest.raises(AttributeError):
             setattr(res, name, object())
+    # ContinuousDiDResults also exposes overall_se / overall_conf_int /
+    # overall_p_value / overall_t_stat as read-only aliases over the
+    # ATT-side canonical fields (no parallel `overall_att` alias is needed
+    # because `overall_att_att` would be confusing; the flat `att` covers
+    # that one). These must also reject assignment.
+    if cls.__name__ == "ContinuousDiDResults":
+        for name in ("overall_se", "overall_conf_int", "overall_p_value", "overall_t_stat"):
+            with pytest.raises(AttributeError):
+                setattr(res, name, object())
 
 
 @pytest.mark.parametrize(

@@ -70,6 +70,16 @@ results.cohort_effects        # Per-cohort effects (via to_dataframe(level='coho
 # Other staggered (ImputationDiD, TwoStageDiD, etc.):
 results.overall_att       # Overall ATT
 results.overall_se        # Standard error
+
+# Flat-alias compatibility: every staggered class above (canonical
+# `overall_*` / `overall_att_*` / `avg_*` prefixed) also exposes the
+# unprefixed flat names `att` / `se` / `conf_int` / `p_value` /
+# `t_stat` as read-only `@property` aliases over the canonical fields.
+# The canonical prefixed names remain the documented and computed
+# surface; the flat aliases are pure read-throughs for compatibility
+# with adapters that `getattr(res, "se", None)`-style query inference.
+results.att               # alias of overall_att / avg_att (or overall_att for ContinuousDiD ATT side)
+results.se                # alias of overall_se / avg_se (or overall_att_se for ContinuousDiD ATT side)
 ```
 
 ---

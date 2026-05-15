@@ -967,6 +967,18 @@ results = bacon_decompose(data, outcome='y', unit='id', time='t', first_treat='f
 
 ## Results Objects
 
+**Flat-alias compatibility note.** Every staggered result class in this
+section (those with canonical `overall_*` / `overall_att_*` / `avg_*`
+prefixed inference fields) ALSO exposes the unprefixed flat names
+`att` / `se` / `conf_int` / `p_value` / `t_stat` as read-only `@property`
+aliases over the canonical fields. The canonical prefixed fields remain
+the documented and computed surface; the flat aliases are pure
+read-throughs for compatibility with external adapters that
+`getattr(res, "se", None)`-style query the inference surface (e.g.
+`balance.interop.diff_diff.as_balance_diagnostic()`). Tables below list
+the canonical names; assume the flat aliases are present on every
+staggered class unless explicitly noted otherwise.
+
 ### DiDResults
 
 Returned by `DifferenceInDifferences.fit()` and `TwoWayFixedEffects.fit()`.
