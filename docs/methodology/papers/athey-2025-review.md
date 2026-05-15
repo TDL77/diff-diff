@@ -272,7 +272,8 @@ Note: Stratified bootstrap -- control and treated units resampled separately. Pr
 ## Implementation Notes
 
 ### Data Structure Requirements
-- **Balanced panel data**: N units x T time periods
+- **Paper assumption — balanced panel:** N units x T time periods.
+- **Shipped implementation:** `diff_diff/trop.py` accepts unbalanced panels with structural gaps (see the "Unbalanced panels" item under Gaps and Uncertainties below and the corresponding section of `docs/methodology/REGISTRY.md` under TROP).
 - **Outcome matrix**: Y (N x T), observed outcomes
 - **Treatment matrix**: W (N x T), binary treatment assignments where `W_it in {0, 1}`
 - **Covariates** (optional): X_it, observed covariates for each unit-period pair

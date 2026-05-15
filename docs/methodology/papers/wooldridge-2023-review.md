@@ -123,9 +123,9 @@ Two approaches:
 - **Count/nonnegative outcomes:** Use exponential `G(z) = exp(z)` with Poisson QLL. Does not require Poisson distribution — only exponential conditional mean.
 - **Corner solutions (`Y ≥ 0` with mass at zero):** Poisson QMLE still valid. Exponential mean handles zeros naturally (p. C56-C57).
 - **All units eventually treated (Section 7.1):** Methods work with minor modification. Last-treated cohort (`g = T`) serves as control. ATTs defined relative to `Y_t(T)` rather than `Y_t(∞)`.
-- **Treatment exit (Section 7.2):** Expand cohort definition to `D_{gh}` where `g` = start period, `h` = end period. ATTs `τ_{ghr}` defined for `r = g,...,T`.
+- **Treatment exit (Section 7.2, extension):** Expand cohort definition to `D_{gh}` where `g` = start period, `h` = end period. ATTs `τ_{ghr}` defined for `r = g,...,T`. The paper notes this extension requires the additional restriction that future shocks to untreated potential outcomes do not drive exit; absent that condition, exit timing becomes endogenous and the standard ETWFE identification argument no longer carries over directly.
 - **Time-varying covariates (Section 7.3):** Replace `X_i` with `X_{it}` in Eq 3.12. Only valid if covariates are not influenced by the intervention.
-- **Multiple treatment levels (Section 7.4):** Replace binary `W_{it}` with set of treatment level indicators. Define cohorts by `D_{iga}` (first period `g`, initial level `a`).
+- **Multiple treatment levels (Section 7.4, extension):** Replace binary `W_{it}` with a set of treatment-level indicators; define cohorts by `D_{iga}` (first period `g`, initial level `a`). The paper describes this only as relatively straightforward, not fully general, and leaves the precise multi-level estimand to future work — so the exact ATT object under non-binary treatment is not pinned down in Wooldridge (2023).
 - **Incidental parameters:** For logit, unit-specific dummies cause incidental parameters problem. Pooled QMLE with cohort dummies (not unit dummies) avoids this. For Poisson with exponential mean, FE Poisson estimator does NOT suffer from incidental parameters (Wooldridge 1999) — this is a unique exception.
 - **No never-treated group:** When `g = T` is the last cohort, it serves as control. Cannot estimate ATT for this last cohort.
 
