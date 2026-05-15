@@ -808,6 +808,7 @@ and covariate-adjusted specifications.)
 - Survey-specific: `tests/test_survey_staggered_ddd.py`
 
 **Outstanding for promotion:**
+- Paper review under `docs/methodology/papers/` covering Ortiz-Villavicencio & Sant'Anna (2025) for the staggered case (the primary paper is shared with TripleDifference, but no dedicated review file exists on disk yet)
 - R parity validation against `triplediff::staggered_ddd()` — CSV fixtures not committed (gitignored); tests skip without local R + `triplediff` (tracked in TODO.md row, PR #245)
 - Per-cohort group-effect SE convention: implementation includes WIF (conservative vs R's `wif=NULL`); documented in REGISTRY, deferred decision on whether to add an opt-in WIF-disable path (tracked in TODO.md row, PR #245)
 - Formal Verified Components walk-through here
@@ -1091,7 +1092,7 @@ These are not estimators but variance/inference plumbing used across many estima
 
 **Documentation in place:**
 - REGISTRY.md section: `## ConleySpatialHAC` plus three sub-sections (combined spatial + cluster product kernel — Wave A #119; performance/scale — Wave A #120; callable `conley_metric` validation — Wave A #123)
-- **Paper review on file**: `docs/methodology/papers/conley-1999-review.md` (review date 2026-05-09); plus three adjacent paper reviews for the spillover initiative: `butts-2021-review.md`, `butts-2023-review.md` (JUE Insight), `clarke-2017-review.md`, `colella-et-al-2019-review.md`
+- **Paper review on file**: `docs/methodology/papers/conley-1999-review.md` (review date 2026-05-09); plus four adjacent paper reviews for the spillover initiative: `butts-2021-review.md`, `butts-2023-review.md` (JUE Insight), `clarke-2017-review.md`, `colella-et-al-2019-review.md`
 - Implementation: 162 tests in `tests/test_conley_vcov.py` (Phase 1 + Phase 2 space-time HAC)
 - Wired through `DifferenceInDifferences`, `MultiPeriodDiD`, `TwoWayFixedEffects` via `vcov_type="conley"` enum
 
@@ -1192,7 +1193,7 @@ Promotion priority for the **In Progress** entries, ordered by what's blocked on
 9. **WooldridgeDiD (ETWFE)** — companion-paper review (Wooldridge 2023 nonlinear extension) merged in PR #443; primary-source review for Wooldridge (2025) ETWFE not yet on file, and no dedicated methodology test file.
 10. **ContinuousDiD** — 15 methodology tests already in place; mostly a consolidation pass with a documented boundary-knots deviation from R `contdid` v0.1.0.
 11. **TROP** — paper review recently merged (PR #443); needs methodology file and cross-language anchor (when paper-author reference becomes available).
-12. **StaggeredTripleDifference** — shares paper review with TripleDifference; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
+12. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
 13. **ConleySpatialHAC** — paper review + committed R `conleyreg` goldens; needs dedicated methodology test file + summary R-parity table in this tracker.
 14. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
 
