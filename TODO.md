@@ -31,7 +31,7 @@ Target: ideally < 1000 lines per module; modules ≥3000 lines are candidates fo
 | `had_pretests.py` | 4951 | Consider splitting (Stute / Yatchew / QUG / joint pretests) |
 | `had.py` | 4593 | Consider splitting (continuous / mass-point / event-study / survey paths) |
 | `staggered.py` | 3963 | Consider splitting — grew through survey + aggregation features |
-| `linalg.py` | 3601 | Consider splitting (vcov surfaces) — unified backend, splitting would hurt cohesion |
+| `linalg.py` | 3601 | Consider splitting (vcov surfaces) only if cohesion can be preserved — unified backend; vcov / solver paths are tightly coupled |
 | `diagnostic_report.py` | 3380 | Consider splitting (per-method renderers + provenance) |
 | `power.py` | 3196 | Consider splitting (power analysis + MDE + sample size) |
 | `synthetic_did.py` | 2819 | Monitor — variance methods + survey paths |
@@ -51,8 +51,16 @@ Target: ideally < 1000 lines per module; modules ≥3000 lines are candidates fo
 | `continuous_did.py` | 1682 | Acceptable |
 | `results.py` | 1676 | Acceptable |
 | `staggered_triple_diff.py` | 1619 | Acceptable |
+| `_nprobust_port.py` | 1412 | Acceptable |
+| `practitioner.py` | 1402 | Acceptable |
+| `trop_global.py` | 1350 | Acceptable |
+| `trop_local.py` | 1339 | Acceptable |
+| `local_linear.py` | 1332 | Acceptable |
+| `wooldridge.py` | 1305 | Acceptable |
+| `chaisemartin_dhaultfoeuille_bootstrap.py` | 1175 | Acceptable |
 | `bacon.py` | 1144 | Acceptable |
 | `pretrends.py` | 1133 | Acceptable |
+| `stacked_did.py` | 1050 | Acceptable |
 | `conley.py` | 1006 | Acceptable |
 | `visualization/` | 4316 | Subpackage (split across 7 files) — OK |
 
@@ -211,7 +219,7 @@ Ordered paydown view across the tables above. Tier A → D is by effort × risk,
 
 ### Standard Error Consistency
 
-`vcov_type` has subsumed the previously-proposed `se_type` knob — `DifferenceInDifferences` and `TwoWayFixedEffects` expose the full surface (`hc1`, `hc2`, `hc2_bm`, `cr1`, `cr2`, `conley`, `bootstrap`). Threading `vcov_type` through the 8 standalone estimators (`CallawaySantAnna`, `SunAbraham`, `ImputationDiD`, `TwoStageDiD`, `TripleDifference`, `StackedDiD`, `WooldridgeDiD`, `EfficientDiD`) remains open and is tracked as a single methodology row in the table above (Phase 1a row).
+`vcov_type` has subsumed the previously-proposed `se_type` knob. `DifferenceInDifferences` and `TwoWayFixedEffects` accept `vcov_type ∈ {"classical", "hc1", "hc2", "hc2_bm", "conley"}` (the validated set in `linalg.py::_VALID_VCOV_TYPES`); cluster-robust variance is obtained by passing `cluster=` alongside the heteroscedasticity kind (`hc1 + cluster` ⇒ CR1 Liang-Zeger; `hc2_bm + cluster` ⇒ CR2 Bell-McCaffrey, gated by the open weighted-CR2 / absorbed-FE rows in the table above); wild cluster bootstrap is a separate `inference="wild_bootstrap"` path on the same estimator. Threading `vcov_type` through the 8 standalone estimators (`CallawaySantAnna`, `SunAbraham`, `ImputationDiD`, `TwoStageDiD`, `TripleDifference`, `StackedDiD`, `WooldridgeDiD`, `EfficientDiD`) remains open and is tracked as a single methodology row in the table above (Phase 1a row).
 
 ### Type Annotations
 
