@@ -29,6 +29,7 @@ Core estimator classes for DiD analysis:
    diff_diff.TwoStageDiD
    diff_diff.WooldridgeDiD
    diff_diff.BaconDecomposition
+   diff_diff.StaggeredTripleDifference
 
 Results Classes
 ---------------
@@ -66,6 +67,8 @@ Result containers returned by estimators:
    diff_diff.BaconDecompositionResults
    diff_diff.wooldridge_results.WooldridgeDiDResults
    diff_diff.Comparison2x2
+   diff_diff.StaggeredTripleDiffResults
+   diff_diff.TWFEWeightsResult
 
 Visualization
 -------------
@@ -113,6 +116,10 @@ are documented in :doc:`profile`.
    :nosignatures:
 
    diff_diff.profile_panel
+   diff_diff.PanelProfile
+   diff_diff.OutcomeShape
+   diff_diff.TreatmentDoseShape
+   diff_diff.Alert
 
 Sensitivity Analysis
 --------------------
@@ -144,6 +151,23 @@ Testing the parallel trends assumption:
    diff_diff.check_parallel_trends
    diff_diff.check_parallel_trends_robust
    diff_diff.equivalence_test_trends
+
+HAD Pretest Workflow
+--------------------
+
+Companion pretest battery for ``HeterogeneousAdoptionDiD`` implementing the
+Section 4 QUG / Stute / Yatchew tests from de Chaisemartin, Ciccia,
+D'Haultfœuille & Knau (2026), plus a unified report wrapper:
+
+.. autosummary::
+   :toctree: _autosummary
+   :nosignatures:
+
+   diff_diff.HADPretestReport
+   diff_diff.QUGTestResults
+   diff_diff.StuteTestResults
+   diff_diff.YatchewTestResults
+   diff_diff.StuteJointResult
 
 Bootstrap Inference
 -------------------
@@ -192,6 +216,37 @@ Power analysis for pre-trends tests (Roth 2022):
    diff_diff.PreTrendsPowerCurve
    diff_diff.compute_pretrends_power
    diff_diff.compute_mdv
+
+Reporting
+---------
+
+Stakeholder-facing report and diagnostic battery wrappers around fitted
+result objects:
+
+.. autosummary::
+   :toctree: _autosummary
+   :nosignatures:
+
+   diff_diff.BusinessReport
+   diff_diff.BusinessContext
+   diff_diff.DiagnosticReport
+   diff_diff.DiagnosticReportResults
+
+Boundary Local-Linear Estimators
+--------------------------------
+
+Calonico-Cattaneo-Farrell (2018) MSE-optimal bandwidth selector and
+Calonico-Cattaneo-Titiunik (2014) robust-bias-corrected local-linear fit
+used by ``HeterogeneousAdoptionDiD``'s continuous-dose fit paths
+(``continuous_at_zero`` and ``continuous_near_d_lower``):
+
+.. autosummary::
+   :toctree: _autosummary
+   :nosignatures:
+
+   diff_diff.LocalLinearFit
+   diff_diff.BandwidthResult
+   diff_diff.BiasCorrectedFit
 
 Data Preparation
 ----------------
