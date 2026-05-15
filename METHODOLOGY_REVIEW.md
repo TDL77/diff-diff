@@ -16,16 +16,17 @@ Each estimator in diff-diff should be periodically reviewed to ensure:
 
 ### What "Complete" means in this tracker
 
-A **Complete** entry has:
+A **Complete** entry has a documented review pass against the primary academic source captured in this file. The minimum content is:
 
-- A "Verified Components" checklist in this document covering ATT formula, SE formula, R/reference parity (or explicit hand-calculation when no reference exists), and every edge case enumerated in REGISTRY.md.
-- A "Corrections Made" section listing every implementation fix the review uncovered (or `(None — implementation verified correct)` if none).
-- A "Deviations" section enumerating every intentional difference from the reference implementation, with rationale.
-- A dedicated `tests/test_methodology_<name>.py` file (or equivalent embedded methodology block in `tests/test_<name>.py`) whose assertions correspond 1:1 to the Verified Components list.
+- A "Corrections Made" block listing every implementation fix the review uncovered, or `(None — implementation verified correct)`.
+- An explicit statement of deviations from the reference implementation, or `(None)`. Format varies — some entries use a dedicated "Deviations" / "Deviations from R" block, others surface deviations inline in "Corrections Made" or "Outstanding Concerns".
+- Verification evidence: a "Verified Components" checklist, an "Edge Cases Verified" enumeration, an "R Comparison Results" table, or some combination of these.
 
-**In Progress** entries have substantial scaffolding in place — REGISTRY.md section, paper review under `docs/methodology/papers/`, methodology test file, or R parity fixtures — but no formal Verified Components walk-through has been captured here yet. The "Documentation in place" sub-section enumerates what already exists; the "Outstanding for promotion" sub-section enumerates what's needed to flip to Complete.
+The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
 
-**Not Started** entries have neither a Verified Components block nor the prerequisite scaffolding. Substantive paper-vs-code audit work is required.
+**In Progress** entries have substantial scaffolding in place — REGISTRY.md section, paper review under `docs/methodology/papers/`, methodology test file, or R parity fixtures — but no formal walk-through has been captured here yet. The "Documentation in place" sub-section enumerates what already exists; the "Outstanding for promotion" sub-section enumerates what's needed to flip to Complete.
+
+**Not Started** entries have neither a tracker walk-through nor most of the prerequisite scaffolding. Substantive paper-vs-code audit work is required.
 
 ---
 
@@ -125,7 +126,7 @@ A **Complete** entry has:
 
 **Test Coverage:**
 - 51 methodology verification tests in `tests/test_methodology_did.py`
-- 123 existing tests in `tests/test_estimators.py`
+- Existing unit-test coverage in `tests/test_estimators.py` (`TestDifferenceInDifferences` class plus shared estimator-API classes)
 - R benchmark tests (skip if R not available)
 
 **R Comparison Results:**
@@ -148,6 +149,9 @@ A **Complete** entry has:
 4. Non-binary treatment/time: Raises ValueError as expected
 5. No variation in treatment/time: Raises ValueError as expected
 6. Missing values: Raises ValueError as expected
+
+**Deviations from R's `fixest::feols()`:** (None — point estimates and SEs match within
+documented tolerances; cluster-robust and absorbed-FE behavior verified.)
 
 ---
 
@@ -194,11 +198,16 @@ A **Complete** entry has:
 - R comparison benchmark via `benchmarks/R/benchmark_multiperiod.R` using
   `fixest::feols(outcome ~ treated * time_f | unit)`. ATT diff < 1e-11, SE diff 0.0%,
   period-effects correlation 1.0. Validated at small (200 units) and 1k scales.
-- Default SE is HC1 (not cluster-robust at unit level as fixest uses). Cluster-robust
-  available via `cluster` parameter but not the default.
 - Endpoint binning for distant event times not yet implemented.
 - FutureWarning for reference_period default change should eventually be removed once
   the transition is complete.
+
+**Deviations from R's `fixest::feols()`:**
+1. **Default SE is HC1**, not cluster-robust at unit level (the `fixest` default for panel
+   data). Cluster-robust available via `cluster` parameter but not the default.
+2. **Reference period default is last pre-period** (e=-1 convention, matches `fixest`/`did`);
+   prior Python releases used first pre-period and the change is gated by a `FutureWarning`
+   until the deprecation window closes.
 
 ---
 
@@ -273,6 +282,10 @@ variables appear to the left of the `|` separator.
   treatment at `time=1`, making staggering undetectable. Users with staggered designs should
   use `decompose()` or `CallawaySantAnna` directly for proper diagnostics.
 
+**Deviations from R's `fixest::feols()`:** (None — point estimates, cluster-robust SEs,
+CI bounds, and absorbed-FE results all match within documented tolerances on both bare
+and covariate-adjusted specifications.)
+
 ---
 
 ### Staggered Treatment Estimators
@@ -302,7 +315,7 @@ variables appear to the left of the `|` separator.
 
 **Test Coverage:**
 - 61 methodology verification tests in `tests/test_methodology_callaway.py`
-- 93 existing tests in `tests/test_staggered.py`
+- Existing unit-test coverage in `tests/test_staggered.py`
 - R benchmark tests (skip if R not available)
 
 **R Comparison Results:**
@@ -371,7 +384,7 @@ variables appear to the left of the `|` separator.
 - [x] All REGISTRY.md edge cases tested
 
 **Test Coverage:**
-- 43 tests in `tests/test_sun_abraham.py` (36 existing + 7 methodology verification)
+- Combined methodology + unit tests in `tests/test_sun_abraham.py` (the methodology verification block grew incrementally from the original 7 review tests as edge cases were added)
 - R benchmark tests via `benchmarks/run_benchmarks.py --estimator sunab`
 
 **R Comparison Results:**
@@ -467,7 +480,7 @@ variables appear to the left of the `|` separator.
 - [x] All REGISTRY.md edge cases tested
 
 **Test Coverage:**
-- 72 tests in `tests/test_stacked_did.py` across 11 test classes (basic, trimming, Q-weights, clean-control, clustering, edge cases, sklearn interface, results methods, validation)
+- `tests/test_stacked_did.py`: 10 test classes (basic, trimming, Q-weights, clean-control, clustering, stacked-data shape, edge cases, sklearn interface, results methods, validation)
 - R benchmark tests via `benchmarks/run_benchmarks.py --estimator stacked`
 
 **R Comparison Results (200 units, 8 periods, kappa_pre=2, kappa_post=2):**
@@ -757,8 +770,12 @@ variables appear to the left of the `|` separator.
    comparison, matching R's `compute_outcome_regression_rc()`.
 
 **Outstanding Concerns:**
-- Implementation uses `panel=FALSE` (repeated cross-section) mode. Panel mode (`panel=TRUE`)
-  with differenced outcomes not yet implemented.
+- Panel mode (`panel=TRUE`) with differenced outcomes not yet implemented (see Deviations).
+
+**Deviations from R's `triplediff::ddd()`:**
+1. **Repeated cross-section mode only**: Implementation uses `panel=FALSE`. Panel mode with
+   differenced outcomes is not yet implemented; users with balanced panel data and
+   time-invariant covariates should compute first differences manually before fitting.
 
 **R Comparison Results (panel=FALSE, n=500 per DGP):**
 | DGP | Method | Covariates | ATT Diff | SE Diff |
@@ -809,6 +826,16 @@ variables appear to the left of the `|` separator.
 | Status | **Complete** |
 | Last Review | 2026-04-23 |
 
+**Verified Components:**
+- [x] Frank-Wolfe on the collapsed (N_co × T_pre) problem (Algorithm 1 of Arkhangelsky et al. 2021), matching R's `synthdid::fw.step()`
+- [x] Unit weights: Frank-Wolfe with two-pass sparsification, matching R's `synthdid::sc.weight.fw()` and `sparsify_function()`
+- [x] Time weights: Frank-Wolfe on collapsed form, matching R's `fw.step()`
+- [x] Auto-computed `zeta_omega` / `zeta_lambda` from data noise level `N_tr × σ²` (Appendix D), matching R's default behavior
+- [x] Pairs-bootstrap refit per Algorithm 2 step 2, warm-started from fit-time ω/λ via the new `init_weights=` kwargs on `compute_sdid_unit_weights` / `compute_time_weights`, matching R's `bootstrap_sample` which rebinds `attr(estimate, "opts")` per `update.omega=TRUE` / `update.lambda=TRUE`
+- [x] Placebo variance (library default) and jackknife variance methods
+- [x] Same-library validation: placebo-SE tracking vs. bootstrap-SE, AER §6.3 Monte Carlo truth
+- [x] All REGISTRY.md SyntheticDiD edge cases tested
+
 **Test Coverage:**
 - 157 methodology tests in `tests/test_methodology_sdid.py`
 
@@ -858,6 +885,16 @@ variables appear to the left of the `|` separator.
   is in place; cross-language anchor tracked in TODO.md. The R-parity fixture from the
   previous release was deleted because it pinned the now-removed fixed-weight path.
 
+**Deviations from R's synthdid::synthdid_estimate():**
+1. **Default `variance_method` is `"placebo"`** (R defaults to `"bootstrap"`). Rationale:
+   (a) placebo is unconditionally available on pweight-only survey designs, whereas refit
+   bootstrap rejects every survey design in this release; (b) placebo sidesteps the
+   ~5–30× slowdown of per-draw Frank-Wolfe re-estimation in refit bootstrap. Documented
+   in REGISTRY.md §SyntheticDiD `Note (default variance_method deviation from R)`.
+2. **Parameter names**: `zeta_omega` / `zeta_lambda` (matching the paper's notation);
+   R uses `eta.omega` / `eta.lambda`. The deprecated Python aliases `lambda_reg` / `zeta`
+   from prior releases emit `DeprecationWarning` and will be removed in a future release.
+
 ---
 
 ### Diagnostics & Sensitivity
@@ -892,7 +929,7 @@ variables appear to the left of the `|` separator.
 | Module | `honest_did.py` |
 | Primary Reference | Rambachan & Roth (2023), *A More Credible Approach to Parallel Trends*, RES 90(5), 2555-2591 |
 | R Reference | `HonestDiD` package |
-| Status | **Complete** (pending R comparison) |
+| Status | **Complete** |
 | Last Review | 2026-04-01 |
 
 **Verified Components:**
@@ -1079,7 +1116,7 @@ These are not estimators but variance/inference plumbing used across many estima
 **Documentation in place:**
 - REGISTRY.md sub-sections (under `## Survey Data Support`): Weighted Estimation, TSL Variance, Weight Type Effects on Inference, Absorbed FE with Survey Weights, Survey Degrees of Freedom, Survey Aggregation (`aggregate_survey`), Survey-Aware Bootstrap (Phase 6), Replicate Weight Variance (Phase 6), DEFF Diagnostics (Phase 6), Subpopulation Analysis (Phase 6), Survey DGP (`generate_survey_did_data`)
 - **Theory document**: `docs/methodology/survey-theory.md` (805 lines) — full Binder-Lumley derivation of design-based variance for modern DiD estimators, including influence-function machinery
-- 8 dedicated test files: `test_survey.py`, `test_survey_dcdh.py`, `test_survey_dcdh_replicate_psu.py`, `test_survey_estimator_validation.py`, `test_survey_phase3.py` through `test_survey_phase8.py`, `test_survey_real_data.py`, `test_survey_r_crossvalidation.py`, `test_survey_staggered_ddd.py`
+- 13 dedicated `tests/test_survey*.py` files: `test_survey.py`, `test_survey_dcdh.py`, `test_survey_dcdh_replicate_psu.py`, `test_survey_estimator_validation.py`, `test_survey_phase3.py`, `test_survey_phase4.py`, `test_survey_phase5.py`, `test_survey_phase6.py`, `test_survey_phase7a.py`, `test_survey_phase8.py`, `test_survey_r_crossvalidation.py`, `test_survey_real_data.py`, `test_survey_staggered_ddd.py`
 - Per-estimator survey hooks documented in the REGISTRY sections of every estimator that supports survey design (DiD/TWFE/MultiPeriodDiD, CS, DCDH, ContinuousDiD, EfficientDiD, HAD, ImputationDiD, StaggeredTripleDiff, TROP, WooldridgeDiD)
 
 **Outstanding for promotion:**
