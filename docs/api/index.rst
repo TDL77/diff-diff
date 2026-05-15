@@ -29,6 +29,7 @@ Core estimator classes for DiD analysis:
    diff_diff.TwoStageDiD
    diff_diff.WooldridgeDiD
    diff_diff.BaconDecomposition
+   diff_diff.StaggeredTripleDifference
 
 Results Classes
 ---------------
@@ -66,6 +67,8 @@ Result containers returned by estimators:
    diff_diff.BaconDecompositionResults
    diff_diff.wooldridge_results.WooldridgeDiDResults
    diff_diff.Comparison2x2
+   diff_diff.StaggeredTripleDiffResults
+   diff_diff.TWFEWeightsResult
 
 Visualization
 -------------
@@ -148,6 +151,22 @@ Testing the parallel trends assumption:
    diff_diff.check_parallel_trends
    diff_diff.check_parallel_trends_robust
    diff_diff.equivalence_test_trends
+
+HAD Pretest Workflow
+--------------------
+
+Companion pretest battery for ``HeterogeneousAdoptionDiD`` (Baker et al.
+2025 QUG/Stute/Yatchew tests + unified report wrapper):
+
+.. autosummary::
+   :toctree: _autosummary
+   :nosignatures:
+
+   diff_diff.HADPretestReport
+   diff_diff.QUGTestResults
+   diff_diff.StuteTestResults
+   diff_diff.YatchewTestResults
+   diff_diff.StuteJointResult
 
 Bootstrap Inference
 -------------------
