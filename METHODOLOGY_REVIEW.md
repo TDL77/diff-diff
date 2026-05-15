@@ -593,10 +593,11 @@ and covariate-adjusted specifications.)
 
 **Documentation in place:**
 - REGISTRY.md section: `## WooldridgeDiD (ETWFE)` (saturated cohort×time interactions, OLS/logit/Poisson via IRLS, ASF-based ATT for nonlinear methods with delta-method SEs, four aggregations, survey support)
-- **Paper review on file**: `docs/methodology/papers/wooldridge-2023-review.md` (retrospective, merged PR #443 on 2026-05-13)
-- Implementation: 107 unit tests in `tests/test_wooldridge.py`
+- **Companion-paper review on file**: `docs/methodology/papers/wooldridge-2023-review.md` covers Wooldridge (2023) *Simple approaches to nonlinear difference-in-differences with panel data*, Econometrics Journal 26(3) — the nonlinear extension that the logit/Poisson paths implement (retrospective, merged PR #443 on 2026-05-13). A dedicated review for the primary ETWFE source (Wooldridge 2025, *Empirical Economics* 69(5)) is **not** yet on file.
+- Implementation: `tests/test_wooldridge.py` (covers OLS, logit, and Poisson paths plus the four aggregation types)
 
 **Outstanding for promotion:**
+- Dedicated paper review for the primary ETWFE source: write `docs/methodology/papers/wooldridge-2025-review.md` covering Wooldridge (2025) *Empirical Economics* 69(5), 2545–2587 (published version of the 2021 SSRN working paper / NBER WP 29154)
 - Dedicated `tests/test_methodology_wooldridge.py` with paper-equation-numbered Verified Components walk-through
 - R parity fixture against `etwfe` (and ideally Stata `jwdid`) covering OLS, logit, and Poisson paths
 - Verified Components for nonlinear-method ASF / delta-method SE invariants
@@ -695,7 +696,7 @@ and covariate-adjusted specifications.)
 - Implementation: 299 unit tests in `tests/test_had.py` + 247 pretest tests in `tests/test_had_pretests.py`
 - Bandwidth port: 12 tests in `tests/test_bandwidth_selector.py` + 11 in `tests/test_nprobust_port.py`; bias-corrected `lprobust` parity in `tests/test_bias_corrected_lprobust.py`
 - R parity: 5 R-direct parity tests in `tests/test_did_had_parity.py`; `nprobust` golden fixtures in `benchmarks/data/nprobust_*_golden.json` validated at `0.0000%` relative error
-- Two dedicated tutorials: T21 (`docs/tutorials/21_had_pretest_workflow.ipynb`) and T22 (`docs/tutorials/22_had_survey_design.ipynb`) with companion drift-test files (16 + 32 tests)
+- Two dedicated tutorials: T21 (`docs/tutorials/21_had_pretest_workflow.ipynb`) and T22 (`docs/tutorials/22_had_survey_design.ipynb`) with companion `tests/test_t21_had_pretest_workflow_drift.py` and `tests/test_t22_had_survey_design_drift.py` drift-test files
 
 **Outstanding for promotion:**
 - Dedicated `tests/test_methodology_had.py` (versus the existing implementation-detail-heavy `test_had.py`) with paper-equation-numbered Verified Components walk-through (Equations 3, 7, 11, 18, 29 for Theorems 1, 3, 4, 7)
@@ -949,7 +950,7 @@ and covariate-adjusted specifications.)
 - [ ] R comparison: pending (benchmark scripts need updating)
 
 **Test Coverage:**
-- 72 tests in `tests/test_honest_did.py` (14 classes) — all passing
+- Comprehensive unit-test coverage in `tests/test_honest_did.py` (15 test classes spanning DeltaSD/DeltaRM/DeltaSDRM bounds, FLCI, ARP infrastructure, CS integration, edge cases) — all passing
 - 27 methodology verification tests in `tests/test_methodology_honest_did.py`
 - R benchmark tests (pending)
 - Paper review on file: `docs/methodology/papers/rambachan-roth-2023-review.md`
@@ -1115,9 +1116,9 @@ These are not estimators but variance/inference plumbing used across many estima
 
 **Documentation in place:**
 - REGISTRY.md sub-sections (under `## Survey Data Support`): Weighted Estimation, TSL Variance, Weight Type Effects on Inference, Absorbed FE with Survey Weights, Survey Degrees of Freedom, Survey Aggregation (`aggregate_survey`), Survey-Aware Bootstrap (Phase 6), Replicate Weight Variance (Phase 6), DEFF Diagnostics (Phase 6), Subpopulation Analysis (Phase 6), Survey DGP (`generate_survey_did_data`)
-- **Theory document**: `docs/methodology/survey-theory.md` (805 lines) — full Binder-Lumley derivation of design-based variance for modern DiD estimators, including influence-function machinery
+- **Theory document**: `docs/methodology/survey-theory.md` — full Binder-Lumley derivation of design-based variance for modern DiD estimators, including influence-function machinery
 - 13 dedicated `tests/test_survey*.py` files: `test_survey.py`, `test_survey_dcdh.py`, `test_survey_dcdh_replicate_psu.py`, `test_survey_estimator_validation.py`, `test_survey_phase3.py`, `test_survey_phase4.py`, `test_survey_phase5.py`, `test_survey_phase6.py`, `test_survey_phase7a.py`, `test_survey_phase8.py`, `test_survey_r_crossvalidation.py`, `test_survey_real_data.py`, `test_survey_staggered_ddd.py`
-- Per-estimator survey hooks documented in the REGISTRY sections of every estimator that supports survey design (DiD/TWFE/MultiPeriodDiD, CS, DCDH, ContinuousDiD, EfficientDiD, HAD, ImputationDiD, StaggeredTripleDiff, TROP, WooldridgeDiD)
+- Per-estimator survey hooks documented in the REGISTRY sections of every estimator that supports survey design (DiD/TWFE/MultiPeriodDiD, CS, SunAbraham, StackedDiD, ImputationDiD, TwoStageDiD, WooldridgeDiD, EfficientDiD, ContinuousDiD, DCDH, HAD, TripleDifference, StaggeredTripleDifference, TROP)
 
 **Outstanding for promotion:**
 - Dedicated `tests/test_methodology_survey.py` (or split between TSL and replicate-weight surfaces) with Binder-equation-numbered Verified Components walk-through
@@ -1179,7 +1180,7 @@ Promotion priority for the **In Progress** entries (after `BaconDecomposition`):
 
 1. **HeterogeneousAdoptionDiD (HAD)** — largest current surface, Phase 4.5 just shipped, no paper-review-equivalent walk-through here yet (despite 550+ tests and a comprehensive REGISTRY section).
 2. **ChaisemartinDHaultfoeuille (DCDH)** — paper review + 12 methodology tests + 24 R parity tests + 347 unit tests. Closest to ready; mostly a consolidation pass.
-3. **WooldridgeDiD (ETWFE)** — paper review recently merged (PR #443). 107 unit tests but no dedicated methodology file.
+3. **WooldridgeDiD (ETWFE)** — companion-paper review (Wooldridge 2023 nonlinear extension) merged in PR #443; primary-source review for Wooldridge (2025) ETWFE not yet on file, and no dedicated methodology test file. Solid unit-test coverage in `tests/test_wooldridge.py`.
 4. **ContinuousDiD** — 15 methodology tests already in place; mostly a consolidation pass with a documented boundary-knots deviation from R `contdid` v0.1.0.
 5. **TROP** — paper review recently merged (PR #443). 120 unit tests; needs methodology file and cross-language anchor (when paper-author reference becomes available).
 6. **EfficientDiD** — no paper review on file; substantial implementation work (130 + 12 tests) needs paper-vs-code audit and a fresh paper review.
