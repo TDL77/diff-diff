@@ -9,7 +9,7 @@
 
 ## Methodology Registry Entry
 
-*Formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries -- copy the `## TROP` section into the appropriate category in the registry.*
+*Working draft formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries. Two open source-ambiguity items remain (weight normalization and Eq. 13 penalty form — see "Gaps and Uncertainties" below); resolve those against the source before promoting this section into REGISTRY.md.*
 
 ## TROP
 
@@ -264,7 +264,7 @@ Note: Stratified bootstrap -- control and treated units resampled separately. Pr
 - [ ] Stratified bootstrap preserving unit-level structure (Algorithm 3)
 - [ ] Covariate extension supported (Equation 14)
 - [ ] Special cases recoverable: DID, MC, SC, SDID via tuning parameters
-- [ ] Weight normalization: `1^T omega = 1^T theta = 1` (Section 5, page 20)
+- Weight normalization (`1^T omega = 1^T theta = 1`, Section 5, page 20) — **open source-ambiguity item**; see Gap #5 below. Section 5 states sum-to-one, Equation 3 / Equation 2 use unnormalized exponential weights, and the shipped implementation matches Equation 2. Do not promote this to a requirement until the discrepancy is resolved against the source.
 - [ ] Heterogeneous treatment effects supported via per-observation estimation (Remark 6.1)
 
 ---
