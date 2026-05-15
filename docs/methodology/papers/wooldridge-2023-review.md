@@ -98,9 +98,10 @@ When all units are treated at the same time `g`, the model simplifies to:
 
 *Standard errors (Section 3, p. C47):*
 - Delta method for individual `τ̂_{gr}` and aggregated ATTs (Wooldridge 2010, problem 12.17)
-- Panel bootstrap (resampling units) is also valid — allows for serial dependence and model misspecification
+- Panel bootstrap (resampling units) is also valid in the paper's framework — allows for serial dependence and model misspecification
 - Cluster-robust SEs at unit level for pooled estimation
 - For nonlinear models: standard sandwich `(X'WX)⁻¹ meat (X'WX)⁻¹` where `W = diag(μ_i(1-μ_i))` for logit or `W = diag(μ_i)` for Poisson
+- **Note (shipped API restriction):** in `WooldridgeDiD`, `n_bootstrap > 0` is currently OLS-only (rejected for logit/Poisson at `diff_diff/wooldridge.py:432-437`) and rejected when `survey_design` is set (`diff_diff/wooldridge.py:441-444`). Use analytical SEs for nonlinear or survey paths.
 
 *Aggregation (Section 3.1, p. C50):*
 - **Simple (static):** weighted average of immediate effects `τ̃_{sg}` across cohorts `g = q,...,T`, weights = cohort proportions among all eventually treated
@@ -108,7 +109,7 @@ When all units are treated at the same time `g`, the model simplifies to:
 - **Calendar time:** weighted average across cohorts for each calendar period
 - **Group:** weighted average across periods for each cohort
 - SEs for all aggregations via delta method or panel bootstrap
-- **Note (current implementation deviation):** the shipped `WooldridgeDiD` aggregations use cell-level observation-count weights `n_{g,t}` (matching Stata `jwdid_estat`) rather than the paper's cohort-share weights from Eqs. 7.2-7.4. See `docs/methodology/REGISTRY.md` "Aggregations" under WooldridgeDiD and the corresponding line in `TODO.md` ("Tech Debt from Code Reviews") for the tracked deviation.
+- **Note (current implementation deviation):** the shipped `WooldridgeDiD` aggregations use cell-level observation-count weights `n_{g,t}` (matching Stata `jwdid_estat`) rather than the cohort-share weights described conceptually in Section 3.1. The 2023 paper does not provide explicit aggregation-weight equations; the formal cohort-share equations referenced in `docs/methodology/REGISTRY.md` ("W2025 Eqs. 7.2-7.4") are from a later Wooldridge ETWFE source. See `docs/methodology/REGISTRY.md` "Aggregations" under WooldridgeDiD and the corresponding line in `TODO.md` ("Tech Debt from Code Reviews") for the tracked deviation.
 
 *Testing parallel trends (Section 4):*
 
@@ -174,11 +175,17 @@ Two approaches:
 ## Implementation Notes
 
 ### Data Structure Requirements
-- Balanced or unbalanced panel: N units observed over T fixed time periods
-- Required: outcome `Y_{it}`, unit ID, time period, cohort indicator `D_g` (or `first_treat`), time-varying treatment `W_{it}`
-- Optional covariates (paper notation `X_i` is time-constant; shipped `diff_diff/wooldridge.py:394-411` supports a richer set): `exovar` (time-invariant, no interaction or demeaning), `xtvar` (time-varying, demeaned within cohort×period cells when `demean_covariates=True`), `xgvar` (covariates interacted with each cohort indicator). See `docs/methodology/REGISTRY.md` under WooldridgeDiD "Covariates".
-- `W_{it}` is absorbing: once treated, always treated (no exit unless using Section 7.2 extension)
-- Cohorts defined by first treatment period `g ∈ {q, q+1, ..., T, ∞}`
+
+*Paper notation:* `Y_{it}` (outcome), `D_g` (cohort indicator), `W_{it}` (time-varying treatment), `X_i` (time-invariant covariates).
+
+*Shipped API (`diff_diff/wooldridge.py:394-411`):* users provide outcome, unit ID, time, and `cohort` (or `first_treat`). The model derives `W_{it}` internally from `cohort` and `time` via `_build_interaction_matrix` (`diff_diff/wooldridge.py:165-189`) — users do NOT pass `W_{it}` as a column.
+
+*Covariates (richer than paper notation):* `exovar` (time-invariant, no interaction or demeaning), `xtvar` (time-varying, demeaned within cohort×period cells when `demean_covariates=True`), `xgvar` (covariates interacted with each cohort indicator). See `docs/methodology/REGISTRY.md` under WooldridgeDiD "Covariates".
+
+*Other contracts:*
+- Balanced or unbalanced panel: N units observed over T fixed time periods.
+- Treatment is absorbing: once treated, always treated (no exit unless using Section 7.2 extension).
+- Cohorts defined by first treatment period `g ∈ {q, q+1, ..., T, ∞}`.
 
 ### Computational Considerations
 - Pooled estimation is a single regression over all N×T observations — O(N·T·K²) where K is number of parameters
