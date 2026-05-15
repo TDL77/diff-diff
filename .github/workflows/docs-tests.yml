@@ -131,4 +131,7 @@ jobs:
 
       - name: Confirm pydata-sphinx-theme version
         # Surface the resolved version in the log for future debugging.
-        run: pip show pydata-sphinx-theme | head -3
+        # Avoid `pip show ... | head -3`: `head` closes the pipe after 3
+        # lines and `pip show` exits non-zero under bash -o pipefail
+        # (GitHub Actions default), failing the step despite a clean install.
+        run: python -c "import importlib.metadata as m; print('pydata-sphinx-theme', m.version('pydata-sphinx-theme'))"
