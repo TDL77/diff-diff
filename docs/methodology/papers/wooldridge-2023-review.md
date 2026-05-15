@@ -2,7 +2,7 @@
 
 **Authors:** Jeffrey M. Wooldridge
 **Citation:** Wooldridge, J. M. (2023). Simple approaches to nonlinear difference-in-differences with panel data. *The Econometrics Journal*, 26(3), C31–C66. https://doi.org/10.1093/ectj/utad016
-**PDF reviewed:** papers/wooldridge.pdf
+**PDF reviewed:** https://doi.org/10.1093/ectj/utad016 (Econometrics Journal — official article URL)
 **Review date:** 2026-03-21
 
 ---

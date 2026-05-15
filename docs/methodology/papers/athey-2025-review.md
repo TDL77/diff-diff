@@ -9,7 +9,7 @@
 
 ## Methodology Registry Entry
 
-*Working draft formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries. Two open source-ambiguity items remain (weight normalization and Eq. 13 penalty form — see "Gaps and Uncertainties" below); resolve those against the source before promoting this section into REGISTRY.md.*
+*Working draft formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries. One open source-ambiguity item remains (weight normalization — see Gap #5 under "Gaps and Uncertainties" below); resolve it against the source before promoting this section into REGISTRY.md.*
 
 ## TROP
 
@@ -351,7 +351,7 @@ The paper uses semi-synthetic simulations (Section 3.1, pages 9-11) based on 6 r
 
 5. **Weight normalization**: Section 5 (page 20) states weights sum to one (`1^T omega = 1^T theta = 1`), but the weight specification in Equation 3 (page 7) uses unnormalized exponential weights. It is unclear whether normalization is applied before or after the optimization, or whether the theoretical results in Section 5 assume normalized weights while the practical algorithm uses unnormalized weights. The existing diff-diff implementation uses unnormalized weights in the optimization (matching Equation 2).
 
-6. **Nuclear norm penalty in Equation 13**: Equation 13's penalty term should be rechecked against pages 26-27 of the PDF to confirm whether it uses the unsquared nuclear norm `lambda_nn ||L||_*` (matching Equation 2) or a squared variant `lambda_nn ||L||_*^2`. The shipped implementation uses the unsquared form per Equation 2.
+6. **Nuclear norm penalty in Equation 13** (resolved): the source uses the same unsquared nuclear-norm penalty `lambda_nn ||L||_*` in Equation 13 as in Equation 2 (consistent with the rest of the draft and confirmed against the paper text). The shipped implementation matches.
 
 7. **General assignment patterns**: Section 6.1 generalizes beyond block assignment, but the inference results (Section 5.3) and theoretical guarantees (Theorem 5.1) are stated under block assignment. The extent to which theoretical results carry over to general patterns is not fully characterized.
 
