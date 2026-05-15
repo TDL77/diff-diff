@@ -980,14 +980,25 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
         heterogeneity : str, optional
             Column name for a time-invariant covariate to test for
             heterogeneous effects (Web Appendix Section 1.5, Lemma 7).
-            Partial implementation: post-treatment regressions only
-            (no placebo regressions or joint null test). Cannot be
-            combined with ``controls``, ``trends_linear``, or
-            ``trends_nonparam``. Requires ``L_max >= 1``. Under
-            ``by_path`` / ``paths_of_interest``, per-path
-            heterogeneity coefficients also surface on
-            ``results.path_heterogeneity_effects`` and on
-            ``to_dataframe(level="by_path")`` via ``het_*`` columns.
+            Per-horizon OLS regressions are computed for forward
+            horizons (1..L_max), and ALSO for backward (placebo)
+            horizons (-1..-L_max) when ``placebo=True`` is set
+            (post-2026-05-15: per-path placebo predict_het R-parity
+            against ``did_multiplegt_dyn(by_path, predict_het, placebo)``).
+            Joint Wald F-test across rows is NOT computed
+            (per-horizon inference only). Cannot be combined with
+            ``controls``, ``trends_linear``, or ``trends_nonparam``.
+            Requires ``L_max >= 1``. Under ``by_path`` /
+            ``paths_of_interest``, per-path heterogeneity coefficients
+            also surface on ``results.path_heterogeneity_effects`` and
+            on ``to_dataframe(level="by_path")`` via ``het_*`` columns
+            (positive AND negative-horizon rows populated when
+            ``placebo=True``). Under ``survey_design``, backward-
+            horizon (placebo) heterogeneity is NOT computed (the pre-
+            period Binder TSL cell allocator is deferred to a follow-
+            up methodology PR); a ``UserWarning`` fires at fit-time
+            and forward-horizon heterogeneity continues to compute
+            normally.
         design2 : bool, default=False
             If ``True``, identify and report switch-in/switch-out
             (Design-2) groups. Convenience wrapper (descriptive summary,

@@ -1280,7 +1280,10 @@ class ChaisemartinDHaultfoeuilleResults:
             [
                 thin,
                 "Note: Per-horizon regressions only (no joint F-test). "
-                "Negative l = placebo (backward) horizon when placebo=True.",
+                "Negative l = placebo (backward) horizon when "
+                "placebo=True. Under survey_design, only forward "
+                "horizons are computed (backward-horizon survey "
+                "heterogeneity is deferred — see REGISTRY note).",
                 "",
             ]
         )
