@@ -1061,3 +1061,76 @@ class TestDiDAbsorbedFERParity:
         assert np.isfinite(res.att)
         assert np.isfinite(res.se)
         np.testing.assert_allclose(res.att, float(d["coef"][treat_post_idx]), atol=1e-10)
+
+    def test_absorb_hc2_bm_clustered_matches_clubsandwich(self):
+        """`absorb=` + `hc2_bm` + `cluster=unit` matches clubSandwich's CR2.
+
+        Exercises the cluster-aware CR2 BM path that the R generator pins
+        via `vcovCR(fit_did, cluster=d_did$unit, type="CR2")`. Without this
+        test, the new auto-route would have an unverified clustered-CR2
+        lane.
+        """
+        d = self._load_golden()
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "post": d["post"],
+                "y": d["y"],
+            }
+        )
+        res = DifferenceInDifferences(vcov_type="hc2_bm", cluster="unit").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="post",
+            absorb=["unit", "period"],
+            unit="unit",
+        )
+        coef_names = d["coef_names"]
+        treat_post_idx = coef_names.index("treat_post")
+        expected_vcov = np.asarray(d["vcov_cr2"]).reshape(d["vcov_cr2_shape"])
+        expected_se_slope = float(np.sqrt(expected_vcov[treat_post_idx, treat_post_idx]))
+        np.testing.assert_allclose(res.se, expected_se_slope, atol=1e-10)
+        np.testing.assert_allclose(res.att, float(d["coef"][treat_post_idx]), atol=1e-10)
+
+    def test_absorb_hc2_bm_df_sensitive_inference(self):
+        """Bell-McCaffrey Satterthwaite DOF must propagate to `p_value` / `conf_int`.
+
+        HC2-BM differs from HC2 only in the DOF used for inference (Satterthwaite
+        ratio rather than n-k). If the auto-routed fit silently used n-k for the
+        BM path, `p_value` and `conf_int` would be wrong even though `se` looked
+        right. This test asserts that:
+
+        (1) HC2 and HC2-BM give the same `se` on the same data (HC2 meat is shared);
+        (2) HC2 and HC2-BM produce DIFFERENT `p_value` and `conf_int` because the
+            critical-value DOF differs (HC2-BM uses Satterthwaite DOF < n-k, so
+            t-critical is larger → wider CI, larger p-value).
+
+        This is the df-sensitive regression guard the R1 reviewer asked for.
+        """
+        d = self._load_golden()
+        res_hc2 = self._fit_absorb(d, "hc2")
+        res_hc2_bm = self._fit_absorb(d, "hc2_bm")
+        # Same point estimate.
+        np.testing.assert_allclose(res_hc2.att, res_hc2_bm.att, atol=1e-12)
+        # Same SE (the meat is the same; only the DOF differs for inference).
+        np.testing.assert_allclose(res_hc2.se, res_hc2_bm.se, atol=1e-12)
+        # DIFFERENT p_value and conf_int (DOF differs).
+        assert res_hc2.p_value != res_hc2_bm.p_value, (
+            "HC2 and HC2-BM should have different p_values "
+            "because the BM Satterthwaite DOF differs from n-k. "
+            "Same p_value indicates the DOF was not propagated to inference."
+        )
+        ci_hc2 = res_hc2.conf_int
+        ci_hc2_bm = res_hc2_bm.conf_int
+        # The BM CI should be WIDER than the HC2 CI (smaller DOF → larger
+        # t-critical → wider interval).
+        width_hc2 = float(ci_hc2[1] - ci_hc2[0])
+        width_hc2_bm = float(ci_hc2_bm[1] - ci_hc2_bm[0])
+        assert width_hc2_bm > width_hc2, (
+            f"HC2-BM CI width ({width_hc2_bm:.6f}) should exceed "
+            f"HC2 CI width ({width_hc2:.6f}) — BM Satterthwaite DOF is "
+            "smaller than n-k, so the critical value is larger."
+        )
