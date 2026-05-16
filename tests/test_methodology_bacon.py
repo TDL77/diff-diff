@@ -301,11 +301,12 @@ _R_GOLDEN_PATH = (
 def _load_r_golden() -> dict:
     if not _R_GOLDEN_PATH.exists():
         pytest.skip(
-            f"R parity goldens missing at {_R_GOLDEN_PATH}. To generate, "
+            f"R parity goldens missing at {_R_GOLDEN_PATH}. To regenerate, "
             "install R + `install.packages('bacondecomp')` + "
             "`install.packages('jsonlite')` then `cd benchmarks/R && "
-            "Rscript generate_bacon_golden.R`. The R goldens are deferred "
-            "until R is provisioned (see TODO.md)."
+            "Rscript generate_bacon_golden.R`. The goldens are committed "
+            "to the repo by default; this skip path covers partial-checkout "
+            "or packaging scenarios where the JSON file is unavailable."
         )
     return json.loads(_R_GOLDEN_PATH.read_text())
 
@@ -371,12 +372,20 @@ class TestBaconParityR:
 
         def _classify_r_type(c: dict, fixture_name: str) -> str:
             # R bacondecomp's `type` strings vary across versions
-            # ("Treated vs Untreated", "Earlier vs Later Treated", ...).
-            # Fall back to inferring from the control_group: U sentinel
-            # (0, np.inf, or "never"-containing string) -> treated_vs_never;
-            # otherwise treated_group < control_group is earlier-vs-later.
+            # ("Treated vs Untreated", "Earlier vs Later Treated",
+            # "Later vs Always Treated", ...). Fall back to inferring from
+            # the control_group: U sentinel (0, np.inf, or "never"-containing
+            # string) -> treated_vs_never; otherwise treated_group <
+            # control_group is earlier-vs-later. Note: ``Later vs Always
+            # Treated`` is canonicalized to ``treated_vs_never`` here because
+            # Python's paper-footnote-11 convention folds always-treated
+            # units into the U bucket — semantically these R rows belong
+            # to the U comparison set even though R numbers them by the
+            # always-treated cohort (typically first_treat=1).
             t = c.get("type") or ""
             if "never" in t.lower() or "untreated" in t.lower():
+                return "treated_vs_never"
+            if "always" in t.lower():
                 return "treated_vs_never"
             ctrl = c["control_group"]
             if isinstance(ctrl, str) and "never" in ctrl.lower():
@@ -398,14 +407,16 @@ class TestBaconParityR:
             if fixture_name == "meta":
                 continue
             panel = pd.DataFrame(fix["panel"])
-            results = bacon_decompose(
-                panel,
-                outcome="y",
-                unit="unit",
-                time="time",
-                first_treat="first_treat",
-                weights="exact",
-            )
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=UserWarning)
+                results = bacon_decompose(
+                    panel,
+                    outcome="y",
+                    unit="unit",
+                    time="time",
+                    first_treat="first_treat",
+                    weights="exact",
+                )
             py_estimates = {}
             py_weights = {}
             for c in results.comparisons:
@@ -427,6 +438,24 @@ class TestBaconParityR:
                 )
                 r_estimates[key] = c["estimate"]
                 r_weights[key] = c["weight"]
+            # ``always_treated_remapped`` carves out only the U-bucket rows,
+            # which R and Python decompose under different conventions
+            # (R: separate ``Later vs Always Treated`` + ``Treated vs
+            # Untreated``; Python: single ``treated_vs_never`` per cohort
+            # via paper-footnote-11 remap). The aggregated fold-back is
+            # asserted in ``test_always_treated_remapped_fold_back_matches_r``.
+            # The 6 timing-vs-timing rows in that fixture are NOT affected
+            # by the convention split and must satisfy direct per-component
+            # parity at atol=1e-6 — narrow the carve-out to U-bucket keys
+            # only so regressions in timing-vs-timing decomposition are
+            # caught directly, not just through aggregate parity.
+            if fixture_name == "always_treated_remapped":
+                # Drop only treated_vs_never keys from both sides; keep
+                # earlier_vs_later + later_vs_earlier for direct parity.
+                py_estimates = {k: v for k, v in py_estimates.items() if k[0] != "treated_vs_never"}
+                py_weights = {k: v for k, v in py_weights.items() if k[0] != "treated_vs_never"}
+                r_estimates = {k: v for k, v in r_estimates.items() if k[0] != "treated_vs_never"}
+                r_weights = {k: v for k, v in r_weights.items() if k[0] != "treated_vs_never"}
             # Full-set equality: no Python component missing from R, no R
             # component missing from Python. A dropped β̂_{kU} term or an
             # extra spurious comparison would fail here.
@@ -448,6 +477,81 @@ class TestBaconParityR:
                 assert abs(py_weights[k] - r_weights[k]) < 1e-6, (
                     f"{fixture_name} {k}: weight Python={py_weights[k]} " f"vs R={r_weights[k]}"
                 )
+
+    def test_always_treated_remapped_fold_back_matches_r(self, golden) -> None:
+        """Pin the documented R→Python fold-back for the always-treated U bucket.
+
+        The per-component test above carves out **only the U-bucket rows**
+        from ``always_treated_remapped`` (the 6 timing-vs-timing rows are
+        still asserted directly at atol=1e-6); R and Python decompose the
+        U bucket differently — but the documented REGISTRY claim is that
+        **aggregating** R's `Later vs Always Treated` + `Treated vs
+        Untreated` rows by treated cohort matches Python's single
+        `treated_vs_never` cell for that cohort. Assert that fold-back
+        directly so a cohort-level regression can't slip through under
+        overall TWFE parity.
+
+        For each treated cohort k:
+        - R: combined weight w_R = w(k vs always-treated) + w(k vs untreated)
+          and weight-weighted estimate e_R = Σ w_i * e_i / w_R
+        - Python: single treated_vs_never component (w_Py, e_Py)
+        - Assert |w_Py - w_R| < 1e-6 AND |e_Py - e_R| < 1e-6.
+        """
+        if "always_treated_remapped" not in golden:
+            pytest.skip("always_treated_remapped fixture not in goldens")
+        fix = golden["always_treated_remapped"]
+        panel = pd.DataFrame(fix["panel"])
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=UserWarning)
+            results = bacon_decompose(
+                panel,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                weights="exact",
+            )
+        # Build Python's treated_vs_never lookup: cohort -> (weight, estimate)
+        py_tvn = {
+            float(c.treated_group): (c.weight, c.estimate)
+            for c in results.comparisons
+            if c.comparison_type == "treated_vs_never"
+        }
+        # Aggregate R's two U-bucket types per treated cohort.
+        # R uses ctrl=99999 for untreated and ctrl=1 (the always-treated cohort)
+        # for the `Later vs Always Treated` rows. Match on case-insensitive
+        # semantic tokens so the selector survives `bacondecomp` label
+        # variation across versions (same convention as the neighboring
+        # ``_classify_r_type`` helper used by the per-component test).
+        r_agg: dict = {}
+        for c in fix["r_components"]:
+            tlow = (c.get("type") or "").lower()
+            is_untreated = "untreated" in tlow or "never" in tlow
+            is_always_treated_compare = "always" in tlow
+            if is_untreated or is_always_treated_compare:
+                k = float(c["treated_group"])
+                w = float(c["weight"])
+                e = float(c["estimate"])
+                if k not in r_agg:
+                    r_agg[k] = [0.0, 0.0]  # [sum_w, sum_w_e]
+                r_agg[k][0] += w
+                r_agg[k][1] += w * e
+        # Cohorts must match
+        assert set(py_tvn.keys()) == set(r_agg.keys()), (
+            f"always_treated_remapped: treated_vs_never cohorts differ. "
+            f"Python: {sorted(py_tvn)}, R-aggregated: {sorted(r_agg)}"
+        )
+        for k, (py_w, py_e) in py_tvn.items():
+            r_w, r_we = r_agg[k]
+            r_e = r_we / r_w
+            assert abs(py_w - r_w) < 1e-6, (
+                f"always_treated_remapped cohort={k}: combined weight "
+                f"Python={py_w:.10f} vs R-aggregated={r_w:.10f}"
+            )
+            assert abs(py_e - r_e) < 1e-6, (
+                f"always_treated_remapped cohort={k}: weight-averaged estimate "
+                f"Python={py_e:.10f} vs R-aggregated={r_e:.10f}"
+            )
 
 
 # ---------------------------------------------------------------------------

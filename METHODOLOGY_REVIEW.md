@@ -24,7 +24,7 @@ A **Complete** entry has a documented review pass against the primary academic s
 
 The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
 
-**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures (e.g., DCDH has a methodology file, R parity, and a companion-paper review for the 2026 universal-rollout extension; HAD has its primary-source paper review and R parity but no dedicated methodology file; ContinuousDiD has the methodology file but no paper review); others have only the REGISTRY entry and unit tests (e.g., BaconDecomposition, PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
+**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures (e.g., DCDH has a methodology file, R parity, and a companion-paper review for the 2026 universal-rollout extension; HAD has its primary-source paper review and R parity but no dedicated methodology file; ContinuousDiD has the methodology file but no paper review); others have only the REGISTRY entry and unit tests (e.g., PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
 
 **Not Started** entries have neither a tracker walk-through nor an REGISTRY.md section. This tracker no longer carries any Not Started rows; new estimators are expected to enter as In Progress when their REGISTRY entry lands.
 
@@ -78,7 +78,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 
 | Tool | Module | R Reference | Status | Last Review |
 |------|--------|-------------|--------|-------------|
-| BaconDecomposition | `bacon.py` | `bacondecomp::bacon()` | **Complete** (R parity pending) | 2026-05-16 |
+| BaconDecomposition | `bacon.py` | `bacondecomp::bacon()` | **Complete** | 2026-05-16 |
 | HonestDiD | `honest_did.py` | `HonestDiD` package | **Complete** | 2026-04-01 |
 | PreTrendsPower | `pretrends.py` | `pretrends` package | **In Progress** | — |
 | PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | **In Progress** | — |
@@ -909,7 +909,7 @@ and covariate-adjusted specifications.)
 | Module | `bacon.py` |
 | Primary Reference | Goodman-Bacon (2021), *Difference-in-differences with variation in treatment timing*, J. Econometrics 225(2), 254-277 |
 | R Reference | `bacondecomp::bacon()` |
-| Status | **Complete** (R parity goldens pending) |
+| Status | **Complete** |
 | Last Review | 2026-05-16 |
 
 **Verified Components:**
@@ -926,24 +926,28 @@ and covariate-adjusted specifications.)
 - [x] No untreated group: `s_{kU}` terms drop, weights renormalize, sum-to-1 still holds
 - [x] Single timing group with U: only `treated_vs_never` comparisons
 - [x] Survey design composes cleanly with exact mode and warn+remap
-- [ ] R `bacondecomp::bacon()` parity at `atol=1e-6` — R generator script committed; JSON goldens pending follow-up R install (see TODO.md)
+- [x] R `bacondecomp::bacon()` parity at `atol=1e-6` — 3 fixtures (`uniform_3groups_with_never_treated`, `two_groups_no_never_treated`, `always_treated_remapped`); TWFE coefficient + weights-sum match across all 3 fixtures; per-component estimate + weight parity locked on the 2 non-remap fixtures **and on the 6 timing-vs-timing rows of `always_treated_remapped`** (carve-out narrowed to U-bucket rows only); R→Python U-bucket fold-back asserted by a dedicated `test_always_treated_remapped_fold_back_matches_r` test that aggregates R's split `Later vs Always Treated` + `Treated vs Untreated` rows per cohort and compares to Python's single `treated_vs_never` cell at `atol=1e-6`. See `benchmarks/data/r_bacondecomp_golden.json` + `TestBaconParityR`.
 
 **Test Coverage:**
-- 24 methodology tests in `tests/test_methodology_bacon.py` across 6 classes (21 active + 3 R-parity tests that skip on missing goldens)
+- 34 methodology tests in `tests/test_methodology_bacon.py` across 6 classes — all active, including the 4 R-parity tests (3 aggregate/per-component + 1 always-treated fold-back; goldens committed at `benchmarks/data/r_bacondecomp_golden.json`)
 - 32 existing tests in `tests/test_bacon.py` (basic decomposition, weight properties, weights-parameter API, TWFE integration, visualization, balanced-panel warnings, edge cases)
 
 **R Comparison Results:**
-- **Pending**: `bacondecomp` R package not installed in the local R 4.5.2 library at PR-B authoring time. R generator script committed at `benchmarks/R/generate_bacon_golden.R`; running it requires `install.packages("bacondecomp")` + `install.packages("jsonlite")` then `cd benchmarks/R && Rscript generate_bacon_golden.R`. JSON goldens land at `benchmarks/data/r_bacondecomp_golden.json` once generated. `tests/test_methodology_bacon.py::TestBaconParityR` skips with a pointer until then. Tracked in TODO.md follow-up row.
+- **Validated** at `atol=1e-6` against `bacondecomp::bacon()` (version 0.1.1, R 4.5.2). Goldens at `benchmarks/data/r_bacondecomp_golden.json`; generator at `benchmarks/R/generate_bacon_golden.R`. Three DGP fixtures:
+  - `uniform_3groups_with_never_treated`: 9 components covering all three comparison types — full per-component parity (estimate + weight at `atol=1e-6`).
+  - `two_groups_no_never_treated`: 2 components, timing-only decomposition — full per-component parity.
+  - `always_treated_remapped`: TWFE coefficient + weights-sum match at `atol=1e-6`; the 6 timing-vs-timing rows (between cohorts 3/4/5) also satisfy direct per-component parity at `atol=1e-6` (carve-out narrowed to U-bucket rows only). The U-bucket breakdown diverges by convention (Python's paper-footnote-11 U-remap vs R's distinct `Later vs Always Treated` cohort decomposition); the aggregate is invariant to the re-bucketing per Theorem 1, and the R→Python fold-back is pinned by `test_always_treated_remapped_fold_back_matches_r` which aggregates R's split `Later vs Always Treated` + `Treated vs Untreated` rows per cohort and compares to Python's single `treated_vs_never` cell.
 
 **Corrections Made:**
 1. **Theorem 1 exact-weights rewrite** (`bacon.py:_recompute_exact_weights`, lines ~740-880). The previous "exact" mode implementation did not actually compute Eqs. 7-9 / 10e-g — it was missing the `(1 - n_kU)` factor in the within-subsample treatment variance, did not square the sample share, and added an extraneous `unit_share` factor not present in the paper. The post-hoc sum-to-1 normalization masked the relative-weight error but produced a decomposition error of ~0.3% (0.007 absolute) against TWFE on a 3-cohort + never-treated DGP. **Rewrote** the function to compute the exact numerators of Eqs. 10e/f/g (with proper Eqs. 7-9 variances) and let the post-hoc normalization handle the `V̂^D` denominator (Theorem 1 identity guarantees `V̂^D = Σ numerators`). Now matches TWFE at `atol=1e-10`. The existing `test_weighted_sum_equals_twfe` tolerance was tightened from `< 0.1` to `< 1e-10` to lock the contract.
 2. **Default `weights` flipped from `"approximate"` to `"exact"`** at three entry points: `BaconDecomposition.__init__()` (`bacon.py:397`), `bacon_decompose()` convenience function (`bacon.py:1064`), `TwoWayFixedEffects.decompose()` (`twfe.py:684`). The paper-faithful Theorem 1 weights are now the default; the simplified approximate path remains opt-in via explicit `weights="approximate"`. `diff_diff/diagnostic_report.py:1740` (production diagnostic surface) was updated to pass explicit `weights="exact"`.
 3. **Always-treated warn+remap via internal column** (`bacon.py:fit()`, lines ~487-525). Paper footnote 11 puts units with `t_i < 1` in `U`, but `bacon.py` previously only mapped `first_treat ∈ {0, np.inf}` into U. Added detection using ordered-time logic on the **time axis** (`first_treat <= min(time)` while excluding the never-treated sentinels `0` and `np.inf`) with `UserWarning` and automatic remap via an internal column (`__bacon_first_treat_internal__`), preserving the user's `first_treat` column unchanged. Detection handles event-time-encoded panels (`time ∈ [-2,..,3]`) correctly; the `0` sentinel restriction applies only to `first_treat`. Count exposed via new `BaconDecompositionResults.n_always_treated_remapped` field.
 
-**Deviations from R's `bacondecomp::bacon()`:**
-1. **Unbalanced panel acceptance** (library extension): R errors on unbalanced panels; Python emits a `UserWarning` and decomposes. The paper's Appendix A proof assumes balanced panels — decomposition on unbalanced panels is approximate to Theorem 1.
-2. **Approximate weight mode** (Python-only optimization): `weights="approximate"` is a library-only fast path with simplified variance computation, not present in R. Users who want Python-R numerical parity should pass `weights="exact"` (the new default).
-3. **NaN for invalid inference fields not applicable**: the decomposition is deterministic; there are no SE/p-value fields on the comparison output. The `decomposition_error` field is a finite float (zero in well-conditioned cases).
+**Deviations from R's `bacondecomp::bacon()` and from the paper:**
+1. **First-period boundary extension on always-treated remap** (library convention, deviation from paper footnote 11 strict rule and from R): Goodman-Bacon (2021) footnote 11 uses strict `t_i < 1` for the always-treated bucket (units treated *before* the first observable period). The library applies the **inclusive** `first_treat <= min(time)` rule, additionally folding units treated *at* the first observable period (`first_treat == min(time)`) into `U`. Rationale: such units have no untreated cell in-panel and cannot contribute as a treated cohort, so folding them into U mirrors the always-treated handling rather than dropping them silently. R `bacondecomp::bacon()` does NOT apply this boundary fold-back — it keeps `first_treat == min(time)` cohorts in their own bucket and emits `Later vs Always Treated` comparisons. When `min(time) > 1` (no first-period-treated cohorts) the library rule reduces to the paper's strict rule. Documented in REGISTRY `**Deviation (first-period boundary extension on always-treated remap)**`.
+2. **Unbalanced panel acceptance** (library extension): R errors on unbalanced panels; Python emits a `UserWarning` and decomposes. The paper's Appendix A proof assumes balanced panels — decomposition on unbalanced panels is approximate to Theorem 1.
+3. **Approximate weight mode** (Python-only optimization): `weights="approximate"` is a library-only fast path with simplified variance computation, not present in R. Users who want Python-R numerical parity should pass `weights="exact"` (the new default).
+4. **NaN for invalid inference fields not applicable**: the decomposition is deterministic; there are no SE/p-value fields on the comparison output. The `decomposition_error` field is a finite float (zero in well-conditioned cases).
 
 ---
 
@@ -1203,23 +1207,22 @@ Promotion priority for the **In Progress** entries, ordered by what's blocked on
 
 **Substantive-review-blocked (no methodology test file, no paper review, no R parity):**
 
-1. **BaconDecomposition** — chosen for next substantive review during the 2026-05-15 tracker refresh session. Smaller scope than estimator reviews; R reference (`bacondecomp::bacon()`) available; methodology is well-understood (Goodman-Bacon 2021); REGISTRY checklist provides a ready-made target.
-2. **PreTrendsPower** — small surface, established R package (`pretrends`), Roth (2022) is short.
-3. **PowerAnalysis** — larger surface (MDE / power / sample size / simulation paths); REGISTRY already lists Bloom (1995) and Burlig et al. (2020) as primary sources; least urgent if the library's power-analysis utilities are not heavily used.
-4. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
-5. **EfficientDiD** — no paper review on file; substantial implementation work (`tests/test_efficient_did.py` + validation tests) needs paper-vs-code audit against Chen, Sant'Anna & Xie (2025).
-6. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
+1. **PreTrendsPower** — small surface, established R package (`pretrends`), Roth (2022) is short.
+2. **PowerAnalysis** — larger surface (MDE / power / sample size / simulation paths); REGISTRY already lists Bloom (1995) and Burlig et al. (2020) as primary sources; least urgent if the library's power-analysis utilities are not heavily used.
+3. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
+4. **EfficientDiD** — no paper review on file; substantial implementation work (`tests/test_efficient_did.py` + validation tests) needs paper-vs-code audit against Chen, Sant'Anna & Xie (2025).
+5. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
-7. **HeterogeneousAdoptionDiD (HAD)** — largest current surface, Phase 4.5 just shipped; shares the de Chaisemartin (2026) paper review with DCDH; needs a dedicated Verified Components block.
-8. **ChaisemartinDHaultfoeuille (DCDH)** — methodology test file + 24 R parity tests + 347 unit tests + a companion-paper review for the 2026 universal-rollout extension. Primary-source reviews for the 2020 AER and 2022/2024 NBER WP 29873 papers are still outstanding alongside the Verified Components walk-through.
-9. **WooldridgeDiD (ETWFE)** — companion-paper review (Wooldridge 2023 nonlinear extension) merged in PR #443; primary-source review for Wooldridge (2025) ETWFE not yet on file, and no dedicated methodology test file.
-10. **ContinuousDiD** — 15 methodology tests already in place; mostly a consolidation pass with a documented boundary-knots deviation from R `contdid` v0.1.0.
-11. **TROP** — paper review recently merged (PR #443); needs methodology file and cross-language anchor (when paper-author reference becomes available).
-12. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
-13. **ConleySpatialHAC** — paper review + committed R `conleyreg` goldens; needs dedicated methodology test file + summary R-parity table in this tracker.
-14. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
+6. **HeterogeneousAdoptionDiD (HAD)** — largest current surface, Phase 4.5 just shipped; shares the de Chaisemartin (2026) paper review with DCDH; needs a dedicated Verified Components block.
+7. **ChaisemartinDHaultfoeuille (DCDH)** — methodology test file + 24 R parity tests + 347 unit tests + a companion-paper review for the 2026 universal-rollout extension. Primary-source reviews for the 2020 AER and 2022/2024 NBER WP 29873 papers are still outstanding alongside the Verified Components walk-through.
+8. **WooldridgeDiD (ETWFE)** — companion-paper review (Wooldridge 2023 nonlinear extension) merged in PR #443; primary-source review for Wooldridge (2025) ETWFE not yet on file, and no dedicated methodology test file.
+9. **ContinuousDiD** — 15 methodology tests already in place; mostly a consolidation pass with a documented boundary-knots deviation from R `contdid` v0.1.0.
+10. **TROP** — paper review recently merged (PR #443); needs methodology file and cross-language anchor (when paper-author reference becomes available).
+11. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
+12. **ConleySpatialHAC** — paper review + committed R `conleyreg` goldens; needs dedicated methodology test file + summary R-parity table in this tracker.
+13. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
 
 ---
 

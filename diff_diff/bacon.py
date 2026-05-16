@@ -475,7 +475,15 @@ class BaconDecomposition:
             excluding the never-treated sentinels ``0`` and ``np.inf``)
             are automatically remapped to the ``U`` (untreated) bucket
             per Goodman-Bacon (2021) footnote 11, with a
-            ``UserWarning``. Detection uses ordered-time logic on the
+            ``UserWarning``. **Library boundary extension:** the paper
+            uses the strict inequality ``t_i < 1`` (units treated
+            *before* the first observable period); the library uses the
+            **inclusive** ``first_treat <= min(time)`` rule, additionally
+            folding units treated *at* the first observable period
+            (``first_treat == min(time)``) into ``U`` because such units
+            have no untreated cell in-panel. See REGISTRY's
+            ``**Deviation (first-period boundary extension on
+            always-treated remap)**`` block for the full contract. Detection uses ordered-time logic on the
             **time axis** so panels whose ``time`` column contains
             negative or zero-crossing labels (e.g. event-time
             ``time ∈ [-2,..,3]``) are handled correctly; the ``0``
@@ -1302,9 +1310,16 @@ def bacon_decompose(
     >>> from diff_diff import bacon_decompose
     >>>
     >>> # Default: paper-faithful Goodman-Bacon (2021) Theorem 1 weights
-    >>> # (weights="exact"); intended to match R bacondecomp::bacon() at
-    >>> # atol=1e-6 (R parity goldens pending — see TODO.md "R parity
-    >>> # goldens generation" for the deferred validation step).
+    >>> # (weights="exact"); matches R bacondecomp::bacon() at atol=1e-6 on
+    >>> # the aggregate (TWFE coefficient + weights-sum) across all panels,
+    >>> # and on the per-component breakdown when there are no
+    >>> # always-treated / first-period-treated cohorts (i.e. all
+    >>> # non-sentinel first_treat values are strictly greater than
+    >>> # min(time)). For panels with always-treated units, the
+    >>> # per-component breakdown diverges by convention (Python remaps
+    >>> # to U per paper footnote 11; R emits `Later vs Always Treated`);
+    >>> # see REGISTRY note on R parity convention divergence. Validated
+    >>> # via tests/test_methodology_bacon.py::TestBaconParityR.
     >>> results = bacon_decompose(
     ...     data=panel_df,
     ...     outcome='earnings',
