@@ -31,7 +31,7 @@ from diff_diff._backend import (
     _rust_loocv_grid_search,
 )
 from diff_diff.trop_global import TROPGlobalMixin
-from diff_diff.trop_local import TROPLocalMixin, _validate_and_pivot_treatment
+from diff_diff.trop_local import TROPLocalMixin, _setup_trop_data
 from diff_diff.trop_results import (
     _LAMBDA_INF,
     _PrecomputedStructures,
@@ -432,7 +432,6 @@ class TROP(TROPLocalMixin, TROPGlobalMixin):
 
         # Resolve survey design
         from diff_diff.survey import (
-            _extract_unit_survey_weights,
             _resolve_survey_for_fit,
             _validate_unit_constant_survey,
         )
@@ -470,94 +469,21 @@ class TROP(TROPLocalMixin, TROPGlobalMixin):
             )
 
         # Below is the local method (default)
-        # Get unique units and periods
-        all_units = sorted(data[unit].unique())
-
-        # Extract unit-level survey weights
-        if resolved_survey is not None:
-            unit_weight_arr = _extract_unit_survey_weights(data, unit, survey_design, all_units)
-        else:
-            unit_weight_arr = None
-        all_periods = sorted(data[time].unique())
-
-        n_units = len(all_units)
-        n_periods = len(all_periods)
-
-        # Create mappings
-        unit_to_idx = {u: i for i, u in enumerate(all_units)}
-        period_to_idx = {p: i for i, p in enumerate(all_periods)}
-        idx_to_unit = {i: u for u, i in unit_to_idx.items()}
-        idx_to_period = {i: p for p, i in period_to_idx.items()}
-
-        # Create outcome matrix Y (n_periods x n_units) and treatment matrix D
-        # Vectorized: use pivot for O(1) reshaping instead of O(n) iterrows loop
-        Y = (
-            data.pivot(index=time, columns=unit, values=outcome)
-            .reindex(index=all_periods, columns=all_units)
-            .values
+        _ctx = _setup_trop_data(
+            data, outcome, treatment, unit, time, resolved_survey, survey_design
         )
-
-        # For D matrix, validate observed treatment and handle unbalanced panels
-        D, missing_mask = _validate_and_pivot_treatment(
-            data, time, unit, treatment, all_periods, all_units
-        )
-
-        # Validate D is monotonic non-decreasing per unit (absorbing state)
-        # D[t, i] must satisfy: once D=1, it must stay 1 for all subsequent periods
-        # Issue 3 fix (round 10): Check each unit's OBSERVED D sequence for monotonicity
-        # This catches 1->0 violations that span missing period gaps
-        # Example: D[2]=1, missing [3,4], D[5]=0 is a real violation even though
-        # adjacent period transitions don't show it (the gap hides the transition)
-        violating_units = []
-        for unit_idx in range(n_units):
-            # Get observed D values for this unit (where not missing)
-            observed_mask = ~missing_mask[:, unit_idx]
-            observed_d = D[observed_mask, unit_idx]
-
-            # Check if observed sequence is monotonically non-decreasing
-            if len(observed_d) > 1 and np.any(np.diff(observed_d) < 0):
-                violating_units.append(all_units[unit_idx])
-
-        if violating_units:
-            raise ValueError(
-                f"Treatment indicator is not an absorbing state for units: {violating_units}. "
-                f"D[t, unit] must be monotonic non-decreasing (once treated, always treated). "
-                f"If this is event-study style data, convert to absorbing state: "
-                f"D[t, i] = 1 for all t >= first treatment period."
-            )
-
-        # Identify treated observations
-        treated_mask = D == 1
-        n_treated_obs = np.sum(treated_mask)
-
-        if n_treated_obs == 0:
-            raise ValueError("No treated observations found")
-
-        # Identify treated and control units
-        unit_ever_treated = np.any(D == 1, axis=0)
-        treated_unit_idx = np.where(unit_ever_treated)[0]
-        control_unit_idx = np.where(~unit_ever_treated)[0]
-
-        if len(control_unit_idx) == 0:
-            raise ValueError("No control units found")
-
-        # Determine pre/post periods from treatment indicator D
-        # D matrix is the sole input for treatment timing per the paper
-        first_treat_period = None
-        for t in range(n_periods):
-            if np.any(D[t, :] == 1):
-                first_treat_period = t
-                break
-        if first_treat_period is None:
-            raise ValueError("Could not infer post-treatment periods from D matrix")
-
-        n_pre_periods = first_treat_period
-        # Count periods where D=1 is actually observed (matches docstring)
-        # Per docstring: "Number of post-treatment periods (periods with D=1 observations)"
-        n_post_periods = int(np.sum(np.any(D[first_treat_period:, :] == 1, axis=1)))
-
-        if n_pre_periods < 2:
-            raise ValueError("Need at least 2 pre-treatment periods")
+        n_units = _ctx["n_units"]
+        n_periods = _ctx["n_periods"]
+        idx_to_unit = _ctx["idx_to_unit"]
+        idx_to_period = _ctx["idx_to_period"]
+        unit_weight_arr = _ctx["unit_weight_arr"]
+        Y = _ctx["Y"]
+        D = _ctx["D"]
+        n_treated_obs = _ctx["n_treated_obs"]
+        treated_unit_idx = _ctx["treated_unit_idx"]
+        control_unit_idx = _ctx["control_unit_idx"]
+        n_pre_periods = _ctx["n_pre_periods"]
+        n_post_periods = _ctx["n_post_periods"]
 
         # Step 1: Grid search with LOOCV for tuning parameters
         best_lambda = None
@@ -769,7 +695,12 @@ class TROP(TROPLocalMixin, TROPGlobalMixin):
             # Fit model with these weights
             n_fits_attempted += 1
             alpha_hat, beta_hat, L_hat = self._estimate_model(
-                Y, control_mask, weight_matrix, lambda_nn, n_units, n_periods,
+                Y,
+                control_mask,
+                weight_matrix,
+                lambda_nn,
+                n_units,
+                n_periods,
                 _nonconvergence_tracker=nonconverg_tracker,
             )
 
@@ -907,9 +838,7 @@ class TROP(TROPLocalMixin, TROPGlobalMixin):
         """Set estimator parameters."""
         for key, value in params.items():
             if key == "method" and value not in ("local", "global"):
-                raise ValueError(
-                    f"method must be one of ('local', 'global'), got '{value}'"
-                )
+                raise ValueError(f"method must be one of ('local', 'global'), got '{value}'")
             if hasattr(self, key):
                 setattr(self, key, value)
             else:

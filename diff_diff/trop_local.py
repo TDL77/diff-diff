@@ -71,6 +71,129 @@ def _validate_and_pivot_treatment(data, time, unit, treatment, all_periods, all_
     return D, missing_mask
 
 
+def _setup_trop_data(data, outcome, treatment, unit, time, resolved_survey, survey_design):
+    """Shared data setup for TROP local and global fit paths.
+
+    Performs panel pivoting (long → wide), absorbing-state validation,
+    treated/control unit identification, first-treatment-period detection,
+    and pre/post period counting. Returns a dict so both callers can
+    unpack only the fields they need.
+
+    The global-method-specific staggered-adoption check stays in
+    `_fit_global` as a post-helper validation because it depends on
+    estimator semantics (global method requires simultaneous treatment),
+    not data preparation.
+
+    Note: the same dict-shaped contract is also relied on by the bootstrap
+    paths (`_bootstrap_variance` / `_bootstrap_variance_global`) which
+    currently rebuild similar state per draw. Future contract changes to
+    this helper must be checked against both `_fit_*` and `_bootstrap_*`
+    call sites for cross-file sync.
+
+    Returns
+    -------
+    dict
+        With keys:
+        ``all_units, all_periods, n_units, n_periods, unit_to_idx,
+        period_to_idx, idx_to_unit, idx_to_period, unit_weight_arr,
+        Y, D, missing_mask, treated_mask, n_treated_obs,
+        treated_unit_idx, control_unit_idx, first_treat_period,
+        n_pre_periods, n_post_periods``.
+    """
+    all_units = sorted(data[unit].unique())
+    all_periods = sorted(data[time].unique())
+
+    if resolved_survey is not None:
+        from diff_diff.survey import _extract_unit_survey_weights
+
+        unit_weight_arr = _extract_unit_survey_weights(data, unit, survey_design, all_units)
+    else:
+        unit_weight_arr = None
+
+    n_units = len(all_units)
+    n_periods = len(all_periods)
+
+    unit_to_idx = {u: i for i, u in enumerate(all_units)}
+    period_to_idx = {p: i for i, p in enumerate(all_periods)}
+    idx_to_unit = {i: u for u, i in unit_to_idx.items()}
+    idx_to_period = {i: p for p, i in period_to_idx.items()}
+
+    Y = (
+        data.pivot(index=time, columns=unit, values=outcome)
+        .reindex(index=all_periods, columns=all_units)
+        .values
+    )
+
+    D, missing_mask = _validate_and_pivot_treatment(
+        data, time, unit, treatment, all_periods, all_units
+    )
+
+    violating_units = []
+    for unit_idx in range(n_units):
+        observed_mask = ~missing_mask[:, unit_idx]
+        observed_d = D[observed_mask, unit_idx]
+        if len(observed_d) > 1 and np.any(np.diff(observed_d) < 0):
+            violating_units.append(all_units[unit_idx])
+
+    if violating_units:
+        raise ValueError(
+            f"Treatment indicator is not an absorbing state for units: {violating_units}. "
+            f"D[t, unit] must be monotonic non-decreasing (once treated, always treated). "
+            f"If this is event-study style data, convert to absorbing state: "
+            f"D[t, i] = 1 for all t >= first treatment period."
+        )
+
+    treated_mask = D == 1
+    n_treated_obs = int(np.sum(treated_mask))
+
+    if n_treated_obs == 0:
+        raise ValueError("No treated observations found")
+
+    unit_ever_treated = np.any(D == 1, axis=0)
+    treated_unit_idx = np.where(unit_ever_treated)[0]
+    control_unit_idx = np.where(~unit_ever_treated)[0]
+
+    if len(control_unit_idx) == 0:
+        raise ValueError("No control units found")
+
+    first_treat_period = None
+    for t in range(n_periods):
+        if np.any(D[t, :] == 1):
+            first_treat_period = t
+            break
+
+    if first_treat_period is None:
+        raise ValueError("Could not infer post-treatment periods from D matrix")
+
+    n_pre_periods = first_treat_period
+    n_post_periods = int(np.sum(np.any(D[first_treat_period:, :] == 1, axis=1)))
+
+    if n_pre_periods < 2:
+        raise ValueError("Need at least 2 pre-treatment periods")
+
+    return {
+        "all_units": all_units,
+        "all_periods": all_periods,
+        "n_units": n_units,
+        "n_periods": n_periods,
+        "unit_to_idx": unit_to_idx,
+        "period_to_idx": period_to_idx,
+        "idx_to_unit": idx_to_unit,
+        "idx_to_period": idx_to_period,
+        "unit_weight_arr": unit_weight_arr,
+        "Y": Y,
+        "D": D,
+        "missing_mask": missing_mask,
+        "treated_mask": treated_mask,
+        "n_treated_obs": n_treated_obs,
+        "treated_unit_idx": treated_unit_idx,
+        "control_unit_idx": control_unit_idx,
+        "first_treat_period": first_treat_period,
+        "n_pre_periods": n_pre_periods,
+        "n_post_periods": n_post_periods,
+    }
+
+
 # Module-level convergence tolerance for SVD singular value truncation.
 # Singular values below this threshold after soft-thresholding are treated
 # as zero to improve numerical stability.

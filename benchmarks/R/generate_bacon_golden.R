@@ -7,9 +7,21 @@
 #
 # The diff-diff BaconDecomposition implementation (`diff_diff/bacon.py`) with
 # the default ``weights="exact"`` is expected to match the values in this JSON
-# to atol=1e-6 on the per-component (treated, control, type) tuples, and to
-# match the TWFE coefficient to the same tolerance. The ``weights="approximate"``
-# path is a library-only optimization and is NOT covered by this parity harness.
+# at atol=1e-6 along a three-tier contract:
+#   (1) aggregate TWFE coefficient + weights-sum on all 3 fixtures;
+#   (2) direct per-component (treated, control, type) parity on the 2
+#       non-remap fixtures AND on the 6 timing-vs-timing rows of
+#       `always_treated_remapped`;
+#   (3) cohort-level fold-back parity for the U bucket on
+#       `always_treated_remapped` — Python's paper-footnote-11 remap folds
+#       R's separate `Later vs Always Treated` + `Treated vs Untreated`
+#       rows into a single `treated_vs_never` cell per cohort, so the
+#       aggregate is invariant per Theorem 1 but the per-component
+#       breakdown differs by convention. See REGISTRY notes:
+#       `**Note (R parity convention divergence on always-treated)**` and
+#       `**Deviation (first-period boundary extension on always-treated remap)**`.
+# The ``weights="approximate"`` path is a library-only optimization and is
+# NOT covered by this parity harness.
 #
 # Three fixtures:
 #   1. uniform_3groups_with_never_treated — 3 timing groups + never-treated U;
@@ -18,8 +30,8 @@
 #   2. two_groups_no_never_treated — 2 timing groups only; tests the
 #      timing-only decomposition where the s_{kU} terms drop.
 #   3. always_treated_remapped — 3 timing groups + 1 always-treated cohort
-#      (first_treat = 1). Validates that Python's warn+remap of t_i < 1 into
-#      U matches R bacondecomp's native behavior.
+#      (first_treat = 1). Validates the convention-divergent U-bucket
+#      fold-back on Python's warn+remap of always-treated units into U.
 #
 # Run:
 #   cd benchmarks/R && Rscript generate_bacon_golden.R
@@ -193,11 +205,21 @@ df2 <- build_panel(
 fixture_2 <- extract_bacon(df2, "two_groups_no_never_treated")
 
 cat("Building fixture 3: always_treated_remapped...\n")
-# 3 timing-cohorts + 5 always-treated units (first_treat = 1, i.e., treated
-# in every observable period) + 30 never-treated. R's bacondecomp natively
-# groups the first_treat=1 cohort with U (since they are treated throughout
-# every observable period and never serve as a within-window control), which
-# matches what diff-diff's warn+remap does in Python.
+# 3 timing-cohorts (3, 4, 5) + 5 always-treated units (first_treat = 1, i.e.,
+# treated in every observable period) + 25 never-treated. R's bacondecomp
+# keeps the first_treat=1 cohort as a *separate* timing cohort (not in U) and
+# emits a `Later vs Always Treated` comparison row for each later cohort
+# alongside the standard `Treated vs Untreated` row. Python's paper-footnote-11
+# convention remaps these units into the U bucket and folds R's two columns
+# of components into a single `treated_vs_never` cell per treated cohort.
+# The aggregate (TWFE coefficient + weights-sum) is invariant per Theorem 1,
+# but the per-component breakdown differs by convention — see REGISTRY
+# `**Note (R parity convention divergence on always-treated)**` and
+# `**Deviation (first-period boundary extension on always-treated remap)**`.
+# `tests/test_methodology_bacon.py::TestBaconParityR` carves out the U-bucket
+# rows for direct per-component parity (keeping the 6 timing-vs-timing rows
+# under direct parity) and asserts the U-bucket fold-back separately via
+# `test_always_treated_remapped_fold_back_matches_r` at atol=1e-6.
 df3 <- build_panel(
   n_units_per_cohort   = 25L,
   n_periods            = 6L,
@@ -220,8 +242,18 @@ out <- list(
     r_version            = R.version.string,
     description          = paste(
       "Goodman-Bacon (2021) decomposition parity goldens for diff-diff",
-      "BaconDecomposition. Parity target: atol=1e-6 on per-component",
-      "(treated, control, type) tuples plus the TWFE coefficient."
+      "BaconDecomposition. Parity target at atol=1e-6:",
+      "(1) aggregate TWFE coefficient + weights-sum across all 3 fixtures;",
+      "(2) direct per-component (treated, control, type) parity on the 2",
+      "non-remap fixtures AND on the 6 timing-vs-timing rows of",
+      "always_treated_remapped;",
+      "(3) cohort-level fold-back parity for the U bucket on",
+      "always_treated_remapped (Python's paper-footnote-11 remap folds",
+      "R's separate Later-vs-Always-Treated + Treated-vs-Untreated rows",
+      "into a single treated_vs_never cell per cohort; aggregate is",
+      "invariant per Theorem 1, breakdown differs by convention).",
+      "See REGISTRY Note (R parity convention divergence on always-treated)",
+      "+ Deviation (first-period boundary extension)."
     )
   ),
   uniform_3groups_with_never_treated = fixture_1,
