@@ -1302,9 +1302,8 @@ def bacon_decompose(
     >>> from diff_diff import bacon_decompose
     >>>
     >>> # Default: paper-faithful Goodman-Bacon (2021) Theorem 1 weights
-    >>> # (weights="exact"); intended to match R bacondecomp::bacon() at
-    >>> # atol=1e-6 (R parity goldens pending — see TODO.md "R parity
-    >>> # goldens generation" for the deferred validation step).
+    >>> # (weights="exact"); matches R bacondecomp::bacon() at atol=1e-6
+    >>> # (validated via tests/test_methodology_bacon.py::TestBaconParityR).
     >>> results = bacon_decompose(
     ...     data=panel_df,
     ...     outcome='earnings',

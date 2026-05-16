@@ -397,6 +397,21 @@ class TestBaconParityR:
         for fixture_name, fix in golden.items():
             if fixture_name == "meta":
                 continue
+            # ``always_treated_remapped``: R keeps ``first_treat=1`` as a
+            # separate cohort and emits ``Later vs Always Treated`` (and
+            # ``Treated vs Untreated``) comparisons against it. Python's
+            # paper-footnote-11 convention remaps those units to U,
+            # folding R's two columns of components into single
+            # ``treated_vs_never`` cells per treated cohort. The aggregate
+            # (TWFE coefficient + weights-sum) is invariant to this
+            # re-bucketing and is locked by ``test_twfe_coef_matches_r``
+            # and ``test_weights_sum_matches_r`` above, but the
+            # per-component set differs **structurally** under the two
+            # conventions. Skip this fixture's per-component assertion
+            # while keeping the aggregate parity. See REGISTRY note on
+            # always-treated remap for the convention rationale.
+            if fixture_name == "always_treated_remapped":
+                continue
             panel = pd.DataFrame(fix["panel"])
             results = bacon_decompose(
                 panel,
