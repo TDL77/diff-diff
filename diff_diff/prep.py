@@ -19,6 +19,7 @@ import pandas as pd
 from diff_diff.prep_dgp import (  # noqa: F401
     generate_continuous_did_data,
     generate_ddd_data,
+    generate_ddd_panel_data,
     generate_did_data,
     generate_event_study_data,
     generate_factor_data,

@@ -792,9 +792,9 @@ class TestRankControlUnits:
         weights = result["synthetic_weight"].to_numpy()
         # Valid simplex: non-negative, sums to 1.
         assert np.all(weights >= 0), "synthetic_weight must be non-negative"
-        assert abs(weights.sum() - 1.0) < 1e-10, (
-            f"synthetic_weight should sum to 1.0, got {weights.sum()}"
-        )
+        assert (
+            abs(weights.sum() - 1.0) < 1e-10
+        ), f"synthetic_weight should sum to 1.0, got {weights.sum()}"
         # Non-degenerate: at least 2 controls receive non-trivial weight.
         # This guards the Rust-PGD collapse-to-one-vertex bug that
         # previously fired at Y ~ 1e9 under the deleted wrapper.
@@ -833,9 +833,7 @@ class TestRankControlUnits:
 
         for w, label in [(w_unreg, "unregularized"), (w_reg, "regularized")]:
             assert np.all(w >= 0), f"{label} weights must be non-negative"
-            assert abs(w.sum() - 1.0) < 1e-10, (
-                f"{label} weights should sum to 1.0, got {w.sum()}"
-            )
+            assert abs(w.sum() - 1.0) < 1e-10, f"{label} weights should sum to 1.0, got {w.sum()}"
 
         # Regularization should increase entropy (pull toward uniform) or at
         # least not collapse the simplex — a valid regularized solution must
@@ -1136,6 +1134,275 @@ class TestGenerateDddData:
         data1 = generate_ddd_data(seed=123)
         data2 = generate_ddd_data(seed=123)
         pd.testing.assert_frame_equal(data1, data2)
+
+
+class TestGenerateDddPanelData:
+    """Tests for generate_ddd_panel_data function (panel-structured DDD DGP)."""
+
+    def test_shape(self):
+        """len(data) == n_units * n_periods (balanced panel)."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data = generate_ddd_panel_data(n_units=200, n_periods=8, seed=42)
+        assert len(data) == 200 * 8
+        expected_cols = {
+            "unit",
+            "period",
+            "outcome",
+            "group",
+            "partition",
+            "post",
+            "treated",
+            "true_effect",
+        }
+        assert expected_cols.issubset(set(data.columns))
+
+    def test_balanced_cells(self):
+        """Each (group, partition) cell has roughly n_units * group_frac * partition_frac units."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data = generate_ddd_panel_data(
+            n_units=400, n_periods=8, group_frac=0.5, partition_frac=0.5, seed=42
+        )
+        # Cell counts measured at unit level (not row level)
+        unit_cells = data.groupby("unit")[["group", "partition"]].first()
+        cell_counts = unit_cells.groupby(["group", "partition"]).size()
+        assert len(cell_counts) == 4
+        expected_per_cell = 400 * 0.5 * 0.5  # = 100
+        for count in cell_counts.values:
+            assert abs(count - expected_per_cell) <= 2
+
+    def test_treatment_effect_location(self):
+        """true_effect != 0 only when group==1 AND partition==1 AND post==1."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data = generate_ddd_panel_data(
+            n_units=200, n_periods=8, treatment_period=4, treatment_effect=3.0, seed=42
+        )
+        treated_mask = (data["group"] == 1) & (data["partition"] == 1) & (data["post"] == 1)
+        assert (data.loc[treated_mask, "true_effect"] == 3.0).all()
+        assert (data.loc[~treated_mask, "true_effect"] == 0.0).all()
+        assert (data["treated"] == treated_mask.astype(int)).all()
+
+    def test_panel_structure(self):
+        """Each unit observed in exactly n_periods periods."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data = generate_ddd_panel_data(n_units=100, n_periods=6, seed=42)
+        assert data.groupby("unit")["period"].count().eq(6).all()
+
+    def test_post_derived_from_period(self):
+        """post is exactly 1[period >= treatment_period]."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data = generate_ddd_panel_data(n_units=100, n_periods=8, treatment_period=3, seed=42)
+        expected_post = (data["period"] >= 3).astype(int)
+        assert (data["post"] == expected_post).all()
+
+    def test_group_partition_time_invariant(self):
+        """group and partition are unit-level (constant within unit) — DDD-CPT requirement."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data = generate_ddd_panel_data(n_units=200, n_periods=8, seed=42)
+        assert data.groupby("unit")["group"].nunique().eq(1).all()
+        assert data.groupby("unit")["partition"].nunique().eq(1).all()
+
+    def test_treatment_period_validation(self):
+        """treatment_period must satisfy 1 <= treatment_period < n_periods."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        with pytest.raises(ValueError, match="treatment_period"):
+            generate_ddd_panel_data(n_units=100, n_periods=8, treatment_period=0, seed=42)
+        with pytest.raises(ValueError, match="treatment_period"):
+            generate_ddd_panel_data(n_units=100, n_periods=8, treatment_period=8, seed=42)
+
+    def test_group_frac_validation(self):
+        """group_frac and partition_frac must be strictly in (0, 1)."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        with pytest.raises(ValueError, match="group_frac"):
+            generate_ddd_panel_data(n_units=100, group_frac=0.0, seed=42)
+        with pytest.raises(ValueError, match="group_frac"):
+            generate_ddd_panel_data(n_units=100, group_frac=1.0, seed=42)
+        with pytest.raises(ValueError, match="partition_frac"):
+            generate_ddd_panel_data(n_units=100, partition_frac=0.0, seed=42)
+
+    def test_n_units_validation(self):
+        """n_units must be >= 4."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        with pytest.raises(ValueError, match="n_units"):
+            generate_ddd_panel_data(n_units=3, seed=42)
+
+    def test_infeasible_cell_counts_raise(self):
+        """Configs that round to empty (group, partition) cells fail fast."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        # n_units=4, group_frac=0.25 → n_group_1=1; partition_frac=0.25 inside
+        # the 1-unit group=1 stratum rounds to 0, leaving the (1, 1) cell empty.
+        with pytest.raises(ValueError, match=r"every \(group, partition\) cell"):
+            generate_ddd_panel_data(
+                n_units=4,
+                group_frac=0.25,
+                partition_frac=0.25,
+                seed=42,
+            )
+        # n_units=10, group_frac=0.1 → n_group_1=1 again; same failure mode for
+        # the (1, 1) cell.
+        with pytest.raises(ValueError, match=r"every \(group, partition\) cell"):
+            generate_ddd_panel_data(
+                n_units=10,
+                group_frac=0.1,
+                partition_frac=0.5,
+                seed=42,
+            )
+
+    def test_smallest_feasible_config_populates_all_cells(self):
+        """n_units=4 with fracs=0.5 yields one unit per (group, partition) cell."""
+        from diff_diff import TripleDifference
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data = generate_ddd_panel_data(
+            n_units=4,
+            n_periods=4,
+            treatment_period=2,
+            group_frac=0.5,
+            partition_frac=0.5,
+            noise_sd=0.0,
+            seed=42,
+        )
+        # All four (group, partition) cells must receive exactly one unit.
+        unit_cells = data.groupby("unit")[["group", "partition"]].first()
+        cell_counts = unit_cells.groupby(["group", "partition"]).size()
+        assert len(cell_counts) == 4
+        assert (cell_counts == 1).all()
+        # TripleDifference.fit (which requires all 8 G×P×T cells) must succeed
+        # on the smallest feasible config — validates the public contract
+        # advertised in the docstring's compatibility paragraph.
+        TripleDifference().fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="post",
+        )
+
+    def test_recommended_clustered_panel_path(self):
+        """Documented clustered-by-unit path produces n_clusters == n_units inference.
+
+        Locks the docstring's recommended pattern (`cluster="unit"` for panel data)
+        against silent regression: TripleDifference is the repeated-cross-section
+        `panel=FALSE` estimator, so unclustered SE on panel-generated rows
+        understates variance. Clustering by `unit` aggregates per-row IFs within
+        unit before variance computation (Liang-Zeger CR1).
+        """
+        from diff_diff import TripleDifference
+        from diff_diff.prep import generate_ddd_panel_data
+
+        n_units = 200
+        data = generate_ddd_panel_data(
+            n_units=n_units,
+            n_periods=8,
+            treatment_period=4,
+            seed=42,
+        )
+        result = TripleDifference(cluster="unit").fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="post",
+        )
+        assert np.isfinite(result.att)
+        assert np.isfinite(result.se)
+        # Cluster-robust path records the number of clusters used.
+        assert result.n_clusters == n_units
+        # Unclustered fit on the same data MUST produce a different SE (clustering
+        # is materially different when within-unit serial correlation exists).
+        unclustered = TripleDifference().fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="post",
+        )
+        # Point estimate is invariant to clustering.
+        np.testing.assert_allclose(unclustered.att, result.att, atol=1e-10)
+        # SE differs because panel rows are not iid.
+        assert unclustered.se != result.se
+
+    def test_reproducibility(self):
+        """Same seed produces identical DataFrames."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data1 = generate_ddd_panel_data(n_units=100, n_periods=6, seed=123)
+        data2 = generate_ddd_panel_data(n_units=100, n_periods=6, seed=123)
+        pd.testing.assert_frame_equal(data1, data2)
+
+    def test_ddd_effect_recovery_deterministic(self):
+        """noise_sd=0 deterministic recovery within 1e-6 (catches DGP transcription bugs)."""
+        from diff_diff import TripleDifference
+        from diff_diff.prep import generate_ddd_panel_data
+
+        true_effect = 2.0
+        data = generate_ddd_panel_data(
+            n_units=400,
+            n_periods=8,
+            treatment_period=4,
+            treatment_effect=true_effect,
+            noise_sd=0.0,
+            seed=42,
+        )
+        result = TripleDifference().fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="post",
+        )
+        assert abs(result.att - true_effect) < 1e-6
+
+    def test_ddd_effect_recovery(self):
+        """Finite-sample recovery within tolerance under default noise."""
+        from diff_diff import TripleDifference
+        from diff_diff.prep import generate_ddd_panel_data
+
+        true_effect = 2.0
+        data = generate_ddd_panel_data(
+            n_units=1000,
+            n_periods=8,
+            treatment_period=4,
+            treatment_effect=true_effect,
+            seed=42,
+        )
+        result = TripleDifference().fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="post",
+        )
+        assert abs(result.att - true_effect) < 0.7
+
+    def test_covariates_added(self):
+        """add_covariates=True adds x1 and x2 columns."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data = generate_ddd_panel_data(
+            n_units=100, n_periods=6, treatment_period=3, add_covariates=True, seed=42
+        )
+        assert "x1" in data.columns
+        assert "x2" in data.columns
+
+    def test_covariates_omitted(self):
+        """add_covariates=False omits x1 and x2 columns."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data = generate_ddd_panel_data(
+            n_units=100, n_periods=6, treatment_period=3, add_covariates=False, seed=42
+        )
+        assert "x1" not in data.columns
+        assert "x2" not in data.columns
 
 
 class TestGeneratePanelData:
@@ -2095,20 +2362,27 @@ class TestSurveyDGPResearchGrade:
         # Zero never-treated (exact)
         with pytest.raises(ValueError, match="conditional_pt requires at least one"):
             generate_survey_did_data(
-                add_covariates=True, conditional_pt=0.3,
-                never_treated_frac=0.0, seed=42,
+                add_covariates=True,
+                conditional_pt=0.3,
+                never_treated_frac=0.0,
+                seed=42,
             )
         # Small fraction that floors to zero never-treated units
         with pytest.raises(ValueError, match="conditional_pt requires at least one"):
             generate_survey_did_data(
-                n_units=50, add_covariates=True, conditional_pt=0.3,
-                never_treated_frac=0.01, seed=42,
+                n_units=50,
+                add_covariates=True,
+                conditional_pt=0.3,
+                never_treated_frac=0.01,
+                seed=42,
             )
         # All never-treated (no ever-treated units)
         with pytest.raises(ValueError, match="conditional_pt requires at least one"):
             generate_survey_did_data(
-                add_covariates=True, conditional_pt=0.3,
-                never_treated_frac=1.0, seed=42,
+                add_covariates=True,
+                conditional_pt=0.3,
+                never_treated_frac=1.0,
+                seed=42,
             )
 
     def test_conditional_pt_requires_covariates(self):
@@ -2123,13 +2397,9 @@ class TestSurveyDGPResearchGrade:
         from diff_diff.prep_dgp import generate_survey_did_data
 
         with pytest.raises(ValueError, match="conditional_pt must be finite"):
-            generate_survey_did_data(
-                add_covariates=True, conditional_pt=np.inf, seed=42
-            )
+            generate_survey_did_data(add_covariates=True, conditional_pt=np.inf, seed=42)
         with pytest.raises(ValueError, match="conditional_pt must be finite"):
-            generate_survey_did_data(
-                add_covariates=True, conditional_pt=np.nan, seed=42
-            )
+            generate_survey_did_data(add_covariates=True, conditional_pt=np.nan, seed=42)
 
     def test_conditional_pt_x1_distribution_shift(self):
         """Treated units should have higher x1 when conditional_pt is active."""
@@ -2295,9 +2565,7 @@ class TestSurveyDGPResearchGrade:
         uncond_did = abs(beta_uncond[3])
 
         # Conditional DID: add x1 and x1*post
-        X_cond = np.column_stack([
-            np.ones(n), treated, post, treated_post, x1, x1_post
-        ])
+        X_cond = np.column_stack([np.ones(n), treated, post, treated_post, x1, x1_post])
         beta_cond = np.linalg.lstsq(X_cond, y, rcond=None)[0]
         cond_did = abs(beta_cond[3])
 
@@ -2311,9 +2579,7 @@ class TestSurveyDGPResearchGrade:
         """conditional_pt=0.0 should produce identical output to default."""
         from diff_diff.prep_dgp import generate_survey_did_data
 
-        df_default = generate_survey_did_data(
-            n_units=100, add_covariates=True, seed=99
-        )
+        df_default = generate_survey_did_data(n_units=100, add_covariates=True, seed=99)
         df_explicit = generate_survey_did_data(
             n_units=100, add_covariates=True, conditional_pt=0.0, seed=99
         )
@@ -2380,9 +2646,7 @@ class TestSurveyDGPResearchGrade:
             p1 = df[df["period"] == 1]
             x1_treated = p1.loc[p1["first_treat"] > 0, "x1"].mean()
             x1_control = p1.loc[p1["first_treat"] == 0, "x1"].mean()
-            assert x1_treated > x1_control, (
-                f"panel={panel_mode}: treated x1 not shifted"
-            )
+            assert x1_treated > x1_control, f"panel={panel_mode}: treated x1 not shifted"
 
 
 class TestAggregateSurvey:
@@ -3355,9 +3619,7 @@ class TestAggregateSurvey:
         for state in panel["state"].unique():
             state_rows = panel[panel["state"] == state]
             expected_weight = state_rows["cell_sum_w"].mean()
-            np.testing.assert_allclose(
-                state_rows["y_weight"].values, expected_weight, rtol=1e-10
-            )
+            np.testing.assert_allclose(state_rows["y_weight"].values, expected_weight, rtol=1e-10)
             # Must be constant within unit
             assert state_rows["y_weight"].nunique() == 1
 
@@ -3459,15 +3721,21 @@ class TestAggregateSurvey:
                 n_resp = rng.randint(15, 25)  # varying respondents per cell
                 te = 2.0 if (first_treats[geo] > 0 and period >= first_treats[geo]) else 0.0
                 for _ in range(n_resp):
-                    rows.append({
-                        "geo": geo, "period": period,
-                        "wt": rng.uniform(0.5, 3.0),
-                        "y": rng.normal(10 + te, 2),
-                    })
+                    rows.append(
+                        {
+                            "geo": geo,
+                            "period": period,
+                            "wt": rng.uniform(0.5, 3.0),
+                            "y": rng.normal(10 + te, 2),
+                        }
+                    )
         micro = pd.DataFrame(rows)
         design = SurveyDesign(weights="wt")
         panel, stage2 = aggregate_survey(
-            micro, by=["geo", "period"], outcomes="y", survey_design=design,
+            micro,
+            by=["geo", "period"],
+            outcomes="y",
+            survey_design=design,
         )
         assert stage2.weight_type == "pweight"
 
@@ -3475,14 +3743,18 @@ class TestAggregateSurvey:
         # but y_weight must be unit-constant
         for geo in panel["geo"].unique():
             geo_rows = panel[panel["geo"] == geo]
-            assert geo_rows["y_weight"].nunique() == 1, (
-                f"Geo {geo}: y_weight not constant within unit"
-            )
+            assert (
+                geo_rows["y_weight"].nunique() == 1
+            ), f"Geo {geo}: y_weight not constant within unit"
 
         panel["first_treat"] = panel["geo"].map(first_treats)
         result = CallawaySantAnna().fit(
-            panel, outcome="y_mean", unit="geo", time="period",
-            first_treat="first_treat", survey_design=stage2,
+            panel,
+            outcome="y_mean",
+            unit="geo",
+            time="period",
+            first_treat="first_treat",
+            survey_design=stage2,
         )
         assert np.isfinite(result.overall_att), f"ATT not finite: {result.overall_att}"
         assert result.overall_se > 0, f"SE not positive: {result.overall_se}"
@@ -3546,7 +3818,10 @@ class TestAggregateSurvey:
 
         # Pweight mode: state 0 retained (cell_sum_w > 0 despite NaN precision)
         panel_p, _ = aggregate_survey(
-            data, by=["state", "period"], outcomes="y", survey_design=design,
+            data,
+            by=["state", "period"],
+            outcomes="y",
+            survey_design=design,
             second_stage_weights="pweight",
         )
         assert 0 in panel_p["state"].values
@@ -3555,7 +3830,10 @@ class TestAggregateSurvey:
         # Aweight mode: state 0 dropped (all precision NaN -> weight 0)
         with pytest.warns(UserWarning, match="zero total weight"):
             panel_a, _ = aggregate_survey(
-                data, by=["state", "period"], outcomes="y", survey_design=design,
+                data,
+                by=["state", "period"],
+                outcomes="y",
+                survey_design=design,
                 second_stage_weights="aweight",
             )
         assert 0 not in panel_a["state"].values
@@ -3584,9 +3862,7 @@ class TestAggregateSurveyScaffolding:
         n = len(state)
         wt = rng.uniform(0.5, 2.5, n)
         y = rng.normal(5.0, 1.5, n)
-        df_base = pd.DataFrame(
-            {"state": state, "year": year, "wt": wt, "y": y}
-        )
+        df_base = pd.DataFrame({"state": state, "year": year, "wt": wt, "y": y})
 
         if mode == "stratified_fpc":
             df = df_base.copy()
@@ -3643,7 +3919,10 @@ class TestAggregateSurveyScaffolding:
             df["psu"] = psu
             policy = mode.split("_", 1)[1]
             sd = SurveyDesign(
-                weights="wt", strata="stratum", psu="psu", lonely_psu=policy,
+                weights="wt",
+                strata="stratum",
+                psu="psu",
+                lonely_psu=policy,
             )
             return df, sd
 
@@ -3660,8 +3939,10 @@ class TestAggregateSurveyScaffolding:
             nan_a, nan_b = np.isnan(a), np.isnan(b)
             assert np.array_equal(nan_a, nan_b), f"NaN pattern mismatch in {col}"
             np.testing.assert_allclose(
-                a[~nan_a], b[~nan_b],
-                atol=1e-14, rtol=1e-14,
+                a[~nan_a],
+                b[~nan_b],
+                atol=1e-14,
+                rtol=1e-14,
                 err_msg=f"{col} diverges between fast and legacy paths",
             )
 
@@ -3685,16 +3966,24 @@ class TestAggregateSurveyScaffolding:
 
         data, sd = self._build_microdata(mode)
         panel_fast, _ = aggregate_survey(
-            data, by=["state", "year"], outcomes="y", survey_design=sd,
+            data,
+            by=["state", "year"],
+            outcomes="y",
+            survey_design=sd,
         )
         # Force the legacy code path by disabling the scaffolding precompute.
         # _cell_mean_variance falls back to compute_survey_if_variance when
         # scaffolding is None.
         monkeypatch.setattr(
-            prep, "_precompute_psu_scaffolding", lambda resolved: None,
+            prep,
+            "_precompute_psu_scaffolding",
+            lambda resolved: None,
         )
         panel_legacy, _ = aggregate_survey(
-            data, by=["state", "year"], outcomes="y", survey_design=sd,
+            data,
+            by=["state", "year"],
+            outcomes="y",
+            survey_design=sd,
         )
         self._assert_panels_equivalent(panel_fast, panel_legacy)
 

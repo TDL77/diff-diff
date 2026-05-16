@@ -162,9 +162,11 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         Which units serve as the comparison group:
         ``"never_treated"`` requires a never-treated cohort (raises if
         none exist); ``"last_cohort"`` reclassifies the latest treatment
-        cohort as pseudo-never-treated and drops post-treatment periods
-        for that cohort.  Distinct from CallawaySantAnna's
-        ``"not_yet_treated"`` — see REGISTRY.md for details.
+        cohort as pseudo-never-treated and drops periods at
+        ``t >= last_g - anticipation`` so the pseudo-control's
+        pre-treatment window excludes anticipation-contaminated periods.
+        Distinct from CallawaySantAnna's ``"not_yet_treated"`` — see
+        REGISTRY.md for details.
     n_bootstrap : int, default 0
         Number of multiplier bootstrap iterations (0 = analytical only).
     bootstrap_weights : str, default ``"rademacher"``
@@ -173,7 +175,9 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         Random seed for reproducibility.
     anticipation : int, default 0
         Number of anticipation periods (shifts the effective treatment
-        boundary forward by this amount).
+        boundary forward by this amount). When combined with
+        ``control_group="last_cohort"``, also trims the pseudo-control
+        period set at ``t >= last_g - anticipation`` (see REGISTRY.md).
     sieve_k_max : int or None
         Maximum polynomial degree for sieve ratio estimation. None = auto
         (``min(floor(n_gp^{1/5}), 5)``). Only used with covariates.

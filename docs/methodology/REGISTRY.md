@@ -877,7 +877,7 @@ where `q_{g,e} = pi_g / sum_{g' in G_{trt,e}} pi_{g'}`.
 - **Near-zero propensity scores**: Ratio `p_g(X)/p_{g'}(X)` explodes. Overlap assumption (O) rules this out in population; implement trimming or warn on finite-sample instability
 - **Note:** When no sieve degree K succeeds for ratio estimation (basis dimension exceeds comparison group size, or all linear systems are singular), the estimator falls back to a constant ratio of 1 for all units with a UserWarning. The outcome regression adjustment remains active, so the generated outcomes (Eq 4.4) still incorporate covariate information via the m_hat terms. The DR property ensures consistency as long as the outcome regression is correctly specified.
 - **Note:** When no sieve degree K succeeds for inverse propensity estimation (algorithm step 4), the estimator falls back to unconditional n/n_group scaling with a UserWarning, which reduces to the unconditional Omega* approximation for the affected group.
-- **All units eventually treated**: Last cohort serves as "never-treated" by dropping time periods from the last cohort's treatment onset onward. Use `control_group="last_cohort"` to enable; default `"never_treated"` raises ValueError if no never-treated units exist
+- **All units eventually treated**: Last cohort serves as "never-treated" by dropping time periods from `last_g - anticipation` onward (where `last_g` is the latest treatment cohort). This excludes anticipation-contaminated periods from the pseudo-control's pre-treatment window. With `anticipation=0` (default), this equals `last_g`. Use `control_group="last_cohort"` to enable; default `"never_treated"` raises ValueError if no never-treated units exist
 - **Negative weights**: Explicitly stated as harmless for bias and beneficial for precision; arise from efficiency optimization under overidentification (Section 5.2)
 - **PT-Post regime (just-identified)**: Under PT-Post, EDiD automatically reduces to standard single-baseline estimator (Corollary 3.2). No downside to using EDiD -- it subsumes standard estimators
 - **Duplicate rows**: Duplicate `(unit, time)` entries are rejected with `ValueError`. The estimator requires exactly one observation per unit-period
@@ -936,7 +936,7 @@ where `q_{g,e} = pi_g / sum_{g' in G_{trt,e}} pi_{g'}`.
 - **Note:** EfficientDiD covariates (DR path) with survey weights supported — WLS outcome regression, weighted sieve normal equations for propensity ratios/inverse propensities, survey-weighted Nadaraya-Watson kernel for conditional Omega*(X), and survey-weighted ATT averaging. Silverman bandwidth uses unweighted statistics (survey-weighted bandwidth deferred as second-order refinement).
 - **Note:** Cluster-robust SEs use the standard Liang-Zeger clustered sandwich estimator applied to EIF values: aggregate EIF within clusters, center, and compute variance with G/(G-1) small-sample correction. Cluster bootstrap generates multiplier weights at the cluster level (all units in a cluster share the same weight). Analytical clustered SEs are the default when `cluster` is set; cluster bootstrap is opt-in via `n_bootstrap > 0`.
 - **Note:** Hausman pretest operates on the post-treatment event-study vector ES(e) per Theorem A.1. Both PT-All and PT-Post fits are aggregated to ES(e) using cohort-size weights before computing the test statistic H = delta' V^{-1} delta where delta = ES_post - ES_all and V = Cov(ES_post) - Cov(ES_all). Covariance is computed from aggregated ES(e)-level EIF values. The variance-difference matrix V is inverted via Moore-Penrose pseudoinverse to handle finite-sample non-positive-definiteness. Effective rank of V (number of positive eigenvalues) is used as degrees of freedom.
-- **Note:** Last-cohort-as-control (`control_group="last_cohort"`) reclassifies the latest treatment cohort as pseudo-never-treated and drops time periods at/after that cohort's treatment start. This is distinct from CallawaySantAnna's `not_yet_treated` option which dynamically selects not-yet-treated units per (g,t) pair.
+- **Note:** Last-cohort-as-control (`control_group="last_cohort"`) reclassifies the latest treatment cohort as pseudo-never-treated and drops time periods at `t >= last_g - anticipation`, excluding anticipation-contaminated periods from the pseudo-control's pre-treatment window. This is distinct from CallawaySantAnna's `not_yet_treated` option which dynamically selects not-yet-treated units per (g,t) pair.
 
 ---
 
@@ -1746,6 +1746,16 @@ finite-sample adjustment.
 
 Note: IF-based SEs are inherently heteroskedasticity-robust; the `robust` parameter
 has no additional effect.
+
+**Note (panel-shaped input, `generate_ddd_panel_data`):** `TripleDifference` is the
+repeated-cross-section `panel=FALSE` implementation: the individual-level default SE
+treats each row as an independent observation (df = n_obs - 8). When fitting against
+panel-shaped data with repeated unit rows and within-unit serial correlation
+(e.g., `generate_ddd_panel_data` output), unclustered SE understates sampling
+variability and overstates power. Pass `cluster="unit"` to invoke the Liang-Zeger
+CR1 path so the influence functions are aggregated within unit before variance
+computation. The point estimate `att` is invariant to clustering, only the inference
+contract changes.
 
 *Edge cases:*
 - Propensity scores near 0/1: trimmed at `pscore_trim` (default 0.01)

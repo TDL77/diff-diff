@@ -1125,6 +1125,39 @@ class TestLastCohortControl:
         with pytest.raises(ValueError, match="No treated cohorts"):
             EfficientDiD(control_group="last_cohort").fit(df, "y", "unit", "time", "first_treat")
 
+    def test_last_cohort_with_anticipation_trims_at_last_g_minus_anticipation(self):
+        """last_cohort + anticipation>0 trims at `last_g - anticipation`, not `last_g`.
+
+        Regression guard for PR #230 deferral: the code at efficient_did.py:470 uses
+        `effective_last = last_g - self.anticipation` so anticipation-contaminated periods
+        are excluded from the pseudo-control's pre-treatment window. If a future change
+        reverts to `t < last_g`, this test will catch it by checking the trimmed
+        `time_periods` set exposed on EfficientDiDResults.
+        """
+        df = _make_staggered_panel(
+            n_per_group=60,
+            n_control=0,
+            groups=(3, 5, 7),
+            effects={3: 2.0, 5: 1.5, 7: 1.0},
+        )
+        # _make_staggered_panel default n_periods=7, last_g=7, times 1..7.
+        # anticipation=0: effective_last=7, time_periods=[1..6]
+        # anticipation=1: effective_last=6, time_periods=[1..5]
+        result_a0 = EfficientDiD(
+            pt_assumption="all", control_group="last_cohort", anticipation=0
+        ).fit(df, "y", "unit", "time", "first_treat")
+        result_a1 = EfficientDiD(
+            pt_assumption="all", control_group="last_cohort", anticipation=1
+        ).fit(df, "y", "unit", "time", "first_treat")
+
+        assert max(result_a0.time_periods) == 6
+        assert max(result_a1.time_periods) == 5
+        assert len(result_a1.time_periods) == len(result_a0.time_periods) - 1
+        assert np.isfinite(result_a0.overall_att)
+        assert np.isfinite(result_a1.overall_att)
+        assert 7 not in result_a0.groups
+        assert 7 not in result_a1.groups
+
     def test_last_cohort_aggregate_event_study(self):
         """last_cohort with aggregate='event_study' should produce finite results."""
         df = _make_staggered_panel(
@@ -2084,9 +2117,7 @@ class TestSievePartialKSkipWarning:
         with pytest.warns(UserWarning) as caught:
             ratio = estimate_propensity_ratio_sieve(X, mask_g, mask_gp, k_max=3)
         assert np.all(np.isfinite(ratio))
-        partial_skip_msgs = [
-            str(w.message) for w in caught if "skipped K=" in str(w.message)
-        ]
+        partial_skip_msgs = [str(w.message) for w in caught if "skipped K=" in str(w.message)]
         assert partial_skip_msgs, (
             "Expected a partial-K-skip warning when some K's are rank deficient "
             "but at least one succeeds; got none."
@@ -2106,9 +2137,7 @@ class TestSievePartialKSkipWarning:
         with pytest.warns(UserWarning) as caught:
             s_hat = estimate_inverse_propensity_sieve(X, mask, k_max=3)
         assert np.all(np.isfinite(s_hat))
-        partial_skip_msgs = [
-            str(w.message) for w in caught if "skipped K=" in str(w.message)
-        ]
+        partial_skip_msgs = [str(w.message) for w in caught if "skipped K=" in str(w.message)]
         assert partial_skip_msgs
 
     def test_ratio_sieve_no_warning_when_no_skips(self):
@@ -2128,9 +2157,7 @@ class TestSievePartialKSkipWarning:
             _w.simplefilter("always")
             ratio = estimate_propensity_ratio_sieve(X, mask_g, mask_gp, k_max=3)
         assert np.all(np.isfinite(ratio))
-        partial_skip_msgs = [
-            str(w.message) for w in caught if "skipped K=" in str(w.message)
-        ]
-        assert partial_skip_msgs == [], (
-            f"Unexpected partial-skip warning on clean data: {partial_skip_msgs}"
-        )
+        partial_skip_msgs = [str(w.message) for w in caught if "skipped K=" in str(w.message)]
+        assert (
+            partial_skip_msgs == []
+        ), f"Unexpected partial-skip warning on clean data: {partial_skip_msgs}"

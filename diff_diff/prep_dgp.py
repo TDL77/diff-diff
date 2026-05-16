@@ -1129,6 +1129,259 @@ def generate_staggered_ddd_data(
     return pd.DataFrame(records)
 
 
+def generate_ddd_panel_data(
+    n_units: int = 200,
+    n_periods: int = 8,
+    treatment_period: int = 4,
+    group_frac: float = 0.5,
+    partition_frac: float = 0.5,
+    treatment_effect: float = 2.0,
+    group_effect: float = 2.0,
+    partition_effect: float = 1.0,
+    time_effect: float = 0.5,
+    group_time_interaction: float = 1.0,
+    partition_time_interaction: float = 0.5,
+    group_partition_interaction: float = 1.5,
+    unit_fe_sd: float = 1.5,
+    noise_sd: float = 1.0,
+    add_covariates: bool = False,
+    seed: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Generate synthetic panel data for Triple Difference (DDD) power analysis.
+
+    Creates a balanced panel of n_units observed over n_periods with two
+    time-invariant binary dimensions (``group`` and ``partition``) and a
+    derived binary ``post`` indicator. The triple-interaction effect
+    (``group * partition * post``) is the identifying ATT under DDD-CPT.
+
+    The DGP equation is::
+
+        Y_{i,t} = unit_fe_i
+                + group_i        * group_effect
+                + partition_i    * partition_effect
+                + post_t         * time_effect
+                + (group_i * partition_i)  * group_partition_interaction
+                + (group_i * post_t)       * group_time_interaction
+                + (partition_i * post_t)   * partition_time_interaction
+                + treatment_effect * group_i * partition_i * post_t
+                + epsilon_{i,t}
+
+    where ``group_i`` and ``partition_i`` are unit-level (constant in t)
+    and ``post_t = 1[period >= treatment_period]``. DDD-CPT identification
+    holds because ``group_partition_interaction`` enters only as a
+    unit-level (time-invariant) effect, leaving the triple-interaction as
+    the sole source of differential group × partition trend.
+
+    Unlike the cross-sectional ``generate_ddd_data``, this DGP provides
+    panel-realistic unit fixed effects and within-unit serial structure,
+    making it suitable for panel-aware power-analysis simulations or
+    sanity-checking estimators that ignore the panel dimension.
+
+    .. warning::
+
+        ``TripleDifference`` is a repeated-cross-section ``panel=FALSE``
+        estimator: its analytical default treats each row as an
+        independent observation (df = n_obs - 8). When fitting against
+        ``generate_ddd_panel_data`` output, the within-unit serial
+        correlation makes unclustered SEs anti-conservative — they
+        understate sampling variability and overstate power. Always pass
+        ``cluster="unit"`` (Liang-Zeger CR1) when fitting on
+        panel-generated data; the point estimate ``att`` is invariant to
+        clustering but the inference contract is not. See the
+        ``TripleDifference`` REGISTRY entry for the clustering contract.
+
+    Parameters
+    ----------
+    n_units : int, default=200
+        Number of units in the panel.
+    n_periods : int, default=8
+        Number of time periods.
+    treatment_period : int, default=4
+        Period (0-indexed) at which ``post`` switches from 0 to 1.
+        Must satisfy ``1 <= treatment_period < n_periods``.
+    group_frac : float, default=0.5
+        Fraction of units with ``group=1``. Must be in ``(0, 1)``. The
+        partition split is then drawn stratified-by-group at the requested
+        ``partition_frac`` so every (group, partition) cell receives at
+        least one unit; a ``ValueError`` is raised when the rounded cell
+        counts would leave any cell empty.
+    partition_frac : float, default=0.5
+        Fraction of units with ``partition=1`` within each ``group``
+        stratum. Must be in ``(0, 1)``. The stratified allocation is what
+        makes TripleDifference.fit's 2x2x2 surface populated for any valid
+        ``(n_units, group_frac, partition_frac)``.
+    treatment_effect : float, default=2.0
+        True ATT for the triple-interaction cell (group=1, partition=1,
+        post=1).
+    group_effect : float, default=2.0
+        Main effect of ``group=1`` (unit-level).
+    partition_effect : float, default=1.0
+        Main effect of ``partition=1`` (unit-level).
+    time_effect : float, default=0.5
+        Main effect of ``post=1`` (time-level).
+    group_time_interaction : float, default=1.0
+        Coefficient on ``group * post`` (differential trend for the group
+        dimension).
+    partition_time_interaction : float, default=0.5
+        Coefficient on ``partition * post`` (differential trend for the
+        partition dimension).
+    group_partition_interaction : float, default=1.5
+        Coefficient on the unit-level ``group * partition`` interaction.
+        Must be time-invariant for DDD-CPT to hold.
+    unit_fe_sd : float, default=1.5
+        Standard deviation of the unit fixed effect.
+    noise_sd : float, default=1.0
+        Standard deviation of the idiosyncratic noise term.
+    add_covariates : bool, default=False
+        If True, add unit-level covariates ``x1`` (continuous) and ``x2``
+        (binary) that affect the outcome.
+    seed : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    pd.DataFrame
+        Long-format panel with columns:
+
+        - ``unit``: integer unit ID.
+        - ``period``: integer time period (0-indexed).
+        - ``outcome``: outcome variable.
+        - ``group``: unit-level binary group indicator (time-invariant).
+        - ``partition``: unit-level binary partition indicator
+          (time-invariant, orthogonal to group).
+        - ``post``: binary indicator, ``1`` if ``period >= treatment_period``.
+        - ``treated``: ``group * partition * post`` (binary).
+        - ``true_effect``: ``treatment_effect`` when treated, else 0.
+        - ``x1``, ``x2``: optional unit-level covariates (only if
+          ``add_covariates=True``).
+
+    Examples
+    --------
+    Generate a balanced panel with default parameters:
+
+    >>> data = generate_ddd_panel_data(n_units=200, n_periods=8, seed=42)
+    >>> data.shape
+    (1600, 8)
+    >>> data.groupby('unit')['period'].count().eq(8).all()
+    True
+
+    Fit with TripleDifference. Note ``time="post"`` (the derived binary
+    indicator) and ``cluster="unit"`` (required for valid inference on
+    panel-generated data; see the warning above):
+
+    >>> from diff_diff import TripleDifference
+    >>> result = TripleDifference(cluster="unit").fit(
+    ...     data, outcome='outcome', group='group',
+    ...     partition='partition', time='post',
+    ... )
+    """
+    if not (1 <= treatment_period < n_periods):
+        raise ValueError(
+            f"treatment_period must satisfy 1 <= treatment_period < n_periods; "
+            f"got treatment_period={treatment_period}, n_periods={n_periods}."
+        )
+    if not (0.0 < group_frac < 1.0):
+        raise ValueError(f"group_frac must be in (0, 1); got {group_frac}.")
+    if not (0.0 < partition_frac < 1.0):
+        raise ValueError(f"partition_frac must be in (0, 1); got {partition_frac}.")
+    if n_units < 4:
+        raise ValueError(
+            f"n_units must be >= 4 to populate all four (group, partition) cells; "
+            f"got {n_units}."
+        )
+
+    # Stratified allocation that guarantees every (group, partition) cell receives
+    # at least one unit. Independent marginal sampling could collapse a cell when
+    # rounded marginals are small (e.g., n_units=4, group_frac=partition_frac=0.25
+    # yields n_group_1=1 with no room for both partition values within group=1).
+    # TripleDifference.fit requires all 8 G×P×T cells, so we validate first.
+    n_group_1 = int(round(n_units * group_frac))
+    n_group_0 = n_units - n_group_1
+    n_p1_g0 = int(round(n_group_0 * partition_frac))
+    n_p1_g1 = int(round(n_group_1 * partition_frac))
+    n_p0_g0 = n_group_0 - n_p1_g0
+    n_p0_g1 = n_group_1 - n_p1_g1
+    cell_counts = {
+        (0, 0): n_p0_g0,
+        (0, 1): n_p1_g0,
+        (1, 0): n_p0_g1,
+        (1, 1): n_p1_g1,
+    }
+    if min(cell_counts.values()) < 1:
+        raise ValueError(
+            f"generate_ddd_panel_data requires every (group, partition) cell to "
+            f"contain at least one unit so TripleDifference.fit's 2x2x2 surface is "
+            f"populated. With n_units={n_units}, group_frac={group_frac}, "
+            f"partition_frac={partition_frac}, the rounded cell counts are "
+            f"(group, partition): (0,0)={n_p0_g0}, (0,1)={n_p1_g0}, "
+            f"(1,0)={n_p0_g1}, (1,1)={n_p1_g1}. Increase n_units or move "
+            f"group_frac/partition_frac closer to 0.5 so each cell receives "
+            f">=1 unit."
+        )
+
+    rng = np.random.default_rng(seed)
+
+    group = np.zeros(n_units, dtype=int)
+    group_idx = rng.choice(n_units, size=n_group_1, replace=False)
+    group[group_idx] = 1
+    partition = np.zeros(n_units, dtype=int)
+    g0_units = np.where(group == 0)[0]
+    g1_units = np.where(group == 1)[0]
+    partition[rng.choice(g0_units, size=n_p1_g0, replace=False)] = 1
+    partition[rng.choice(g1_units, size=n_p1_g1, replace=False)] = 1
+
+    unit_fe = rng.normal(0.0, unit_fe_sd, size=n_units)
+
+    if add_covariates:
+        x1 = rng.normal(0.0, 1.0, size=n_units)
+        x2 = rng.choice([0, 1], size=n_units)
+    else:
+        x1 = None
+        x2 = None
+
+    records = []
+    for i in range(n_units):
+        g_i = int(group[i])
+        p_i = int(partition[i])
+        for t in range(n_periods):
+            post_t = 1 if t >= treatment_period else 0
+            y = (
+                unit_fe[i]
+                + g_i * group_effect
+                + p_i * partition_effect
+                + post_t * time_effect
+                + (g_i * p_i) * group_partition_interaction
+                + (g_i * post_t) * group_time_interaction
+                + (p_i * post_t) * partition_time_interaction
+            )
+            treated = int(g_i == 1 and p_i == 1 and post_t == 1)
+            true_eff = treatment_effect if treated else 0.0
+            if treated:
+                y += treatment_effect
+            if add_covariates:
+                y += 0.5 * x1[i] + 0.3 * x2[i]
+            y += rng.normal(0.0, noise_sd)
+
+            row = {
+                "unit": i,
+                "period": t,
+                "outcome": float(y),
+                "group": g_i,
+                "partition": p_i,
+                "post": post_t,
+                "treated": treated,
+                "true_effect": float(true_eff),
+            }
+            if add_covariates:
+                row["x1"] = float(x1[i])
+                row["x2"] = int(x2[i])
+
+            records.append(row)
+
+    return pd.DataFrame(records)
+
+
 def _rank_pair_weights(
     unit_weight: np.ndarray,
     unit_stratum: np.ndarray,
@@ -1432,9 +1685,7 @@ def generate_survey_did_data(
         raise ValueError("te_covariate_interaction requires add_covariates=True")
 
     if not np.isfinite(conditional_pt):
-        raise ValueError(
-            f"conditional_pt must be finite, got {conditional_pt}"
-        )
+        raise ValueError(f"conditional_pt must be finite, got {conditional_pt}")
     if conditional_pt != 0.0 and not add_covariates:
         raise ValueError("conditional_pt requires add_covariates=True")
     if conditional_pt != 0.0:

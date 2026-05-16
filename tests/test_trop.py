@@ -4146,6 +4146,49 @@ class TestTROPModuleSplit:
                 trop_est.fit(df, "outcome", "treated", "unit", "time")
             mock_fg.assert_not_called()
 
+    def test_setup_trop_data_internal_contract(self):
+        """`_setup_trop_data` returns a self-consistent state dict used by both fit paths.
+
+        Regression guard for the Wave 4 refactor: both `TROP.fit()` local path and
+        `_fit_global()` now consume `_setup_trop_data`'s dict. If a future contract
+        change drops or renames a field, this catches it.
+        """
+        from diff_diff.trop_local import _setup_trop_data
+
+        df = self._make_panel()
+        ctx = _setup_trop_data(
+            df,
+            outcome="outcome",
+            treatment="treated",
+            unit="unit",
+            time="time",
+            resolved_survey=None,
+            survey_design=None,
+        )
+        n_units = ctx["n_units"]
+        n_periods = ctx["n_periods"]
+        # Dimensions are consistent across return fields.
+        assert ctx["Y"].shape == (n_periods, n_units)
+        assert ctx["D"].shape == (n_periods, n_units)
+        assert ctx["missing_mask"].shape == (n_periods, n_units)
+        assert ctx["treated_mask"].shape == (n_periods, n_units)
+        assert len(ctx["all_units"]) == n_units
+        assert len(ctx["all_periods"]) == n_periods
+        # Round-trip both mapping pairs (the local path historically built both
+        # forward and inverse maps; helper now returns all four uniformly so
+        # global path gains parity).
+        for i in range(n_units):
+            assert ctx["unit_to_idx"][ctx["idx_to_unit"][i]] == i
+        for t in range(n_periods):
+            assert ctx["period_to_idx"][ctx["idx_to_period"][t]] == t
+        # first_treat_period derivation matches the canonical "first row of D
+        # with any treated cell" expression used pre-refactor.
+        assert ctx["first_treat_period"] == int(np.argmax(np.any(ctx["D"] == 1, axis=1)))
+        assert ctx["n_pre_periods"] == ctx["first_treat_period"]
+        # Treated/control unit partition is complete and disjoint.
+        assert len(ctx["treated_unit_idx"]) + len(ctx["control_unit_idx"]) == n_units
+        assert len(set(ctx["treated_unit_idx"]) & set(ctx["control_unit_idx"])) == 0
+
 
 class TestSilentWarningAudit:
     """Tests for UserWarning emissions added by the silent warning audit."""
