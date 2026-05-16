@@ -5204,15 +5204,28 @@ def _compute_heterogeneity_test(
             continue
 
         if not use_survey:
-            # Plain OLS path: standard inference per Lemma 7. df is the
-            # pre-drop column count (n_obs - n_params); matches R's
+            # Plain OLS path: standard inference per Lemma 7. df uses
+            # the POST-drop numerical rank (n_obs - rank), matching R's
             # did_multiplegt_dyn(predict_het=...) which uses the
-            # t-distribution with df = n - k from the OLS regression
-            # (DIDmultiplegtDYN:::did_multiplegt_main `t_stat <- qt(0.975,
-            # df.residual(model))` site). Under near-rank-deficient
-            # designs that solve_ols retains rather than NaN-out, n_params
-            # may exceed actual rank; see TODO row for the deferred
-            # rank-tracking follow-up.
+            # t-distribution with df = n_obs - rank(design) from the OLS
+            # regression (`df.residual(model)` site at
+            # `DIDmultiplegtDYN:::did_multiplegt_main` `t_stat <- qt(0.975,
+            # df.residual(model))`). For full-rank designs `rank ==
+            # n_params` and behavior is bit-identical to the pre-PR
+            # `n_obs - n_params` path. For near-rank-deficient designs
+            # that `solve_ols` retains rather than NaN-out (e.g.,
+            # cohort-collinearity at high horizons), the post-drop rank
+            # is strictly lower and the post-PR `df` is larger, matching
+            # R's lm() convention. The rank is computed via the same
+            # `_detect_rank_deficiency` helper that `solve_ols` calls
+            # internally; the extra O(nk^2) cost is negligible at
+            # heterogeneity scale (k = intercept + X_het + cohort dummies,
+            # typically 5-30 columns; n = path-switcher count, typically
+            # 30-300 groups).
+            from diff_diff.linalg import _detect_rank_deficiency
+
+            rank, _dropped, _pivot = _detect_rank_deficiency(design)
+            df_ols = max(int(n_obs) - int(rank), 0)
             coefs, _residuals, vcov = solve_ols(
                 design,
                 dep_arr,
@@ -5223,7 +5236,7 @@ def _compute_heterogeneity_test(
             se_het = float("nan")
             if vcov is not None and np.isfinite(vcov[1, 1]) and vcov[1, 1] > 0:
                 se_het = float(np.sqrt(vcov[1, 1]))
-            t_stat, p_val, ci = safe_inference(beta_het, se_het, alpha=alpha, df=n_obs - n_params)
+            t_stat, p_val, ci = safe_inference(beta_het, se_het, alpha=alpha, df=df_ols)
         else:
             # Survey-aware path: WLS with per-group weights + TSL IF variance.
             W_elig = W_g_all[eligible]
