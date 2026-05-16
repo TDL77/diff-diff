@@ -3467,7 +3467,62 @@ class TestSpilloverDiDEventStudyValidation:
 
 
 class TestSpilloverDiDEventStudyBackwardCompat:
-    """event_study=False reproduces Wave B SE bit-identity (no behavioral drift)."""
+    """event_study=False reproduces Wave B SE bit-identity (no behavioral drift).
+
+    The golden values below were captured against the Wave C event_study=False
+    path on `generate_butts_nonstaggered_dgp(seed=42)`. Since Wave C does not
+    modify the aggregate (Wave B) stage-2 design, fit, or extraction logic,
+    these values ARE the Wave B numerics. Any future drift on this PIN
+    indicates an accidental change to the aggregate path.
+    """
+
+    # PR #456 R3 golden capture (event_study=False on the seed-42 fixture).
+    _WAVE_B_GOLDEN_ATT = -0.08620379515400438
+    _WAVE_B_GOLDEN_SE = 0.017812406263278957
+    _WAVE_B_GOLDEN_RING_INNER_COEF = -0.0371780776943839
+    _WAVE_B_GOLDEN_RING_INNER_SE = 0.008298917907045593
+    _WAVE_B_GOLDEN_RING_OUTER_COEF = -0.009441319618178406
+    _WAVE_B_GOLDEN_RING_OUTER_SE = 0.015538307675860204
+
+    def test_event_study_false_matches_wave_b_golden(self):
+        """Pre-Wave-C golden parity (not just determinism): pin att/se on a
+        deterministic DGP and assert bit-identical reproduction. Strengthened
+        per PR #456 R3 review — the previous determinism check (fit twice on
+        the current code path) did not actually anchor against a pre-Wave-C
+        baseline."""
+        df = generate_butts_nonstaggered_dgp(seed=42)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=False,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            res = est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+        # Scalar att/se must match the pre-Wave-C golden at machine precision.
+        assert res.att == self._WAVE_B_GOLDEN_ATT, (
+            f"event_study=False att drift: got {res.att!r}, "
+            f"expected {self._WAVE_B_GOLDEN_ATT!r}"
+        )
+        assert res.se == self._WAVE_B_GOLDEN_SE, (
+            f"event_study=False se drift: got {res.se!r}, " f"expected {self._WAVE_B_GOLDEN_SE!r}"
+        )
+        # Per-ring entries must also match.
+        inner = res.spillover_effects.loc["[0, 50)"]
+        assert inner["coef"] == self._WAVE_B_GOLDEN_RING_INNER_COEF, (
+            f"inner ring coef drift: got {inner['coef']!r}, "
+            f"expected {self._WAVE_B_GOLDEN_RING_INNER_COEF!r}"
+        )
+        assert inner["se"] == self._WAVE_B_GOLDEN_RING_INNER_SE, (
+            f"inner ring se drift: got {inner['se']!r}, "
+            f"expected {self._WAVE_B_GOLDEN_RING_INNER_SE!r}"
+        )
+        outer = res.spillover_effects.loc["[50, 200]"]
+        assert outer["coef"] == self._WAVE_B_GOLDEN_RING_OUTER_COEF
+        assert outer["se"] == self._WAVE_B_GOLDEN_RING_OUTER_SE
 
     def test_event_study_false_bit_identical_to_wave_b_fixture(self):
         df = generate_butts_nonstaggered_dgp(seed=42)
@@ -3489,7 +3544,7 @@ class TestSpilloverDiDEventStudyBackwardCompat:
             _w.simplefilter("ignore", UserWarning)
             res_a = est_a.fit(df, outcome="y", unit="unit", time="time", treatment="D")
             res_b = est_b.fit(df, outcome="y", unit="unit", time="time", treatment="D")
-        # Bit-identical (deterministic fit).
+        # Determinism guard (the golden parity check above pins the actual values).
         assert res_a.att == res_b.att
         assert res_a.se == res_b.se
 
@@ -3526,6 +3581,51 @@ class TestSpilloverDiDEventStudyIdentification:
                 f"k={k}: mean tau_k estimate {mean_est:.4f} differs from "
                 f"target {target:.4f} by more than 0.025 over "
                 f"{len(tau_k_estimates[k])} seeds"
+            )
+
+    def test_per_ring_event_time_delta_jk_recovery(self):
+        """PR #456 R3 fix: also verify per-(ring, event-time) `delta_jk`
+        recovery — not just `tau_k`. REGISTRY says Wave C covers `delta_jk`
+        recovery; this test backs that claim.
+
+        DGP places all near-controls in ring 0 (one-cohort-one-cluster), so
+        only ring 0 cells fire; outer rings emit NaN coefs with n_obs=0
+        (rectangular schema).
+        """
+
+        def delta_fn(j, k):
+            # Mild profile in ring 0: k=0 → -0.04; k=1 → -0.035; k=2 → -0.03.
+            return -0.04 + 0.005 * k
+
+        delta_k_estimates = {k: [] for k in [0, 1, 2]}
+
+        for s in range(50):
+            df = generate_butts_staggered_dgp(
+                seed=s,
+                tau_per_event_time=lambda k: -0.07,
+                delta_per_ring_per_event_time=delta_fn,
+            )
+            try:
+                res = _fit_event_study(df, horizon_max=2)
+            except Exception:
+                continue
+            # Ring 0 corresponds to the inner ring; ring labels are like
+            # "[0, 50)" depending on rings passed. Iterate by position.
+            ring_labels = res.spillover_effects.index.get_level_values("ring").unique()
+            inner_ring = ring_labels[0]
+            for k in delta_k_estimates:
+                key = (inner_ring, k)
+                if key in res.spillover_effects.index:
+                    val = res.spillover_effects.loc[key, "coef"]
+                    if np.isfinite(val):
+                        delta_k_estimates[k].append(val)
+
+        for k, target in [(0, -0.04), (1, -0.035), (2, -0.03)]:
+            mean_est = np.mean(delta_k_estimates[k])
+            assert abs(mean_est - target) < 0.025, (
+                f"delta_jk recovery: k={k} target={target:.4f}, "
+                f"mean_est={mean_est:.4f} over {len(delta_k_estimates[k])} seeds "
+                f"(tolerance 0.025)"
             )
 
 
