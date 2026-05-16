@@ -1410,11 +1410,13 @@ class TestDCDHDynRParityHeterogeneity:
                 f"h={h} n_obs: py={py_h['n_obs']} vs r={r_h['n_obs']}"
             )
             # `p_value` and `conf_int` parity (post-2026-05-15 df threading).
-            # `_compute_heterogeneity_test` now passes `df = n_obs - n_params`
-            # to `safe_inference`, matching R's t-distribution with WLS df.
-            # Pinned at INFERENCE_RTOL = 1e-4 because Wald-test critical
-            # values come from `scipy.stats.t.ppf` and `t.sf` which are
-            # implementation-aligned with R's `qt`/`pt` to ~6 sig figs.
+            # `_compute_heterogeneity_test` now passes
+            # `df = n_obs - rank(design)` to `safe_inference`, matching
+            # R's t-distribution with WLS df (full-rank designs have
+            # `rank == n_params`). Pinned at INFERENCE_RTOL = 1e-4
+            # because Wald-test critical values come from
+            # `scipy.stats.t.ppf` and `t.sf` which are implementation-
+            # aligned with R's `qt`/`pt` to ~6 sig figs.
             assert py_h["p_value"] == pytest.approx(
                 r_h["p_value"], rel=self.INFERENCE_RTOL
             ), f"h={h} p_value: py={py_h['p_value']:.6e} vs r={r_h['p_value']:.6e}"

@@ -2870,11 +2870,12 @@ class TestHeterogeneityTesting:
     def test_heterogeneity_inference_local_invariants(self):
         """Local SE-derivation invariants for non-survey heterogeneity
         inference. Post-2026-05-15 df threading: Python passes
-        ``df = n_obs - n_params`` to ``safe_inference`` (matching R's
-        t-distribution); R-parity is pinned in
+        ``df = n_obs - rank(design)`` to ``safe_inference`` (matching
+        R's t-distribution); for full-rank designs ``rank == n_params``.
+        R-parity is pinned in
         ``tests/test_chaisemartin_dhaultfoeuille_parity.py``. This local
         test verifies the SE-derived fields are wired correctly
-        without requiring back-derivation of ``n_params``:
+        without requiring back-derivation of ``rank``:
         ``t_stat = beta / se``; ``conf_int`` symmetric around ``beta``
         with positive half-width; ``p_value`` in ``[0, 1]``.
         Without these checks a regression isolated to the inference
@@ -10354,12 +10355,13 @@ class TestByPathHeterogeneity:
     def test_per_path_heterogeneity_inference_local_invariants(self):
         """Local SE-derivation invariants for non-survey per-path
         heterogeneity inference. Post-2026-05-15 df threading: Python
-        passes ``df = n_obs - n_params`` to ``safe_inference``; R-parity
-        is pinned in
+        passes ``df = n_obs - rank(design)`` to ``safe_inference``
+        (full-rank designs have ``rank == n_params``); R-parity is
+        pinned in
         ``tests/test_chaisemartin_dhaultfoeuille_parity.py::
         TestDCDHDynRParityByPathHeterogeneity``. Verifies SE-derivation
         wiring (``t_stat = beta/se``, symmetric ``conf_int`` around beta,
-        ``p_value`` in ``[0, 1]``) without back-deriving ``n_params``.
+        ``p_value`` in ``[0, 1]``) without back-deriving ``rank``.
         Mirrors
         ``TestHeterogeneityTesting::test_heterogeneity_inference_local_invariants``.
         """

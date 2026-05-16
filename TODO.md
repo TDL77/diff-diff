@@ -184,8 +184,7 @@ Ordered paydown view across the tables above. Tier A → D is by effort × risk,
 - WooldridgeDiD: optional `weights="cohort_share"` on `aggregate()` (`wooldridge_results.py`)
 - HAD survey-design API consolidation: drop deprecated `survey=`/`weights=` kwargs (`had.py`, `had_pretests.py`; gated on next minor bump)
 - Survey-design resolution / collapse helper extraction across `continuous_did.py`, `efficient_did.py`, `stacked_did.py`
-- dCDH heterogeneity df threading: t-distribution at heterogeneity surface (or formalize the tolerance constant) (`chaisemartin_dhaultfoeuille.py`)
-- dCDH by_path placebo `predict_het` parity vs R `did_multiplegt_dyn(..., by_path, predict_het)` (`chaisemartin_dhaultfoeuille.py`, `chaisemartin_dhaultfoeuille_results.py`)
+- dCDH survey + backward-horizon `predict_het` allocator derivation: lift the warn-and-skip fallback at `_compute_heterogeneity_test` once the pre-period Binder TSL cell-period allocator is derived (currently the gate emits a `UserWarning` and falls back to forward-horizon-only heterogeneity under `survey_design + placebo + heterogeneity`) (`chaisemartin_dhaultfoeuille.py`, `docs/methodology/REGISTRY.md`)
 - Rust local-method solver path unification to `solve_wls_svd` + bootstrap-weight RNG parity audit (`rust/src/trop.rs`, `rust/src/bootstrap.rs`)
 - AI review CI workflow-contract pin test expansion (`tests/test_openai_review.py`)
 - In-site Sphinx render of `REPORTING.md` and `REGISTRY.md` (`docs/conf.py` + `:doc:` link migration)
