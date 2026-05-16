@@ -1234,6 +1234,59 @@ class TestGenerateDddPanelData:
         with pytest.raises(ValueError, match="n_units"):
             generate_ddd_panel_data(n_units=3, seed=42)
 
+    def test_infeasible_cell_counts_raise(self):
+        """Configs that round to empty (group, partition) cells fail fast."""
+        from diff_diff.prep import generate_ddd_panel_data
+
+        # n_units=4, group_frac=0.25 → n_group_1=1; partition_frac=0.25 inside
+        # the 1-unit group=1 stratum rounds to 0, leaving the (1, 1) cell empty.
+        with pytest.raises(ValueError, match=r"every \(group, partition\) cell"):
+            generate_ddd_panel_data(
+                n_units=4,
+                group_frac=0.25,
+                partition_frac=0.25,
+                seed=42,
+            )
+        # n_units=10, group_frac=0.1 → n_group_1=1 again; same failure mode for
+        # the (1, 1) cell.
+        with pytest.raises(ValueError, match=r"every \(group, partition\) cell"):
+            generate_ddd_panel_data(
+                n_units=10,
+                group_frac=0.1,
+                partition_frac=0.5,
+                seed=42,
+            )
+
+    def test_smallest_feasible_config_populates_all_cells(self):
+        """n_units=4 with fracs=0.5 yields one unit per (group, partition) cell."""
+        from diff_diff import TripleDifference
+        from diff_diff.prep import generate_ddd_panel_data
+
+        data = generate_ddd_panel_data(
+            n_units=4,
+            n_periods=4,
+            treatment_period=2,
+            group_frac=0.5,
+            partition_frac=0.5,
+            noise_sd=0.0,
+            seed=42,
+        )
+        # All four (group, partition) cells must receive exactly one unit.
+        unit_cells = data.groupby("unit")[["group", "partition"]].first()
+        cell_counts = unit_cells.groupby(["group", "partition"]).size()
+        assert len(cell_counts) == 4
+        assert (cell_counts == 1).all()
+        # TripleDifference.fit (which requires all 8 G×P×T cells) must succeed
+        # on the smallest feasible config — validates the public contract
+        # advertised in the docstring's compatibility paragraph.
+        TripleDifference().fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="post",
+        )
+
     def test_reproducibility(self):
         """Same seed produces identical DataFrames."""
         from diff_diff.prep import generate_ddd_panel_data

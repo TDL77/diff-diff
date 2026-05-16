@@ -1188,10 +1188,16 @@ def generate_ddd_panel_data(
         Period (0-indexed) at which ``post`` switches from 0 to 1.
         Must satisfy ``1 <= treatment_period < n_periods``.
     group_frac : float, default=0.5
-        Fraction of units with ``group=1``. Must be in ``(0, 1)``.
+        Fraction of units with ``group=1``. Must be in ``(0, 1)``. The
+        partition split is then drawn stratified-by-group at the requested
+        ``partition_frac`` so every (group, partition) cell receives at
+        least one unit; a ``ValueError`` is raised when the rounded cell
+        counts would leave any cell empty.
     partition_frac : float, default=0.5
-        Fraction of units with ``partition=1`` (assigned independently of
-        ``group``). Must be in ``(0, 1)``.
+        Fraction of units with ``partition=1`` within each ``group``
+        stratum. Must be in ``(0, 1)``. The stratified allocation is what
+        makes TripleDifference.fit's 2x2x2 surface populated for any valid
+        ``(n_units, group_frac, partition_frac)``.
     treatment_effect : float, default=2.0
         True ATT for the triple-interaction cell (group=1, partition=1,
         post=1).
@@ -1270,16 +1276,45 @@ def generate_ddd_panel_data(
             f"got {n_units}."
         )
 
+    # Stratified allocation that guarantees every (group, partition) cell receives
+    # at least one unit. Independent marginal sampling could collapse a cell when
+    # rounded marginals are small (e.g., n_units=4, group_frac=partition_frac=0.25
+    # yields n_group_1=1 with no room for both partition values within group=1).
+    # TripleDifference.fit requires all 8 G×P×T cells, so we validate first.
+    n_group_1 = int(round(n_units * group_frac))
+    n_group_0 = n_units - n_group_1
+    n_p1_g0 = int(round(n_group_0 * partition_frac))
+    n_p1_g1 = int(round(n_group_1 * partition_frac))
+    n_p0_g0 = n_group_0 - n_p1_g0
+    n_p0_g1 = n_group_1 - n_p1_g1
+    cell_counts = {
+        (0, 0): n_p0_g0,
+        (0, 1): n_p1_g0,
+        (1, 0): n_p0_g1,
+        (1, 1): n_p1_g1,
+    }
+    if min(cell_counts.values()) < 1:
+        raise ValueError(
+            f"generate_ddd_panel_data requires every (group, partition) cell to "
+            f"contain at least one unit so TripleDifference.fit's 2x2x2 surface is "
+            f"populated. With n_units={n_units}, group_frac={group_frac}, "
+            f"partition_frac={partition_frac}, the rounded cell counts are "
+            f"(group, partition): (0,0)={n_p0_g0}, (0,1)={n_p1_g0}, "
+            f"(1,0)={n_p0_g1}, (1,1)={n_p1_g1}. Increase n_units or move "
+            f"group_frac/partition_frac closer to 0.5 so each cell receives "
+            f">=1 unit."
+        )
+
     rng = np.random.default_rng(seed)
 
-    n_group_1 = max(1, min(n_units - 1, int(round(n_units * group_frac))))
-    n_partition_1 = max(1, min(n_units - 1, int(round(n_units * partition_frac))))
     group = np.zeros(n_units, dtype=int)
     group_idx = rng.choice(n_units, size=n_group_1, replace=False)
     group[group_idx] = 1
     partition = np.zeros(n_units, dtype=int)
-    partition_idx = rng.choice(n_units, size=n_partition_1, replace=False)
-    partition[partition_idx] = 1
+    g0_units = np.where(group == 0)[0]
+    g1_units = np.where(group == 1)[0]
+    partition[rng.choice(g0_units, size=n_p1_g0, replace=False)] = 1
+    partition[rng.choice(g1_units, size=n_p1_g1, replace=False)] = 1
 
     unit_fe = rng.normal(0.0, unit_fe_sd, size=n_units)
 
