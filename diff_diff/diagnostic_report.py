@@ -1774,6 +1774,31 @@ class DiagnosticReport:
                 "status": "error",
                 "reason": f"bacon_decompose raised {type(exc).__name__}: {exc}",
             }
+        except NotImplementedError as exc:
+            # PR #454 R4 P3: ``BaconDecomposition.fit()`` raises
+            # ``NotImplementedError`` for replicate-weight survey designs
+            # (bacon.py rejects them because Bacon is a diagnostic that
+            # does not compute replicate-based variance). Match the
+            # within-unit-varying skip pattern above: emit a structured
+            # skip naming the ``precomputed={'bacon': ...}`` escape hatch
+            # so survey-backed reports with replicate-weight designs
+            # produce an actionable skip rather than an opaque
+            # ``status="error"`` block.
+            return {
+                "status": "skipped",
+                "reason": (
+                    "Survey design uses replicate weights, which the "
+                    "Bacon decomposition does not support (bacon is a "
+                    "diagnostic and does not compute replicate-based "
+                    "variance). To populate this section, run "
+                    "``bacon_decompose(data, ..., "
+                    "survey_design=SurveyDesign(weights=..., strata=..., "
+                    "psu=..., fpc=...))`` with a TSL-based design and "
+                    "pass via "
+                    "``DiagnosticReport(..., precomputed={'bacon': result})``. "
+                    f"Rejection detail: {exc}"
+                ),
+            }
         except Exception as exc:  # noqa: BLE001
             return {
                 "status": "error",

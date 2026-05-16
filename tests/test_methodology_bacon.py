@@ -1067,6 +1067,45 @@ class TestBaconSurveyDesignNarrowing:
         assert abs(total - 1.0) < 0.01
         assert np.isfinite(results.twfe_estimate)
 
+    def test_diagnostic_report_skips_with_structured_reason_on_replicate_weights(
+        self,
+    ) -> None:
+        """PR #454 R4 P3 regression: ``DiagnosticReport._check_bacon``
+        emits ``status="skipped"`` (not ``"error"``) when the survey
+        design uses replicate weights, which Bacon rejects with
+        ``NotImplementedError`` upstream. The skip reason names the
+        ``precomputed={'bacon': ...}`` escape hatch and points users at
+        a TSL-based survey design as the supported alternative.
+        """
+        from diff_diff import DiagnosticReport, SurveyDesign
+
+        df, _ = self._time_varying_survey_panel()
+        df["rep_w1"] = 1.0
+        df["rep_w2"] = 1.0
+        sd_rep = SurveyDesign(
+            weights="w",
+            replicate_weights=["rep_w1", "rep_w2"],
+            replicate_method="BRR",
+        )
+
+        class _Stub:
+            pass
+
+        dr = DiagnosticReport(
+            _Stub(),
+            data=df,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=sd_rep,
+        )
+        block = dr._check_bacon()
+        assert block["status"] == "skipped"
+        reason = block["reason"]
+        assert "replicate weights" in reason
+        assert "precomputed" in reason
+
     def test_diagnostic_report_skips_with_structured_reason_on_time_varying_survey(
         self,
     ) -> None:

@@ -702,7 +702,19 @@ class TwoWayFixedEffects(DifferenceInDifferences):
             Name of time period column.
         first_treat : str
             Name of column indicating when each unit was first treated.
-            Use 0 (or np.inf) for never-treated units.
+            The values ``0`` and ``np.inf`` are **reserved as
+            never-treated sentinels**; a real treatment cohort with
+            ``first_treat == 0`` would be folded into ``U`` and should
+            be re-labeled to a non-sentinel value before fitting. Units
+            whose ``first_treat`` is at or before the first observable
+            period (``first_treat <= min(time)``, excluding the
+            sentinels) are automatically remapped to the ``U``
+            (untreated) bucket per Goodman-Bacon (2021) footnote 11
+            with a ``UserWarning``. See ``BaconDecomposition.fit()`` for
+            the full contract and
+            ``BaconDecompositionResults.n_always_treated_remapped`` for
+            the count. The user's original ``first_treat`` column is
+            preserved unchanged.
         weights : str, default="exact"
             Weight calculation method:
 
