@@ -2606,7 +2606,7 @@ Shipped in `diff_diff/had_pretests.py` as `stute_joint_pretest()` (residuals-in 
 
 *Assumption checks / warnings:*
 - Requires variation in treatment timing (staggered adoption)
-- Always-treated units (`0 < first_treat <= min(time)`, paper footnote 11) are automatically remapped to the `U` (untreated) bucket with a `UserWarning`; see the `**Note (always-treated remap)**` below
+- Always-treated units (`first_treat <= min(time)`, excluding the never-treated sentinels `0` and `np.inf`; paper footnote 11) are automatically remapped to the `U` (untreated) bucket with a `UserWarning`; see the `**Note (always-treated remap)**` below for the full ordered-time / sentinel contract
 - Unbalanced panels are accepted with a `UserWarning`; the paper's Appendix A proof assumes balanced panels
 - Falls back to timing-only comparisons when no never-treated units are present (no untreated group → `s_{kU}` terms drop, weights rescale to sum to 1; **VWCT and ΔATT can still bias the result** — see paper Eqs. 14-15)
 

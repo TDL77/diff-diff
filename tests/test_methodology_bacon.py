@@ -16,8 +16,9 @@ Test class breakdown:
   TWFE-vs-weighted-sum identity, per-Eq variance hand-checks at atol=1e-10.
 - ``TestBaconParityR`` — R parity at atol=1e-6 against the committed
   ``benchmarks/data/r_bacondecomp_golden.json`` (skip if missing).
-- ``TestBaconAlwaysTreatedRemap`` — warn+remap of 0 < first_treat <= min(time)
-  to U; user's first_treat column preserved unchanged.
+- ``TestBaconAlwaysTreatedRemap`` — warn+remap of first_treat <= min(time)
+  (excluding never-treated sentinels 0 and np.inf) to U; user's first_treat
+  column preserved unchanged.
 - ``TestBaconEdgeCases`` — no-untreated, single-cohort, boundary D̄_k,
   unbalanced panel, constant-ATT recovery.
 - ``TestBaconWeightModes`` — exact-is-default, approximate-opt-in,
@@ -488,9 +489,12 @@ def _panel_with_always_treated() -> pd.DataFrame:
 class TestBaconAlwaysTreatedRemap:
     """Goodman-Bacon (2021) footnote 11: t_i < 1 units go in U.
 
-    bacon.py automatically remaps ``0 < first_treat <= min(time)`` units
-    via an internal column (``__bacon_first_treat_internal__``), preserving
-    the user's original ``first_treat`` column unchanged.
+    bacon.py automatically remaps units whose ``first_treat <= min(time)``
+    (excluding the never-treated sentinels ``0`` and ``np.inf``) via an
+    internal column (``__bacon_first_treat_internal__``), preserving the
+    user's original ``first_treat`` column unchanged. Detection uses
+    ordered-time logic on the **time axis**, so event-time-encoded
+    panels (``time ∈ [-2,..,3]``) are handled correctly.
     """
 
     def test_warn_emitted_on_remap(self) -> None:
