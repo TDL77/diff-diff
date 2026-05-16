@@ -2870,11 +2870,12 @@ class TestHeterogeneityTesting:
     def test_heterogeneity_inference_local_invariants(self):
         """Local SE-derivation invariants for non-survey heterogeneity
         inference. Post-2026-05-15 df threading: Python passes
-        ``df = n_obs - n_params`` to ``safe_inference`` (matching R's
-        t-distribution); R-parity is pinned in
+        ``df = n_obs - rank(design)`` to ``safe_inference`` (matching
+        R's t-distribution); for full-rank designs ``rank == n_params``.
+        R-parity is pinned in
         ``tests/test_chaisemartin_dhaultfoeuille_parity.py``. This local
         test verifies the SE-derived fields are wired correctly
-        without requiring back-derivation of ``n_params``:
+        without requiring back-derivation of ``rank``:
         ``t_stat = beta / se``; ``conf_int`` symmetric around ``beta``
         with positive half-width; ``p_value`` in ``[0, 1]``.
         Without these checks a regression isolated to the inference
@@ -8311,6 +8312,71 @@ class TestByPathNonBinary:
         assert (0, -1, -1, -1) in path_keys
         assert (0, 1, 1, 1) in path_keys
 
+    def test_negative_baseline_path_supported(self):
+        """Negative-baseline switchers (D_{g,1} = -1) produce correct path tuples.
+
+        Closes TODO #419 test-coverage gap. The existing
+        ``test_negative_integer_D_supported`` covers paths with negative
+        values in non-baseline positions (e.g. ``(0, -1, -1, -1)``), which
+        does NOT trigger R's ``substr(path, 1, 1)`` bug regime — R's
+        per-by_path dispatcher captures only the first character of the
+        comma-separated path string, so ``"-1,0,0,0"`` collapses to
+        ``"-"`` baseline rather than ``"-1"``. Python's tuple-key matching
+        is correct under any baseline value; this test pins the
+        negative-baseline contract with switchers that start at
+        ``D_{g,1} = -1`` and transition to ``0``. Per the REGISTRY note,
+        Python here is correct AND known to diverge from R's per-path
+        subset construction for the same data — no R-parity fixture is
+        added because R is the buggy side.
+        """
+        rng = np.random.default_rng(46)
+        rows = []
+        n_periods = 8
+        # 30 switchers with D_{g,1} = -1, transitioning to 0 at F_g=4
+        # path = (-1, 0, 0, 0) (length L_max+1 = 4 with L_max=3)
+        for g in range(30):
+            for t in range(n_periods):
+                d = 0 if t >= 3 else -1
+                rows.append({"group": g, "period": t, "treatment": d})
+        # 30 switchers with D_{g,1} = -1, transitioning to 1 at F_g=4
+        # path = (-1, 1, 1, 1)
+        for g in range(30, 60):
+            for t in range(n_periods):
+                d = 1 if t >= 3 else -1
+                rows.append({"group": g, "period": t, "treatment": d})
+        # 20 always-at-(-1) controls (D == -1 throughout — same baseline
+        # as the switchers, never-treated relative to the change)
+        for g in range(60, 80):
+            for t in range(n_periods):
+                rows.append({"group": g, "period": t, "treatment": -1})
+        df = pd.DataFrame(rows)
+        df["outcome"] = (
+            10.0
+            + df["group"].values * 0.1
+            + 0.1 * df["period"].values
+            + 2.0 * df["treatment"].values
+            + rng.normal(0, 0.5, size=len(df))
+        )
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=2, twfe_diagnostic=False, seed=42
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+            )
+        assert res.path_effects is not None
+        path_keys = set(res.path_effects.keys())
+        # Both negative-baseline paths must appear with full negative
+        # baseline preserved in the tuple key.
+        assert (-1, 0, 0, 0) in path_keys, (
+            f"Expected (-1, 0, 0, 0) in path keys; got {sorted(path_keys)}"
+        )
+        assert (-1, 1, 1, 1) in path_keys, (
+            f"Expected (-1, 1, 1, 1) in path keys; got {sorted(path_keys)}"
+        )
+
     def test_path_effects_present_under_non_binary(self):
         """path_effects populated; tuple keys are non-binary."""
         df = _by_path_data_with_non_binary_treatment()
@@ -10289,12 +10355,13 @@ class TestByPathHeterogeneity:
     def test_per_path_heterogeneity_inference_local_invariants(self):
         """Local SE-derivation invariants for non-survey per-path
         heterogeneity inference. Post-2026-05-15 df threading: Python
-        passes ``df = n_obs - n_params`` to ``safe_inference``; R-parity
-        is pinned in
+        passes ``df = n_obs - rank(design)`` to ``safe_inference``
+        (full-rank designs have ``rank == n_params``); R-parity is
+        pinned in
         ``tests/test_chaisemartin_dhaultfoeuille_parity.py::
         TestDCDHDynRParityByPathHeterogeneity``. Verifies SE-derivation
         wiring (``t_stat = beta/se``, symmetric ``conf_int`` around beta,
-        ``p_value`` in ``[0, 1]``) without back-deriving ``n_params``.
+        ``p_value`` in ``[0, 1]``) without back-deriving ``rank``.
         Mirrors
         ``TestHeterogeneityTesting::test_heterogeneity_inference_local_invariants``.
         """
@@ -11458,3 +11525,160 @@ class TestByPathPredictHetPlacebo:
         s = res.summary()
         assert isinstance(s, str)
         assert len(s) > 0
+
+    def test_heterogeneity_df_uses_post_drop_rank(self):
+        """Heterogeneity inference uses df = n_obs - rank(design).
+
+        Pre-PR (#449) Python used ``df = n_obs - n_params`` AND a
+        small-sample short-circuit at ``n_obs <= n_params``. For the
+        boundary case ``n_obs == n_params > rank(design)`` (e.g.,
+        cohort-dummy collinearity at high horizons), R's
+        ``did_multiplegt_dyn`` / ``lm()`` alias-drops the redundant
+        column and fits with ``df = n_obs - rank``; pre-PR Python
+        short-circuited and NaN-filled. Post-PR uses ``n_obs <= rank``
+        as the small-sample guard AND ``df = n_obs - rank``.
+
+        Test construction: 5 switchers with first_switch_idx in
+        ``{3, 3, 4, 5, 6}`` (4 unique cohorts), ``X_het = [1, 1, 0,
+        0, 0]``. X_het is exactly 1 on the F_g=3 cohort (which is
+        sorted first and dropped as reference) and 0 on the other 3
+        cohorts. The design matrix
+        ``[intercept, X_het, F=4 dummy, F=5 dummy, F=6 dummy]`` has
+        5 columns but ``X_het = intercept - (F=4 + F=5 + F=6)``, so
+        rank = 4. ``n_obs = 5``, ``n_params = 5``, ``rank = 4``.
+        Pre-PR: short-circuit fires (``5 <= 5``) → NaN-fill. Post-PR:
+        ``n_obs > rank`` → fit with ``df = 1``.
+
+        The X_het column itself is identifiable (one of the cohort
+        dummies gets alias-dropped, not X_het) because pivoted QR
+        orders columns by norm and ``||X_het|| = sqrt(2)`` exceeds
+        the cohort dummies' unit norm.
+        """
+        from diff_diff.chaisemartin_dhaultfoeuille import (
+            _compute_heterogeneity_test,
+        )
+        from diff_diff.utils import safe_inference
+
+        n_periods = 8
+        # 5 switchers, F_g in {3, 3, 4, 5, 6} — 4 unique cohort keys.
+        # baselines all 0, switch_direction all +1.
+        first_switch = np.array([3, 3, 4, 5, 6], dtype=int)
+        n_groups = 5
+        baselines = np.zeros(n_groups, dtype=float)
+        switch_direction = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
+        T_g = np.full(n_groups, n_periods - 1, dtype=int)
+        # X_het = 1 for the F_g=3 cohort (reference), 0 for others.
+        # This makes X_het exactly equal to
+        # intercept - (sum of non-reference cohort dummies).
+        X_het = np.array([1.0, 1.0, 0.0, 0.0, 0.0])
+
+        rng = np.random.RandomState(202)
+        Y_mat = rng.normal(0, 1, size=(n_groups, n_periods))
+        # Add het signal at post-period so beta != 0
+        for g in range(n_groups):
+            f = first_switch[g]
+            Y_mat[g, f] += 5.0 + 3.0 * X_het[g]
+        N_mat = np.ones((n_groups, n_periods))
+
+        result = _compute_heterogeneity_test(
+            Y_mat=Y_mat,
+            N_mat=N_mat,
+            baselines=baselines,
+            first_switch_idx=first_switch,
+            switch_direction=switch_direction,
+            T_g=T_g,
+            X_het=X_het,
+            L_max=1,
+        )
+        assert 1 in result
+        h = result[1]
+        # POST-PR: regression fits despite n_obs == n_params (= 5),
+        # because rank == 4 < n_params. Pre-PR would have short-
+        # circuited at the `n_obs <= n_params` guard and returned NaN.
+        assert np.isfinite(h["beta"]), (
+            f"beta should be finite under post-drop-rank guard "
+            f"(n_obs=5, n_params=5, rank=4). Pre-PR would NaN-fill. "
+            f"Entry: {h}"
+        )
+        assert np.isfinite(h["se"]), f"se non-finite: {h}"
+        n_obs = int(h["n_obs"])
+        assert n_obs == 5, f"expected n_obs=5, got {n_obs}"
+        # df = n_obs - rank = 5 - 4 = 1. safe_inference at df=1
+        # reproduces stored t/p/CI bit-exactly.
+        expected_t, expected_p, expected_ci = safe_inference(
+            h["beta"], h["se"], df=1
+        )
+        np.testing.assert_allclose(
+            h["t_stat"], expected_t, atol=1e-12, rtol=1e-12,
+            err_msg="t_stat does not match safe_inference(df=1)",
+        )
+        np.testing.assert_allclose(
+            h["p_value"], expected_p, atol=1e-12, rtol=1e-12,
+            err_msg="p_value does not match safe_inference(df=1)",
+        )
+        np.testing.assert_allclose(
+            h["conf_int"], expected_ci, atol=1e-12, rtol=1e-12,
+            err_msg="conf_int does not match safe_inference(df=1)",
+        )
+        # safe_inference(df=n_obs - n_params=0) would produce different
+        # p_value/conf_int. Pin the asymmetry so a regression that
+        # reverts to pre-drop n_params is caught here.
+        wrong_t, wrong_p, wrong_ci = safe_inference(
+            h["beta"], h["se"], df=n_obs - 5
+        )
+        if np.isfinite(wrong_p):
+            # When df=0, safe_inference NaN-fills; the asymmetry check
+            # only fires when wrong_p is finite (which it isn't at df=0).
+            # We still pin that the stored p_value is NOT equal to the
+            # pre-drop result.
+            assert not np.isclose(h["p_value"], wrong_p, atol=1e-10), (
+                "stored p_value matches pre-drop n_params df; "
+                "rank-threading may have reverted"
+            )
+
+    def test_heterogeneity_underidentified_nan_fills(self):
+        """Genuinely under-identified case (n_obs <= rank) NaN-fills.
+
+        Guards against accidentally removing the small-sample short-
+        circuit entirely. Construction: 4 switchers, each its own
+        cohort. Design = [intercept, X_het, 3 cohort dummies] = 5
+        columns. With X_het non-collinear, rank = min(4, 5) = 4 =
+        n_obs. Post-PR's `n_obs <= rank` guard fires (4 <= 4) and
+        NaN-fills.
+        """
+        from diff_diff.chaisemartin_dhaultfoeuille import (
+            _compute_heterogeneity_test,
+        )
+
+        n_periods = 8
+        first_switch = np.array([3, 4, 5, 6], dtype=int)
+        n_groups = 4
+        baselines = np.zeros(n_groups, dtype=float)
+        switch_direction = np.array([1.0, 1.0, 1.0, 1.0])
+        T_g = np.full(n_groups, n_periods - 1, dtype=int)
+        # X_het with both 0s and 1s, not collinear with cohort dummies
+        X_het = np.array([1.0, 0.0, 1.0, 0.0])
+
+        rng = np.random.RandomState(203)
+        Y_mat = rng.normal(0, 1, size=(n_groups, n_periods))
+        N_mat = np.ones((n_groups, n_periods))
+
+        result = _compute_heterogeneity_test(
+            Y_mat=Y_mat,
+            N_mat=N_mat,
+            baselines=baselines,
+            first_switch_idx=first_switch,
+            switch_direction=switch_direction,
+            T_g=T_g,
+            X_het=X_het,
+            L_max=1,
+        )
+        assert 1 in result
+        h = result[1]
+        assert np.isnan(h["beta"]), (
+            f"beta should be NaN when n_obs <= rank; got {h}"
+        )
+        assert np.isnan(h["se"])
+        assert np.isnan(h["t_stat"])
+        assert np.isnan(h["p_value"])
+        assert h["n_obs"] == 4
