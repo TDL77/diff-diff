@@ -171,6 +171,10 @@ from diff_diff.two_stage import (
     TwoStageDiDResults,
     two_stage_did,
 )
+from diff_diff.spillover import (
+    SpilloverDiD,
+)
+from diff_diff.results import SpilloverDiDResults  # re-export
 from diff_diff.stacked_did import (
     StackedDiD,
     StackedDiDResults,
@@ -300,6 +304,7 @@ __all__ = [
     "SunAbraham",
     "ImputationDiD",
     "TwoStageDiD",
+    "SpilloverDiD",
     "TripleDifference",
     "TROP",
     "StackedDiD",
@@ -341,6 +346,7 @@ __all__ = [
     "TwoStageDiDResults",
     "TwoStageBootstrapResults",
     "two_stage_did",
+    "SpilloverDiDResults",
     "TripleDifferenceResults",
     "triple_difference",
     "StaggeredTripleDifference",

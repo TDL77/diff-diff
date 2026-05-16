@@ -355,6 +355,117 @@ def _get_significance_stars(p_value: float) -> str:
 
 
 @dataclass
+class SpilloverDiDResults(DiDResults):
+    """Results from a ring-indicator spillover-aware DiD estimation (Butts 2021).
+
+    Extends :class:`DiDResults` with per-ring spillover effect estimates and
+    diagnostic counts for the identifying control population.
+
+    Attributes
+    ----------
+    att : float
+        Total effect on the treated, ``tau_total`` (inherited from DiDResults).
+    spillover_effects : pd.DataFrame, optional
+        Per-ring spillover-on-control estimates. Columns: ``["coef", "se",
+        "t_stat", "p_value", "ci_low", "ci_high"]``. Index: ring label
+        like ``"[0, 50)"``; for event-study output the index is a
+        ``MultiIndex`` over ``(ring_label, event_time)``.
+    ring_breakpoints : list of float
+        Sorted distance breakpoints used to construct the rings.
+    d_bar : float
+        Far-away cutoff (Butts Assumption 5). Equals ``max(ring_breakpoints)``
+        unless explicitly overridden.
+    n_units_ever_in_ring : dict[str, int]
+        Counts of UNIQUE units that appear in each ring AT LEAST ONCE
+        across observed periods. Under staggered timing the ring
+        membership is time-varying, so a unit can be counted in
+        multiple rings (one per period it visits). Under non-staggered
+        timing the rings are unit-static, so this is a clean partition
+        (each unit appears in exactly one ring or the far-away group).
+        Includes treated units in Ring_1 by geometric construction
+        even though the ``(1 - D_it)`` factor zeros their stage-2
+        contribution.
+    n_far_away_obs : int
+        Number of observations with ``D_it = 0`` AND ``d_it > d_bar``;
+        these observations identify the counterfactual trend (Butts
+        Assumption 5(ii)).
+    is_staggered : bool
+        True if multiple distinct treatment-onset times were detected.
+    event_study : bool
+        True if per-event-time ring coefficients were emitted (i.e.,
+        ``self.event_study=True`` was set on the estimator).
+    stage1_n_obs : int
+        Number of observations in the stage-1 untreated-and-unexposed
+        subsample (``Omega_0_butts``).
+    """
+
+    spillover_effects: Optional[pd.DataFrame] = field(default=None)
+    ring_breakpoints: Optional[List[float]] = field(default=None)
+    d_bar: Optional[float] = field(default=None)
+    n_units_ever_in_ring: Optional[Dict[str, int]] = field(default=None)
+    n_far_away_obs: Optional[int] = field(default=None)
+    is_staggered: Optional[bool] = field(default=None)
+    event_study: Optional[bool] = field(default=None)
+    stage1_n_obs: Optional[int] = field(default=None)
+    anticipation: Optional[int] = field(default=None)
+
+    def summary(self, alpha: Optional[float] = None) -> str:
+        """Extended summary with ATT row plus per-ring rows."""
+        base = super().summary(alpha=alpha)
+        if self.spillover_effects is None or self.spillover_effects.empty:
+            return base
+        lines = base.split("\n")
+        # Find the closing separator line and inject ring rows before it.
+        ring_rows = ["", "Spillover Effects (ring-indicator, Butts 2021)".center(70), "-" * 70]
+        header = (
+            f"{'Ring':<15} {'Estimate':>12} {'Std. Err.':>12} "
+            f"{'t-stat':>10} {'P>|t|':>10} {'':>5}"
+        )
+        ring_rows.append(header)
+        ring_rows.append("-" * 70)
+        for label, row in self.spillover_effects.iterrows():
+            coef = row.get("coef", np.nan)
+            se = row.get("se", np.nan)
+            t_stat = row.get("t_stat", np.nan)
+            p_value = row.get("p_value", np.nan)
+            stars = _get_significance_stars(p_value)
+            label_str = str(label) if not isinstance(label, tuple) else f"{label[0]} k={label[1]}"
+            ring_rows.append(
+                f"{label_str[:15]:<15} {coef:>12.4f} {se:>12.4f} "
+                f"{t_stat:>10.3f} {p_value:>10.4f} {stars:>5}"
+            )
+        ring_rows.append("-" * 70)
+        # Insert ring block before the final "==..." line (last row of base).
+        for idx in range(len(lines) - 1, -1, -1):
+            if lines[idx].startswith("="):
+                lines = lines[:idx] + ring_rows + lines[idx:]
+                break
+        return "\n".join(lines)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Override to serialize ``spillover_effects`` DataFrame as list-of-dicts."""
+        base = super().to_dict()
+        base.update(
+            {
+                "spillover_effects": (
+                    self.spillover_effects.reset_index().to_dict(orient="records")
+                    if self.spillover_effects is not None
+                    else None
+                ),
+                "ring_breakpoints": self.ring_breakpoints,
+                "d_bar": self.d_bar,
+                "n_units_ever_in_ring": self.n_units_ever_in_ring,
+                "n_far_away_obs": self.n_far_away_obs,
+                "is_staggered": self.is_staggered,
+                "event_study": self.event_study,
+                "stage1_n_obs": self.stage1_n_obs,
+                "anticipation": self.anticipation,
+            }
+        )
+        return base
+
+
+@dataclass
 class PeriodEffect:
     """
     Treatment effect for a single time period.

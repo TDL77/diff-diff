@@ -177,6 +177,8 @@ Supported Estimators
      - Borusyak, Jaravel & Spiess (2024) imputation estimator
    * - :class:`~diff_diff.TwoStageDiD`
      - Gardner (2022) two-stage residualized estimator
+   * - :class:`~diff_diff.SpilloverDiD`
+     - Butts (2021) ring-indicator spillover-aware DiD
    * - :class:`~diff_diff.SyntheticDiD`
      - Synthetic DiD combining DiD and synthetic control
    * - :class:`~diff_diff.StackedDiD`

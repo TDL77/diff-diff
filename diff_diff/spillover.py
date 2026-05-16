@@ -1,0 +1,1957 @@
+"""
+SpilloverDiD — Butts (2021) ring-indicator spillover-aware DiD.
+
+Augments a two-stage Gardner (2022) DiD with ring-indicator covariates that
+identify the spillover effect on near-control units alongside the direct
+effect on treated units. Handles both panel non-staggered and Section 5
+staggered timing in a single estimator.
+
+References
+----------
+Butts, K. (2023). Difference-in-Differences with Spatial Spillovers.
+    arXiv:2105.03737v3 (originally posted 2021).
+Gardner, J. (2022). Two-stage differences in differences. arXiv:2207.05943.
+
+Notes
+-----
+The paper's notation in Equation 5/6 is ``(1 - D_it) * Ring_{ij}`` with
+``S_i`` unit-static. Reading that literally under a two-way fixed effects
+specification yields a rank-deficient design (``(1 - D_it) * S_i = S_i -
+D_it``; ``S_i`` is absorbed by ``mu_i``, leaving ``-D_it``). The paper
+defines ``S_it = S_i * 1{t >= t_treat}`` (page 12, just above Equation 5)
+and Section 5's Table 2 makes the time-varying form explicit
+(``S^k_{it}``, ``Ring^k_{it,j}``). This implementation uses the
+time-varying form, which is the spec that supports the paper's
+identification argument (Proposition 2.3 + Section 3.1 subsample logic).
+"""
+
+import warnings
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
+
+import numpy as np
+import pandas as pd
+
+from diff_diff.conley import (
+    _CONLEY_EARTH_RADIUS_KM,
+    _CONLEY_SPARSE_N_THRESHOLD,
+    _haversine_km,
+    _validate_callable_metric_result,
+)
+from diff_diff.linalg import solve_ols
+from diff_diff.results import SpilloverDiDResults
+from diff_diff.utils import safe_inference
+
+# Type alias mirroring diff_diff.conley.ConleyMetric so callers can supply
+# any of the built-in identifiers or a user callable returning a pairwise
+# distance matrix.
+SpilloverMetric = Union[
+    Literal["haversine", "euclidean"],
+    Callable[[np.ndarray, np.ndarray], np.ndarray],
+]
+
+
+# =============================================================================
+# Ring construction helpers (Step 1)
+# =============================================================================
+
+
+def _haversine_km_pairwise(
+    coords_a: np.ndarray,
+    coords_b: np.ndarray,
+) -> np.ndarray:
+    """Vectorized pairwise great-circle distance (km) between two coord sets.
+
+    Parameters
+    ----------
+    coords_a : ndarray of shape (n_a, 2)
+        ``(lat, lon)`` in DEGREES for the first set of points.
+    coords_b : ndarray of shape (n_b, 2)
+        ``(lat, lon)`` in DEGREES for the second set of points.
+
+    Returns
+    -------
+    ndarray of shape (n_a, n_b)
+        Great-circle distances in km. Matches the ``_haversine_km`` Earth
+        radius convention (6371.01 km, mirroring R ``conleyreg``).
+    """
+    lat_a = coords_a[:, 0][:, None]
+    lon_a = coords_a[:, 1][:, None]
+    lat_b = coords_b[:, 0][None, :]
+    lon_b = coords_b[:, 1][None, :]
+    return _haversine_km(lat_a, lon_a, lat_b, lon_b)
+
+
+def _euclidean_pairwise(
+    coords_a: np.ndarray,
+    coords_b: np.ndarray,
+) -> np.ndarray:
+    """Vectorized pairwise Euclidean distance between two coord sets.
+
+    Coordinates are treated as planar; no unit conversion. Matches the
+    ``_pairwise_distance_matrix`` Euclidean branch of ``conley.py``.
+    """
+    diffs = coords_a[:, None, :] - coords_b[None, :, :]
+    return np.sqrt(np.einsum("ijk,ijk->ij", diffs, diffs))
+
+
+def _apply_callable_metric_pairwise(
+    metric: Callable[[np.ndarray, np.ndarray], np.ndarray],
+    coords_a: np.ndarray,
+    coords_b: np.ndarray,
+) -> np.ndarray:
+    """Apply a user-supplied callable metric to two coord sets.
+
+    Unlike :func:`_validate_callable_metric_result` which checks square
+    ``(n, n)`` symmetry on a single coord set, this helper accepts a
+    rectangular ``(n_a, n_b)`` result. The validator is therefore relaxed:
+    we only require finiteness, non-negativity, and correct shape. The
+    zero-diagonal / symmetry checks apply only when the same coord set is
+    passed on both sides; ring-construction usage passes a treated-only
+    subset on side B, so the diagonal of the rectangular result is not
+    meaningful.
+    """
+    result = metric(coords_a, coords_b)
+    arr = np.asarray(result, dtype=np.float64)
+    expected_shape = (coords_a.shape[0], coords_b.shape[0])
+    if arr.shape != expected_shape:
+        raise ValueError(
+            "conley_metric callable returned shape "
+            f"{arr.shape} for pairwise ring distance, expected {expected_shape}."
+        )
+    if not np.isfinite(arr).all():
+        raise ValueError(
+            "conley_metric callable returned non-finite entries for pairwise "
+            "ring distance; all distances must be finite."
+        )
+    if (arr < 0.0).any():
+        raise ValueError(
+            "conley_metric callable returned negative entries for pairwise "
+            "ring distance; all distances must be non-negative."
+        )
+    return arr
+
+
+def _pairwise_ring_distances(
+    coords_units: np.ndarray,
+    coords_treated: np.ndarray,
+    metric: SpilloverMetric,
+) -> np.ndarray:
+    """Compute (n_units, n_treated) pairwise distances under the chosen metric."""
+    if callable(metric):
+        return _apply_callable_metric_pairwise(metric, coords_units, coords_treated)
+    if metric == "haversine":
+        return _haversine_km_pairwise(coords_units, coords_treated)
+    if metric == "euclidean":
+        return _euclidean_pairwise(coords_units, coords_treated)
+    raise ValueError(
+        f"Unknown conley_metric: {metric!r}. Expected 'haversine', 'euclidean', "
+        "or a callable returning a pairwise distance matrix."
+    )
+
+
+def _compute_nearest_treated_distance_static(
+    data: pd.DataFrame,
+    *,
+    unit: str,
+    coords: Tuple[str, str],
+    metric: SpilloverMetric,
+    treated_unit_ids: np.ndarray,
+    cutoff_km: Optional[float] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return per-unit nearest-treated distance for the non-staggered case.
+
+    The set of treated units is fixed (ever-treated), so distances are
+    unit-level constants and don't vary across periods. Caller broadcasts
+    to per-row when assembling ring covariates.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Panel data with one row per (unit, period). Used to extract
+        per-unit coords via :meth:`DataFrame.drop_duplicates` on ``unit``.
+    unit : str
+        Column name of the unit identifier.
+    coords : tuple of (str, str)
+        ``(lat_col, lon_col)``.
+    metric : "haversine" | "euclidean" | callable
+        Distance metric. For ``"haversine"``, ``coords`` is interpreted as
+        ``(lat, lon)`` in degrees. For ``"euclidean"``, ``coords`` is
+        planar. Callable receives two ``(n, 2)`` arrays and must return an
+        ``(n_a, n_b)`` finite non-negative distance matrix.
+    treated_unit_ids : ndarray
+        IDs of ever-treated units (used as side B of pairwise distance).
+    cutoff_km : float, optional
+        If set and ``len(unit_index) > _CONLEY_SPARSE_N_THRESHOLD``, the
+        sparse cKDTree path is used to find treated neighbors within
+        ``cutoff_km`` per unit; otherwise the dense (n_units × n_treated)
+        matrix is built. Units with no treated neighbor within ``cutoff_km``
+        receive ``d_i = inf`` (they fall outside any ring and into the
+        far-away control group, identical to dense-path behavior with
+        infinite distance to the nearest reached treated unit).
+
+    Returns
+    -------
+    d_i : ndarray of shape (n_unique_units,)
+        ``d_i = min_{k in treated_unit_ids} d(i, k)`` per unique unit.
+    unit_index : ndarray of shape (n_unique_units,)
+        Unit identifiers in the same order as ``d_i``.
+    """
+    unit_coords_df = (
+        data[[unit, coords[0], coords[1]]]
+        .drop_duplicates(subset=[unit])
+        .set_index(unit)
+        .sort_index()
+    )
+    unit_index = np.asarray(unit_coords_df.index.values)
+    all_coords = np.asarray(unit_coords_df[[coords[0], coords[1]]].values, dtype=np.float64)
+    treated_set = set(treated_unit_ids.tolist())
+    treated_mask = np.array([uid in treated_set for uid in unit_index], dtype=bool)
+    treated_coords = all_coords[treated_mask]
+    if treated_coords.shape[0] == 0:
+        raise ValueError(
+            "_compute_nearest_treated_distance_static: no treated units present "
+            "in `data` matching `treated_unit_ids`."
+        )
+
+    n_units = all_coords.shape[0]
+    is_builtin_metric = metric in ("haversine", "euclidean")
+    if cutoff_km is not None and n_units > _CONLEY_SPARSE_N_THRESHOLD and is_builtin_metric:
+        d_i = _compute_nearest_treated_distance_sparse(
+            all_coords=all_coords,
+            treated_coords=treated_coords,
+            metric=metric,  # type: ignore[arg-type]
+            cutoff_km=float(cutoff_km),
+        )
+    else:
+        # Dense path: full pairwise matrix, then row-min.
+        dists = _pairwise_ring_distances(all_coords, treated_coords, metric)
+        d_i = dists.min(axis=1)
+    return d_i.astype(np.float64), unit_index
+
+
+def _compute_nearest_treated_distance_sparse(
+    *,
+    all_coords: np.ndarray,
+    treated_coords: np.ndarray,
+    metric: Literal["haversine", "euclidean"],
+    cutoff_km: float,
+) -> np.ndarray:
+    """Sparse cKDTree path for nearest-treated-distance computation.
+
+    Used when ``n_units > _CONLEY_SPARSE_N_THRESHOLD`` AND the metric is a
+    built-in string. The tree is built on the treated subset (small) and
+    queried with each unit row. Units with no treated neighbor inside
+    ``cutoff_km`` get ``d_i = inf``, which places them in the far-away
+    control group on the downstream ring-membership step.
+
+    For haversine: lat/lon are projected to 3-D unit-sphere Cartesian
+    coordinates; the chord-distance query radius is
+    ``2 * sin(arc / (2 * R_earth))`` with arc clamped at ``pi * R_earth``
+    so cutoffs beyond a hemisphere don't shrink. Exact great-circle
+    distances are then recomputed via :func:`_haversine_km` for the in-
+    range matches and the per-row minimum is taken.
+
+    For euclidean: planar L2 directly in cKDTree.
+
+    Parameters
+    ----------
+    all_coords : ndarray of shape (n_units, 2)
+        Coordinates for all units.
+    treated_coords : ndarray of shape (n_treated, 2)
+        Coordinates for ever-treated units.
+    metric : 'haversine' or 'euclidean'
+        Built-in metric only; callables fall back to the dense path.
+    cutoff_km : float
+        Maximum considered distance. Units beyond this get ``d_i = inf``.
+
+    Returns
+    -------
+    ndarray of shape (n_units,)
+        Nearest-treated distance per unit (inf when no neighbor in range).
+    """
+    # Imported lazily to mirror conley.py's lazy-scipy pattern and keep
+    # module import cheap when the sparse path isn't exercised.
+    from scipy.spatial import cKDTree  # noqa: WPS433  (deferred import)
+
+    n_units = all_coords.shape[0]
+    if metric == "haversine":
+        # Project lat/lon (degrees) to 3-D unit-sphere Cartesian.
+        lat_rad_all = np.radians(all_coords[:, 0])
+        lon_rad_all = np.radians(all_coords[:, 1])
+        unit_xyz = np.column_stack(
+            [
+                np.cos(lat_rad_all) * np.cos(lon_rad_all),
+                np.cos(lat_rad_all) * np.sin(lon_rad_all),
+                np.sin(lat_rad_all),
+            ]
+        )
+        lat_rad_tr = np.radians(treated_coords[:, 0])
+        lon_rad_tr = np.radians(treated_coords[:, 1])
+        tree_xyz = np.column_stack(
+            [
+                np.cos(lat_rad_tr) * np.cos(lon_rad_tr),
+                np.cos(lat_rad_tr) * np.sin(lon_rad_tr),
+                np.sin(lat_rad_tr),
+            ]
+        )
+        # Chord-distance radius for the query; clamp arc at pi (a half-revolution)
+        # so cutoffs > pi * R_earth do not shrink chord radius below the true reach.
+        arc_radians = min(cutoff_km / _CONLEY_EARTH_RADIUS_KM, np.pi)
+        query_r = 2.0 * np.sin(arc_radians / 2.0)
+        query_r *= 1.0 + 1e-12  # numerical safety margin
+        tree = cKDTree(tree_xyz)
+        # Query in chord space, recompute exact great-circle distance for matches.
+        neighbors = tree.query_ball_point(unit_xyz, r=query_r, p=2.0)
+        d_i = np.full(n_units, np.inf, dtype=np.float64)
+        for i, idxs in enumerate(neighbors):
+            if not idxs:
+                continue
+            # Exact great-circle distance for the in-range treated neighbors.
+            arr_idxs = np.asarray(idxs, dtype=np.intp)
+            d_subset = _haversine_km(
+                all_coords[i, 0],
+                all_coords[i, 1],
+                treated_coords[arr_idxs, 0],
+                treated_coords[arr_idxs, 1],
+            )
+            d_i[i] = float(d_subset.min())
+        return d_i
+
+    # Euclidean: cKDTree handles directly.
+    tree = cKDTree(treated_coords)
+    d_i = np.full(n_units, np.inf, dtype=np.float64)
+    neighbors = tree.query_ball_point(all_coords, r=cutoff_km, p=2.0)
+    for i, idxs in enumerate(neighbors):
+        if not idxs:
+            continue
+        arr_idxs = np.asarray(idxs, dtype=np.intp)
+        d_subset = _euclidean_pairwise(all_coords[i : i + 1], treated_coords[arr_idxs])
+        d_i[i] = float(d_subset.min())
+    return d_i
+
+
+def _compute_nearest_treated_distance_staggered(
+    data: pd.DataFrame,
+    *,
+    unit: str,
+    time: str,
+    coords: Tuple[str, str],
+    metric: SpilloverMetric,
+    first_treat_by_unit: Dict[Any, Any],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return per-row nearest-treated distance for the staggered case.
+
+    For each (unit, period) observation, find the minimum distance to any
+    unit that is treated BY THE END of that period (``first_treat_k <=
+    t``). Ring membership in the staggered case is therefore unit-time
+    varying.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Panel data (one row per unit-period).
+    unit : str
+        Unit identifier column name.
+    time : str
+        Time period column name.
+    coords : tuple of (str, str)
+        ``(lat_col, lon_col)``.
+    metric : "haversine" | "euclidean" | callable
+        Distance metric.
+    first_treat_by_unit : dict
+        Mapping from unit identifier to onset time (or ``np.inf`` for
+        never-treated). Generated by :func:`_extract_treatment_onsets`.
+
+    Notes
+    -----
+    The staggered helper currently always uses dense pairwise distance per
+    cohort. A sparse cKDTree branch (mirroring the static helper) is queued
+    as a follow-up — see TODO.md.
+
+    Returns
+    -------
+    d_it : ndarray of shape (n_rows,)
+        Per-row nearest-treated distance, with ``inf`` for rows where no
+        unit has been treated yet by time t (early periods).
+    row_unit : ndarray of shape (n_rows,)
+        Aligned unit identifier per row (for downstream broadcasting).
+    row_time : ndarray of shape (n_rows,)
+        Aligned time identifier per row.
+    """
+    unit_coords_df = (
+        data[[unit, coords[0], coords[1]]].drop_duplicates(subset=[unit]).set_index(unit)
+    )
+    unit_index = np.asarray(unit_coords_df.index.values)
+    all_coords = np.asarray(unit_coords_df[[coords[0], coords[1]]].values, dtype=np.float64)
+    unit_to_pos = {uid: pos for pos, uid in enumerate(unit_index)}
+
+    row_unit = np.asarray(data[unit].values)
+    row_time = np.asarray(data[time].values)
+    n_rows = len(row_unit)
+    d_it = np.full(n_rows, np.inf, dtype=np.float64)
+
+    # Determine the cohort onset times that exist in the data (excluding never-treated).
+    unique_onsets = sorted({ft for ft in first_treat_by_unit.values() if np.isfinite(ft)})
+    if not unique_onsets:
+        # Degenerate: no treated units. Caller should have rejected this
+        # in `_validate_spillover_inputs`, but defensively return inf.
+        return d_it, row_unit, row_time
+
+    # Row's unit position. Invariant across cohort iterations — compute
+    # once outside the loop.
+    row_pos = np.array([unit_to_pos[uid] for uid in row_unit], dtype=np.intp)
+
+    # For each unique onset time, compute (n_units, n_treated_by_then) pairwise
+    # distances ONCE, then assign to rows whose t >= that onset (carrying forward
+    # the minimum across cohorts).
+    for onset in unique_onsets:
+        treated_by_onset_ids = [uid for uid, ft in first_treat_by_unit.items() if ft <= onset]
+        treated_positions = np.array(
+            [unit_to_pos[uid] for uid in treated_by_onset_ids if uid in unit_to_pos],
+            dtype=np.intp,
+        )
+        if treated_positions.size == 0:
+            continue
+        treated_coords = all_coords[treated_positions]
+        # Compute per-unit nearest distance to this cohort's treated set.
+        dists_to_cohort = _pairwise_ring_distances(all_coords, treated_coords, metric).min(axis=1)
+        # Update rows whose period t >= onset: take min of current d_it and the
+        # newly-available cohort distance.
+        affected_rows = row_time >= onset
+        if not affected_rows.any():
+            continue
+        row_cohort_dist = dists_to_cohort[row_pos]
+        # Only update rows where this cohort's distance is smaller than the
+        # current d_it (carries the running minimum across cohorts).
+        update_mask = affected_rows & (row_cohort_dist < d_it)
+        d_it[update_mask] = row_cohort_dist[update_mask]
+
+    return d_it, row_unit, row_time
+
+
+def _build_ring_indicators(
+    d_values: np.ndarray,
+    rings: List[float],
+) -> np.ndarray:
+    """Build K boolean ring masks from distances and breakpoints.
+
+    Convention (per Butts Equation 6 + plan Risks #2): half-open at the
+    top of each interior ring, CLOSED at the outermost upper edge so units
+    exactly at ``d_bar`` belong to the last ring (not the far-away group).
+    Far-away controls use a strict ``d_i > d_bar`` check (handled
+    elsewhere). Treated units have ``d_i = 0`` and fall in Ring_1 by
+    construction; their ring contribution is later zeroed by the
+    ``(1 - D_i)`` factor.
+
+    Parameters
+    ----------
+    d_values : ndarray
+        Distances (per-unit for non-staggered or per-row for staggered).
+    rings : list of float
+        Sorted breakpoints with ``len(rings) >= 2``. ``K = len(rings) - 1``
+        rings are constructed.
+
+    Returns
+    -------
+    masks : ndarray of shape (len(d_values), K), bool
+        ``masks[i, j] = True`` if ``d_values[i]`` falls in ring ``j``.
+
+    Raises
+    ------
+    ValueError
+        ``rings`` has fewer than 2 elements, or is not strictly increasing.
+    """
+    rings_arr = np.asarray(rings, dtype=np.float64)
+    if rings_arr.ndim != 1 or rings_arr.size < 2:
+        raise ValueError(
+            "rings must be a sorted list of at least 2 breakpoints "
+            f"(got shape {rings_arr.shape})."
+        )
+    if (np.diff(rings_arr) <= 0).any():
+        raise ValueError("rings must be strictly increasing; got " f"{rings_arr.tolist()}.")
+    if (rings_arr < 0).any():
+        raise ValueError("rings must be non-negative; got " f"{rings_arr.tolist()}.")
+
+    n = d_values.shape[0]
+    K = rings_arr.size - 1
+    masks = np.zeros((n, K), dtype=bool)
+    for j in range(K):
+        lo = rings_arr[j]
+        hi = rings_arr[j + 1]
+        if j == K - 1:
+            # Outermost ring: closed at d_bar so units at the boundary
+            # belong to this ring (not the far-away group).
+            masks[:, j] = (d_values >= lo) & (d_values <= hi)
+        else:
+            # Interior rings: half-open at top so the breakpoint between
+            # adjacent rings unambiguously falls in the next ring.
+            masks[:, j] = (d_values >= lo) & (d_values < hi)
+    return masks
+
+
+def _ring_label(rings: List[float], j: int) -> str:
+    """Render the human-readable ring label for index ``j``.
+
+    Convention matches :func:`_build_ring_indicators`: half-open at the
+    top of interior rings, closed at the outermost upper edge.
+    """
+    K = len(rings) - 1
+    lo = rings[j]
+    hi = rings[j + 1]
+    if j == K - 1:
+        return f"[{lo:g}, {hi:g}]"
+    return f"[{lo:g}, {hi:g})"
+
+
+# =============================================================================
+# Treatment-timing helpers (Step 2)
+# =============================================================================
+
+
+def _extract_treatment_onsets(
+    data: pd.DataFrame,
+    first_treat_col: str,
+    unit_col: str,
+    *,
+    treat_zero_as_never_treated: bool = True,
+) -> Dict[Any, float]:
+    """Return a dict mapping each unit to its treatment onset time.
+
+    Parameters
+    ----------
+    treat_zero_as_never_treated : bool, default True
+        When True (default, matching Gardner / TwoStageDiD user convention),
+        ``first_treat = 0`` is treated as a never-treated sentinel
+        equivalent to ``np.inf``. Set to False for INTERNAL onset columns
+        produced by :func:`_convert_treatment_to_first_treat` from a
+        binary ``D`` column — there, ``0`` may legitimately be the
+        onset time on 0-indexed panels (a unit treated at the first
+        observed period gets ``first_treat = 0``). The auto-generated
+        column writes ``np.inf`` for never-treated, so the 0-as-sentinel
+        collision is avoided.
+
+    Notes
+    -----
+    If a unit has non-constant ``first_treat`` values across its rows,
+    ``ValueError`` is raised — SpilloverDiD requires the
+    absorbing-treatment assumption (one onset per unit). Mirrors
+    :class:`TwoStageDiD`'s warning behaviour, but escalates to a hard error
+    because the spillover identification math depends on each unit having a
+    single well-defined ``S_it`` trajectory.
+    """
+
+    def _normalize(v: float) -> float:
+        if np.isinf(v):
+            return np.inf
+        if treat_zero_as_never_treated and v == 0:
+            return np.inf
+        return float(v)
+
+    onsets: Dict[Any, float] = {}
+    non_constant_units: List[Any] = []
+    for unit_id, group in data.groupby(unit_col):
+        ft_unique = group[first_treat_col].dropna().unique().tolist()
+        normalized = {_normalize(v) for v in ft_unique}
+        if len(normalized) > 1:
+            non_constant_units.append(unit_id)
+            continue
+        if not normalized:
+            # All rows are NaN → treat as never-treated.
+            onsets[unit_id] = np.inf
+            continue
+        # Use the unique value, not iloc[0], to avoid being fooled by a
+        # leading-NaN row when the rest of the unit is consistently treated.
+        ft = next(iter(normalized))
+        onsets[unit_id] = ft  # already normalized: np.inf for never-treated, float otherwise
+    if non_constant_units:
+        sample = non_constant_units[:5]
+        suffix = f" (and {len(non_constant_units) - 5} more)" if len(non_constant_units) > 5 else ""
+        raise ValueError(
+            f"{len(non_constant_units)} unit(s) have non-constant "
+            f"'{first_treat_col}' values across rows (e.g. {sample}{suffix}). "
+            "SpilloverDiD requires the absorbing-treatment assumption "
+            "(one onset per unit, treatment never reverses). For "
+            "non-absorbing / reversible treatments, see "
+            "ChaisemartinDHaultfoeuille."
+        )
+    return onsets
+
+
+def _convert_treatment_to_first_treat(
+    data: pd.DataFrame,
+    treatment: str,
+    time: str,
+    unit: str,
+) -> Tuple[pd.DataFrame, str]:
+    """Auto-convert a binary ``D_it`` column to a per-unit ``first_treat`` column.
+
+    Returns a defensive-copy frame augmented with a new
+    ``"_spillover_first_treat"`` column whose value per unit is
+    ``min{t : D_it = 1}`` for ever-treated units and ``np.inf`` for
+    never-treated. The original ``treatment`` column is preserved.
+
+    **Absorbing-treatment validation:** after extracting ``first_treat``,
+    each ever-treated unit's ``D_it`` is verified to be 1 at all rows with
+    ``t >= first_treat[unit]`` (treatment never reverses). Non-absorbing
+    patterns like ``[0, 1, 0]`` raise ``ValueError`` rather than being
+    silently coerced into ``first_treat = min(t | D_it = 1)``.
+
+    Raises
+    ------
+    ValueError
+        ``data`` does not contain a numeric ``treatment`` column or
+        ``time`` / ``unit`` columns; ``treatment`` has values outside
+        ``{0, 1}``; or treatment is non-absorbing for some unit.
+    """
+    if treatment not in data.columns:
+        raise ValueError(f"treatment column '{treatment}' not in data.")
+    # NaN in treatment is not silently coerced — it would later be rebuilt
+    # from `first_treat` and could flip a row from "unknown" to "treated"
+    # or "control" with no warning.
+    nan_mask = data[treatment].isna()
+    if bool(nan_mask.any()):
+        n_nan = int(nan_mask.sum())
+        raise ValueError(
+            f"treatment column '{treatment}' contains {n_nan} NaN value(s). "
+            "SpilloverDiD requires explicit 0/1 status on every row; "
+            "missing-treatment rows must be either imputed or dropped "
+            "before fitting (the auto-conversion path cannot silently "
+            "reclassify them since that would change tau_total and "
+            "delta_j without warning)."
+        )
+    treat_vals = data[treatment].unique()
+    # Exact binary check — NOT `int(v) in (0, 1)` (which would accept 0.9,
+    # 1.1, etc. by rounding-down semantics and silently misclassify
+    # fractional rows into the control group).
+    if not all(v in (0, 0.0, 1, 1.0) for v in treat_vals):
+        raise ValueError(
+            f"treatment column '{treatment}' must contain only exact 0/1 "
+            f"values; got unique values: {sorted(treat_vals)}. Fractional "
+            "values (e.g. 0.9 or 1.1) are NOT silently coerced — fix the "
+            "data or thresholding upstream before passing to SpilloverDiD."
+        )
+
+    out = data.copy(deep=False)
+    treated_rows = out[out[treatment] == 1]
+    if treated_rows.empty:
+        out["_spillover_first_treat"] = np.inf
+        return out, "_spillover_first_treat"
+
+    onset_by_unit = treated_rows.groupby(unit)[time].min()
+
+    # Verify absorbing: for each ever-treated unit, D_it must be EXACTLY 1
+    # at every row with t >= first_treat[unit]. NOT merely "not equal to 0"
+    # — that would silently accept e.g. NaN or other non-binary values that
+    # slipped past the binary check above (defense in depth).
+    reversing_units: List[Any] = []
+    for u in onset_by_unit.index:
+        onset = onset_by_unit.loc[u]
+        unit_rows = out[(out[unit] == u) & (out[time] >= onset)]
+        if (unit_rows[treatment] != 1).any():
+            reversing_units.append(u)
+    if reversing_units:
+        sample = reversing_units[:5]
+        suffix = f" (and {len(reversing_units) - 5} more)" if len(reversing_units) > 5 else ""
+        raise ValueError(
+            f"{len(reversing_units)} unit(s) have non-absorbing treatment "
+            f"patterns (treatment reverses to 0 after onset; e.g. units "
+            f"{sample}{suffix}). SpilloverDiD requires the absorbing-"
+            "treatment assumption — once a unit is treated, it stays "
+            "treated. For non-absorbing / reversible treatments, see "
+            "ChaisemartinDHaultfoeuille."
+        )
+
+    onset_lookup: Dict[Any, float] = {
+        uid: float(onset_by_unit.loc[uid]) if uid in onset_by_unit.index else np.inf
+        for uid in out[unit].unique()
+    }
+    out["_spillover_first_treat"] = out[unit].map(onset_lookup).astype(np.float64).values
+    return out, "_spillover_first_treat"
+
+
+# =============================================================================
+# Two-stage Gardner inline (Step 3)
+# =============================================================================
+
+# Convergence tolerance for the iterative alternating-projection FE solver
+# (Gauss-Seidel style; mirrors `TwoStageDiD._iterative_fe`).
+_FE_ITER_MAX = 100
+_FE_ITER_TOL = 1e-10
+
+
+def _check_omega_0_connectivity(
+    *,
+    omega_0_mask: np.ndarray,
+    unit_codes_arr: np.ndarray,
+    time_codes_arr: np.ndarray,
+    units_in_omega_0: set,
+    n_times: int,
+    unit_uniques: List[Any],
+) -> None:
+    """Raise ``ValueError`` if the Omega_0 bipartite graph is disconnected.
+
+    Stage 1's iterative FE solver identifies ``(mu_i, lambda_t)`` only up to
+    component-specific constants per connected component of the bipartite
+    graph (supported units on one side, periods on the other; edge =
+    Omega_0 row at that (unit, period) cell). If the graph splits into
+    K > 1 unit-bearing components, residualization later combines
+    ``mu_i`` from one component with ``lambda_t`` from another, silently
+    corrupting ``y_tilde`` and downstream ``tau_total`` / ``delta_j``.
+
+    Balanced panel + per-unit/per-period Omega_0 coverage is NECESSARY
+    but not SUFFICIENT — connectivity is the load-bearing identification
+    condition. Under the current absorbing-treatment + period-strict +
+    unit-warn-drop regime this case may be unreachable in practice (we
+    were unable to construct an example that survives the upstream
+    validators), but the check is defense-in-depth and future-proofs
+    Wave B extensions (event-study, survey-design integration, possible
+    reversible-treatment relaxations).
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    supported_units_sorted = sorted(units_in_omega_0)
+    n_supp = len(supported_units_sorted)
+    if n_supp <= 1:
+        # No multi-component case possible with 0 or 1 supported units.
+        return
+
+    supp_unit_to_idx = {code: i for i, code in enumerate(supported_units_sorted)}
+
+    omega_unit_codes = unit_codes_arr[omega_0_mask]
+    omega_time_codes = time_codes_arr[omega_0_mask]
+
+    # Every Omega_0 row's unit is by definition in `units_in_omega_0`, so
+    # all rows contribute edges to the supported subgraph.
+    edge_unit_idx = np.array(
+        [supp_unit_to_idx[int(c)] for c in omega_unit_codes],
+        dtype=np.int64,
+    )
+    edge_time_offset = n_supp + np.asarray(omega_time_codes, dtype=np.int64)
+
+    # Symmetric adjacency: nodes 0..n_supp-1 are units, n_supp..n_supp+n_times-1
+    # are periods. Edge weights are 1 (presence only).
+    rows = np.concatenate([edge_unit_idx, edge_time_offset])
+    cols = np.concatenate([edge_time_offset, edge_unit_idx])
+    data_ones = np.ones(len(rows), dtype=np.int8)
+    adj = csr_matrix(
+        (data_ones, (rows, cols)),
+        shape=(n_supp + n_times, n_supp + n_times),
+    )
+
+    _, component_labels = connected_components(adj, directed=False)
+
+    # Count components that contain at least one supported UNIT node.
+    # (Period nodes unreachable from any unit form trivial singletons but
+    # those would already be caught by the period-level Omega_0 check
+    # upstream; here we only fail when there are 2+ unit-bearing
+    # components.)
+    unit_component_ids = set(int(c) for c in component_labels[:n_supp])
+    n_unit_components = len(unit_component_ids)
+
+    if n_unit_components <= 1:
+        return
+
+    # Build informative error: name first few units per component.
+    component_units: Dict[int, List[Any]] = {}
+    for unit_pos, unit_code in enumerate(supported_units_sorted):
+        comp = int(component_labels[unit_pos])
+        component_units.setdefault(comp, []).append(unit_uniques[unit_code])
+    component_summary = "; ".join(
+        f"component {comp_id}: {list(units[:3])}"
+        + (f" (+{len(units) - 3} more)" if len(units) > 3 else "")
+        for comp_id, units in list(sorted(component_units.items()))[:3]
+    )
+    raise ValueError(
+        f"Stage-1 fixed effects unidentified: the Omega_0 bipartite "
+        f"graph (supported units linked by shared untreated-and-"
+        f"unexposed periods) splits into {n_unit_components} "
+        f"disconnected components. Balanced panel and per-unit/per-"
+        f"period Omega_0 coverage are NECESSARY but not SUFFICIENT for "
+        f"joint identification — the iterative FE solver returns FE only "
+        f"up to component-specific constants, and residualization "
+        f"combines mu from one component with lambda from another, "
+        f"silently corrupting tau_total and delta_j. Examples: "
+        f"{component_summary}. To fix, ensure all supported units share "
+        f"at least one common Omega_0 period (e.g., add a far-away "
+        f"never-treated unit that observes the full time range)."
+    )
+
+
+def _iterative_fe_subset(
+    y_full: np.ndarray,
+    unit_codes_full: np.ndarray,
+    time_codes_full: np.ndarray,
+    omega_0_mask: np.ndarray,
+    *,
+    max_iter: int = _FE_ITER_MAX,
+    tol: float = _FE_ITER_TOL,
+) -> Tuple[np.ndarray, np.ndarray, bool]:
+    """Stage-1 iterative-alternating-projection FE solver on the Butts subsample.
+
+    Fits ``y[Omega_0] = mu_i + lambda_t + u`` on the untreated-and-unexposed
+    rows (``Omega_0_mask`` True). Returns FE arrays indexed by code, with
+    ``NaN`` at positions whose unit / time is not represented in the
+    subsample (rank-deficient cells).
+
+    Mirrors ``TwoStageDiD._iterative_fe`` structurally but operates on
+    integer-coded factors via ``np.bincount`` for speed and skips the
+    survey-weights branch (Wave B MVP).
+
+    Parameters
+    ----------
+    y_full : ndarray of shape (n_rows,)
+        Outcome vector for ALL observations (Omega_0 + treated/exposed).
+    unit_codes_full : ndarray of shape (n_rows,)
+        Integer factor codes per row in ``[0, n_units)``.
+    time_codes_full : ndarray of shape (n_rows,)
+        Integer factor codes per row in ``[0, n_times)``.
+    omega_0_mask : ndarray of shape (n_rows,), bool
+        True for rows in the stage-1 fit subsample (D_it=0 AND S_it=0).
+
+    Returns
+    -------
+    unit_fe_arr : ndarray of shape (n_units,)
+        Unit FE indexed by code. ``NaN`` for units absent from Omega_0.
+    time_fe_arr : ndarray of shape (n_times,)
+        Time FE indexed by code. ``NaN`` for periods absent from Omega_0.
+    converged : bool
+        Whether the iterative solver reached ``tol`` within ``max_iter``.
+    """
+    if omega_0_mask.sum() == 0:
+        raise ValueError(
+            "_iterative_fe_subset: Omega_0 (untreated-and-unexposed subsample) "
+            "is empty. Cannot fit stage-1 fixed effects. Check that some "
+            "control units have d_it > d_bar (Butts Assumption 5(ii))."
+        )
+
+    n_units = int(unit_codes_full.max()) + 1
+    n_times = int(time_codes_full.max()) + 1
+
+    # Operate on the subset only (faster than masking each iteration).
+    y_sub = y_full[omega_0_mask]
+    unit_sub = unit_codes_full[omega_0_mask]
+    time_sub = time_codes_full[omega_0_mask]
+    n_sub = len(y_sub)
+
+    alpha = np.zeros(n_sub)
+    beta = np.zeros(n_sub)
+    converged = False
+    for _ in range(max_iter):
+        # beta[t] = mean over rows in time-group t of (y - alpha)
+        resid = y_sub - alpha
+        time_sums = np.bincount(time_sub, weights=resid, minlength=n_times)
+        time_counts = np.bincount(time_sub, minlength=n_times)
+        time_means = np.where(time_counts > 0, time_sums / np.maximum(time_counts, 1), 0.0)
+        beta_new = time_means[time_sub]
+
+        # alpha[i] = mean over rows in unit-group i of (y - beta_new)
+        resid = y_sub - beta_new
+        unit_sums = np.bincount(unit_sub, weights=resid, minlength=n_units)
+        unit_counts = np.bincount(unit_sub, minlength=n_units)
+        unit_means = np.where(unit_counts > 0, unit_sums / np.maximum(unit_counts, 1), 0.0)
+        alpha_new = unit_means[unit_sub]
+
+        max_change = max(
+            float(np.max(np.abs(alpha_new - alpha))) if n_sub > 0 else 0.0,
+            float(np.max(np.abs(beta_new - beta))) if n_sub > 0 else 0.0,
+        )
+        alpha = alpha_new
+        beta = beta_new
+        if max_change < tol:
+            converged = True
+            break
+
+    # Build FE arrays indexed by code; NaN for unseen units/periods.
+    unit_fe_arr = np.full(n_units, np.nan, dtype=np.float64)
+    time_fe_arr = np.full(n_times, np.nan, dtype=np.float64)
+    # For each code present in the subset, take any row's converged value
+    # (constant within group at convergence). Sort-by-code to make access
+    # deterministic.
+    seen_unit_codes = np.unique(unit_sub)
+    for u_code in seen_unit_codes:
+        idx = np.flatnonzero(unit_sub == u_code)[0]
+        unit_fe_arr[u_code] = alpha[idx]
+    seen_time_codes = np.unique(time_sub)
+    for t_code in seen_time_codes:
+        idx = np.flatnonzero(time_sub == t_code)[0]
+        time_fe_arr[t_code] = beta[idx]
+    return unit_fe_arr, time_fe_arr, converged
+
+
+def _residualize_butts(
+    y_full: np.ndarray,
+    unit_codes_full: np.ndarray,
+    time_codes_full: np.ndarray,
+    unit_fe_arr: np.ndarray,
+    time_fe_arr: np.ndarray,
+) -> np.ndarray:
+    """Compute ``y_tilde = y - mu_hat[i] - lambda_hat[t]`` for ALL rows.
+
+    Rows whose unit or period has ``NaN`` FE (rank-deficient cells from
+    stage 1) get ``NaN`` y_tilde and are masked out of stage 2.
+    """
+    mu_per_row = unit_fe_arr[unit_codes_full]
+    lambda_per_row = time_fe_arr[time_codes_full]
+    return y_full - mu_per_row - lambda_per_row
+
+
+# =============================================================================
+# Public estimator (skeleton — fit() implemented in Step 3)
+# =============================================================================
+
+
+class SpilloverDiD:
+    """Ring-indicator spillover-aware DiD (Butts 2021).
+
+    Standalone estimator implementing two-stage Gardner (2022) methodology
+    with ring-indicator covariates that identify the direct effect on
+    treated units (``tau_total``) alongside per-ring spillover effects on
+    near-control units (``delta_j``). Supports both panel non-staggered
+    timing and Section 5 staggered timing in a single ``fit()`` entry
+    point — non-staggered is the special case where all treated units
+    share an onset time.
+
+    Parameters
+    ----------
+    rings : list of float
+        Sorted distance breakpoints with at least 2 elements. ``K =
+        len(rings) - 1`` rings are constructed.
+    d_bar : float, optional
+        Far-away cutoff (Butts Assumption 5). Defaults to ``max(rings)``;
+        if explicitly set, must equal ``max(rings)``. Wave B MVP does not
+        support a ``d_bar`` strictly larger than the outermost ring edge
+        (a "dead zone" where units satisfy ``rings[-1] < d_i <= d_bar``
+        but are in neither a ring nor the far-away group has no clean
+        methodological interpretation). To use a smaller spillover
+        bandwidth, shrink the outermost ring edge instead.
+    vcov_type : str, default="hc1"
+        Variance estimator. Set to ``"conley"`` and supply
+        ``conley_coords``/``conley_cutoff_km``/``conley_lag_cutoff`` to
+        enable Conley spatial-HAC at stage 2 (recommended per paper
+        Section 3.1).
+    conley_coords : tuple of (str, str), optional
+        ``(lat_col, lon_col)`` column names. Used for ring construction
+        AND for the Conley vcov spatial kernel.
+    conley_metric : str or callable, default="haversine"
+        Distance metric used for both ring construction and the Conley
+        spatial kernel. See :mod:`diff_diff.conley` for callable contract.
+    conley_cutoff_km : float, optional
+        Conley spatial-HAC bandwidth. Required when ``vcov_type="conley"``.
+    conley_lag_cutoff : int, optional
+        Within-unit Bartlett max lag. Required when ``vcov_type="conley"``.
+        Use ``0`` to suppress the serial-component sandwich.
+    cluster : str, optional
+        Column name for cluster-robust variance, or the combined Conley
+        cluster product kernel when paired with ``vcov_type="conley"``.
+    alpha : float, default=0.05
+        Significance level for confidence intervals.
+    anticipation : int, default=0
+        Number of pre-treatment periods where effects may occur. Treatment
+        and ring-membership clocks both shift by ``-anticipation`` so the
+        stage-1 untreated-and-unexposed subsample correctly excludes
+        anticipation rows.
+    event_study : bool, default=False
+        If ``True``, emit per-event-time × ring coefficients (Butts Table
+        2 staggered specification). The result's ``spillover_effects``
+        DataFrame uses a ``MultiIndex`` over ``(ring, event_time)``.
+    horizon_max : int, optional
+        Maximum absolute event-study horizon. Mirrors
+        :class:`diff_diff.two_stage.TwoStageDiD`.
+    rank_deficient_action : {"warn", "error", "silent"}, default="warn"
+        Action when the stage-2 design is rank-deficient.
+
+    Attributes
+    ----------
+    results_ : SpilloverDiDResults
+        Populated after :meth:`fit` completes.
+    is_fitted_ : bool
+
+    Notes
+    -----
+    The implementation uses two-stage Gardner methodology with the
+    time-varying ``S_it = S_i * 1{t >= t_treat}`` form (paper page 12,
+    just above Equation 5). Reading the literal unit-static ``(1 - D_it) *
+    S_i`` from Equation 5 yields a rank-deficient design under TWFE;
+    Section 5's Table 2 makes the time-varying form explicit. The
+    diff-diff implementation matches the paper's identification argument
+    once the ``S_it`` notation is read correctly.
+
+    For non-staggered timing, Gardner identity → stage-2 point estimates
+    equal a single-stage TWFE with the time-varying spillover regressor.
+    """
+
+    def __init__(
+        self,
+        *,
+        rings: List[float],
+        d_bar: Optional[float] = None,
+        vcov_type: str = "hc1",
+        conley_coords: Optional[Tuple[str, str]] = None,
+        conley_metric: SpilloverMetric = "haversine",
+        conley_cutoff_km: Optional[float] = None,
+        conley_lag_cutoff: Optional[int] = None,
+        cluster: Optional[str] = None,
+        alpha: float = 0.05,
+        anticipation: int = 0,
+        event_study: bool = False,
+        horizon_max: Optional[int] = None,
+        rank_deficient_action: str = "warn",
+    ):
+        if rank_deficient_action not in ("warn", "error", "silent"):
+            raise ValueError(
+                f"rank_deficient_action must be 'warn', 'error', or 'silent', "
+                f"got '{rank_deficient_action}'"
+            )
+        self.rings = rings
+        self.d_bar = d_bar
+        self.vcov_type = vcov_type
+        self.conley_coords = conley_coords
+        self.conley_metric = conley_metric
+        self.conley_cutoff_km = conley_cutoff_km
+        self.conley_lag_cutoff = conley_lag_cutoff
+        self.cluster = cluster
+        self.alpha = alpha
+        self.anticipation = anticipation
+        self.event_study = event_study
+        self.horizon_max = horizon_max
+        self.rank_deficient_action = rank_deficient_action
+        self.is_fitted_ = False
+        self.results_: Optional[Any] = None
+
+    def get_params(self) -> Dict[str, Any]:
+        return {
+            "rings": self.rings,
+            "d_bar": self.d_bar,
+            "vcov_type": self.vcov_type,
+            "conley_coords": self.conley_coords,
+            "conley_metric": self.conley_metric,
+            "conley_cutoff_km": self.conley_cutoff_km,
+            "conley_lag_cutoff": self.conley_lag_cutoff,
+            "cluster": self.cluster,
+            "alpha": self.alpha,
+            "anticipation": self.anticipation,
+            "event_study": self.event_study,
+            "horizon_max": self.horizon_max,
+            "rank_deficient_action": self.rank_deficient_action,
+        }
+
+    def set_params(self, **params: Any) -> "SpilloverDiD":
+        valid = set(self.get_params().keys())
+        for key, value in params.items():
+            if key not in valid:
+                raise ValueError(
+                    f"Unknown parameter: {key!r}. Valid parameters: " f"{sorted(valid)}."
+                )
+            setattr(self, key, value)
+        return self
+
+    # -------------------------------------------------------------------------
+    # Fit-time validators (Step 2)
+    # -------------------------------------------------------------------------
+
+    def _validate_spillover_inputs(
+        self,
+        data: pd.DataFrame,
+        treatment: Optional[str],
+        first_treat: Optional[str],
+        time: str,
+        unit: str,
+        outcome: str,
+    ) -> None:
+        """Front-door validation for SpilloverDiD.fit().
+
+        Runs BEFORE any stage-1 work. Catches malformed estimator state
+        (rings, d_bar), missing/conflicting timing kwargs (treatment XOR
+        first_treat), missing required columns, and Conley-specific
+        prerequisites. Resolves ``self._effective_d_bar`` as a side
+        effect so subsequent helpers can read it directly.
+
+        Raises
+        ------
+        ValueError
+            Any malformed input. Error messages name the offending kwarg
+            and (where applicable) the offending row count.
+        """
+        # 1. rings: sorted list of >= 2 elements, non-negative, strictly increasing.
+        if not isinstance(self.rings, (list, tuple, np.ndarray)):
+            raise ValueError(
+                f"rings must be a list/tuple/array of distance breakpoints; "
+                f"got {type(self.rings).__name__}."
+            )
+        rings_arr = np.asarray(self.rings, dtype=np.float64)
+        if rings_arr.ndim != 1 or rings_arr.size < 2:
+            raise ValueError(
+                "rings must contain at least 2 breakpoints; "
+                f"got {len(self.rings)} ({list(self.rings)})."
+            )
+        if (rings_arr < 0).any():
+            raise ValueError(f"rings must be non-negative; got {list(self.rings)}.")
+        if (np.diff(rings_arr) <= 0).any():
+            raise ValueError(f"rings must be strictly increasing; got {list(self.rings)}.")
+        if rings_arr[0] != 0:
+            raise ValueError(
+                f"rings[0] must equal 0 to cover treated locations "
+                f"(d_it = 0 must belong to Ring 1); got rings[0] = "
+                f"{rings_arr[0]}. Rows with 0 <= d_it < rings[0] would "
+                "be flagged as exposed (S_it = 1) but receive zero "
+                "spillover regressors at stage 2, silently biasing the "
+                "estimator. To exclude very-close pairs, model that with "
+                "an explicit innermost ring covering [0, rings[0])."
+            )
+
+        # 2. d_bar: defaults to rings[-1]; if set explicitly must equal rings[-1]
+        #    (avoid the dead zone where d_i in (rings[-1], d_bar] is neither
+        #    in any ring nor far-away).
+        if self.d_bar is None:
+            self._effective_d_bar = float(rings_arr[-1])
+        else:
+            if not np.isfinite(self.d_bar) or self.d_bar <= 0:
+                raise ValueError(f"d_bar must be positive and finite; got {self.d_bar}.")
+            if not np.isclose(self.d_bar, rings_arr[-1]):
+                raise ValueError(
+                    f"d_bar ({self.d_bar}) must equal max(rings) ({rings_arr[-1]}); "
+                    "to vary d_bar, vary the rings breakpoints (the outermost "
+                    "edge is implicitly the spillover cutoff). Setting d_bar "
+                    "different from rings[-1] would create a 'dead zone' "
+                    "where units in (rings[-1], d_bar] are neither in any "
+                    "ring nor in the far-away control group."
+                )
+            self._effective_d_bar = float(self.d_bar)
+
+        # 3. Exactly ONE of treatment / first_treat must be supplied.
+        if treatment is None and first_treat is None:
+            raise ValueError(
+                "Exactly one of `treatment` (binary D_it column) or "
+                "`first_treat` (per-unit onset-time column) must be supplied."
+            )
+        if treatment is not None and first_treat is not None:
+            raise ValueError(
+                "Provide either `treatment` or `first_treat`, not both. "
+                "`treatment` is auto-converted to `first_treat` internally."
+            )
+
+        # 4. Required columns exist in data (treat outcome the same way as
+        # other required columns — front-door error rather than late
+        # KeyError when `data[outcome]` is dereferenced).
+        required = [time, unit, outcome]
+        if treatment is not None:
+            required.append(treatment)
+        if first_treat is not None:
+            required.append(first_treat)
+        missing = [c for c in required if c not in data.columns]
+        if missing:
+            raise ValueError(f"Missing required columns in data: {missing}.")
+
+        # 4a-bis. Outcome must be finite per-row. Non-finite outcomes
+        # propagate into stage-1 FE estimation and surface as non-
+        # convergence warnings + late solver failures rather than a
+        # targeted input error. Reject up front.
+        outcome_arr = np.asarray(data[outcome].values, dtype=np.float64)
+        if not np.isfinite(outcome_arr).all():
+            n_bad = int((~np.isfinite(outcome_arr)).sum())
+            raise ValueError(
+                f"outcome column '{outcome}' contains {n_bad} non-finite "
+                "value(s) (NaN / Inf). SpilloverDiD requires finite outcomes "
+                "for stage-1 FE estimation; impute or drop missing rows "
+                "before fitting."
+            )
+
+        # 4a-ter. Identifier columns (unit, time, optionally first_treat
+        # when user-supplied) must not contain NaN. Missing identifiers
+        # would fall through to opaque numpy / pandas errors (e.g.
+        # "negative elements" from np.bincount) rather than a targeted
+        # ValueError. Reject up front.
+        for id_col in (unit, time):
+            id_nan_mask = data[id_col].isna()
+            if bool(id_nan_mask.any()):
+                n_nan = int(id_nan_mask.sum())
+                raise ValueError(
+                    f"identifier column '{id_col}' contains {n_nan} "
+                    "missing value(s). SpilloverDiD requires valid "
+                    "unit / time identifiers on every row; drop or "
+                    "impute missing-identifier rows before fitting."
+                )
+        # `first_treat` is checked only when user-supplied; the auto-
+        # generated path produces a clean column.
+        if first_treat is not None and first_treat in data.columns:
+            ft_nan_mask = data[first_treat].isna()
+            if bool(ft_nan_mask.any()):
+                n_nan = int(ft_nan_mask.sum())
+                raise ValueError(
+                    f"first_treat column '{first_treat}' contains {n_nan} "
+                    "missing value(s). Use np.inf (or 0) for never-treated "
+                    "units; do not leave NaN."
+                )
+
+        # 4b. One-row-per-(unit, time) cell panel contract. Duplicate cells
+        # would silently re-weight stage-1 FE estimation AND stage-2 OLS
+        # without any warning. Reject up front.
+        cell_counts = data.groupby([unit, time]).size()
+        dups = cell_counts[cell_counts > 1]
+        if len(dups) > 0:
+            sample = list(dups.index[:5])
+            suffix = f" (and {len(dups) - 5} more)" if len(dups) > 5 else ""
+            raise ValueError(
+                f"{len(dups)} duplicate (unit, time) cell(s) detected "
+                f"(e.g. {sample}{suffix}). SpilloverDiD requires "
+                "one-row-per-(unit, time) panel data — duplicate cells "
+                "would silently re-weight both the stage-1 FE fit and the "
+                "stage-2 OLS. Aggregate to unique cells before fitting."
+            )
+
+        # 4c. Balanced-panel contract for the Wave B MVP. An unbalanced
+        # panel where the stage-1 (unit, time) FE bipartite graph induced
+        # by Omega_0 isn't connected produces unidentified residuals on
+        # treated rows. The exact-graph-connectivity check is queued as
+        # a follow-up; the MVP simply rejects panels where some unit
+        # doesn't observe every period.
+        n_unique_times = data[time].nunique()
+        unit_period_counts = data.groupby(unit)[time].nunique()
+        underbalanced = unit_period_counts[unit_period_counts < n_unique_times]
+        if len(underbalanced) > 0:
+            sample = list(underbalanced.index[:5])
+            suffix = f" (and {len(underbalanced) - 5} more)" if len(underbalanced) > 5 else ""
+            raise ValueError(
+                f"Unbalanced panel: {len(underbalanced)} unit(s) do not "
+                f"observe every period (panel has {n_unique_times} unique "
+                f"periods, affected units e.g. {sample}{suffix}). Wave B "
+                "MVP requires a balanced panel — an unbalanced (unit, time) "
+                "Omega_0 bipartite graph can produce unidentified residuals "
+                "for some treated rows even when every unit and every "
+                "period has at least one Omega_0 row. Balance the panel "
+                "(impute missing cells or drop affected units) before "
+                "fitting. Graph-connectivity-based identification is "
+                "queued as a follow-up extension."
+            )
+
+        # 5a. conley_coords is required ALWAYS — ring construction dereferences
+        # it on every fit() path, regardless of vcov_type. Validate up front
+        # rather than letting downstream code fail with AssertionError/KeyError.
+        if self.conley_coords is None:
+            raise ValueError(
+                "SpilloverDiD requires `conley_coords=(lat_col, lon_col)` "
+                "for ring construction, regardless of vcov_type."
+            )
+        if not isinstance(self.conley_coords, (list, tuple)) or len(self.conley_coords) != 2:
+            raise ValueError(
+                "conley_coords must be a 2-tuple (lat_col, lon_col); "
+                f"got {self.conley_coords!r}."
+            )
+        # Within-unit coord constancy: ring construction collapses coords to
+        # one row per unit via drop_duplicates(subset=[unit]). If a unit's
+        # lat/lon varies across rows the first observed value is silently
+        # used; reject up front rather than silently misclassify spillover
+        # exposure.
+        coord_cols = list(self.conley_coords)
+        if unit in data.columns and all(c in data.columns for c in coord_cols):
+            per_unit_unique = data.groupby(unit)[coord_cols].nunique()
+            non_constant = per_unit_unique[(per_unit_unique > 1).any(axis=1)]
+            if len(non_constant) > 0:
+                sample = non_constant.index.tolist()[:5]
+                suffix = f" (and {len(non_constant) - 5} more)" if len(non_constant) > 5 else ""
+                raise ValueError(
+                    f"{len(non_constant)} unit(s) have non-constant "
+                    f"conley_coords ({coord_cols}) across rows (e.g. {sample}"
+                    f"{suffix}). SpilloverDiD requires within-unit-constant "
+                    "coordinates — ring construction collapses coords per "
+                    "unit via drop_duplicates. Aggregate to a single (lat, "
+                    "lon) per unit (e.g. via the unit's geographic centroid) "
+                    "before fitting, or fix the data so coords are constant."
+                )
+        for c in self.conley_coords:
+            if c not in data.columns:
+                raise ValueError(f"conley_coords column '{c}' not in data.")
+        # Coord finiteness check (per-row).
+        coord_vals = data[list(self.conley_coords)].values
+        coord_arr = np.asarray(coord_vals, dtype=np.float64)
+        if not np.isfinite(coord_arr).all():
+            n_nonfinite = int((~np.isfinite(coord_arr)).any(axis=1).sum())
+            raise ValueError(
+                f"conley_coords contain non-finite values in {n_nonfinite} row(s); "
+                "coordinates must be finite for distance computation."
+            )
+        # Haversine lat/lon domain check: applies on EVERY vcov path (not just
+        # vcov_type='conley') because ring construction always uses
+        # conley_metric for distance computation. Out-of-range coords silently
+        # produce wrong ring assignment otherwise.
+        if self.conley_metric == "haversine":
+            lat_arr = coord_arr[:, 0]
+            lon_arr = coord_arr[:, 1]
+            if (lat_arr < -90.0).any() or (lat_arr > 90.0).any():
+                bad_rows = int(((lat_arr < -90.0) | (lat_arr > 90.0)).sum())
+                raise ValueError(
+                    f"conley_coords latitude column '{coord_cols[0]}' contains "
+                    f"{bad_rows} row(s) outside [-90, 90] degrees. Haversine "
+                    "metric requires geographic lat/lon coords; if your coords "
+                    "are already projected (planar), pass conley_metric='euclidean'."
+                )
+            if (lon_arr < -180.0).any() or (lon_arr > 180.0).any():
+                bad_rows = int(((lon_arr < -180.0) | (lon_arr > 180.0)).sum())
+                raise ValueError(
+                    f"conley_coords longitude column '{coord_cols[1]}' contains "
+                    f"{bad_rows} row(s) outside [-180, 180] degrees. Haversine "
+                    "metric requires geographic lat/lon coords; if your coords "
+                    "are already projected (planar), pass conley_metric='euclidean'."
+                )
+
+        # 5b. cluster column existence + NaN check — applies on every vcov
+        # path, not just conley. Missing cluster ids would produce wrong
+        # SEs (NaN counted as its own cluster by np.unique() but dropped
+        # by pandas groupby() in the cluster meat).
+        if self.cluster is not None:
+            if self.cluster not in data.columns:
+                raise ValueError(f"cluster column '{self.cluster}' not in data.")
+            cluster_nan_mask = data[self.cluster].isna()
+            if bool(cluster_nan_mask.any()):
+                n_nan = int(cluster_nan_mask.sum())
+                raise ValueError(
+                    f"cluster column '{self.cluster}' contains {n_nan} "
+                    "missing value(s). NaN cluster ids would silently "
+                    "produce wrong clustered SEs (np.unique counts NaN as "
+                    "its own cluster but pandas groupby drops it from the "
+                    "cluster meat). Drop or impute missing cluster rows "
+                    "before fitting."
+                )
+
+        # 5c. Conley-specific kwargs (only required when vcov_type='conley').
+        if self.vcov_type == "conley":
+            if self.conley_cutoff_km is None or not (
+                np.isfinite(self.conley_cutoff_km) and self.conley_cutoff_km > 0
+            ):
+                raise ValueError(
+                    "vcov_type='conley' requires conley_cutoff_km > 0 (finite); "
+                    f"got {self.conley_cutoff_km}."
+                )
+            if self.conley_lag_cutoff is None or self.conley_lag_cutoff < 0:
+                raise ValueError(
+                    "vcov_type='conley' requires conley_lag_cutoff >= 0 (integer); "
+                    f"got {self.conley_lag_cutoff}."
+                )
+
+        # 6. At least one treated unit must exist.
+        if treatment is not None:
+            n_treated_obs = int((data[treatment] == 1).sum())
+            if n_treated_obs == 0:
+                raise ValueError(
+                    f"No treated observations found (column '{treatment}' "
+                    "is all 0/NaN). SpilloverDiD requires at least one treated unit."
+                )
+        else:
+            ft_finite = np.isfinite(data[first_treat].astype(float).values)  # type: ignore[arg-type]
+            n_treated_units = int(
+                pd.Series(ft_finite & (data[first_treat].astype(float).values != 0)).any()  # type: ignore[index]
+            )
+            if not n_treated_units:
+                raise ValueError(
+                    f"No treated units found (column '{first_treat}' is "
+                    "all 0 / inf / NaN). SpilloverDiD requires at least one "
+                    "treated unit."
+                )
+
+    def _validate_far_away_exists(
+        self,
+        d_array: np.ndarray,
+        is_control_array: np.ndarray,
+    ) -> int:
+        """Verify Butts Assumption 5(ii): at least one (D=0, d > d_bar) observation.
+
+        Parameters
+        ----------
+        d_array : ndarray
+            Per-unit or per-row distances (caller chooses; the check is
+            count-based, not granularity-sensitive).
+        is_control_array : ndarray, bool
+            Aligned mask: True where the observation belongs to a control
+            unit (D_i = 0 for static, D_it = 0 for staggered).
+
+        Returns
+        -------
+        n_far_away : int
+            Number of far-away control observations.
+
+        Raises
+        ------
+        ValueError
+            No (D=0, d > d_bar) observations exist; Assumption 5(ii) fails.
+        """
+        d_bar = self._effective_d_bar
+        far_away_mask = (d_array > d_bar) & is_control_array
+        n_far_away = int(far_away_mask.sum())
+        if n_far_away < 1:
+            raise ValueError(
+                "No far-away control observations: every control unit has "
+                f"d_i <= d_bar = {d_bar}. Butts (2021) Assumption 5(ii) "
+                "requires the sample to contain control units strictly "
+                "further than d_bar from any treated unit. Either reduce "
+                "d_bar (via the outermost ring breakpoint), expand the sample, "
+                "or verify the coords/metric configuration."
+            )
+        return n_far_away
+
+    def fit(
+        self,
+        data: pd.DataFrame,
+        *,
+        outcome: str,
+        unit: str,
+        time: str,
+        treatment: Optional[str] = None,
+        first_treat: Optional[str] = None,
+        covariates: Optional[List[str]] = None,
+        survey_design: object = None,
+    ) -> SpilloverDiDResults:
+        """Fit the two-stage Gardner DiD with ring-indicator covariates.
+
+        Methodology (Butts 2021 Section 5 + Gardner 2022):
+
+        1. Compute per-row spillover indicators from ``conley_coords``.
+        2. Build stage-1 subsample ``Omega_0 = {D_it=0 AND S_it=0}``
+           (untreated AND unexposed) — Butts' clean control group.
+        3. Stage 1: fit ``Y_it = mu_i + lambda_t + u`` on ``Omega_0``.
+        4. Residualize: ``Y_tilde = Y - mu_hat - lambda_hat`` for ALL rows.
+        5. Stage 2: regress ``Y_tilde`` on ``[D_it, (1-D_it)*Ring_{it,j}]`` via
+           :func:`solve_ols`, threading the configured ``vcov_type``.
+        6. Wrap as :class:`SpilloverDiDResults`.
+
+        Notes
+        -----
+        Wave B MVP: stage-2 variance is the standard solve_ols estimator
+        (HC1 / Conley / cluster). The Gardner GMM sandwich first-stage
+        uncertainty correction is NOT applied (planned follow-up; see
+        TODO and plan Risks #2). Variance is therefore approximate (likely
+        underestimated by a few percent in typical settings).
+        """
+        if survey_design is not None:
+            raise NotImplementedError(
+                "SpilloverDiD does not yet support survey_design= ; planned "
+                "as a follow-up extension. See TODO.md."
+            )
+        if self.event_study:
+            raise NotImplementedError(
+                "SpilloverDiD does not yet support event_study=True ; the "
+                "per-event-time × ring decomposition (Butts Table 2) is "
+                "planned as a follow-up extension. The base "
+                "(event_study=False) aggregate spec is fully supported and "
+                "handles both non-staggered and staggered timing."
+            )
+        if self.horizon_max is not None:
+            raise NotImplementedError(
+                "SpilloverDiD does not yet support horizon_max= (used only "
+                "in event-study mode); planned as a follow-up extension."
+            )
+        # Validate `anticipation` up front: must be a non-negative integer.
+        # Accepting fractional or negative values would silently shift
+        # treatment timing and ring exposure beyond what the estimator's
+        # identification contract supports.
+        if not isinstance(self.anticipation, (int, np.integer)) or self.anticipation < 0:
+            raise ValueError(
+                f"anticipation must be a non-negative integer; got "
+                f"{self.anticipation!r} (type {type(self.anticipation).__name__})."
+            )
+        if covariates is not None and len(covariates) > 0:
+            raise NotImplementedError(
+                "SpilloverDiD does not yet support covariates= in Wave B MVP. "
+                "The Gardner-style two-stage pattern requires covariate "
+                "effects to be estimated on the untreated-and-unexposed "
+                "subsample at stage 1 and subtracted from Y before stage 2 — "
+                "appending them only at stage 2 (without stage-1 "
+                "residualization) would silently bias tau_total / delta_j on "
+                "panels with time-varying covariates. The full covariate "
+                "path mirroring TwoStageDiD._fit_untreated_model is queued as "
+                "a follow-up extension. See TODO.md."
+            )
+        if self.vcov_type in ("hc2", "hc2_bm"):
+            raise NotImplementedError(
+                f"SpilloverDiD does not yet support vcov_type='{self.vcov_type}'. "
+                "The current stage-2 inference uses a generic residual df "
+                "(n - effective_rank) for t-distribution lookups, but "
+                "hc2 / hc2_bm require per-coefficient Bell-McCaffrey / CR2 "
+                "degrees of freedom for correct p-values and CIs. Routing "
+                "stage 2 through LinearRegression (which supplies the "
+                "per-coefficient DOF metadata) is queued as a follow-up "
+                "extension. Use vcov_type='hc1', 'classical', 'conley', or "
+                "leave default; combine with cluster=<col> for CR1."
+            )
+
+        # Step 0: defensive copy so the caller's DataFrame is never mutated.
+        data = data.copy(deep=False)
+
+        # Step 0b: coerce `time` to numeric BEFORE any structural validation.
+        # The validator's duplicate-cell and balanced-panel checks depend on
+        # period IDENTITY; mixed raw encodings like ['0', 0, '1', 1] would
+        # pass validation but collapse to duplicate periods after coercion.
+        # Coercing first ensures validation sees the actual numeric labels.
+        if time in data.columns:
+            try:
+                data = data.assign(**{time: pd.to_numeric(data[time])})
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"time column '{time}' must be numeric (or string-coercible "
+                    f"to numeric). Got: {exc}. Encode periods as integers / "
+                    "floats before passing to SpilloverDiD."
+                ) from exc
+        # User-supplied first_treat must also be coerced BEFORE validation
+        # so the NaN check and identity-based checks see the actual labels.
+        # Auto-generated `_spillover_first_treat` (from binary D) doesn't
+        # exist yet — it's created later by `_convert_treatment_to_first_treat`.
+        if first_treat is not None and first_treat in data.columns:
+            try:
+                data = data.assign(**{first_treat: pd.to_numeric(data[first_treat])})
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"first_treat column '{first_treat}' must be numeric (or "
+                    f"string-coercible to numeric). Got: {exc}. Encode onset "
+                    "times as integers / floats (or np.inf for never-treated) "
+                    "before passing to SpilloverDiD."
+                ) from exc
+
+        # Step 1: front-door validation (rings, d_bar, timing-kwargs XOR,
+        # coords, panel structure — all on COERCED time/first_treat labels).
+        self._validate_spillover_inputs(data, treatment, first_treat, time, unit, outcome)
+
+        # Step 2: convert binary treatment to per-unit first_treat if needed.
+        # Track whether `first_treat` was AUTO-GENERATED (from a binary D
+        # column) vs USER-SUPPLIED (Gardner convention). The auto-generated
+        # column uses ONLY np.inf for never-treated (no 0-as-never-treated
+        # sentinel); preserving this distinction avoids silently
+        # reclassifying baseline-treated units (D=1 at t=0) as never-treated.
+        treatment_auto_converted = treatment is not None
+        if treatment is not None:
+            data, first_treat = _convert_treatment_to_first_treat(data, treatment, time, unit)
+        assert first_treat is not None  # validator guarantees this
+
+        # Step 3: factorize unit/time → integer codes (mirrors TwoStageDiD).
+        unit_vals = data[unit].values
+        time_vals = data[time].values
+        unit_codes_full, unit_uniques = pd.factorize(pd.Series(unit_vals), sort=True)
+        time_codes_full, time_uniques = pd.factorize(pd.Series(time_vals), sort=True)
+
+        # Step 4: extract treatment onsets per unit; detect staggered.
+        first_treat_by_unit = _extract_treatment_onsets(
+            data,
+            first_treat,
+            unit,
+            treat_zero_as_never_treated=not treatment_auto_converted,
+        )
+        finite_onsets = {ft for ft in first_treat_by_unit.values() if np.isfinite(ft)}
+        if not finite_onsets:
+            raise ValueError(
+                "No treated units found (all first_treat values are inf or 0). "
+                "SpilloverDiD requires at least one treated unit."
+            )
+        is_staggered = len(finite_onsets) > 1
+
+        # Apply anticipation shift to onsets used for ring construction AND
+        # for the D_it indicator (treatment-effective onset).
+        effective_onsets = {
+            uid: (ft - self.anticipation if np.isfinite(ft) else ft)
+            for uid, ft in first_treat_by_unit.items()
+        }
+
+        # Step 5: compute per-row d_it. For non-staggered (single common
+        # onset), use the cheaper static helper that builds the pairwise
+        # distance matrix once; for staggered, use the per-cohort helper
+        # that handles time-varying ring membership.
+        assert self.conley_coords is not None  # validator-guaranteed
+
+        # If conley_metric is a user callable, validate it against the full
+        # 6-check contract (shape / finite / non-negative / symmetric /
+        # zero-diagonal) on the per-unit (n, n) self-call BEFORE using it
+        # for ring construction. Without this, a callable with positive
+        # self-distance silently corrupts ring assignment (treated units
+        # at their own location should have d=0 → fall in Ring_1; positive
+        # self-distance pushes them out into a different ring).
+        if callable(self.conley_metric):
+            unit_coords_for_validation = (
+                data[list(self.conley_coords)].drop_duplicates().values.astype(np.float64)
+            )
+            _validate_callable_metric_result(
+                self.conley_metric(unit_coords_for_validation, unit_coords_for_validation),
+                unit_coords_for_validation.shape[0],
+            )
+
+        if is_staggered:
+            d_it_per_row, _, _ = _compute_nearest_treated_distance_staggered(
+                data,
+                unit=unit,
+                time=time,
+                coords=self.conley_coords,
+                metric=self.conley_metric,
+                first_treat_by_unit=effective_onsets,
+            )
+        else:
+            # Non-staggered: single common onset. Build d_i per unit once,
+            # then broadcast to per-row AND zero out pre-treatment rows
+            # (matching the staggered helper's inf-at-pre-treatment
+            # convention so downstream ring + Omega_0 logic is timing-
+            # agnostic).
+            ever_treated_ids = np.array(
+                [uid for uid, ft in first_treat_by_unit.items() if np.isfinite(ft)],
+                dtype=object,
+            )
+            d_i_per_unit, unit_index_static = _compute_nearest_treated_distance_static(
+                data,
+                unit=unit,
+                coords=self.conley_coords,
+                metric=self.conley_metric,
+                treated_unit_ids=ever_treated_ids,
+                # Pass `d_bar` as the cutoff so the cKDTree sparse path
+                # auto-activates when n_units > _CONLEY_SPARSE_N_THRESHOLD
+                # for built-in metrics. Units beyond d_bar get d_i = inf,
+                # which the downstream ring builder treats as far-away
+                # controls — same as the dense-path semantics.
+                cutoff_km=self._effective_d_bar,
+            )
+            unit_to_d = {uid: float(d_i_per_unit[idx]) for idx, uid in enumerate(unit_index_static)}
+            d_it_per_row = np.array([unit_to_d.get(u, np.inf) for u in unit_vals])
+            # Pre-treatment rows have d_it=inf (no unit treated yet).
+            shared_onset = next(iter(finite_onsets))
+            shared_effective_onset = shared_onset - self.anticipation
+            d_it_per_row = np.where(
+                np.asarray(time_vals, dtype=np.float64) < shared_effective_onset,
+                np.inf,
+                d_it_per_row,
+            )
+
+        # Step 6: build ring indicators per row (Butts Eq 6 time-varying form).
+        ring_masks = _build_ring_indicators(d_it_per_row, list(self.rings))
+        K = ring_masks.shape[1]
+
+        # Step 7: compute D_it per row (with anticipation shift).
+        D_it = np.zeros(len(data), dtype=np.float64)
+        for u_id, eff_ft in effective_onsets.items():
+            if np.isfinite(eff_ft):
+                rows = (unit_vals == u_id) & (np.asarray(time_vals) >= eff_ft)
+                D_it[rows] = 1.0
+
+        # Step 7b: verify at least one observation is treated AFTER applying
+        # the anticipation shift. If all first_treat values are > max(time)
+        # in the panel (e.g. an "anticipation" of treatment that hasn't
+        # arrived yet), D_it is all zeros and the stage-2 design has no
+        # treatment variation. Fail fast with a clear identification error
+        # rather than crashing inside solve_ols.
+        if D_it.sum() == 0:
+            max_time = float(np.max(np.asarray(time_vals, dtype=np.float64)))
+            raise ValueError(
+                "No observation is treated in-sample after applying "
+                f"anticipation shift of {self.anticipation}. The earliest "
+                "effective onset is later than the latest observed period "
+                f"({max_time}), so D_it = 0 everywhere and tau_total is "
+                "unidentified. Either include post-onset periods in the "
+                "panel, reduce the anticipation lead, or verify the "
+                "first_treat column."
+            )
+
+        # Step 8: compute S_it = 1{d_it <= d_bar}. Treated-self rows have
+        # d_it=0 → S_it=1 (Omega_0 excludes them; they're treated anyway).
+        S_it = (d_it_per_row <= self._effective_d_bar).astype(np.float64)
+
+        # Step 9: validate far-away controls (Butts Assumption 5(ii)).
+        # Use CURRENT-period untreated status, not never-treated-only. The
+        # paper defines Omega_0 row-wise as {D_it = 0 AND S_it = 0}, so
+        # not-yet-treated observations of eventually-treated units can also
+        # contribute to the far-away identifying group. This matters for
+        # all-eventually-treated staggered designs (no never-treated units).
+        is_control_row_now = D_it == 0
+        n_far_away_obs = self._validate_far_away_exists(d_it_per_row, is_control_row_now)
+
+        # Step 10: Butts Omega_0 mask = (D_it=0 AND S_it=0).
+        omega_0_mask = (D_it == 0) & (S_it == 0)
+
+        # Step 10b: row-level Omega_0 identification check.
+        #
+        # Two regimes (round-16 codex review split):
+        #   - PERIOD-level unsupported (no Omega_0 row at some t): time FE
+        #     structurally unidentified. Dropping the period would remove
+        #     ALL units' observations at that t, including the far-away
+        #     rows needed for identification. Hard error.
+        #   - UNIT-level unsupported (no Omega_0 row for some i): warn-
+        #     and-drop. Unit FE for that i is NaN, residualization writes
+        #     NaN on those rows, and the downstream finite_mask path at
+        #     Step 14 excludes them from stage 2. Mirrors `TwoStageDiD`'s
+        #     always-treated unit handling (`two_stage.py:294-336`) and
+        #     Gardner's framework, which identifies effects from supported
+        #     observations rather than requiring every unit estimable.
+        unit_codes_arr = np.asarray(unit_codes_full)
+        time_codes_arr = np.asarray(time_codes_full)
+        units_in_omega_0 = set(unit_codes_arr[omega_0_mask].tolist())
+        times_in_omega_0 = set(time_codes_arr[omega_0_mask].tolist())
+        all_unit_codes = set(unit_codes_arr.tolist())
+        all_time_codes = set(time_codes_arr.tolist())
+        unsupported_units = sorted(all_unit_codes - units_in_omega_0)
+        unsupported_periods = sorted(all_time_codes - times_in_omega_0)
+
+        if unsupported_periods:
+            affected = [time_uniques[c] for c in unsupported_periods[:5]]
+            suffix = (
+                f" (and {len(unsupported_periods) - 5} more)"
+                if len(unsupported_periods) > 5
+                else ""
+            )
+            raise ValueError(
+                f"Stage-1 fixed effects unidentified: "
+                f"{len(unsupported_periods)} period(s) have NO untreated-and-"
+                f"unexposed (Omega_0) rows — their time FE is unidentified. "
+                f"Examples: {affected}{suffix}. The Butts subsample "
+                "Omega_0 = {D_it = 0 AND S_it = 0} must contain at least one "
+                "row per period that appears in the data. Consider "
+                "tightening d_bar (so fewer rows are flagged as exposed "
+                "S_it = 1) or expanding the sample to include never-treated "
+                "or pre-treatment observations for the affected periods."
+            )
+
+        if unsupported_units:
+            affected = [unit_uniques[c] for c in unsupported_units[:5]]
+            suffix = (
+                f" (and {len(unsupported_units) - 5} more)" if len(unsupported_units) > 5 else ""
+            )
+            warnings.warn(
+                f"SpilloverDiD: {len(unsupported_units)} unit(s) have NO "
+                f"untreated-and-unexposed (Omega_0) rows — their unit FE "
+                f"is unidentified and their rows will be excluded from "
+                f"stage 2 estimation. Examples: {affected}{suffix}. To "
+                f"include these units, expand the sample to provide pre-"
+                f"treatment or untreated observations for them, or tighten "
+                f"d_bar so fewer rows are flagged as exposed (S_it = 1).",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # Step 10c: connected-component check on the Omega_0 bipartite graph.
+        #
+        # Stage 1's iterative FE solver identifies (mu_i, lambda_t) only up
+        # to component-specific constants per connected component of the
+        # bipartite graph (supported units ↔ periods, edge = Omega_0 row).
+        # If the graph splits into K > 1 components, _residualize_butts then
+        # combines mu_i from one component with lambda_t from another,
+        # silently corrupting y_tilde and downstream tau_total / delta_j.
+        # Balanced panel + per-unit/per-period Omega_0 coverage is NECESSARY
+        # but not SUFFICIENT — connectivity is the load-bearing
+        # identification condition for stage 1.
+        _check_omega_0_connectivity(
+            omega_0_mask=omega_0_mask,
+            unit_codes_arr=unit_codes_arr,
+            time_codes_arr=time_codes_arr,
+            units_in_omega_0=units_in_omega_0,
+            n_times=len(time_uniques),
+            unit_uniques=unit_uniques,
+        )
+
+        # Step 11: stage 1 — fit FE on Omega_0.
+        y_full = np.asarray(data[outcome].values, dtype=np.float64)
+        unit_fe_arr, time_fe_arr, converged = _iterative_fe_subset(
+            y_full,
+            np.asarray(unit_codes_full),
+            np.asarray(time_codes_full),
+            omega_0_mask,
+        )
+        if not converged:
+            warnings.warn(
+                "SpilloverDiD stage-1 iterative FE solver did not converge "
+                f"within {_FE_ITER_MAX} iterations (tol={_FE_ITER_TOL}). "
+                "Results may be unreliable.",
+                UserWarning,
+                stacklevel=2,
+            )
+        stage1_n_obs = int(omega_0_mask.sum())
+
+        # Step 12: residualize ALL observations.
+        y_tilde = _residualize_butts(
+            y_full,
+            np.asarray(unit_codes_full),
+            np.asarray(time_codes_full),
+            unit_fe_arr,
+            time_fe_arr,
+        )
+
+        # Mask rank-deficient (NaN y_tilde) rows: rather than zero them out
+        # (which leaves them in the sample for HC1/CR1 n/(n-k) corrections),
+        # we SUBSET stage-2 arrays to the finite rows before solve_ols. This
+        # ensures the SE formulas use the actual estimation sample size.
+        finite_mask = np.isfinite(y_tilde)
+        n_nan = int((~finite_mask).sum())
+        if n_nan > 0:
+            warnings.warn(
+                f"SpilloverDiD: {n_nan} observation(s) excluded from stage 2 "
+                "due to rank-deficient stage-1 FE estimates (unit or period "
+                "absent from the untreated-and-unexposed subsample).",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # Step 13: build stage-2 design [D_it, (1-D_it)*Ring_{it,j}].
+        ring_covariates = np.zeros((len(data), K), dtype=np.float64)
+        for j in range(K):
+            ring_covariates[:, j] = (1.0 - D_it) * ring_masks[:, j].astype(np.float64)
+
+        X_2 = np.column_stack([D_it.reshape(-1, 1), ring_covariates])
+
+        ring_labels = [_ring_label(list(self.rings), j) for j in range(K)]
+        col_names_all = ["treatment"] + [f"_spillover_{lab}" for lab in ring_labels]
+
+        # Step 14: subset arrays to the estimation sample (finite y_tilde rows).
+        # Apply to design, outcome, cluster ids, AND the Conley spatial/temporal
+        # auxiliary arrays so the HC1/CR1/Conley sample-size adjustments use the
+        # correct n.
+        cluster_ids_full = (
+            np.asarray(data[self.cluster].values) if self.cluster is not None else None
+        )
+        if n_nan > 0:
+            X_2_fit = X_2[finite_mask]
+            y_tilde_fit = y_tilde[finite_mask]
+            cluster_ids_fit = (
+                cluster_ids_full[finite_mask] if cluster_ids_full is not None else None
+            )
+            time_vals_fit = np.asarray(time_vals)[finite_mask]
+            unit_vals_fit = np.asarray(unit_vals)[finite_mask]
+        else:
+            X_2_fit = X_2
+            y_tilde_fit = y_tilde
+            cluster_ids_fit = cluster_ids_full
+            time_vals_fit = np.asarray(time_vals)
+            unit_vals_fit = np.asarray(unit_vals)
+
+        # Step 15: stage-2 OLS with configured vcov via solve_ols.
+        solve_kwargs: Dict[str, Any] = {
+            "return_vcov": True,
+            "rank_deficient_action": self.rank_deficient_action,
+            "column_names": col_names_all,
+            "vcov_type": self.vcov_type,
+            "cluster_ids": cluster_ids_fit,
+        }
+        if self.vcov_type == "conley":
+            coord_array_full = np.asarray(data[list(self.conley_coords)].values, dtype=np.float64)
+            coord_array_fit = coord_array_full[finite_mask] if n_nan > 0 else coord_array_full
+            solve_kwargs.update(
+                {
+                    "conley_coords": coord_array_fit,
+                    "conley_cutoff_km": self.conley_cutoff_km,
+                    "conley_metric": self.conley_metric,
+                    "conley_time": time_vals_fit,
+                    "conley_unit": unit_vals_fit,
+                    "conley_lag_cutoff": self.conley_lag_cutoff,
+                }
+            )
+
+        coef, residuals, vcov = solve_ols(X_2_fit, y_tilde_fit, **solve_kwargs)  # type: ignore[misc]
+
+        # Step 16: extract coefficients and inference.
+        tau_total = float(coef[0])
+        # Degrees of freedom for t-distribution inference. Use the EFFECTIVE
+        # rank after solve_ols drops rank-deficient (NaN) coefficient
+        # columns, NOT the raw column count. On rank-deficient stage-2
+        # fits (e.g. an empty ring covariate dropped by solve_ols's QR),
+        # using raw `X_2_fit.shape[1]` would understate df_resid and
+        # silently inflate p-values and CI widths.
+        n_obs_eff = int(finite_mask.sum())
+        k_effective = int(np.isfinite(coef).sum())
+        df_resid = n_obs_eff - k_effective
+        if df_resid <= 0:
+            # Degenerate: no residual degrees of freedom. Force NaN
+            # inference by setting df_resid = 0 (safe_inference treats
+            # df = 0 as no usable degrees of freedom, returning NaN for
+            # t-stat / p-value / CI). Distinct from df_resid = None
+            # which would fall through to a normal-distribution
+            # approximation — misleading on a degenerate sample.
+            warnings.warn(
+                f"SpilloverDiD stage-2 residual df = {df_resid} (n_obs="
+                f"{n_obs_eff}, effective_rank={k_effective}). Inference "
+                "(t-stat, p-value, CI) will be NaN.",
+                UserWarning,
+                stacklevel=2,
+            )
+            df_resid = 0
+
+        # Clamp negative diagonals to 0 before sqrt: indefinite Conley or
+        # near-singular sandwich variances can produce numerically tiny
+        # negative values that would otherwise NaN the entire inference
+        # row. Matches the sibling-estimator convention
+        # (two_stage.py:1183, estimators.py:606, stacked_did.py:515).
+        tau_se = (
+            float(np.sqrt(max(vcov[0, 0], 0.0)))
+            if vcov is not None and np.isfinite(vcov[0, 0])
+            else float("nan")
+        )
+        tau_t, tau_p, tau_ci = safe_inference(tau_total, tau_se, alpha=self.alpha, df=df_resid)
+
+        # Per-ring inference.
+        ring_rows = []
+        for j in range(K):
+            idx = 1 + j  # 0 is treatment; rings follow.
+            coef_j = float(coef[idx])
+            se_j = (
+                float(np.sqrt(max(vcov[idx, idx], 0.0)))
+                if vcov is not None and np.isfinite(vcov[idx, idx])
+                else float("nan")
+            )
+            t_j, p_j, ci_j = safe_inference(coef_j, se_j, alpha=self.alpha, df=df_resid)
+            ring_rows.append(
+                {
+                    "ring": ring_labels[j],
+                    "coef": coef_j,
+                    "se": se_j,
+                    "t_stat": t_j,
+                    "p_value": p_j,
+                    "ci_low": ci_j[0],
+                    "ci_high": ci_j[1],
+                }
+            )
+        spillover_df = pd.DataFrame(ring_rows).set_index("ring") if ring_rows else None
+
+        # Step 16: counts for the result class.
+        n_units_ever_in_ring: Dict[str, int] = {}
+        for j in range(K):
+            in_ring_units = data.loc[ring_masks[:, j], unit].nunique()
+            n_units_ever_in_ring[ring_labels[j]] = int(in_ring_units)
+
+        # Step 17: assemble SpilloverDiDResults. n_obs / n_treated / n_control
+        # reflect the actual stage-2 estimation sample (after dropping NaN
+        # y_tilde rows), matching solve_ols's HC1/CR1 sample-size adjustments.
+        D_it_fit = D_it[finite_mask] if n_nan > 0 else D_it
+
+        # Populate coefficients dict with ALL stage-2 coefficients (treatment
+        # + K rings) keyed by their col_names_all labels so consumers can
+        # align names to vcov rows/cols. "ATT" is exposed as an alias for the
+        # treatment slot to match the sibling-estimator convention.
+        coefficients_full: Dict[str, float] = {}
+        for i, name in enumerate(col_names_all):
+            val = float(coef[i]) if np.isfinite(coef[i]) else float("nan")
+            coefficients_full[name] = val
+        coefficients_full["ATT"] = tau_total
+
+        result = SpilloverDiDResults(
+            att=tau_total,
+            se=tau_se,
+            t_stat=tau_t,
+            p_value=tau_p,
+            conf_int=tau_ci,
+            n_obs=n_obs_eff,
+            n_treated=int(D_it_fit.sum()),
+            n_control=int(len(D_it_fit) - D_it_fit.sum()),
+            alpha=self.alpha,
+            coefficients=coefficients_full,
+            vcov=vcov,
+            residuals=residuals,
+            r_squared=None,
+            inference_method="analytical",
+            n_bootstrap=None,
+            n_clusters=(
+                int(len(np.unique(cluster_ids_fit))) if cluster_ids_fit is not None else None
+            ),
+            vcov_type=self.vcov_type,
+            cluster_name=self.cluster,
+            conley_lag_cutoff=(self.conley_lag_cutoff if self.vcov_type == "conley" else None),
+            spillover_effects=spillover_df,
+            ring_breakpoints=list(self.rings),
+            d_bar=self._effective_d_bar,
+            n_units_ever_in_ring=n_units_ever_in_ring,
+            n_far_away_obs=int(n_far_away_obs),
+            is_staggered=is_staggered,
+            event_study=self.event_study,
+            stage1_n_obs=stage1_n_obs,
+            anticipation=self.anticipation,
+        )
+        self.results_ = result
+        self.is_fitted_ = True
+        return result

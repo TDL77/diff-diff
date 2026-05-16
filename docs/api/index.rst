@@ -27,6 +27,7 @@ Core estimator classes for DiD analysis:
    diff_diff.HeterogeneousAdoptionDiD
    diff_diff.EfficientDiD
    diff_diff.TwoStageDiD
+   diff_diff.SpilloverDiD
    diff_diff.WooldridgeDiD
    diff_diff.BaconDecomposition
    diff_diff.StaggeredTripleDifference
@@ -64,6 +65,7 @@ Result containers returned by estimators:
    diff_diff.EDiDBootstrapResults
    diff_diff.TwoStageDiDResults
    diff_diff.TwoStageBootstrapResults
+   diff_diff.SpilloverDiDResults
    diff_diff.BaconDecompositionResults
    diff_diff.wooldridge_results.WooldridgeDiDResults
    diff_diff.Comparison2x2
@@ -311,6 +313,7 @@ Estimators
    had
    efficient_did
    two_stage
+   spillover
    wooldridge_etwfe
    bacon
 
