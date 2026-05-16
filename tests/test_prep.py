@@ -1287,6 +1287,50 @@ class TestGenerateDddPanelData:
             time="post",
         )
 
+    def test_recommended_clustered_panel_path(self):
+        """Documented clustered-by-unit path produces n_clusters == n_units inference.
+
+        Locks the docstring's recommended pattern (`cluster="unit"` for panel data)
+        against silent regression: TripleDifference is the repeated-cross-section
+        `panel=FALSE` estimator, so unclustered SE on panel-generated rows
+        understates variance. Clustering by `unit` aggregates per-row IFs within
+        unit before variance computation (Liang-Zeger CR1).
+        """
+        from diff_diff import TripleDifference
+        from diff_diff.prep import generate_ddd_panel_data
+
+        n_units = 200
+        data = generate_ddd_panel_data(
+            n_units=n_units,
+            n_periods=8,
+            treatment_period=4,
+            seed=42,
+        )
+        result = TripleDifference(cluster="unit").fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="post",
+        )
+        assert np.isfinite(result.att)
+        assert np.isfinite(result.se)
+        # Cluster-robust path records the number of clusters used.
+        assert result.n_clusters == n_units
+        # Unclustered fit on the same data MUST produce a different SE (clustering
+        # is materially different when within-unit serial correlation exists).
+        unclustered = TripleDifference().fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="post",
+        )
+        # Point estimate is invariant to clustering.
+        np.testing.assert_allclose(unclustered.att, result.att, atol=1e-10)
+        # SE differs because panel rows are not iid.
+        assert unclustered.se != result.se
+
     def test_reproducibility(self):
         """Same seed produces identical DataFrames."""
         from diff_diff.prep import generate_ddd_panel_data

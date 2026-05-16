@@ -1747,6 +1747,16 @@ finite-sample adjustment.
 Note: IF-based SEs are inherently heteroskedasticity-robust; the `robust` parameter
 has no additional effect.
 
+**Note (panel-shaped input, `generate_ddd_panel_data`):** `TripleDifference` is the
+repeated-cross-section `panel=FALSE` implementation: the individual-level default SE
+treats each row as an independent observation (df = n_obs - 8). When fitting against
+panel-shaped data with repeated unit rows and within-unit serial correlation
+(e.g., `generate_ddd_panel_data` output), unclustered SE understates sampling
+variability and overstates power. Pass `cluster="unit"` to invoke the Liang-Zeger
+CR1 path so the influence functions are aggregated within unit before variance
+computation. The point estimate `att` is invariant to clustering, only the inference
+contract changes.
+
 *Edge cases:*
 - Propensity scores near 0/1: trimmed at `pscore_trim` (default 0.01)
 - Empty cells: raises ValueError with diagnostic message

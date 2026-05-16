@@ -1178,6 +1178,19 @@ def generate_ddd_panel_data(
     making it suitable for panel-aware power-analysis simulations or
     sanity-checking estimators that ignore the panel dimension.
 
+    .. warning::
+
+        ``TripleDifference`` is a repeated-cross-section ``panel=FALSE``
+        estimator: its analytical default treats each row as an
+        independent observation (df = n_obs - 8). When fitting against
+        ``generate_ddd_panel_data`` output, the within-unit serial
+        correlation makes unclustered SEs anti-conservative — they
+        understate sampling variability and overstate power. Always pass
+        ``cluster="unit"`` (Liang-Zeger CR1) when fitting on
+        panel-generated data; the point estimate ``att`` is invariant to
+        clustering but the inference contract is not. See the
+        ``TripleDifference`` REGISTRY entry for the clustering contract.
+
     Parameters
     ----------
     n_units : int, default=200
@@ -1253,10 +1266,12 @@ def generate_ddd_panel_data(
     >>> data.groupby('unit')['period'].count().eq(8).all()
     True
 
-    Fit with TripleDifference (note ``time="post"``):
+    Fit with TripleDifference. Note ``time="post"`` (the derived binary
+    indicator) and ``cluster="unit"`` (required for valid inference on
+    panel-generated data; see the warning above):
 
     >>> from diff_diff import TripleDifference
-    >>> result = TripleDifference().fit(
+    >>> result = TripleDifference(cluster="unit").fit(
     ...     data, outcome='outcome', group='group',
     ...     partition='partition', time='post',
     ... )
