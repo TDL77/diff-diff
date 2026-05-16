@@ -5,7 +5,6 @@ These tests verify the corrected implementation against the paper's
 equations, known analytical cases, and expected mathematical properties.
 """
 
-import os
 
 import numpy as np
 import pytest
@@ -245,34 +244,37 @@ class TestOptimalFLCI:
         assert ci_lb_opt <= lb, "CI lower should be <= identified set lower"
         assert ci_ub_opt >= ub, "CI upper should be >= identified set upper"
 
-    @pytest.mark.skipif(
-        os.environ.get("CI") == "true",
-        reason="wall-clock timing is flaky on shared CI runners; short-circuit "
-        "correctness signal will be replaced with a mock/spy per TODO.md "
-        "(see PR #330 follow-up note)",
-    )
     def test_m0_short_circuit(self):
-        """M=0 should use standard CI without optimization.
+        """M=0 takes the bias=0 fast path and never invokes the LP solver.
 
-        Uses wall-clock elapsed time as a proxy for "short-circuit path
-        taken" — fast path is ``<0.5s``, slow optimization would be ``>>
-        0.5s``. Skipped on CI because neighbor-VM contention on shared
-        runners can push even the short-circuit path past the threshold.
-        Run locally to validate the fast-path invariant; the TODO.md entry
-        added by PR #330 tracks replacing this with a mock/spy so the
-        correctness signal becomes CI-safe.
+        ``_compute_worst_case_bias`` returns ``0.0`` immediately when ``M=0``
+        (diff_diff/honest_did.py:1650), so ``scipy.optimize.linprog`` is
+        never reached. Patching the LP solver and asserting ``call_count
+        == 0`` is a direct correctness signal — CI-safe (no wall-clock
+        dependency) and faster than the prior timing-based proxy.
         """
+        from unittest.mock import patch
+
         beta_pre = np.array([0.3, 0.2, 0.1])
         beta_post = np.array([2.0])
         sigma = np.eye(4) * 0.01
         l_vec = np.array([1.0])
 
-        import time
-        t0 = time.time()
-        _compute_optimal_flci(beta_pre, beta_post, sigma, l_vec, 3, 1, M=0.0)
-        elapsed = time.time() - t0
+        with patch("diff_diff.honest_did.optimize.linprog") as mock_linprog:
+            ci_lb, ci_ub = _compute_optimal_flci(
+                beta_pre, beta_post, sigma, l_vec, 3, 1, M=0.0
+            )
 
-        assert elapsed < 0.5, f"M=0 should be fast, took {elapsed:.2f}s"
+        assert mock_linprog.call_count == 0, (
+            f"M=0 must skip the LP solver (fast path at "
+            f"_compute_worst_case_bias:1650); got "
+            f"{mock_linprog.call_count} linprog call(s)."
+        )
+        # End-to-end correctness: M=0 CI is still well-defined.
+        assert np.isfinite(ci_lb) and np.isfinite(ci_ub), (
+            f"M=0 CI must be finite; got [{ci_lb}, {ci_ub}]"
+        )
+        assert ci_lb <= ci_ub, f"M=0 CI must be ordered; got [{ci_lb}, {ci_ub}]"
 
     def test_smoothness_flci_with_survey_df(self):
         """Survey df should widen the smoothness FLCI (folded t vs folded normal)."""
