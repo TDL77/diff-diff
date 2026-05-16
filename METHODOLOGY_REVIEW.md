@@ -14,30 +14,87 @@ Each estimator in diff-diff should be periodically reviewed to ensure:
 3. **Edge case handling**: Documented edge cases are handled correctly
 4. **Standard errors**: SE formulas match the documented approach
 
+### What "Complete" means in this tracker
+
+A **Complete** entry has a documented review pass against the primary academic source captured in this file. The minimum content is:
+
+- A "Corrections Made" block listing every implementation fix the review uncovered, or `(None — implementation verified correct)`.
+- An explicit statement of deviations from the reference implementation, or `(None)`. Format varies — some entries use a dedicated "Deviations" / "Deviations from R" block, others surface deviations inline in "Corrections Made" or "Outstanding Concerns".
+- Verification evidence: a "Verified Components" checklist, an "Edge Cases Verified" enumeration, an "R Comparison Results" table, or some combination of these.
+
+The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
+
+**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures (e.g., DCDH has a methodology file, R parity, and a companion-paper review for the 2026 universal-rollout extension; HAD has its primary-source paper review and R parity but no dedicated methodology file; ContinuousDiD has the methodology file but no paper review); others have only the REGISTRY entry and unit tests (e.g., BaconDecomposition, PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
+
+**Not Started** entries have neither a tracker walk-through nor an REGISTRY.md section. This tracker no longer carries any Not Started rows; new estimators are expected to enter as In Progress when their REGISTRY entry lands.
+
 ---
 
 ## Review Status Summary
 
-| Estimator | Module | R Reference | Status | Last Review |
-|-----------|--------|-------------|--------|-------------|
+### Core DiD Estimators
+
+| Estimator | Module | R / Stata Reference | Status | Last Review |
+|-----------|--------|---------------------|--------|-------------|
 | DifferenceInDifferences | `estimators.py` | `fixest::feols()` | **Complete** | 2026-01-24 |
 | MultiPeriodDiD | `estimators.py` | `fixest::feols()` | **Complete** | 2026-02-02 |
 | TwoWayFixedEffects | `twfe.py` | `fixest::feols()` | **Complete** | 2026-02-08 |
+
+### Staggered Treatment Estimators
+
+| Estimator | Module | R / Stata Reference | Status | Last Review |
+|-----------|--------|---------------------|--------|-------------|
 | CallawaySantAnna | `staggered.py` | `did::att_gt()` | **Complete** | 2026-01-24 |
 | SunAbraham | `sun_abraham.py` | `fixest::sunab()` | **Complete** | 2026-02-15 |
-| SyntheticDiD | `synthetic_did.py` | `synthdid::synthdid_estimate()` | **Complete** | 2026-02-10 |
-| TripleDifference | `triple_diff.py` | `triplediff::ddd()` | **Complete** | 2026-02-18 |
-| StackedDiD | `stacked_did.py` | `stacked-did-weights` | **Complete** | 2026-02-19 |
-| TROP | `trop.py` | (forthcoming) | Not Started | - |
-| BaconDecomposition | `bacon.py` | `bacondecomp::bacon()` | Not Started | - |
-| HonestDiD | `honest_did.py` | `HonestDiD` package | **Complete** | 2026-03-31 |
-| PreTrendsPower | `pretrends.py` | `pretrends` package | Not Started | - |
-| PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | Not Started | - |
+| StackedDiD | `stacked_did.py` | `stacked-did-weights` (Wing-Freedman-Hollingsworth code) | **Complete** | 2026-02-19 |
+| ImputationDiD | `imputation.py` | `didimputation` | **In Progress** | — |
+| TwoStageDiD | `two_stage.py` | `did2s` | **In Progress** | — |
+| WooldridgeDiD (ETWFE) | `wooldridge.py` | `etwfe` (R) / `jwdid` (Stata) | **In Progress** | — |
+| EfficientDiD | `efficient_did.py` | (no canonical R package) | **In Progress** | — |
 
-**Status legend:**
-- **Not Started**: No formal review conducted
-- **In Progress**: Review underway
-- **Complete**: Review finished, implementation verified
+### Continuous & Universal-Treatment Estimators
+
+| Estimator | Module | R / Stata Reference | Status | Last Review |
+|-----------|--------|---------------------|--------|-------------|
+| ContinuousDiD | `continuous_did.py` | `contdid` v0.1.0 | **In Progress** | — |
+| ChaisemartinDHaultfoeuille (DCDH) | `chaisemartin_dhaultfoeuille.py` | `DIDmultiplegtDYN` | **In Progress** | — |
+| HeterogeneousAdoptionDiD (HAD) | `had.py`, `had_pretests.py` | (paper-direct; `nprobust` for bandwidth) | **In Progress** | — |
+| TROP | `trop.py`, `trop_local.py`, `trop_global.py` | (forthcoming; paper-author reference implementation) | **In Progress** | — |
+
+### Triple-Difference Estimators
+
+| Estimator | Module | R Reference | Status | Last Review |
+|-----------|--------|-------------|--------|-------------|
+| TripleDifference | `triple_diff.py` | `triplediff::ddd()` | **Complete** | 2026-02-18 |
+| StaggeredTripleDifference | `staggered_triple_diff.py` | `triplediff::ddd(panel=TRUE)` + `agg_ddd()` | **In Progress** | — |
+
+### Counterfactual / Synthetic Estimators
+
+| Estimator | Module | R Reference | Status | Last Review |
+|-----------|--------|-------------|--------|-------------|
+| SyntheticDiD | `synthetic_did.py` | `synthdid::synthdid_estimate()` | **Complete** | 2026-04-23 |
+
+### Diagnostics & Sensitivity
+
+| Tool | Module | R Reference | Status | Last Review |
+|------|--------|-------------|--------|-------------|
+| BaconDecomposition | `bacon.py` | `bacondecomp::bacon()` | **In Progress** | — |
+| HonestDiD | `honest_did.py` | `HonestDiD` package | **Complete** | 2026-04-01 |
+| PreTrendsPower | `pretrends.py` | `pretrends` package | **In Progress** | — |
+| PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | **In Progress** | — |
+| PlaceboTests | `diagnostics.py` | (no canonical reference) | **In Progress** | — |
+
+### Cross-Cutting Inference Features
+
+| Feature | Module | Reference | Status | Last Review |
+|---------|--------|-----------|--------|-------------|
+| ConleySpatialHAC | `conley.py`, `linalg.py` | `conleyreg` (R) / `acreg` (Stata) | **In Progress** | — |
+| Survey Data Support | `survey.py`, `bootstrap_utils.py` | `survey` package (R) | **In Progress** | — |
+
+**Status legend** (matches the contract in [§ What "Complete" means in this tracker](#what-complete-means-in-this-tracker) above):
+- **Not Started**: No REGISTRY.md entry yet. Reserved for future surfaces; this tracker currently carries no Not Started rows.
+- **In Progress**: REGISTRY.md entry and unit-test coverage exist, but no formal walk-through has been captured in this document yet. The band is wide — see each entry's "Documentation in place" / "Outstanding for promotion" sub-sections for specifics.
+- **Complete**: A documented review pass against the primary academic source is captured here (minimum: Corrections Made, Deviations or `(None)`, and Verified Components / Edge Cases Verified / R Comparison Results in some form).
 
 ---
 
@@ -68,8 +125,8 @@ Each estimator in diff-diff should be periodically reviewed to ensure:
 - [x] All REGISTRY.md edge cases tested
 
 **Test Coverage:**
-- 53 methodology verification tests in `tests/test_methodology_did.py`
-- 123 existing tests in `tests/test_estimators.py`
+- 51 methodology verification tests in `tests/test_methodology_did.py`
+- Existing unit-test coverage in `tests/test_estimators.py` (`TestDifferenceInDifferences` class plus shared estimator-API classes)
 - R benchmark tests (skip if R not available)
 
 **R Comparison Results:**
@@ -79,7 +136,7 @@ Each estimator in diff-diff should be periodically reviewed to ensure:
 - Fixed effects results match within 1%
 
 **Corrections Made:**
-- (None - implementation verified correct)
+- (None — implementation verified correct)
 
 **Outstanding Concerns:**
 - R comparison precision limited by JSON output truncation (4 decimal places)
@@ -92,6 +149,9 @@ Each estimator in diff-diff should be periodically reviewed to ensure:
 4. Non-binary treatment/time: Raises ValueError as expected
 5. No variation in treatment/time: Raises ValueError as expected
 6. Missing values: Raises ValueError as expected
+
+**Deviations from R's `fixest::feols()`:** (None — point estimates and SEs match within
+documented tolerances; cluster-robust and absorbed-FE behavior verified.)
 
 ---
 
@@ -135,15 +195,19 @@ Each estimator in diff-diff should be periodically reviewed to ensure:
   fixed to use interaction sub-VCV instead of full regression VCV.
 
 **Outstanding Concerns:**
-- ~~No R comparison benchmarks yet~~ — **Resolved**: R comparison benchmark added via
-  `benchmarks/R/benchmark_multiperiod.R` using `fixest::feols(outcome ~ treated * time_f | unit)`.
-  Results match R exactly: ATT diff < 1e-11, SE diff 0.0%, period effects correlation 1.0.
-  Validated at small (200 units) and 1k scales.
-- Default SE is HC1 (not cluster-robust at unit level as fixest uses). Cluster-robust
-  available via `cluster` parameter but not the default.
+- R comparison benchmark via `benchmarks/R/benchmark_multiperiod.R` using
+  `fixest::feols(outcome ~ treated * time_f | unit)`. ATT diff < 1e-11, SE diff 0.0%,
+  period-effects correlation 1.0. Validated at small (200 units) and 1k scales.
 - Endpoint binning for distant event times not yet implemented.
 - FutureWarning for reference_period default change should eventually be removed once
   the transition is complete.
+
+**Deviations from R's `fixest::feols()`:**
+1. **Default SE is HC1**, not cluster-robust at unit level (the `fixest` default for panel
+   data). Cluster-robust available via `cluster` parameter but not the default.
+2. **Reference period default is last pre-period** (e=-1 convention, matches `fixest`/`did`);
+   prior Python releases used first pre-period and the change is gated by a `FutureWarning`
+   until the deprecation window closes.
 
 ---
 
@@ -218,9 +282,13 @@ variables appear to the left of the `|` separator.
   treatment at `time=1`, making staggering undetectable. Users with staggered designs should
   use `decompose()` or `CallawaySantAnna` directly for proper diagnostics.
 
+**Deviations from R's `fixest::feols()`:** (None — point estimates, cluster-robust SEs,
+CI bounds, and absorbed-FE results all match within documented tolerances on both bare
+and covariate-adjusted specifications.)
+
 ---
 
-### Modern Staggered Estimators
+### Staggered Treatment Estimators
 
 #### CallawaySantAnna
 
@@ -246,8 +314,8 @@ variables appear to the left of the `|` separator.
 - [x] All documented edge cases from REGISTRY.md
 
 **Test Coverage:**
-- 46 methodology verification tests in `tests/test_methodology_callaway.py`
-- 93 existing tests in `tests/test_staggered.py`
+- 61 methodology verification tests in `tests/test_methodology_callaway.py`
+- Existing unit-test coverage in `tests/test_staggered.py`
 - R benchmark tests (skip if R not available)
 
 **R Comparison Results:**
@@ -256,7 +324,7 @@ variables appear to the left of the `|` separator.
 - Pre-treatment effects may differ due to base_period handling differences
 
 **Corrections Made:**
-- (None - implementation verified correct)
+- (None — implementation verified correct)
 
 **Outstanding Concerns:**
 - R comparison shows ~20% difference in overall ATT with generated data
@@ -316,7 +384,7 @@ variables appear to the left of the `|` separator.
 - [x] All REGISTRY.md edge cases tested
 
 **Test Coverage:**
-- 43 tests in `tests/test_sun_abraham.py` (36 existing + 7 methodology verification)
+- Combined methodology + unit tests in `tests/test_sun_abraham.py` (the methodology verification block grew incrementally from the original 7 review tests as edge cases were added)
 - R benchmark tests via `benchmarks/run_benchmarks.py --estimator sunab`
 
 **R Comparison Results:**
@@ -408,21 +476,11 @@ variables appear to the left of the `|` separator.
 - [x] R comparison: ATT matches within machine precision (diff < 2.1e-11)
 - [x] R comparison: SE matches within machine precision (diff < 4.0e-10)
 - [x] R comparison: Event study effects correlation = 1.000000, max diff < 4.5e-11
-- [x] safe_inference() used for all inference fields
+- [x] `safe_inference()` used for all inference fields
 - [x] All REGISTRY.md edge cases tested
 
 **Test Coverage:**
-- 72 tests in `tests/test_stacked_did.py` across 11 test classes:
-  - `TestStackedDiDBasic` (8): fit, event study, group/all raises, simple aggregation, known constant effect, dynamic effects
-  - `TestTrimming` (5): IC1 window, IC2 no-controls, trimmed groups reported, all-trimmed raises, wider window
-  - `TestQWeights` (4): treated=1, aggregate formula, sample_share formula, positivity
-  - `TestCleanControl` (5): not_yet_treated, strict, never_treated, missing never-treated raises
-  - `TestClustering` (2): unit, unit_subexp
-  - `TestStackedData` (4): accessible, required columns, event time range
-  - `TestEdgeCases` (8): single cohort, anticipation, unbalanced panel, NaN inference, never-treated encodings
-  - `TestSklearnInterface` (4): get_params, set_params, unknown raises, convenience function
-  - `TestResultsMethods` (7): summary, to_dataframe, is_significant, significance_stars, repr
-  - `TestValidation` (8): missing columns, invalid params, population required, no treated units
+- `tests/test_stacked_did.py`: 10 test classes (basic, trimming, Q-weights, clean-control, clustering, stacked-data shape, edge cases, sklearn interface, results methods, validation)
 - R benchmark tests via `benchmarks/run_benchmarks.py --estimator stacked`
 
 **R Comparison Results (200 units, 8 periods, kappa_pre=2, kappa_post=2):**
@@ -476,7 +534,290 @@ variables appear to the left of the `|` separator.
 
 ---
 
-### Advanced Estimators
+#### ImputationDiD
+
+| Field | Value |
+|-------|-------|
+| Module | `imputation.py`, `imputation_bootstrap.py` |
+| Primary Reference | Borusyak, Jaravel & Spiess (2024), *Revisiting Event-Study Designs: Robust and Efficient Estimation*, REStud 91(6) |
+| R Reference | `didimputation` |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## ImputationDiD` (paper-direct equations, edge cases, three-step algorithm)
+- Implementation: 87 unit tests in `tests/test_imputation.py` (basic fit, event study, group aggregation, conservative variance, auxiliary partition, unidentified-estimand handling, balanced/unbalanced panels)
+- Bootstrap path: `imputation_bootstrap.py` with multiplier-weight resampling
+- Survey support: pweight + strata/PSU/FPC via TSL (Phase 6) with PSU-bootstrap path
+
+**Outstanding for promotion:**
+- Dedicated `tests/test_methodology_imputation.py` with paper-equation-numbered Verified Components walk-through
+- R parity benchmark against `didimputation` (none on file)
+- Formal enumeration of deviations from `didimputation` (NaN inference, refused-to-estimate behavior for unidentified estimands per Proposition 5)
+- "Corrections Made" listing for any implementation fixes uncovered during the walk-through
+
+---
+
+#### TwoStageDiD
+
+| Field | Value |
+|-------|-------|
+| Module | `two_stage.py`, `two_stage_bootstrap.py` |
+| Primary Reference | Gardner (2022), *Two-stage differences in differences*, arXiv:2207.05943 |
+| R Reference | `did2s` |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## TwoStageDiD` (Stage 1 unit+time FE on untreated, Stage 2 OLS on residualized outcomes, GMM sandwich variance per Newey-McFadden Theorem 6.1)
+- Implementation: 76 unit tests in `tests/test_two_stage.py` (matches ImputationDiD point estimates, R `did2s` global `(D'D)^{-1}` variance, always-treated unit exclusion, multiplier bootstrap)
+- Documented R alignment: uses global `(D'D)^{-1}` matching `did2s` (not paper Eq. 6)
+
+**Outstanding for promotion:**
+- Dedicated `tests/test_methodology_two_stage.py` with paper-equation-numbered Verified Components walk-through
+- R parity benchmark fixture against `did2s` (none on file)
+- Documented deviation: Newey-McFadden Theorem 6.1 sandwich vs paper's Eq. 6 (already noted in REGISTRY but not formalized in this tracker)
+- "Corrections Made" listing
+
+---
+
+#### WooldridgeDiD (ETWFE)
+
+| Field | Value |
+|-------|-------|
+| Module | `wooldridge.py`, `wooldridge_results.py` |
+| Primary Reference | Wooldridge (2025), *Two-way fixed effects, the two-way Mundlak regression, and difference-in-differences estimators*, Empirical Economics 69(5), 2545–2587 |
+| R Reference | `etwfe` (McDermott 2023); Stata `jwdid` (Rios-Avila 2021) |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## WooldridgeDiD (ETWFE)` (saturated cohort×time interactions, OLS/logit/Poisson via IRLS, ASF-based ATT for nonlinear methods with delta-method SEs, four aggregations, survey support)
+- **Companion-paper review on file**: `docs/methodology/papers/wooldridge-2023-review.md` covers Wooldridge (2023) *Simple approaches to nonlinear difference-in-differences with panel data*, Econometrics Journal 26(3) — the nonlinear extension that the logit/Poisson paths implement (retrospective, merged PR #443 on 2026-05-13). A dedicated review for the primary ETWFE source (Wooldridge 2025, *Empirical Economics* 69(5)) is **not** yet on file.
+- Implementation: `tests/test_wooldridge.py` (covers OLS, logit, and Poisson paths plus the four aggregation types)
+
+**Outstanding for promotion:**
+- Dedicated paper review for the primary ETWFE source: write `docs/methodology/papers/wooldridge-2025-review.md` covering Wooldridge (2025) *Empirical Economics* 69(5), 2545–2587 (published version of the 2021 SSRN working paper / NBER WP 29154)
+- Dedicated `tests/test_methodology_wooldridge.py` with paper-equation-numbered Verified Components walk-through
+- R parity fixture against `etwfe` (and ideally Stata `jwdid`) covering OLS, logit, and Poisson paths
+- Verified Components for nonlinear-method ASF / delta-method SE invariants
+- "Corrections Made" listing
+
+---
+
+#### EfficientDiD
+
+| Field | Value |
+|-------|-------|
+| Module | `efficient_did.py`, `efficient_did_bootstrap.py`, `efficient_did_covariates.py`, `efficient_did_weights.py` |
+| Primary Reference | Chen, Sant'Anna & Xie (2025), *Efficient Difference-in-Differences and Event Study Estimators* |
+| R Reference | (no canonical R package; paper compares against `did` / `DIDmultiplegt` / BJS / Gardner / Wooldridge as benchmarks rather than providing a reference implementation) |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## EfficientDiD` (full Theorem 4.1 EIF, sieve-based propensity-ratio estimation with AIC/BIC, kernel-smoothed conditional covariance, Hausman pretest for PT-All vs PT-Post, survey support)
+- Implementation: 130 unit tests in `tests/test_efficient_did.py` + 12 validation tests in `tests/test_efficient_did_validation.py`
+- Hausman pretest: implemented per Theorem A.1 with Moore-Penrose pseudoinverse for finite-sample non-PSD variance-difference matrix
+- Survey support: pweight + strata/PSU/FPC via TSL on EIF scores; covariates DR path with WLS outcome regression and weighted sieve normal equations
+
+**Outstanding for promotion:**
+- **No paper review on file** under `docs/methodology/papers/` — write one
+- Dedicated `tests/test_methodology_efficient_did.py` with Theorem 3.2 / Equation 3.5 / Equation 4.3 numbered Verified Components walk-through
+- Cross-language anchor: the paper's empirical replication uses HRS data following Sun-Abraham (2021); a same-data benchmark against the paper's reported numbers (or a same-DGP MC against R alternatives) would substantiate the EIF construction
+- Documented deviations: linear OLS working models for outcome regressions vs. paper's general nonparametric specification (DR safety net acknowledged but not separately validated); fixed-weight bootstrap aggregation vs. WIF-corrected analytical aggregation
+
+---
+
+### Continuous & Universal-Treatment Estimators
+
+#### ContinuousDiD
+
+| Field | Value |
+|-------|-------|
+| Module | `continuous_did.py`, `continuous_did_bspline.py`, `continuous_did_results.py` |
+| Primary Reference | Callaway, Goodman-Bacon & Sant'Anna (2024), *Difference-in-Differences with a Continuous Treatment*, NBER WP 32117 |
+| R Reference | `contdid` v0.1.0 (CRAN) |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## ContinuousDiD` plus dedicated theory note in `docs/methodology/continuous-did.md` (PT vs SPT identification, ATT(d|d) / ATT(d) / ACRT(d) / ATT^{loc} / ATT^{glob} / ACRT^{glob} estimands, B-spline OLS, multiplier bootstrap)
+- `tests/test_methodology_continuous_did.py`: 15 tests across 5 classes (linear dose response, quadratic with cubic basis, multi-period aggregation, edge cases, R benchmark)
+- Implementation: 80 unit tests in `tests/test_continuous_did.py`
+- Survey support: weighted B-spline OLS, TSL on influence functions, bootstrap+survey (Phase 6)
+
+**Outstanding for promotion:**
+- Detailed Verified Components block here mirroring REGISTRY's Implementation Checklist (B-spline basis matching `splines2::bSpline`, multi-period cell iteration, dose-response and event-study aggregation, multiplier bootstrap, analytical SE via influence functions)
+- Document the boundary-knots deviation from R `contdid` v0.1.0 (Python uses `range(dose)`; R uses `range(dvals)` which can produce extrapolation artifacts) in a formal Deviations block here
+- Formalize the `+inf` recoding and zero-dose silent-zeroing warnings (currently in REGISTRY) into a Verified Components row
+
+---
+
+#### ChaisemartinDHaultfoeuille (DCDH)
+
+| Field | Value |
+|-------|-------|
+| Module | `chaisemartin_dhaultfoeuille.py`, `chaisemartin_dhaultfoeuille_bootstrap.py`, `chaisemartin_dhaultfoeuille_results.py` |
+| Primary References | (a) de Chaisemartin & D'Haultfœuille (2020), *Two-Way Fixed Effects Estimators with Heterogeneous Treatment Effects*, AER 110(9), 2964-2996. (b) de Chaisemartin & D'Haultfœuille (2022, revised 2024), *Difference-in-Differences Estimators of Intertemporal Treatment Effects*, NBER WP 29873 — Web Appendix Section 3.7.3 for cohort-recentered plug-in variance. (c) de Chaisemartin, Ciccia, D'Haultfœuille & Knau (2026) for the universal-rollout case. |
+| R Reference | `DIDmultiplegtDYN` |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## ChaisemartinDHaultfoeuille` (DID_M, DID_+, DID_-, single-lag placebo, TWFE-weights diagnostic, multiplier bootstrap, DID^X / DID^{fd} / state-set-specific trends / heterogeneity testing / Design-2 / by_path / HonestDiD integration, survey design + replicate weights + HM wild bootstrap)
+- **Companion-paper review on file**: `docs/methodology/papers/dechaisemartin-2026-review.md` covers the 2026 universal-rollout extension (Knau et al.), which is the primary source for HAD rather than for DCDH. The 2020 AER and 2022/2024 NBER WP 29873 papers that define DCDH's core DID_M / DID_+ / DID_- and dynamic estimators do **not** yet have dedicated review files on disk.
+- `tests/test_methodology_chaisemartin_dhaultfoeuille.py`: 12 tests across 4 classes (worked example, cohort recentering, TWFE diagnostic, large-N recovery)
+- `tests/test_chaisemartin_dhaultfoeuille_parity.py`: 24 R parity tests against `DIDmultiplegtDYN`
+- Implementation: 347 unit tests in `tests/test_chaisemartin_dhaultfoeuille.py`
+- Survey-specific: `tests/test_survey_dcdh.py`, `tests/test_survey_dcdh_replicate_psu.py`, plus three dCDH cell-period coverage suites
+
+**Outstanding for promotion:**
+- **Primary-source paper reviews**: write `docs/methodology/papers/dechaisemartin-dhaultfoeuille-2020-review.md` covering the 2020 AER and a companion review covering 2022/2024 NBER WP 29873 (intertemporal treatment effects). The existing 2026 review covers the universal-rollout extension only.
+- Formal Verified Components block here matching REGISTRY's exhaustive Implementation Checklist
+- Consolidated Deviations summary (currently scattered across REGISTRY Notes): equal-cell weighting vs R cell-size weighting, terminal-missingness retention, A11 zero-retention convention, `<50%` switcher warning at far horizons
+- Documented R parity tolerance bands at `l=1` (existing parity fixture in `test_chaisemartin_dhaultfoeuille_parity.py`)
+- "Corrections Made" listing for the Round 2 full-IF fix (never-switching groups now participate in variance via stable-control roles)
+
+---
+
+#### HeterogeneousAdoptionDiD (HAD)
+
+| Field | Value |
+|-------|-------|
+| Module | `had.py`, `had_pretests.py` |
+| Primary Reference | de Chaisemartin, Ciccia, D'Haultfœuille & Knau (2026), *Difference-in-Differences Estimators When No Unit Remains Untreated*, arXiv:2405.04465v6 |
+| R Reference | None (paper-direct implementation); `nprobust` (Calonico-Cattaneo-Farrell) used for bandwidth selection only |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## HeterogeneousAdoptionDiD` (~330 lines covering Phases 1a-5: Epanechnikov/triangular/uniform kernels, HC2+Bell-McCaffrey, CR2 Imbens-Kolesar Satterthwaite DOF, Calonico-Cattaneo-Farrell MSE-DPI bandwidth, bias-corrected local-linear, three design paths — continuous_at_zero / continuous_near_d_lower / mass_point — multi-period event-study via Appendix B.2, three pretest helpers `qug_test` / `stute_test` / `yatchew_hr_test`, composite `did_had_pretest_workflow`, survey support including PSU-level Mammen wild bootstrap for Stute family)
+- **Paper review on file**: shares `dechaisemartin-2026-review.md` with DCDH (universal-rollout coverage)
+- Implementation: comprehensive coverage in `tests/test_had.py` (HAD estimator) and `tests/test_had_pretests.py` (`qug_test` / `stute_test` / `yatchew_hr_test` and the composite workflow); Monte-Carlo coverage in `tests/test_had_mc.py`; dual-knob deprecation in `tests/test_had_dual_knob_deprecation.py`
+- Bandwidth port: `tests/test_bandwidth_selector.py` (public-API wrapper, HAD configuration) and `tests/test_nprobust_port.py` (full `lprobust` / `lpbwselect_mse_dpi` port surface); bias-corrected `lprobust` parity in `tests/test_bias_corrected_lprobust.py`
+- R parity: 5 R-direct parity tests in `tests/test_did_had_parity.py`; `nprobust` golden fixtures in `benchmarks/data/nprobust_*_golden.json` validated at `0.0000%` relative error
+- Two dedicated tutorials: T21 (`docs/tutorials/21_had_pretest_workflow.ipynb`) and T22 (`docs/tutorials/22_had_survey_design.ipynb`) with companion `tests/test_t21_had_pretest_workflow_drift.py` and `tests/test_t22_had_survey_design_drift.py` drift-test files
+
+**Outstanding for promotion:**
+- Dedicated `tests/test_methodology_had.py` (versus the existing implementation-detail-heavy `test_had.py`) with paper-equation-numbered Verified Components walk-through (Equations 3, 7, 11, 18, 29 for Theorems 1, 3, 4, 7)
+- Documented deviations: equal-vs-cell-size weighting conventions; HAD sup-t bootstrap behavior when not gated by `cband=True` and `aggregate="event_study"`
+- Resolution / waiver for the four unchecked Phase-4 items (Pierce-Schott 2016 Figure 2 replication, Table 1 coverage-rate reproduction, Assumption 5/6 non-testability documentation, staggered-timing warning that redirects to DCDH)
+
+---
+
+#### TROP
+
+| Field | Value |
+|-------|-------|
+| Module | `trop.py`, `trop_local.py`, `trop_global.py`, `trop_results.py` |
+| Primary Reference | Athey, Imbens, Qu & Viviano (2025), *Triply Robust Panel Estimators*, arXiv:2508.21536 |
+| R Reference | Paper-author reference implementation (not yet released as CRAN package) |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## TROP` (local: factor matrix via soft-threshold SVD, exponential-decay unit weights matching paper Eq. 2, LOOCV per Eq. 5, multiple rank-selection methods cv/ic/elbow; global: alternating minimization for nuclear-norm penalty with hard-coded inner-FISTA 20-iteration loop, ATT averaging over D==1 cells, Rust-accelerated LOOCV and bootstrap)
+- **Paper review on file**: `docs/methodology/papers/athey-2025-review.md` (retrospective, merged PR #443 on 2026-05-13)
+- Implementation: 120 unit tests in `tests/test_trop.py`
+- Survey support: Rao-Wu rescaled bootstrap with cross-classified pseudo-strata; Rust backend remains pweight-only
+
+**Outstanding for promotion:**
+- Dedicated `tests/test_methodology_trop.py` with paper-equation-numbered Verified Components walk-through
+- Cross-validation against the paper-author reference implementation (when it becomes available) or against the paper's reported numbers on the empirical applications
+- Documented deviations: bootstrap proportional-failure warnings (5% threshold), alternating-minimization convergence warnings, Rust backend's pweight-only limitation vs. Python's full survey-design support
+
+---
+
+### Triple-Difference Estimators
+
+#### TripleDifference
+
+| Field | Value |
+|-------|-------|
+| Module | `triple_diff.py` |
+| Primary Reference | Ortiz-Villavicencio & Sant'Anna (2025), *Better Understanding Triple Differences Estimators*, arXiv:2505.09942 |
+| R Reference | `triplediff::ddd()` (v0.2.1, CRAN) |
+| Status | **Complete** |
+| Last Review | 2026-02-18 |
+
+**Verified Components:**
+- [x] ATT matches R `triplediff::ddd()` for all 3 methods (DR, RA, IPW) — <0.001% relative difference
+- [x] SE matches R `triplediff::ddd()` for all 3 methods — <0.001% relative difference
+- [x] With-covariates ATT matches R — <0.001% relative difference
+- [x] With-covariates SE matches R — <0.001% relative difference
+- [x] Verified across all 4 DGP types from `gen_dgp_2periods()` (different model misspecification scenarios)
+- [x] Influence function-based SE: `SE = std(w3*IF_3 + w2*IF_2 - w1*IF_1, ddof=1) / sqrt(n)`
+- [x] Three-DiD decomposition: `DDD = DiD_3 + DiD_2 - DiD_1` matching R's approach
+- [x] `safe_inference()` used for all inference fields (t_stat, p_value, conf_int)
+
+**Test Coverage:**
+- 45 methodology tests in `tests/test_methodology_triple_diff.py`
+
+**Corrections Made:**
+1. **Complete rewrite of estimation methods** (was naive cell-mean approach, now three-DiD
+   decomposition). The original implementation computed DDD directly from 8 cell means with
+   a naive cell-variance SE. Replaced with R's decomposition into three pairwise DiD
+   comparisons (subgroup j vs reference subgroup 4), each using DR/IPW/RA methodology
+   from Callaway & Sant'Anna. This fixed:
+   - DR SE: was off by >100% (naive cell variance vs influence function)
+   - IPW SE: was off by >200% (incorrect cell-probability-ratio weights)
+   - With-covariates ATT: was off by >1000% for all methods (incorrect cell-by-cell regression)
+2. **Influence function SE** replaces naive cell variance for all methods:
+   `SE = std(w3*IF_3 + w2*IF_2 - w1*IF_1, ddof=1) / sqrt(n)` where
+   `w_j = n / n_j` and `IF_j` is the per-observation influence function for pairwise DiD j.
+3. **Propensity score estimation** now runs per-pairwise-comparison (P(subgroup=4|X) within
+   {j, 4} subset) instead of global P(G=1|X).
+4. **Outcome regression** now fits separate OLS per subgroup-time cell within each pairwise
+   comparison, matching R's `compute_outcome_regression_rc()`.
+
+**Outstanding Concerns:**
+- Panel mode (`panel=TRUE`) with differenced outcomes not yet implemented (see Deviations).
+
+**Deviations from R's `triplediff::ddd()`:**
+1. **Repeated cross-section mode only**: Implementation uses `panel=FALSE`. Panel mode with
+   differenced outcomes is not yet implemented; users with balanced panel data and
+   time-invariant covariates should compute first differences manually before fitting.
+
+**R Comparison Results (panel=FALSE, n=500 per DGP):**
+| DGP | Method | Covariates | ATT Diff | SE Diff |
+|-----|--------|-----------|----------|---------|
+| 1 | DR | No | <0.001% | <0.001% |
+| 1 | DR | Yes | <0.001% | <0.001% |
+| 1 | REG | No | <0.001% | <0.001% |
+| 1 | REG | Yes | <0.001% | <0.001% |
+| 1 | IPW | No | <0.001% | <0.001% |
+| 1 | IPW | Yes | <0.001% | <0.001% |
+| 2-4 | All | Both | <0.001% | <0.001% |
+
+---
+
+#### StaggeredTripleDifference
+
+| Field | Value |
+|-------|-------|
+| Module | `staggered_triple_diff.py`, `staggered_triple_diff_results.py` |
+| Primary Reference | Ortiz-Villavicencio & Sant'Anna (2025) — same paper as TripleDifference, staggered case |
+| R Reference | `triplediff::ddd(panel=TRUE)` + `agg_ddd()` (per `benchmarks/R/benchmark_staggered_triplediff.R`) |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## StaggeredTripleDifference` (per-cohort comparisons against three sub-groups, DR/RA/IPW per component, GMM-optimal closed-form inverse-variance weighting, event-study via CS mixin, IF-based SEs, multiplier bootstrap for simultaneous bands, survey support)
+- `tests/test_methodology_staggered_triple_diff.py`: 6 tests across 3 classes (never-treated comparison, not-yet-treated comparison, aggregation)
+- Dedicated unit-test suite: `tests/test_staggered_triple_diff.py` (~680 lines, full coverage of DR/RA/IPW paths, both control-group modes, GMM weighting, event-study aggregation, edge cases)
+- Survey-specific: `tests/test_survey_staggered_ddd.py`
+
+**Outstanding for promotion:**
+- Paper review under `docs/methodology/papers/` covering Ortiz-Villavicencio & Sant'Anna (2025) for the staggered case (the primary paper is shared with TripleDifference, but no dedicated review file exists on disk yet)
+- R parity validation against `triplediff::ddd(panel=TRUE)` + `agg_ddd()` (per `benchmarks/R/benchmark_staggered_triplediff.R`) — CSV fixtures not committed (gitignored); tests skip without local R + `triplediff` (tracked in TODO.md row, PR #245)
+- Per-cohort group-effect SE convention: implementation includes WIF (conservative vs R's `wif=NULL`); documented in REGISTRY, deferred decision on whether to add an opt-in WIF-disable path (tracked in TODO.md row, PR #245)
+- Formal Verified Components walk-through here
+- Cluster-robust analytical SEs accepted but not wired (deferred per REGISTRY)
+
+---
+
+### Counterfactual / Synthetic Estimators
 
 #### SyntheticDiD
 
@@ -486,7 +827,20 @@ variables appear to the left of the `|` separator.
 | Primary Reference | Arkhangelsky et al. (2021) |
 | R Reference | `synthdid::synthdid_estimate()` |
 | Status | **Complete** |
-| Last Review | 2026-02-10 |
+| Last Review | 2026-04-23 |
+
+**Verified Components:**
+- [x] Frank-Wolfe on the collapsed (N_co × T_pre) problem (Algorithm 1 of Arkhangelsky et al. 2021), matching R's `synthdid::fw.step()`
+- [x] Unit weights: Frank-Wolfe with two-pass sparsification, matching R's `synthdid::sc.weight.fw()` and `sparsify_function()`
+- [x] Time weights: Frank-Wolfe on collapsed form, matching R's `fw.step()`
+- [x] Auto-computed `zeta_omega` / `zeta_lambda` from data noise level `N_tr × σ²` (Appendix D), matching R's default behavior
+- [x] Pairs-bootstrap refit per Algorithm 2 step 2, warm-started from fit-time ω/λ via the new `init_weights=` kwargs on `compute_sdid_unit_weights` / `compute_time_weights`, matching R's `bootstrap_sample` which rebinds `attr(estimate, "opts")` per `update.omega=TRUE` / `update.lambda=TRUE`
+- [x] Placebo variance (library default) and jackknife variance methods
+- [x] Same-library validation: placebo-SE tracking vs. bootstrap-SE, AER §6.3 Monte Carlo truth
+- [x] All REGISTRY.md SyntheticDiD edge cases tested
+
+**Test Coverage:**
+- 157 methodology tests in `tests/test_methodology_sdid.py`
 
 **Corrections Made:**
 1. **Time weights: Frank-Wolfe on collapsed form** (was heuristic inverse-distance).
@@ -528,79 +882,21 @@ variables appear to the left of the `|` separator.
    be removed in a future release.
 
 **Outstanding Concerns:**
-- (None)
+- Cross-language parity anchor against R's default `synthdid::vcov(method="bootstrap")`
+  or Julia `Synthdid.jl::src/vcov.jl::bootstrap_se` is desirable to bolster the
+  methodology contract. Same-library validation (placebo-SE tracking, AER §6.3 MC truth)
+  is in place; cross-language anchor tracked in TODO.md. The R-parity fixture from the
+  previous release was deleted because it pinned the now-removed fixed-weight path.
 
----
-
-#### TripleDifference
-
-| Field | Value |
-|-------|-------|
-| Module | `triple_diff.py` |
-| Primary Reference | Ortiz-Villavicencio & Sant'Anna (2025) |
-| R Reference | `triplediff::ddd()` (v0.2.1, CRAN) |
-| Status | **Complete** |
-| Last Review | 2026-02-18 |
-
-**Verified Components:**
-- [x] ATT matches R `triplediff::ddd()` for all 3 methods (DR, RA, IPW) — <0.001% relative difference
-- [x] SE matches R `triplediff::ddd()` for all 3 methods — <0.001% relative difference
-- [x] With-covariates ATT matches R — <0.001% relative difference
-- [x] With-covariates SE matches R — <0.001% relative difference
-- [x] Verified across all 4 DGP types from `gen_dgp_2periods()` (different model misspecification scenarios)
-- [x] Influence function-based SE: `SE = std(w3*IF_3 + w2*IF_2 - w1*IF_1, ddof=1) / sqrt(n)`
-- [x] Three-DiD decomposition: `DDD = DiD_3 + DiD_2 - DiD_1` matching R's approach
-- [x] safe_inference() used for all inference fields (t_stat, p_value, conf_int)
-
-**Corrections Made:**
-1. **Complete rewrite of estimation methods** (was naive cell-mean approach, now three-DiD
-   decomposition). The original implementation computed DDD directly from 8 cell means with
-   a naive cell-variance SE. Replaced with R's decomposition into three pairwise DiD
-   comparisons (subgroup j vs reference subgroup 4), each using DR/IPW/RA methodology
-   from Callaway & Sant'Anna. This fixed:
-   - DR SE: was off by >100% (naive cell variance vs influence function)
-   - IPW SE: was off by >200% (incorrect cell-probability-ratio weights)
-   - With-covariates ATT: was off by >1000% for all methods (incorrect cell-by-cell regression)
-2. **Influence function SE** replaces naive cell variance for all methods:
-   `SE = std(w3*IF_3 + w2*IF_2 - w1*IF_1, ddof=1) / sqrt(n)` where
-   `w_j = n / n_j` and `IF_j` is the per-observation influence function for pairwise DiD j.
-3. **Propensity score estimation** now runs per-pairwise-comparison (P(subgroup=4|X) within
-   {j, 4} subset) instead of global P(G=1|X).
-4. **Outcome regression** now fits separate OLS per subgroup-time cell within each pairwise
-   comparison, matching R's `compute_outcome_regression_rc()`.
-
-**Outstanding Concerns:**
-- Implementation uses `panel=FALSE` (repeated cross-section) mode. Panel mode (`panel=TRUE`)
-  with differenced outcomes not yet implemented.
-
-**R Comparison Results (panel=FALSE, n=500 per DGP):**
-| DGP | Method | Covariates | ATT Diff | SE Diff |
-|-----|--------|-----------|----------|---------|
-| 1 | DR | No | <0.001% | <0.001% |
-| 1 | DR | Yes | <0.001% | <0.001% |
-| 1 | REG | No | <0.001% | <0.001% |
-| 1 | REG | Yes | <0.001% | <0.001% |
-| 1 | IPW | No | <0.001% | <0.001% |
-| 1 | IPW | Yes | <0.001% | <0.001% |
-| 2-4 | All | Both | <0.001% | <0.001% |
-
----
-
-#### TROP
-
-| Field | Value |
-|-------|-------|
-| Module | `trop.py` |
-| Primary Reference | Athey, Imbens, Qu & Viviano (2025) |
-| R Reference | (forthcoming) |
-| Status | Not Started |
-| Last Review | - |
-
-**Corrections Made:**
-- (None yet)
-
-**Outstanding Concerns:**
-- (None yet)
+**Deviations from R's synthdid::synthdid_estimate():**
+1. **Default `variance_method` is `"placebo"`** (R defaults to `"bootstrap"`). Rationale:
+   (a) placebo is unconditionally available on pweight-only survey designs, whereas refit
+   bootstrap rejects every survey design in this release; (b) placebo sidesteps the
+   ~5–30× slowdown of per-draw Frank-Wolfe re-estimation in refit bootstrap. Documented
+   in REGISTRY.md §SyntheticDiD `Note (default variance_method deviation from R)`.
+2. **Parameter names**: `zeta_omega` / `zeta_lambda` (matching the paper's notation);
+   R uses `eta.omega` / `eta.lambda`. The deprecated Python aliases `lambda_reg` / `zeta`
+   from prior releases emit `DeprecationWarning` and will be removed in a future release.
 
 ---
 
@@ -611,16 +907,20 @@ variables appear to the left of the `|` separator.
 | Field | Value |
 |-------|-------|
 | Module | `bacon.py` |
-| Primary Reference | Goodman-Bacon (2021) |
+| Primary Reference | Goodman-Bacon (2021), *Difference-in-differences with variation in treatment timing*, J. Econometrics 225(2), 254-277 |
 | R Reference | `bacondecomp::bacon()` |
-| Status | Not Started |
-| Last Review | - |
+| Status | **In Progress** |
+| Last Review | — |
 
-**Corrections Made:**
-- (None yet)
+**Documentation in place:**
+- REGISTRY.md section: `## BaconDecomposition` (three comparison types — treated_vs_never, earlier_vs_later, later_vs_earlier; weight construction; TWFE reconstitution; weighted survey path under Phase 3)
+- Implementation: `tests/test_bacon.py` (basic decomposition, weight properties, integration with `TwoWayFixedEffects.decompose()`)
 
-**Outstanding Concerns:**
-- (None yet)
+**Outstanding for promotion:**
+- **Substantive review pass — first target chosen during the 2026-05-15 methodology-review refresh session.** Read Goodman-Bacon (2021), audit `bacon.py` against the paper's decomposition (Equation 11, weight construction in Section 3, three comparison types in Section 4), generate R parity fixtures via `bacondecomp::bacon()`, write `tests/test_methodology_bacon.py` with paper-equation-numbered assertions, populate Verified Components / Corrections Made / Deviations here.
+- Paper review under `docs/methodology/papers/goodman-bacon-2021-review.md`
+- R parity fixture against `bacondecomp::bacon()` covering treated_vs_never, earlier_vs_later, later_vs_earlier weight buckets and their relative shares
+- Verify the REGISTRY Implementation Checklist (all rows currently unchecked except the survey-design Phase 3 row)
 
 ---
 
@@ -629,9 +929,9 @@ variables appear to the left of the `|` separator.
 | Field | Value |
 |-------|-------|
 | Module | `honest_did.py` |
-| Primary Reference | Rambachan & Roth (2023) |
+| Primary Reference | Rambachan & Roth (2023), *A More Credible Approach to Parallel Trends*, RES 90(5), 2555-2591 |
 | R Reference | `HonestDiD` package |
-| Status | **Complete** (pending R comparison) |
+| Status | **Complete** |
 | Last Review | 2026-04-01 |
 
 **Verified Components:**
@@ -651,9 +951,10 @@ variables appear to the left of the `|` separator.
 - [ ] R comparison: pending (benchmark scripts need updating)
 
 **Test Coverage:**
-- 63 existing tests in `tests/test_honest_did.py` (14 classes) — all passing
-- 17 new methodology verification tests in `tests/test_methodology_honest_did.py`
+- Comprehensive unit-test coverage in `tests/test_honest_did.py` (15 test classes spanning DeltaSD/DeltaRM/DeltaSDRM bounds, FLCI, ARP infrastructure, CS integration, edge cases) — all passing
+- 27 methodology verification tests in `tests/test_methodology_honest_did.py`
 - R benchmark tests (pending)
+- Paper review on file: `docs/methodology/papers/rambachan-roth-2023-review.md`
 
 **Corrections Made:**
 1. **DeltaRM: first differences, not levels** (`honest_did.py`, `_construct_constraints_rm_component`):
@@ -717,16 +1018,20 @@ variables appear to the left of the `|` separator.
 | Field | Value |
 |-------|-------|
 | Module | `pretrends.py` |
-| Primary Reference | Roth (2022) |
+| Primary Reference | Roth (2022), *Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends*, AER:I 4(3), 305-322 |
 | R Reference | `pretrends` package |
-| Status | Not Started |
-| Last Review | - |
+| Status | **In Progress** |
+| Last Review | — |
 
-**Corrections Made:**
-- (None yet)
+**Documentation in place:**
+- REGISTRY.md section: `## PreTrendsPower` (MDV at target power, four violation types — linear/constant/last_period/custom, power curve plotting, HonestDiD integration)
+- Implementation: `tests/test_pretrends.py` (point-estimator, MDV, power curve, sensitivity) plus event-study coverage in `tests/test_pretrends_event_study.py`
 
-**Outstanding Concerns:**
-- (None yet)
+**Outstanding for promotion:**
+- Paper review under `docs/methodology/papers/roth-2022-review.md`
+- Dedicated `tests/test_methodology_pretrends.py` with paper-equation-numbered Verified Components walk-through
+- R parity fixture against the `pretrends` R package (the four power calculations: linear, constant, last-period, custom)
+- Verify the REGISTRY Implementation Checklist (all four items currently unchecked)
 
 ---
 
@@ -735,16 +1040,98 @@ variables appear to the left of the `|` separator.
 | Field | Value |
 |-------|-------|
 | Module | `power.py` |
-| Primary Reference | Bloom (1995), Burlig et al. (2020) |
-| R Reference | `pwr` / `DeclareDesign` |
-| Status | Not Started |
-| Last Review | - |
+| Primary References | Bloom (1995); Burlig, Preonas & Woerman (2020) — clustered DiD power (both listed in REGISTRY) |
+| R Reference | `pwr` (basic) / `DeclareDesign` (design-based simulation) |
+| Status | **In Progress** |
+| Last Review | — |
 
-**Corrections Made:**
-- (None yet)
+**Documentation in place:**
+- REGISTRY.md section: `## PowerAnalysis` (MDE / power / sample size / simulation-based power / cluster adjustment); primary sources Bloom (1995) and Burlig et al. (2020) listed
+- Implementation: `tests/test_power.py` (MDE / power / sample-size / simulation paths plus cluster adjustment)
 
-**Outstanding Concerns:**
-- (None yet)
+**Outstanding for promotion:**
+- Paper review under `docs/methodology/papers/` (likely a combined review covering Bloom 1995 + Burlig et al. 2020)
+- Dedicated `tests/test_methodology_power.py` with closed-form walk-through against `pwr::pwr.t.test()` and Burlig et al.'s clustered-DiD power formula
+- Documented reference-validation harness against `pwr` / `DeclareDesign`
+- Verify the REGISTRY Implementation Checklist (all five items currently unchecked)
+
+---
+
+#### PlaceboTests
+
+| Field | Value |
+|-------|-------|
+| Module | `diagnostics.py` |
+| Primary Reference | None canonical (general permutation / leave-one-out diagnostic) |
+| R Reference | None canonical |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## PlaceboTests` (NaN-inference edge cases for `permutation_test` and `leave_one_out_test`)
+- Implementation: tests embedded in `tests/test_diagnostics.py`
+
+**Outstanding for promotion:**
+- Decide whether this surface warrants a standalone methodology review or whether the brief Verified Components walk-through + NaN-inference deviation log should live as a sub-section under each per-estimator diagnostic block instead
+- If kept standalone: brief Verified Components block + Deviations block for the NaN-inference convention
+
+---
+
+### Cross-Cutting Inference Features
+
+These are not estimators but variance/inference plumbing used across many estimators. They warrant their own methodology reviews because the implementation details (kernel choice, weight rescaling, df adjustment) are independently citable.
+
+#### ConleySpatialHAC
+
+| Field | Value |
+|-------|-------|
+| Module | `conley.py`, `linalg.py` (`_validate_vcov_args`, kernel construction) |
+| Primary Reference | Conley (1999), *GMM Estimation with Cross-Sectional Dependence*, J. Econometrics 92(1), 1-45 |
+| Secondary References | Andrews (1991) HAC theory; Colella, Lalive, Sakalli & Thoenig (2019) for the Stata `acreg` parallel; Düsterhöft (2021) `conleyreg` (CRAN) parity target |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md section: `## ConleySpatialHAC` plus three sub-sections (combined spatial + cluster product kernel — Wave A #119; performance/scale — Wave A #120; callable `conley_metric` validation — Wave A #123)
+- **Paper review on file**: `docs/methodology/papers/conley-1999-review.md` (review date 2026-05-09); plus four adjacent paper reviews for the spillover initiative: `butts-2021-review.md`, `butts-2023-review.md` (JUE Insight), `clarke-2017-review.md`, `colella-et-al-2019-review.md`
+- Implementation: 162 tests in `tests/test_conley_vcov.py` (Phase 1 + Phase 2 space-time HAC)
+- Wired through `DifferenceInDifferences`, `MultiPeriodDiD`, `TwoWayFixedEffects` via `vcov_type="conley"` enum
+
+**Documentation in place (R parity):**
+- R `conleyreg` goldens committed: `benchmarks/data/r_conleyreg_conley_golden.json`, generator `benchmarks/R/generate_conley_golden.R`
+- Cross-sectional R parity at `atol=1e-6`: `tests/test_conley_vcov.py::TestConleyParityR`
+- Panel (space-time) R parity at `atol=1e-6`: `TestConleyParitySpacetime` (dense path) and `TestConleySparseRParityForced` (sparse path forced)
+- Internal block-decomposition cross-check at machine precision (matches `conleyreg::time_dist.cpp`): `TestConleyParitySpacetime::test_panel_matches_block_decomposed_reference` (inner tolerance `atol=1e-12`)
+
+**Outstanding for promotion:**
+- Dedicated `tests/test_methodology_conley.py` with paper-equation-numbered Verified Components walk-through (Equation 8 score-covariance, Bartlett kernel, Andrews-style truncation) consolidating the parity tests into a methodology checklist
+- Summary R-parity table in this tracker (currently the parity results are scattered across class-level docstrings in `tests/test_conley_vcov.py`)
+- Document deviation: indefiniteness guard applied to both spatial and cluster kernels (vs. Bartlett's PSD property)
+- Resolution for the Phase 5 spillover-conley dependency on survey-weights interaction (currently raises `NotImplementedError` at the linalg validator)
+
+---
+
+#### Survey Data Support
+
+| Field | Value |
+|-------|-------|
+| Module | `survey.py`, `bootstrap_utils.py` (plus per-estimator hooks) |
+| Primary References | Binder (1983) for TSL variance; Lumley (2004) for the R `survey` package; Solon, Haider & Wooldridge (2015) for the "when to weight" framework |
+| R Reference | `survey` R package |
+| Status | **In Progress** |
+| Last Review | — |
+
+**Documentation in place:**
+- REGISTRY.md sub-sections (under `## Survey Data Support`): Weighted Estimation, TSL Variance, Weight Type Effects on Inference, Absorbed FE with Survey Weights, Survey Degrees of Freedom, Survey Aggregation (`aggregate_survey`), Survey-Aware Bootstrap (Phase 6), Replicate Weight Variance (Phase 6), DEFF Diagnostics (Phase 6), Subpopulation Analysis (Phase 6), Survey DGP (`generate_survey_did_data`)
+- **Theory document**: `docs/methodology/survey-theory.md` — full Binder-Lumley derivation of design-based variance for modern DiD estimators, including influence-function machinery
+- 13 dedicated `tests/test_survey*.py` files: `test_survey.py`, `test_survey_dcdh.py`, `test_survey_dcdh_replicate_psu.py`, `test_survey_estimator_validation.py`, `test_survey_phase3.py`, `test_survey_phase4.py`, `test_survey_phase5.py`, `test_survey_phase6.py`, `test_survey_phase7a.py`, `test_survey_phase8.py`, `test_survey_r_crossvalidation.py`, `test_survey_real_data.py`, `test_survey_staggered_ddd.py`
+- Per-estimator survey hooks documented in the REGISTRY sections of every estimator that supports survey design (DiD/TWFE/MultiPeriodDiD, CS, SunAbraham, StackedDiD, ImputationDiD, TwoStageDiD, WooldridgeDiD, EfficientDiD, ContinuousDiD, DCDH, HAD, TripleDifference, StaggeredTripleDifference, TROP, SyntheticDiD). Scope is *estimators*; survey-capable diagnostics (e.g., `BaconDecomposition` Phase 3, `HonestDiD` survey-df handling) are tracked in their own sections.
+
+**Outstanding for promotion:**
+- Dedicated `tests/test_methodology_survey.py` (or split between TSL and replicate-weight surfaces) with Binder-equation-numbered Verified Components walk-through
+- R parity benchmark against `survey::svyglm` / `survey::svycontrast` for the linear DiD case (`tests/test_survey_r_crossvalidation.py` exists; needs to be wired into a documented "Reference results" table here)
+- Document deviations: PSU-level Hall-Mammen wild clustering as the bootstrap path when survey design is present (vs. R `survey`'s default analytical TSL); strata-vs-no-strata bit-equality not achievable due to RNG-path divergence between the per-stratum numpy loop and the batched `generate_survey_multiplier_weights_batch` call (see `docs/methodology/REGISTRY.md` HAD Stute survey-bootstrap section, "Distributional parity, NOT bit-exact" note, for the documented impossibility — distributional parity holds at large B, exact agreement at `atol=1e-10` does not)
+- Consolidated "Outstanding cross-estimator gaps" enumerating which estimators still raise `NotImplementedError` on which survey-design combinations (e.g., Conley + survey, SyntheticDiD + Conley, HAD replicate weights on Stute family)
 
 ---
 
@@ -754,19 +1141,22 @@ variables appear to the left of the `|` separator.
 
 For each estimator, complete the following steps:
 
-- [ ] **Read primary academic source** - Review the key paper(s) cited in REGISTRY.md
+- [ ] **Read primary academic source** - Review the key paper(s) cited in REGISTRY.md and write a `docs/methodology/papers/<name>-review.md` review if one doesn't exist
 - [ ] **Compare key equations** - Verify implementation matches equations in REGISTRY.md
-- [ ] **Run benchmark against R reference** - Execute `benchmarks/run_benchmarks.py --estimator <name>` if available
+- [ ] **Run benchmark against reference implementation** - Execute `benchmarks/run_benchmarks.py --estimator <name>` if available; otherwise generate fixtures and document parity tolerances
 - [ ] **Verify edge case handling** - Check behavior matches REGISTRY.md documentation
-- [ ] **Check standard error formula** - Confirm SE computation matches reference
-- [ ] **Document any deviations** - Add notes explaining intentional differences with rationale
+- [ ] **Check standard error formula** - Confirm SE computation matches reference (analytical, bootstrap, cluster-robust, survey-aware)
+- [ ] **Write dedicated methodology test file** - `tests/test_methodology_<name>.py` with paper-equation-numbered assertions that correspond 1:1 to the Verified Components list
+- [ ] **Document deviations** - Add notes explaining intentional differences with rationale, using one of the REGISTRY.md labels (`- **Note:**`, `- **Deviation from R:**`, `**Note (deviation from R):**`)
 
 ### When to Update This Document
 
-1. **After completing a review**: Update status to "Complete" and add date
-2. **When making corrections**: Document what was fixed in the "Corrections Made" section
+1. **After completing a review**: Update status to "Complete" and add date, populate Verified Components / Corrections Made / Deviations sections
+2. **When making corrections**: Document what was fixed in the "Corrections Made" section with file path and line number
 3. **When identifying issues**: Add to "Outstanding Concerns" for future investigation
-4. **When deviating from reference**: Document the deviation and rationale
+4. **When deviating from reference**: Document the deviation and rationale; cross-reference the REGISTRY.md `Note (deviation from R)` block
+5. **When promoting from In Progress to Complete**: Replace the "Documentation in place" / "Outstanding for promotion" pair with the full Verified Components / Corrections Made / Deviations structure used by Complete entries
+6. **When adding a new estimator to the library**: Add a row to the appropriate Status Summary table marked **In Progress** and a stub section under the matching category in Detailed Review Notes (Documentation in place / Outstanding for promotion) — same PR that introduces the estimator. New surfaces enter as In Progress because they ship with a REGISTRY.md entry and unit tests by definition.
 
 ### Deviation Documentation
 
@@ -775,7 +1165,7 @@ When our implementation intentionally differs from the reference implementation,
 1. **What differs**: Specific behavior or formula that differs
 2. **Why**: Rationale (e.g., "defensive enhancement", "bug in R package", "follows updated paper")
 3. **Impact**: Whether results differ in practice
-4. **Cross-reference**: Update REGISTRY.md edge cases section
+4. **Cross-reference**: Update REGISTRY.md edge cases section using one of the recognized labels
 
 Example:
 ```
@@ -784,33 +1174,39 @@ whereas R's `did::att_gt` would error. This is a defensive enhancement that prov
 more graceful handling of edge cases while still signaling invalid inference to users.
 ```
 
-### Priority Order
+### Priority Order (2026-05-15)
 
-Suggested order for reviews based on usage and complexity:
+Promotion priority for the **In Progress** entries, ordered by what's blocked on substantive review work (top of list = needs review next) vs. consolidation pass (bottom of list = mostly tracker walk-through):
 
-1. **High priority** (most used, complex methodology):
-   - CallawaySantAnna
-   - SyntheticDiD
-   - HonestDiD
+**Substantive-review-blocked (no methodology test file, no paper review, no R parity):**
 
-2. **Medium priority** (commonly used, simpler methodology):
-   - DifferenceInDifferences
-   - TwoWayFixedEffects
-   - MultiPeriodDiD
-   - SunAbraham
-   - BaconDecomposition
+1. **BaconDecomposition** — chosen for next substantive review during the 2026-05-15 tracker refresh session. Smaller scope than estimator reviews; R reference (`bacondecomp::bacon()`) available; methodology is well-understood (Goodman-Bacon 2021); REGISTRY checklist provides a ready-made target.
+2. **PreTrendsPower** — small surface, established R package (`pretrends`), Roth (2022) is short.
+3. **PowerAnalysis** — larger surface (MDE / power / sample size / simulation paths); REGISTRY already lists Bloom (1995) and Burlig et al. (2020) as primary sources; least urgent if the library's power-analysis utilities are not heavily used.
+4. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
+5. **EfficientDiD** — no paper review on file; substantial implementation work (`tests/test_efficient_did.py` + validation tests) needs paper-vs-code audit against Chen, Sant'Anna & Xie (2025).
+6. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
 
-3. **Lower priority** (newer or less commonly used):
-   - TripleDifference
-   - TROP
-   - PreTrendsPower
-   - PowerAnalysis
+**Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
+
+7. **HeterogeneousAdoptionDiD (HAD)** — largest current surface, Phase 4.5 just shipped; shares the de Chaisemartin (2026) paper review with DCDH; needs a dedicated Verified Components block.
+8. **ChaisemartinDHaultfoeuille (DCDH)** — methodology test file + 24 R parity tests + 347 unit tests + a companion-paper review for the 2026 universal-rollout extension. Primary-source reviews for the 2020 AER and 2022/2024 NBER WP 29873 papers are still outstanding alongside the Verified Components walk-through.
+9. **WooldridgeDiD (ETWFE)** — companion-paper review (Wooldridge 2023 nonlinear extension) merged in PR #443; primary-source review for Wooldridge (2025) ETWFE not yet on file, and no dedicated methodology test file.
+10. **ContinuousDiD** — 15 methodology tests already in place; mostly a consolidation pass with a documented boundary-knots deviation from R `contdid` v0.1.0.
+11. **TROP** — paper review recently merged (PR #443); needs methodology file and cross-language anchor (when paper-author reference becomes available).
+12. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
+13. **ConleySpatialHAC** — paper review + committed R `conleyreg` goldens; needs dedicated methodology test file + summary R-parity table in this tracker.
+14. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
 
 ---
 
 ## Related Documents
 
-- [REGISTRY.md](docs/methodology/REGISTRY.md) - Academic foundations and key equations
-- [ROADMAP.md](ROADMAP.md) - Feature roadmap
-- [TODO.md](TODO.md) - Technical debt tracking
-- [CLAUDE.md](CLAUDE.md) - Development guidelines
+- [REGISTRY.md](docs/methodology/REGISTRY.md) — Academic foundations and key equations
+- [docs/methodology/papers/](docs/methodology/papers/) — Per-paper retrospective reviews (Athey 2025, Butts 2021/2023, Clarke 2017, Colella et al. 2019, Conley 1999, de Chaisemartin 2026, Rambachan-Roth 2023, Wooldridge 2023)
+- [docs/methodology/continuous-did.md](docs/methodology/continuous-did.md) — ContinuousDiD theory note
+- [docs/methodology/survey-theory.md](docs/methodology/survey-theory.md) — Design-based variance estimation for modern DiD estimators
+- [docs/methodology/REPORTING.md](docs/methodology/REPORTING.md) — Reporting conventions across estimators
+- [ROADMAP.md](ROADMAP.md) — Feature roadmap
+- [TODO.md](TODO.md) — Technical debt tracking, including deferred methodology items from code reviews
+- [CLAUDE.md](CLAUDE.md) — Development guidelines
