@@ -301,11 +301,12 @@ _R_GOLDEN_PATH = (
 def _load_r_golden() -> dict:
     if not _R_GOLDEN_PATH.exists():
         pytest.skip(
-            f"R parity goldens missing at {_R_GOLDEN_PATH}. To generate, "
+            f"R parity goldens missing at {_R_GOLDEN_PATH}. To regenerate, "
             "install R + `install.packages('bacondecomp')` + "
             "`install.packages('jsonlite')` then `cd benchmarks/R && "
-            "Rscript generate_bacon_golden.R`. The R goldens are deferred "
-            "until R is provisioned (see TODO.md)."
+            "Rscript generate_bacon_golden.R`. The goldens are committed "
+            "to the repo by default; this skip path covers partial-checkout "
+            "or packaging scenarios where the JSON file is unavailable."
         )
     return json.loads(_R_GOLDEN_PATH.read_text())
 
