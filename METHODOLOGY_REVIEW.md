@@ -929,7 +929,7 @@ and covariate-adjusted specifications.)
 - [x] R `bacondecomp::bacon()` parity at `atol=1e-6` — 3 fixtures (`uniform_3groups_with_never_treated`, `two_groups_no_never_treated`, `always_treated_remapped`); TWFE coefficient + weights-sum match across all 3 fixtures; per-component estimate + weight parity locked on the 2 non-remap fixtures, with a documented convention divergence on `always_treated_remapped` (Python's footnote-11 U-remap vs R's distinct `Later vs Always Treated` cohort decomposition — aggregate is invariant, breakdown is structurally different). See `benchmarks/data/r_bacondecomp_golden.json` + `TestBaconParityR`.
 
 **Test Coverage:**
-- 33 methodology tests in `tests/test_methodology_bacon.py` across 6 classes (all active; R parity activates once goldens are committed)
+- 33 methodology tests in `tests/test_methodology_bacon.py` across 6 classes — all active, including the 3 R-parity tests (goldens committed at `benchmarks/data/r_bacondecomp_golden.json`)
 - 32 existing tests in `tests/test_bacon.py` (basic decomposition, weight properties, weights-parameter API, TWFE integration, visualization, balanced-panel warnings, edge cases)
 
 **R Comparison Results:**
