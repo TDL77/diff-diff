@@ -344,25 +344,6 @@ class DifferenceInDifferences:
         n_treated_raw = int(np.sum(data[treatment].values.astype(float)))
         n_control_raw = len(data) - n_treated_raw
 
-        # Reject multi-absorb with survey weights (single-pass demeaning is
-        # not the correct weighted FWL projection for N > 1 dimensions)
-        if absorb and len(absorb) > 1 and survey_weights is not None:
-            raise ValueError(
-                f"Multiple absorbed fixed effects (absorb={absorb}) with survey "
-                "weights is not supported. Single-pass sequential demeaning is not "
-                "the correct weighted FWL projection for multiple absorbed dimensions. "
-                "Use absorb with a single variable, or use fixed_effects= instead."
-            )
-
-        if absorb and fixed_effects:
-            raise ValueError(
-                "Cannot use both absorb and fixed_effects. "
-                "The absorb within-transformation does not residualize "
-                "fixed_effects dummies, violating the FWL theorem. "
-                "Use absorb alone (for high-dimensional FE) "
-                "or fixed_effects alone (for low-dimensional FE)."
-            )
-
         # Auto-route absorb → fixed_effects when vcov_type needs the FULL FE
         # hat matrix. HC2 leverage and CR2 Bell-McCaffrey DOF both depend on
         # the full-design hat; FWL preserves coefficients and residuals but
@@ -379,11 +360,41 @@ class DifferenceInDifferences:
         # Note: the user-facing `result.coefficients` under this auto-route
         # will include the FE-dummy entries (matching the fixed_effects= path),
         # not the slope-only view that a plain `absorb=` returns.
+        #
+        # Placement: this auto-route runs BEFORE the legacy multi-absorb +
+        # survey-weights guard because that guard's rationale ("single-pass
+        # demeaning is not the correct weighted FWL projection for N > 1
+        # dimensions") doesn't apply when we're about to swap absorb for
+        # fixed_effects: the fixed_effects= path builds the full-dummy design
+        # and solves WLS directly, with no within-transform step. R2 review
+        # surfaced the scope mismatch (REGISTRY/CHANGELOG said "SUPPORTED" but
+        # the survey guard fired first on weighted multi-absorb fits).
         if absorb and self.vcov_type in ("hc2", "hc2_bm"):
             fixed_effects = list(fixed_effects or []) + list(absorb)
             absorb = None
             absorbed_vars = []
             n_absorbed_effects = 0
+
+        # Reject multi-absorb with survey weights (single-pass demeaning is
+        # not the correct weighted FWL projection for N > 1 dimensions). Only
+        # fires when absorb is still set — i.e., the auto-route above didn't
+        # consume it.
+        if absorb and len(absorb) > 1 and survey_weights is not None:
+            raise ValueError(
+                f"Multiple absorbed fixed effects (absorb={absorb}) with survey "
+                "weights is not supported. Single-pass sequential demeaning is not "
+                "the correct weighted FWL projection for multiple absorbed dimensions. "
+                "Use absorb with a single variable, or use fixed_effects= instead."
+            )
+
+        if absorb and fixed_effects:
+            raise ValueError(
+                "Cannot use both absorb and fixed_effects. "
+                "The absorb within-transformation does not residualize "
+                "fixed_effects dummies, violating the FWL theorem. "
+                "Use absorb alone (for high-dimensional FE) "
+                "or fixed_effects alone (for low-dimensional FE)."
+            )
 
         # Validate vcov_type="conley" wire-up. DiD.fit() accepts `unit`
         # as a fit-time arg (NOT on __init__) because cluster/unit

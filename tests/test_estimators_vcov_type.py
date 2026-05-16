@@ -1095,6 +1095,48 @@ class TestDiDAbsorbedFERParity:
         np.testing.assert_allclose(res.se, expected_se_slope, atol=1e-10)
         np.testing.assert_allclose(res.att, float(d["coef"][treat_post_idx]), atol=1e-10)
 
+    def test_absorb_hc2_bm_survey_multi_absorb_auto_routes(self):
+        """Survey-weighted multi-absorb + HC2-BM should auto-route, not reject.
+
+        The legacy guard at `estimators.py` rejects `survey_design` paired with
+        `len(absorb) > 1` because single-pass demeaning is not the correct
+        weighted FWL projection for multiple absorbed dimensions. But when the
+        auto-route fires (hc2/hc2_bm), absorb is swapped for fixed_effects=
+        BEFORE the survey guard sees it, so the demeaning rationale doesn't
+        apply. R2 review caught the scope mismatch: REGISTRY said "SUPPORTED"
+        but the survey guard fired first on weighted multi-absorb. This test
+        pins the new placement.
+        """
+        from diff_diff import SurveyDesign
+
+        d = self._load_golden()
+        rng = np.random.default_rng(20260420)
+        n = len(d["y"])
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "post": d["post"],
+                "y": d["y"],
+                "weight": rng.uniform(0.5, 2.0, size=n),
+            }
+        )
+        sd = SurveyDesign(weights="weight", weight_type="aweight")
+        # Multi-absorb (`unit` + `period`) + survey-weighted + hc2_bm: should
+        # auto-route to fixed_effects= and succeed.
+        res = DifferenceInDifferences(vcov_type="hc2_bm").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="post",
+            absorb=["unit", "period"],
+            unit="unit",
+            survey_design=sd,
+        )
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se)
+
     def test_absorb_hc2_bm_df_sensitive_inference(self):
         """Bell-McCaffrey Satterthwaite DOF must propagate to `p_value` / `conf_int`.
 
