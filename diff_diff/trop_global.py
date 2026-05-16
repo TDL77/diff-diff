@@ -28,7 +28,7 @@ from diff_diff.bootstrap_utils import (
     stratified_bootstrap_indices,
     warn_bootstrap_failure_rate,
 )
-from diff_diff.trop_local import _soft_threshold_svd, _validate_and_pivot_treatment
+from diff_diff.trop_local import _setup_trop_data, _soft_threshold_svd
 from diff_diff.trop_results import TROPResults
 from diff_diff.utils import safe_inference, warn_if_not_converged
 
@@ -584,82 +584,25 @@ class TROPGlobalMixin:
         across units, use `method="local"` which computes observation-specific
         weights that naturally handle heterogeneous timing.
         """
-        # Data setup (same as local method)
-        all_units = sorted(data[unit].unique())
-        all_periods = sorted(data[time].unique())
-
-        # Extract per-unit survey weights for weighted ATT aggregation
-        if resolved_survey is not None:
-            from diff_diff.survey import _extract_unit_survey_weights
-
-            unit_weight_arr = _extract_unit_survey_weights(data, unit, survey_design, all_units)
-        else:
-            unit_weight_arr = None
-
-        n_units = len(all_units)
-        n_periods = len(all_periods)
-
-        idx_to_unit = {i: u for i, u in enumerate(all_units)}
-        idx_to_period = {i: p for i, p in enumerate(all_periods)}
-
-        # Create matrices
-        Y = (
-            data.pivot(index=time, columns=unit, values=outcome)
-            .reindex(index=all_periods, columns=all_units)
-            .values
+        # Data setup (shared with local method via _setup_trop_data helper).
+        _ctx = _setup_trop_data(
+            data, outcome, treatment, unit, time, resolved_survey, survey_design
         )
-
-        D, missing_mask = _validate_and_pivot_treatment(
-            data, time, unit, treatment, all_periods, all_units
-        )
-
-        # Validate absorbing state
-        violating_units = []
-        for unit_idx in range(n_units):
-            observed_mask = ~missing_mask[:, unit_idx]
-            observed_d = D[observed_mask, unit_idx]
-            if len(observed_d) > 1 and np.any(np.diff(observed_d) < 0):
-                violating_units.append(all_units[unit_idx])
-
-        if violating_units:
-            raise ValueError(
-                f"Treatment indicator is not an absorbing state for units: {violating_units}. "
-                f"D[t, unit] must be monotonic non-decreasing (once treated, always treated). "
-                f"If this is event-study style data, convert to absorbing state: "
-                f"D[t, i] = 1 for all t >= first treatment period."
-            )
-
-        # Identify treated observations
-        treated_mask = D == 1
-        n_treated_obs = np.sum(treated_mask)
-
-        if n_treated_obs == 0:
-            raise ValueError("No treated observations found")
-
-        # Identify treated and control units
-        unit_ever_treated = np.any(D == 1, axis=0)
-        treated_unit_idx = np.where(unit_ever_treated)[0]
-        control_unit_idx = np.where(~unit_ever_treated)[0]
-
-        if len(control_unit_idx) == 0:
-            raise ValueError("No control units found")
-
-        # Determine pre/post periods
-        first_treat_period = None
-        for t in range(n_periods):
-            if np.any(D[t, :] == 1):
-                first_treat_period = t
-                break
-
-        if first_treat_period is None:
-            raise ValueError("Could not infer post-treatment periods from D matrix")
-
-        n_pre_periods = first_treat_period
+        n_units = _ctx["n_units"]
+        n_periods = _ctx["n_periods"]
+        idx_to_unit = _ctx["idx_to_unit"]
+        idx_to_period = _ctx["idx_to_period"]
+        unit_weight_arr = _ctx["unit_weight_arr"]
+        Y = _ctx["Y"]
+        D = _ctx["D"]
+        missing_mask = _ctx["missing_mask"]
+        n_treated_obs = _ctx["n_treated_obs"]
+        treated_unit_idx = _ctx["treated_unit_idx"]
+        control_unit_idx = _ctx["control_unit_idx"]
+        first_treat_period = _ctx["first_treat_period"]
+        n_pre_periods = _ctx["n_pre_periods"]
+        n_post_periods = _ctx["n_post_periods"]
         treated_periods = n_periods - first_treat_period
-        n_post_periods = int(np.sum(np.any(D[first_treat_period:, :] == 1, axis=1)))
-
-        if n_pre_periods < 2:
-            raise ValueError("Need at least 2 pre-treatment periods")
 
         # Check for staggered adoption (global method requires simultaneous treatment)
         # Use only observed periods (skip missing) to avoid false positives on unbalanced panels
