@@ -2,7 +2,7 @@
 
 **Authors:** Andrew Goodman-Bacon
 **Citation:** Goodman-Bacon, A. (2021). Difference-in-differences with variation in treatment timing. *Journal of Econometrics*, 225(2), 254-277. DOI: [10.1016/j.jeconom.2021.03.014](https://doi.org/10.1016/j.jeconom.2021.03.014)
-**PDF reviewed:** papers/goodman-bacon.pdf (24 pages: 14 main-text pages, 6 appendix/figure pages with Section 5.2 + Conclusion + Appendix A proof, 4 reference pages)
+**PDF reviewed:** Journal of Econometrics version (DOI: [10.1016/j.jeconom.2021.03.014](https://doi.org/10.1016/j.jeconom.2021.03.014)) — 24 pages total: 14 main-text pages (Sections 1-5.1), 6 appendix/figure pages (Section 5.2 DD with controls, Section 6 Conclusion, Appendix A proof of Theorem 1), 4 reference pages. Local PDFs are gitignored under `/papers/`; the journal/DOI version is the authoritative source.
 **Review date:** 2026-05-16
 
 ---
@@ -11,7 +11,7 @@
 
 *Formatted to match `docs/methodology/REGISTRY.md` structure. Heading levels and labels align with existing entries.*
 
-**Status: proposed.** This block is the source-of-truth target for the REGISTRY entry; it has **not** been merged into `docs/methodology/REGISTRY.md` yet. The current `## BaconDecomposition` section in `REGISTRY.md` (lines ~2598-2654 as of this review) predates this paper-review pass and should be replaced by the corrected content below as part of the follow-up methodology-audit PR for `diff_diff/bacon.py`. Until that PR lands, REGISTRY readers will see the older contract; this paper review is the authoritative reference for the audit work.
+**Status: proposed replacement text for a future REGISTRY update.** This block has **not** been merged into `docs/methodology/REGISTRY.md` yet. The current `## BaconDecomposition` section in `REGISTRY.md` (lines ~2598-2654 as of this review) remains the **sole authoritative methodology contract** until the follow-up audit PR for `diff_diff/bacon.py` lands and replaces it. That audit PR is tracked under `TODO.md` "Tech Debt from Code Reviews" → Methodology/Correctness; it will carry the REGISTRY replacement alongside the paper-vs-code verification, R parity fixtures, methodology test file, and `METHODOLOGY_REVIEW.md` status flip.
 
 ## BaconDecomposition
 
