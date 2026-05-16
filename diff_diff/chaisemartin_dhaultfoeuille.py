@@ -5190,9 +5190,32 @@ def _compute_heterogeneity_test(
         else:
             design = np.hstack([intercept, x_arr])
 
-        # Guard: need more observations than parameters
+        # Compute post-drop numerical rank for both the small-sample
+        # guard and the t-distribution df. `_detect_rank_deficiency` is
+        # the same helper `solve_ols` calls internally; calling it
+        # explicitly here lets the guard use post-drop rank (matching
+        # R's `df.residual = n_obs - rank(design)` convention from
+        # `DIDmultiplegtDYN:::did_multiplegt_main` `qt(0.975,
+        # df.residual(model))`) instead of pre-drop column count,
+        # which would incorrectly short-circuit cases where solve_ols's
+        # R-style alias drop leaves `n_obs > rank > 0` (e.g., cohort-
+        # dummy collinearity at high horizons). For full-rank designs
+        # `rank == n_params` and behavior is bit-identical to the
+        # pre-PR `n_obs - n_params` path. The extra O(nk^2) cost is
+        # negligible at heterogeneity scale (k = intercept + X_het +
+        # cohort dummies, typically 5-30 columns; n = path-switcher
+        # count, typically 30-300 groups).
+        from diff_diff.linalg import _detect_rank_deficiency
+
         n_params = design.shape[1]
-        if n_obs <= n_params:
+        rank, _dropped, _pivot = _detect_rank_deficiency(design)
+
+        # Guard: need MORE observations than rank for a well-defined
+        # residual df. When `n_obs <= rank`, the regression has zero
+        # residual df (perfect fit or under-identified) and inference
+        # is undefined. This is the rank-based replacement for the
+        # pre-PR `n_obs <= n_params` short-circuit.
+        if n_obs <= rank:
             results[l_h] = {
                 "beta": float("nan"),
                 "se": float("nan"),
@@ -5203,35 +5226,34 @@ def _compute_heterogeneity_test(
             }
             continue
 
-        if not use_survey:
-            # Plain OLS path: standard inference per Lemma 7. df uses
-            # the POST-drop numerical rank (n_obs - rank), matching R's
-            # did_multiplegt_dyn(predict_het=...) which uses the
-            # t-distribution with df = n_obs - rank(design) from the OLS
-            # regression (`df.residual(model)` site at
-            # `DIDmultiplegtDYN:::did_multiplegt_main` `t_stat <- qt(0.975,
-            # df.residual(model))`). For full-rank designs `rank ==
-            # n_params` and behavior is bit-identical to the pre-PR
-            # `n_obs - n_params` path. For near-rank-deficient designs
-            # that `solve_ols` retains rather than NaN-out (e.g.,
-            # cohort-collinearity at high horizons), the post-drop rank
-            # is strictly lower and the post-PR `df` is larger, matching
-            # R's lm() convention. The rank is computed via the same
-            # `_detect_rank_deficiency` helper that `solve_ols` calls
-            # internally; the extra O(nk^2) cost is negligible at
-            # heterogeneity scale (k = intercept + X_het + cohort dummies,
-            # typically 5-30 columns; n = path-switcher count, typically
-            # 30-300 groups).
-            from diff_diff.linalg import _detect_rank_deficiency
+        df_ols = int(n_obs) - int(rank)
 
-            rank, _dropped, _pivot = _detect_rank_deficiency(design)
-            df_ols = max(int(n_obs) - int(rank), 0)
+        if not use_survey:
+            # Plain OLS path: standard inference per Lemma 7.
             coefs, _residuals, vcov = solve_ols(
                 design,
                 dep_arr,
                 return_vcov=True,
                 rank_deficient_action=rank_deficient_action,
             )
+            # Under rank-deficient designs solve_ols R-style-drops one
+            # or more columns and NaN-fills their coefs. If `X_het`
+            # (column index 1) is the dropped column, the heterogeneity
+            # coefficient is unidentified — NaN-fill the inference
+            # tuple (matches R's lm() returning NA for aliased
+            # coefficients). Other columns being dropped is fine: the
+            # X_het coefficient and its (1,1) vcov entry remain
+            # identified, df_ols already reflects the post-drop rank.
+            if not np.isfinite(coefs[1]):
+                results[l_h] = {
+                    "beta": float("nan"),
+                    "se": float("nan"),
+                    "t_stat": float("nan"),
+                    "p_value": float("nan"),
+                    "conf_int": (float("nan"), float("nan")),
+                    "n_obs": n_obs,
+                }
+                continue
             beta_het = float(coefs[1])
             se_het = float("nan")
             if vcov is not None and np.isfinite(vcov[1, 1]) and vcov[1, 1] > 0:

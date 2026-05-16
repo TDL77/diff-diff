@@ -11525,102 +11525,158 @@ class TestByPathPredictHetPlacebo:
         assert len(s) > 0
 
     def test_heterogeneity_df_uses_post_drop_rank(self):
-        """Heterogeneity inference df = n_obs - rank (post-drop) per R parity.
+        """Heterogeneity inference uses df = n_obs - rank(design).
 
-        Pre-PR (#449) Python used ``df = n_obs - n_params`` (pre-drop
-        column count). For full-rank designs the two are equal and
-        behavior is bit-identical. For near-rank-deficient designs
-        that ``solve_ols`` retains (does not NaN-out), the post-drop
-        rank is strictly lower than ``n_params``, so the post-drop
-        ``df`` is strictly larger.
+        Pre-PR (#449) Python used ``df = n_obs - n_params`` AND a
+        small-sample short-circuit at ``n_obs <= n_params``. For the
+        boundary case ``n_obs == n_params > rank(design)`` (e.g.,
+        cohort-dummy collinearity at high horizons), R's
+        ``did_multiplegt_dyn`` / ``lm()`` alias-drops the redundant
+        column and fits with ``df = n_obs - rank``; pre-PR Python
+        short-circuited and NaN-filled. Post-PR uses ``n_obs <= rank``
+        as the small-sample guard AND ``df = n_obs - rank``.
 
-        Test strategy: construct a design with a deterministic
-        duplicate cohort dummy (rank-deficient by 1). Verify:
-        (a) the heterogeneity beta is finite (rank-deficiency is
-            handled by ``solve_ols`` via R-style drop, not NaN-fill);
-        (b) the conf_int half-width is consistent with the
-            post-drop ``df = n_obs - (n_params - 1)``, NOT the
-            pre-drop ``df = n_obs - n_params`` (the post-drop half-
-            width is strictly smaller because t_crit shrinks toward
-            Z as df grows). Pin the difference at >= 1e-6 relative
-            so the regression catches accidental reversion.
+        Test construction: 5 switchers with first_switch_idx in
+        ``{3, 3, 4, 5, 6}`` (4 unique cohorts), ``X_het = [1, 1, 0,
+        0, 0]``. X_het is exactly 1 on the F_g=3 cohort (which is
+        sorted first and dropped as reference) and 0 on the other 3
+        cohorts. The design matrix
+        ``[intercept, X_het, F=4 dummy, F=5 dummy, F=6 dummy]`` has
+        5 columns but ``X_het = intercept - (F=4 + F=5 + F=6)``, so
+        rank = 4. ``n_obs = 5``, ``n_params = 5``, ``rank = 4``.
+        Pre-PR: short-circuit fires (``5 <= 5``) → NaN-fill. Post-PR:
+        ``n_obs > rank`` → fit with ``df = 1``.
 
-        This is the only locked behavioral test for the rank-threading
-        change; the full-rank parity is locked by the existing R-parity
-        scenarios (20-23) which all use cohort-clean DGPs.
+        The X_het column itself is identifiable (one of the cohort
+        dummies gets alias-dropped, not X_het) because pivoted QR
+        orders columns by norm and ``||X_het|| = sqrt(2)`` exceeds
+        the cohort dummies' unit norm.
         """
         from diff_diff.chaisemartin_dhaultfoeuille import (
             _compute_heterogeneity_test,
         )
         from diff_diff.utils import safe_inference
 
-        # Build a synthetic problem where the design has a deterministic
-        # exact-duplicate cohort: 12 switchers all with F_g=2 and a
-        # constructed cohort key collision via baseline replication.
-        # The internal regression has [intercept, X_het, cohort_dummies];
-        # near-rank-deficiency arises naturally on small samples with
-        # singleton cohorts. We force it by constructing a panel where
-        # every switcher's cohort key (D_{g,1}, F_g, S_g) is identical
-        # (rank-deficient relative to the 12-row regression once cohort
-        # dummies are added — only intercept + X_het identify).
-        rng = np.random.RandomState(101)
-        n_groups = 30  # 12 switchers + 18 controls
-        n_periods = 5
-        baselines = np.zeros(n_groups, dtype=int)
-        first_switch = np.array([-1] * n_groups)
-        for g in range(12):
-            first_switch[g] = 2  # all switchers at F_g=2
+        n_periods = 8
+        # 5 switchers, F_g in {3, 3, 4, 5, 6} — 4 unique cohort keys.
+        # baselines all 0, switch_direction all +1.
+        first_switch = np.array([3, 3, 4, 5, 6], dtype=int)
+        n_groups = 5
+        baselines = np.zeros(n_groups, dtype=float)
+        switch_direction = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
         T_g = np.full(n_groups, n_periods - 1, dtype=int)
-        X_het = np.array(
-            [1.0 if g < 6 else 0.0 for g in range(n_groups)]
-        )
-        # Build Y / N matrices: switchers get treatment effect; controls 0
-        Y_mat = np.zeros((n_groups, n_periods), dtype=float)
-        N_mat = np.ones((n_groups, n_periods), dtype=float)
+        # X_het = 1 for the F_g=3 cohort (reference), 0 for others.
+        # This makes X_het exactly equal to
+        # intercept - (sum of non-reference cohort dummies).
+        X_het = np.array([1.0, 1.0, 0.0, 0.0, 0.0])
+
+        rng = np.random.RandomState(202)
+        Y_mat = rng.normal(0, 1, size=(n_groups, n_periods))
+        # Add het signal at post-period so beta != 0
         for g in range(n_groups):
-            for t in range(n_periods):
-                d = 1.0 if (g < 12 and t >= first_switch[g]) else 0.0
-                Y_mat[g, t] = (
-                    0.5 * t
-                    + (5.0 + 3.0 * X_het[g]) * d
-                    + rng.normal(0, 0.5)
-                )
-        switch_direction = np.where(first_switch >= 0, 1.0, np.nan)
+            f = first_switch[g]
+            Y_mat[g, f] += 5.0 + 3.0 * X_het[g]
+        N_mat = np.ones((n_groups, n_periods))
 
         result = _compute_heterogeneity_test(
             Y_mat=Y_mat,
             N_mat=N_mat,
-            baselines=baselines.astype(float),
+            baselines=baselines,
             first_switch_idx=first_switch,
             switch_direction=switch_direction,
             T_g=T_g,
             X_het=X_het,
             L_max=1,
         )
-        # Horizon 1 must be populated with finite inference
         assert 1 in result
         h = result[1]
-        assert np.isfinite(h["beta"]), f"beta non-finite: {h}"
+        # POST-PR: regression fits despite n_obs == n_params (= 5),
+        # because rank == 4 < n_params. Pre-PR would have short-
+        # circuited at the `n_obs <= n_params` guard and returned NaN.
+        assert np.isfinite(h["beta"]), (
+            f"beta should be finite under post-drop-rank guard "
+            f"(n_obs=5, n_params=5, rank=4). Pre-PR would NaN-fill. "
+            f"Entry: {h}"
+        )
         assert np.isfinite(h["se"]), f"se non-finite: {h}"
-
-        # n_params = intercept + X_het + cohort dummies. With ALL
-        # switchers sharing (D_{g,1}=0, F_g=2, S_g=+1) cohort, there's
-        # only 1 unique cohort → 0 cohort dummies (reference dropped),
-        # so n_params == 2 (intercept + X_het). In this regime the
-        # design is FULL rank (rank == n_params), and df is unchanged
-        # from the pre-PR convention. Use this as a sanity check that
-        # the new df path is wired correctly on the full-rank side:
-        # safe_inference at df = n_obs - 2 reproduces stored t/p/CI.
         n_obs = int(h["n_obs"])
+        assert n_obs == 5, f"expected n_obs=5, got {n_obs}"
+        # df = n_obs - rank = 5 - 4 = 1. safe_inference at df=1
+        # reproduces stored t/p/CI bit-exactly.
         expected_t, expected_p, expected_ci = safe_inference(
-            h["beta"], h["se"], df=n_obs - 2
+            h["beta"], h["se"], df=1
         )
         np.testing.assert_allclose(
             h["t_stat"], expected_t, atol=1e-12, rtol=1e-12,
+            err_msg="t_stat does not match safe_inference(df=1)",
         )
         np.testing.assert_allclose(
             h["p_value"], expected_p, atol=1e-12, rtol=1e-12,
+            err_msg="p_value does not match safe_inference(df=1)",
         )
         np.testing.assert_allclose(
             h["conf_int"], expected_ci, atol=1e-12, rtol=1e-12,
+            err_msg="conf_int does not match safe_inference(df=1)",
         )
+        # safe_inference(df=n_obs - n_params=0) would produce different
+        # p_value/conf_int. Pin the asymmetry so a regression that
+        # reverts to pre-drop n_params is caught here.
+        wrong_t, wrong_p, wrong_ci = safe_inference(
+            h["beta"], h["se"], df=n_obs - 5
+        )
+        if np.isfinite(wrong_p):
+            # When df=0, safe_inference NaN-fills; the asymmetry check
+            # only fires when wrong_p is finite (which it isn't at df=0).
+            # We still pin that the stored p_value is NOT equal to the
+            # pre-drop result.
+            assert not np.isclose(h["p_value"], wrong_p, atol=1e-10), (
+                "stored p_value matches pre-drop n_params df; "
+                "rank-threading may have reverted"
+            )
+
+    def test_heterogeneity_underidentified_nan_fills(self):
+        """Genuinely under-identified case (n_obs <= rank) NaN-fills.
+
+        Guards against accidentally removing the small-sample short-
+        circuit entirely. Construction: 4 switchers, each its own
+        cohort. Design = [intercept, X_het, 3 cohort dummies] = 5
+        columns. With X_het non-collinear, rank = min(4, 5) = 4 =
+        n_obs. Post-PR's `n_obs <= rank` guard fires (4 <= 4) and
+        NaN-fills.
+        """
+        from diff_diff.chaisemartin_dhaultfoeuille import (
+            _compute_heterogeneity_test,
+        )
+
+        n_periods = 8
+        first_switch = np.array([3, 4, 5, 6], dtype=int)
+        n_groups = 4
+        baselines = np.zeros(n_groups, dtype=float)
+        switch_direction = np.array([1.0, 1.0, 1.0, 1.0])
+        T_g = np.full(n_groups, n_periods - 1, dtype=int)
+        # X_het with both 0s and 1s, not collinear with cohort dummies
+        X_het = np.array([1.0, 0.0, 1.0, 0.0])
+
+        rng = np.random.RandomState(203)
+        Y_mat = rng.normal(0, 1, size=(n_groups, n_periods))
+        N_mat = np.ones((n_groups, n_periods))
+
+        result = _compute_heterogeneity_test(
+            Y_mat=Y_mat,
+            N_mat=N_mat,
+            baselines=baselines,
+            first_switch_idx=first_switch,
+            switch_direction=switch_direction,
+            T_g=T_g,
+            X_het=X_het,
+            L_max=1,
+        )
+        assert 1 in result
+        h = result[1]
+        assert np.isnan(h["beta"]), (
+            f"beta should be NaN when n_obs <= rank; got {h}"
+        )
+        assert np.isnan(h["se"])
+        assert np.isnan(h["t_stat"])
+        assert np.isnan(h["p_value"])
+        assert h["n_obs"] == 4
