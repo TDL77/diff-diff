@@ -1412,7 +1412,7 @@ class TestDCDHDynRParityHeterogeneity:
             # `p_value` and `conf_int` parity (post-2026-05-15 df threading).
             # `_compute_heterogeneity_test` now passes
             # `df = n_obs - rank(design)` to `safe_inference`, matching
-            # R's t-distribution with WLS df (full-rank designs have
+            # R's t-distribution with OLS df (full-rank designs have
             # `rank == n_params`). Pinned at INFERENCE_RTOL = 1e-4
             # because Wald-test critical values come from
             # `scipy.stats.t.ppf` and `t.sf` which are implementation-
