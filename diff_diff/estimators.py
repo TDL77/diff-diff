@@ -344,6 +344,22 @@ class DifferenceInDifferences:
         n_treated_raw = int(np.sum(data[treatment].values.astype(float)))
         n_control_raw = len(data) - n_treated_raw
 
+        # Reject the `absorb + fixed_effects` mutual-exclusion combination
+        # BEFORE any auto-route. R4 review caught a contract-drift where the
+        # auto-route silently merged the two arguments on the HC2/HC2-BM
+        # path — the public API has always treated this combination as
+        # invalid (different FE-handling paths; mixing them violates the
+        # FWL theorem on the demeaned half), so keep the explicit rejection
+        # in front of the auto-route to preserve user-facing behavior.
+        if absorb and fixed_effects:
+            raise ValueError(
+                "Cannot use both absorb and fixed_effects. "
+                "The absorb within-transformation does not residualize "
+                "fixed_effects dummies, violating the FWL theorem. "
+                "Use absorb alone (for high-dimensional FE) "
+                "or fixed_effects alone (for low-dimensional FE)."
+            )
+
         # Auto-route absorb → fixed_effects when vcov_type needs the FULL FE
         # hat matrix. HC2 leverage and CR2 Bell-McCaffrey DOF both depend on
         # the full-design hat; FWL preserves coefficients and residuals but
@@ -385,15 +401,6 @@ class DifferenceInDifferences:
                 "weights is not supported. Single-pass sequential demeaning is not "
                 "the correct weighted FWL projection for multiple absorbed dimensions. "
                 "Use absorb with a single variable, or use fixed_effects= instead."
-            )
-
-        if absorb and fixed_effects:
-            raise ValueError(
-                "Cannot use both absorb and fixed_effects. "
-                "The absorb within-transformation does not residualize "
-                "fixed_effects dummies, violating the FWL theorem. "
-                "Use absorb alone (for high-dimensional FE) "
-                "or fixed_effects alone (for low-dimensional FE)."
             )
 
         # Validate vcov_type="conley" wire-up. DiD.fit() accepts `unit`

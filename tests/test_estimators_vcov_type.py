@@ -1095,6 +1095,36 @@ class TestDiDAbsorbedFERParity:
         np.testing.assert_allclose(res.se, expected_se_slope, atol=1e-10)
         np.testing.assert_allclose(res.att, float(d["coef"][treat_post_idx]), atol=1e-10)
 
+    def test_absorb_plus_fixed_effects_still_rejected_under_hc2_bm(self):
+        """Mutual-exclusion of `absorb=` and `fixed_effects=` is preserved.
+
+        R4 review caught that the auto-route initially merged the two
+        arguments silently on the HC2/HC2-BM path. The public API has
+        always treated this combination as invalid; the rejection must
+        fire regardless of `vcov_type`.
+        """
+        d = self._load_golden()
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "post": d["post"],
+                "y": d["y"],
+            }
+        )
+        for vcov in ("hc1", "hc2", "hc2_bm"):
+            with pytest.raises(ValueError, match="Cannot use both absorb and fixed_effects"):
+                DifferenceInDifferences(vcov_type=vcov).fit(
+                    data,
+                    outcome="y",
+                    treatment="treated",
+                    time="post",
+                    absorb=["unit"],
+                    fixed_effects=["period"],
+                    unit="unit",
+                )
+
     def test_absorb_hc2_bm_survey_multi_absorb_auto_routes(self):
         """Survey-weighted multi-absorb + HC2-BM should auto-route, not reject.
 
