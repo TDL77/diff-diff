@@ -70,6 +70,13 @@ Generate synthetic Triple Difference data.
 
 .. autofunction:: diff_diff.generate_ddd_data
 
+generate_ddd_panel_data
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Generate synthetic panel-structured Triple Difference data for power analysis.
+
+.. autofunction:: diff_diff.generate_ddd_panel_data
+
 generate_factor_data
 ~~~~~~~~~~~~~~~~~~~~
 
