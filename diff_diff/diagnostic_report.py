@@ -1746,6 +1746,34 @@ class DiagnosticReport:
                 weights="exact",  # paper-faithful Eqs. 7-9 / 10e-g
                 survey_design=self._survey_design,
             )
+        except ValueError as exc:
+            # PR #454 R1 P1: the exact-mode survey path enforces
+            # within-unit constancy of survey columns via
+            # ``_validate_unit_constant_survey``. Survey-backed reports on
+            # panels with time-varying within-unit weights / strata / PSU
+            # / FPC fail that check. The library still supports those
+            # panels via explicit ``bacon_decompose(weights="approximate", ...)``,
+            # so emit a structured skip pointing users at the
+            # ``precomputed={'bacon': ...}`` escape hatch rather than an
+            # opaque ``error`` block.
+            if "varies within units" in str(exc):
+                return {
+                    "status": "skipped",
+                    "reason": (
+                        "Survey design has within-unit-varying columns "
+                        "(weights / strata / PSU / FPC), which the "
+                        'paper-faithful ``weights="exact"`` Bacon path '
+                        "rejects. Run ``bacon_decompose(data, ..., "
+                        'weights="approximate", survey_design=design)`` '
+                        "yourself and pass via "
+                        "``DiagnosticReport(..., precomputed={'bacon': result})`` "
+                        f"to populate this section. Validator detail: {exc}"
+                    ),
+                }
+            return {
+                "status": "error",
+                "reason": f"bacon_decompose raised {type(exc).__name__}: {exc}",
+            }
         except Exception as exc:  # noqa: BLE001
             return {
                 "status": "error",

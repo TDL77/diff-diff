@@ -465,16 +465,22 @@ class BaconDecomposition:
         time : str
             Name of time period column.
         first_treat : str
-            Name of column indicating when unit was first treated.
-            Use 0 (or np.inf) for never-treated units. Units whose
-            ``first_treat`` is at or before the first observable period
-            (``first_treat <= min(time)``, excluding the never-treated
-            sentinels ``0`` and ``np.inf``) are automatically remapped to
-            the ``U`` (untreated) bucket per Goodman-Bacon (2021)
-            footnote 11, with a ``UserWarning``. Detection uses
-            ordered-time logic so panels with negative or zero-crossing
-            period labels (e.g. event-time ``time ∈ [-2,..,3]``) work
-            correctly. The user's original ``first_treat`` column on
+            Name of column indicating when unit was first treated. The
+            values ``0`` and ``np.inf`` are **reserved as never-treated
+            sentinels** (not configurable today); a real treatment cohort
+            with ``first_treat == 0`` would be folded into ``U`` and
+            should instead be re-labeled to a non-sentinel value before
+            fitting. Units whose ``first_treat`` is at or before the
+            first observable period (``first_treat <= min(time)``,
+            excluding the never-treated sentinels ``0`` and ``np.inf``)
+            are automatically remapped to the ``U`` (untreated) bucket
+            per Goodman-Bacon (2021) footnote 11, with a
+            ``UserWarning``. Detection uses ordered-time logic on the
+            **time axis** so panels whose ``time`` column contains
+            negative or zero-crossing labels (e.g. event-time
+            ``time ∈ [-2,..,3]``) are handled correctly; the ``0``
+            sentinel restriction applies only to ``first_treat``, not to
+            ``time``. The user's original ``first_treat`` column on
             ``data`` is preserved unchanged; remapping happens in an
             internal column. The count of remapped units is exposed on
             the result as
@@ -542,11 +548,16 @@ class BaconDecomposition:
         # prior sentinel-only convention (`first_treat ∈ {0, np.inf}`) is
         # narrower than the paper's U.
         #
-        # Detection uses ORDERED-TIME logic (`first_treat <= min(time)`),
-        # NOT positive-sign restriction, so panels with negative or
-        # zero-crossing period labels (e.g. event-time `time ∈ [-2,..,3]`)
-        # work correctly. Sentinel rows (`first_treat ∈ {0, np.inf}`) are
-        # excluded from the remap so the never-treated contract is preserved.
+        # Detection uses ORDERED-TIME logic on the `time` axis
+        # (`first_treat <= min(time)`), NOT positive-sign restriction, so
+        # panels whose `time` column has negative or zero-crossing labels
+        # (e.g. event-time `time ∈ [-2,..,3]`) are handled correctly.
+        # Sentinel rows (`first_treat ∈ {0, np.inf}`) are excluded from
+        # the remap so the never-treated contract is preserved. NOTE: the
+        # `0` sentinel restriction applies to `first_treat` only, not to
+        # `time`; a real treatment cohort with `first_treat == 0` is not
+        # supported today and would be folded into `U` (re-label such
+        # cohorts to a non-sentinel value before fitting).
         # Remapping writes to an internal column; the user's `first_treat`
         # column is preserved unchanged (df = data.copy() above).
         df["__bacon_first_treat_internal__"] = df[first_treat]
@@ -1279,7 +1290,9 @@ def bacon_decompose(
     >>> from diff_diff import bacon_decompose
     >>>
     >>> # Default: paper-faithful Goodman-Bacon (2021) Theorem 1 weights
-    >>> # (weights="exact"), matching R bacondecomp::bacon() at atol=1e-6.
+    >>> # (weights="exact"); intended to match R bacondecomp::bacon() at
+    >>> # atol=1e-6 (R parity goldens pending — see TODO.md "R parity
+    >>> # goldens generation" for the deferred validation step).
     >>> results = bacon_decompose(
     ...     data=panel_df,
     ...     outcome='earnings',

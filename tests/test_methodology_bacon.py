@@ -1051,3 +1051,37 @@ class TestBaconSurveyDesignNarrowing:
         total = sum(c.weight for c in results.comparisons)
         assert abs(total - 1.0) < 0.01
         assert np.isfinite(results.twfe_estimate)
+
+    def test_diagnostic_report_skips_with_structured_reason_on_time_varying_survey(
+        self,
+    ) -> None:
+        """PR #454 R1 P1 regression: ``DiagnosticReport._check_bacon`` now
+        emits ``status="skipped"`` (not ``"error"``) when the panel has
+        within-unit-varying survey columns. The skip reason names the
+        ``precomputed={'bacon': ...}`` + explicit ``weights="approximate"``
+        escape hatch so users have a documented migration path.
+        """
+        from diff_diff import DiagnosticReport
+
+        df, sd = self._time_varying_survey_panel()
+
+        class _Stub:
+            """Minimal results stub that does not carry survey_metadata,
+            so the survey-metadata-without-survey_design early-skip at
+            ``diagnostic_report.py:1723`` does not pre-empt this path."""
+
+        dr = DiagnosticReport(
+            _Stub(),
+            data=df,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=sd,
+        )
+        block = dr._check_bacon()
+        assert block["status"] == "skipped"
+        reason = block["reason"]
+        assert "varies within units" not in reason or "approximate" in reason
+        assert "precomputed" in reason
+        assert 'weights="approximate"' in reason or "approximate" in reason
