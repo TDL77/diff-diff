@@ -810,20 +810,33 @@ class TestSpilloverDiDIdentification:
         assert abs(np.mean(att_estimates) - (-0.07)) < 0.02
         assert abs(np.mean(delta_estimates) - (-0.04)) < 0.02
 
-    def test_staggered_recovers_tau_total(self):
-        """Staggered MC with 30 seeds (smaller because each DGP is larger)."""
+    def test_staggered_recovers_tau_total_and_delta_1(self):
+        """Staggered MC with 30 seeds (smaller because each DGP is larger).
+
+        Anchors BOTH `tau_total` and `delta_1` recovery on the staggered
+        DGP. Per-ring `delta_jk` (event-time decomposition) is deferred
+        alongside `event_study=True` support.
+        """
         att_estimates = []
+        delta_estimates = []
         for s in range(30):
             df = generate_butts_staggered_dgp(tau_total=-0.07, delta_1=-0.04, seed=s)
             result = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon")).fit(
                 df, outcome="y", unit="unit", time="time", first_treat="first_treat"
             )
             att_estimates.append(result.att)
+            if result.spillover_effects is not None and len(result.spillover_effects) > 0:
+                delta_estimates.append(result.spillover_effects.iloc[0]["coef"])
         mean_att = float(np.mean(att_estimates))
-        # Staggered MC is noisier; allow a looser tolerance.
+        mean_delta = float(np.mean(delta_estimates))
+        # Staggered MC is noisier than non-staggered; allow a looser
+        # tolerance (0.04 on tau_total, 0.03 on delta_1).
         assert (
             abs(mean_att - (-0.07)) < 0.04
         ), f"staggered tau_total: expected -0.07, got {mean_att:.4f}"
+        assert (
+            abs(mean_delta - (-0.04)) < 0.03
+        ), f"staggered delta_1: expected -0.04, got {mean_delta:.4f}"
 
 
 # =============================================================================
@@ -1853,6 +1866,139 @@ class TestSpilloverDiDAnticipationPropagation:
         d = result.to_dict()
         assert "anticipation" in d
         assert d["anticipation"] == 0
+
+
+class TestSpilloverDiDAnticipationBehavior:
+    """Round-7 CI review P1: anticipation must change the fitted estimand,
+    not just round-trip through the result object. It shifts BOTH the
+    treatment indicator and the ring-exposure clock by `-anticipation`,
+    moving rows in and out of Omega_0 and changing `tau_total` / `delta_j`.
+    Hand-built 4-period panel with one treated unit at t=2: anticipation=1
+    promotes t=1 into the "treated" window, dropping that row from
+    Omega_0 and increasing n_treated by one period's worth of obs.
+    Verified on both fit entry paths (`treatment=` and `first_treat=`).
+    """
+
+    @staticmethod
+    def _make_4period_panel():
+        rng = np.random.default_rng(42)
+        # 1 treated @ t=2, 1 near-control, 2 far-controls. 4 periods.
+        specs = [
+            ("treated", 0.0, [0, 0, 1, 1]),
+            ("near", 0.5, [0, 0, 0, 0]),
+            ("far1", 5.0, [0, 0, 0, 0]),
+            ("far2", 5.1, [0, 0, 0, 0]),
+        ]
+        rows = []
+        for unit, lat, d_pattern in specs:
+            for t in range(4):
+                rows.append(
+                    {
+                        "unit": unit,
+                        "time": t,
+                        "lat": lat,
+                        "lon": 0.0,
+                        "D": d_pattern[t],
+                        "y": rng.normal(),
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def test_anticipation_shifts_omega_0_on_treatment_path(self):
+        """anticipation=1 on the binary `treatment=` path: the effective
+        treatment indicator slides one period earlier, so t=1 (formerly
+        Omega_0 for treated + near units) is dropped from stage 1 and
+        promoted into the "currently-treated / currently-exposed" zone.
+        Stage 1 sample shrinks; n_treated grows; att changes."""
+        df = self._make_4period_panel()
+        r0 = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            anticipation=0,
+        ).fit(df, outcome="y", unit="unit", time="time", treatment="D")
+        r1 = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            anticipation=1,
+        ).fit(df, outcome="y", unit="unit", time="time", treatment="D")
+        # n_treated grows by 1 row (treated unit's t=1 row promoted under
+        # the shifted indicator).
+        assert r1.n_treated == r0.n_treated + 1, (
+            f"anticipation=1 should add one treated period; "
+            f"got n_treated {r0.n_treated} -> {r1.n_treated}"
+        )
+        # Stage 1 Omega_0 sample shrinks (rows promoted to treated/exposed
+        # leave Omega_0).
+        assert r1.stage1_n_obs < r0.stage1_n_obs, (
+            f"anticipation=1 should shrink Omega_0; got stage1_n_obs "
+            f"{r0.stage1_n_obs} -> {r1.stage1_n_obs}"
+        )
+        # And the estimand changes (different sample → different att).
+        assert r0.att != r1.att, f"anticipation=1 should change att; got {r0.att} == {r1.att}"
+
+    def test_anticipation_shifts_omega_0_on_first_treat_path(self):
+        """anticipation=1 on the Gardner `first_treat=` path: same shift
+        applies. The first_treat column carries treatment onsets directly,
+        and anticipation subtracts from each onset for both the D_it
+        construction AND the ring-exposure (S_it) clock."""
+        df = self._make_4period_panel()
+        # Convert binary D to first_treat column.
+        first_treat_map = {"treated": 2.0, "near": np.inf, "far1": np.inf, "far2": np.inf}
+        df_ft = df.copy()
+        df_ft["first_treat"] = df_ft["unit"].map(first_treat_map)
+        df_ft = df_ft.drop(columns=["D"])
+
+        r0 = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            anticipation=0,
+        ).fit(df_ft, outcome="y", unit="unit", time="time", first_treat="first_treat")
+        r1 = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            anticipation=1,
+        ).fit(df_ft, outcome="y", unit="unit", time="time", first_treat="first_treat")
+        assert r1.n_treated == r0.n_treated + 1, (
+            f"first_treat path anticipation=1: expected +1 treated, "
+            f"got {r0.n_treated} -> {r1.n_treated}"
+        )
+        assert r1.stage1_n_obs < r0.stage1_n_obs, (
+            f"first_treat path anticipation=1: Omega_0 should shrink, "
+            f"got {r0.stage1_n_obs} -> {r1.stage1_n_obs}"
+        )
+        assert r0.att != r1.att, (
+            f"first_treat path anticipation=1: expected att to change, " f"got {r0.att} == {r1.att}"
+        )
+
+    def test_anticipation_shift_matches_across_fit_paths(self):
+        """Sanity-check that the `treatment=` and `first_treat=` paths
+        produce identical results under the same anticipation setting —
+        the two entry points are internally unified, so anticipation must
+        compose consistently with both."""
+        df = self._make_4period_panel()
+        df_ft = df.copy()
+        df_ft["first_treat"] = df_ft["unit"].map(
+            {"treated": 2.0, "near": np.inf, "far1": np.inf, "far2": np.inf}
+        )
+        df_ft = df_ft.drop(columns=["D"])
+
+        for ant in (0, 1):
+            r_d = SpilloverDiD(
+                rings=[0.0, 100.0],
+                conley_coords=("lat", "lon"),
+                anticipation=ant,
+            ).fit(df, outcome="y", unit="unit", time="time", treatment="D")
+            r_ft = SpilloverDiD(
+                rings=[0.0, 100.0],
+                conley_coords=("lat", "lon"),
+                anticipation=ant,
+            ).fit(df_ft, outcome="y", unit="unit", time="time", first_treat="first_treat")
+            assert r_d.att == r_ft.att, (
+                f"anticipation={ant}: att mismatch between paths " f"({r_d.att} vs {r_ft.att})"
+            )
+            assert (
+                r_d.stage1_n_obs == r_ft.stage1_n_obs
+            ), f"anticipation={ant}: stage1_n_obs mismatch between paths"
 
 
 class TestSpilloverDiDEffectiveRankDoF:
