@@ -519,11 +519,16 @@ class TestBaconParityR:
         }
         # Aggregate R's two U-bucket types per treated cohort.
         # R uses ctrl=99999 for untreated and ctrl=1 (the always-treated cohort)
-        # for the `Later vs Always Treated` rows.
+        # for the `Later vs Always Treated` rows. Match on case-insensitive
+        # semantic tokens so the selector survives `bacondecomp` label
+        # variation across versions (same convention as the neighboring
+        # ``_classify_r_type`` helper used by the per-component test).
         r_agg: dict = {}
         for c in fix["r_components"]:
-            ctype = c.get("type", "")
-            if "Untreated" in ctype or ("Always Treated" in ctype and "Later" in ctype):
+            tlow = (c.get("type") or "").lower()
+            is_untreated = "untreated" in tlow or "never" in tlow
+            is_always_treated_compare = "always" in tlow
+            if is_untreated or is_always_treated_compare:
                 k = float(c["treated_group"])
                 w = float(c["weight"])
                 e = float(c["estimate"])

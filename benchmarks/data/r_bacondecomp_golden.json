@@ -3,7 +3,7 @@
     "generated_at": "2026-05-16",
     "bacondecomp_version": "0.1.1",
     "r_version": "R version 4.5.2 (2025-10-31)",
-    "description": "Goodman-Bacon (2021) decomposition parity goldens for diff-diff BaconDecomposition. Parity target: atol=1e-6 on per-component (treated, control, type) tuples plus the TWFE coefficient."
+    "description": "Goodman-Bacon (2021) decomposition parity goldens for diff-diff BaconDecomposition. Parity target at atol=1e-6: (1) aggregate TWFE coefficient + weights-sum across all 3 fixtures; (2) direct per-component (treated, control, type) parity on the 2 non-remap fixtures AND on the 6 timing-vs-timing rows of always_treated_remapped; (3) cohort-level fold-back parity for the U bucket on always_treated_remapped (Python's paper-footnote-11 remap folds R's separate Later-vs-Always-Treated + Treated-vs-Untreated rows into a single treated_vs_never cell per cohort; aggregate is invariant per Theorem 1, breakdown differs by convention). See REGISTRY Note (R parity convention divergence on always-treated) + Deviation (first-period boundary extension)."
   },
   "uniform_3groups_with_never_treated": {
     "panel": {
