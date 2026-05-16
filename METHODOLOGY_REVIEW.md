@@ -24,7 +24,7 @@ A **Complete** entry has a documented review pass against the primary academic s
 
 The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
 
-**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review, a dedicated methodology test file, and R parity fixtures (e.g., DCDH has all three; HAD has the paper review and R parity but no dedicated methodology file; ContinuousDiD has the methodology file but no paper review); others have only the REGISTRY entry and unit tests (e.g., BaconDecomposition, PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
+**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures (e.g., DCDH has a methodology file, R parity, and a companion-paper review for the 2026 universal-rollout extension; HAD has its primary-source paper review and R parity but no dedicated methodology file; ContinuousDiD has the methodology file but no paper review); others have only the REGISTRY entry and unit tests (e.g., BaconDecomposition, PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
 
 **Not Started** entries have neither a tracker walk-through nor an REGISTRY.md section. This tracker no longer carries any Not Started rows; new estimators are expected to enter as In Progress when their REGISTRY entry lands.
 
@@ -666,13 +666,14 @@ and covariate-adjusted specifications.)
 
 **Documentation in place:**
 - REGISTRY.md section: `## ChaisemartinDHaultfoeuille` (DID_M, DID_+, DID_-, single-lag placebo, TWFE-weights diagnostic, multiplier bootstrap, DID^X / DID^{fd} / state-set-specific trends / heterogeneity testing / Design-2 / by_path / HonestDiD integration, survey design + replicate weights + HM wild bootstrap)
-- **Paper review on file**: `docs/methodology/papers/dechaisemartin-2026-review.md` (universal-rollout coverage)
+- **Companion-paper review on file**: `docs/methodology/papers/dechaisemartin-2026-review.md` covers the 2026 universal-rollout extension (Knau et al.), which is the primary source for HAD rather than for DCDH. The 2020 AER and 2022/2024 NBER WP 29873 papers that define DCDH's core DID_M / DID_+ / DID_- and dynamic estimators do **not** yet have dedicated review files on disk.
 - `tests/test_methodology_chaisemartin_dhaultfoeuille.py`: 12 tests across 4 classes (worked example, cohort recentering, TWFE diagnostic, large-N recovery)
 - `tests/test_chaisemartin_dhaultfoeuille_parity.py`: 24 R parity tests against `DIDmultiplegtDYN`
 - Implementation: 347 unit tests in `tests/test_chaisemartin_dhaultfoeuille.py`
 - Survey-specific: `tests/test_survey_dcdh.py`, `tests/test_survey_dcdh_replicate_psu.py`, plus three dCDH cell-period coverage suites
 
 **Outstanding for promotion:**
+- **Primary-source paper reviews**: write `docs/methodology/papers/dechaisemartin-dhaultfoeuille-2020-review.md` covering the 2020 AER and a companion review covering 2022/2024 NBER WP 29873 (intertemporal treatment effects). The existing 2026 review covers the universal-rollout extension only.
 - Formal Verified Components block here matching REGISTRY's exhaustive Implementation Checklist
 - Consolidated Deviations summary (currently scattered across REGISTRY Notes): equal-cell weighting vs R cell-size weighting, terminal-missingness retention, A11 zero-retention convention, `<50%` switcher warning at far horizons
 - Documented R parity tolerance bands at `l=1` (existing parity fixture in `test_chaisemartin_dhaultfoeuille_parity.py`)
@@ -1189,7 +1190,7 @@ Promotion priority for the **In Progress** entries, ordered by what's blocked on
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
 7. **HeterogeneousAdoptionDiD (HAD)** — largest current surface, Phase 4.5 just shipped; shares the de Chaisemartin (2026) paper review with DCDH; needs a dedicated Verified Components block.
-8. **ChaisemartinDHaultfoeuille (DCDH)** — paper review + 12 methodology tests + 24 R parity tests + 347 unit tests. Closest to ready; mostly a consolidation pass.
+8. **ChaisemartinDHaultfoeuille (DCDH)** — methodology test file + 24 R parity tests + 347 unit tests + a companion-paper review for the 2026 universal-rollout extension. Primary-source reviews for the 2020 AER and 2022/2024 NBER WP 29873 papers are still outstanding alongside the Verified Components walk-through.
 9. **WooldridgeDiD (ETWFE)** — companion-paper review (Wooldridge 2023 nonlinear extension) merged in PR #443; primary-source review for Wooldridge (2025) ETWFE not yet on file, and no dedicated methodology test file.
 10. **ContinuousDiD** — 15 methodology tests already in place; mostly a consolidation pass with a documented boundary-knots deviation from R `contdid` v0.1.0.
 11. **TROP** — paper review recently merged (PR #443); needs methodology file and cross-language anchor (when paper-author reference becomes available).
