@@ -2867,18 +2867,21 @@ class TestHeterogeneityTesting:
         assert 1 in r.heterogeneity_effects
         assert 2 in r.heterogeneity_effects
 
-    def test_heterogeneity_inference_matches_safe_inference(self):
-        """Local invariant: non-survey heterogeneity `t_stat` / `p_value` /
-        `conf_int` must equal ``safe_inference(beta, se, df=None)`` on every
-        populated horizon. R parity for these fields is intentionally
-        skipped (Python uses normal Z, R uses finite-df t — documented in
-        REGISTRY); without this local invariant a regression isolated to
-        the inference extraction or `_refresh_path_inference` ordering
-        could silently drop / mis-route the SE-derived fields while
-        beta / se still pass R parity.
+    def test_heterogeneity_inference_local_invariants(self):
+        """Local SE-derivation invariants for non-survey heterogeneity
+        inference. Post-2026-05-15 df threading: Python passes
+        ``df = n_obs - n_params`` to ``safe_inference`` (matching R's
+        t-distribution); R-parity is pinned in
+        ``tests/test_chaisemartin_dhaultfoeuille_parity.py``. This local
+        test verifies the SE-derived fields are wired correctly
+        without requiring back-derivation of ``n_params``:
+        ``t_stat = beta / se``; ``conf_int`` symmetric around ``beta``
+        with positive half-width; ``p_value`` in ``[0, 1]``.
+        Without these checks a regression isolated to the inference
+        extraction or ``_refresh_path_inference`` ordering could
+        silently drop / mis-route the SE-derived fields while beta / se
+        still pass R parity.
         """
-        from diff_diff.utils import safe_inference
-
         df = self._make_panel_with_het()
         r = ChaisemartinDHaultfoeuille(seed=1).fit(
             df, "outcome", "group", "period", "treatment",
@@ -2889,19 +2892,22 @@ class TestHeterogeneityTesting:
         for l_h, het in r.heterogeneity_effects.items():
             if not (np.isfinite(het["beta"]) and np.isfinite(het["se"])):
                 continue
-            expected_t, expected_p, expected_ci = safe_inference(
-                het["beta"], het["se"], df=None
-            )
+            expected_t = het["beta"] / het["se"]
             assert het["t_stat"] == pytest.approx(expected_t, rel=1e-12), (
                 f"l={l_h} t_stat: stored={het['t_stat']} vs "
-                f"safe_inference={expected_t}"
+                f"beta/se={expected_t}"
             )
-            assert het["p_value"] == pytest.approx(expected_p, rel=1e-12), (
-                f"l={l_h} p_value: stored={het['p_value']} vs "
-                f"safe_inference={expected_p}"
+            half_low = het["beta"] - het["conf_int"][0]
+            half_high = het["conf_int"][1] - het["beta"]
+            assert half_low > 0, f"l={l_h} conf_int_lower not below beta"
+            assert half_high > 0, f"l={l_h} conf_int_upper not above beta"
+            assert half_low == pytest.approx(half_high, rel=1e-12), (
+                f"l={l_h} conf_int asymmetric: "
+                f"below={half_low} above={half_high}"
             )
-            assert het["conf_int"][0] == pytest.approx(expected_ci[0], rel=1e-12)
-            assert het["conf_int"][1] == pytest.approx(expected_ci[1], rel=1e-12)
+            assert 0.0 <= het["p_value"] <= 1.0, (
+                f"l={l_h} p_value out of [0, 1]: {het['p_value']}"
+            )
             checked += 1
         assert checked >= 1, "Expected at least one populated heterogeneity horizon"
 
@@ -10280,20 +10286,18 @@ class TestByPathHeterogeneity:
                 f"(DGP: 5 + 3*het_x), got {horizons[1]['beta']}"
             )
 
-    def test_per_path_heterogeneity_inference_matches_safe_inference(self):
-        """Local invariant: non-survey per-path heterogeneity `t_stat` /
-        `p_value` / `conf_int` must equal ``safe_inference(beta, se,
-        df=None)`` on every populated (path, horizon) entry. R parity
-        for these fields is intentionally skipped (Python uses normal Z,
-        R uses finite-df t — documented in REGISTRY); without this local
-        invariant a regression isolated to the inference extraction or
-        `_refresh_path_inference` ordering could silently drop or
-        mis-route the SE-derived fields while beta / se still pass R
-        parity. Mirrors the global heterogeneity test of the same name
-        in TestHeterogeneityTesting.
+    def test_per_path_heterogeneity_inference_local_invariants(self):
+        """Local SE-derivation invariants for non-survey per-path
+        heterogeneity inference. Post-2026-05-15 df threading: Python
+        passes ``df = n_obs - n_params`` to ``safe_inference``; R-parity
+        is pinned in
+        ``tests/test_chaisemartin_dhaultfoeuille_parity.py::
+        TestDCDHDynRParityByPathHeterogeneity``. Verifies SE-derivation
+        wiring (``t_stat = beta/se``, symmetric ``conf_int`` around beta,
+        ``p_value`` in ``[0, 1]``) without back-deriving ``n_params``.
+        Mirrors
+        ``TestHeterogeneityTesting::test_heterogeneity_inference_local_invariants``.
         """
-        from diff_diff.utils import safe_inference
-
         df = _by_path_het_data()
         est = ChaisemartinDHaultfoeuille(drop_larger_lower=False, by_path=3)
         with warnings.catch_warnings():
@@ -10308,22 +10312,24 @@ class TestByPathHeterogeneity:
             for l_h, het in horizons.items():
                 if not (np.isfinite(het["beta"]) and np.isfinite(het["se"])):
                     continue
-                expected_t, expected_p, expected_ci = safe_inference(
-                    het["beta"], het["se"], df=None
-                )
+                expected_t = het["beta"] / het["se"]
                 assert het["t_stat"] == pytest.approx(expected_t, rel=1e-12), (
                     f"path={path} l={l_h} t_stat: stored={het['t_stat']} vs "
-                    f"safe_inference={expected_t}"
+                    f"beta/se={expected_t}"
                 )
-                assert het["p_value"] == pytest.approx(expected_p, rel=1e-12), (
-                    f"path={path} l={l_h} p_value: stored={het['p_value']} vs "
-                    f"safe_inference={expected_p}"
+                half_low = het["beta"] - het["conf_int"][0]
+                half_high = het["conf_int"][1] - het["beta"]
+                assert half_low > 0, (
+                    f"path={path} l={l_h} conf_int_lower not below beta"
                 )
-                assert het["conf_int"][0] == pytest.approx(
-                    expected_ci[0], rel=1e-12
+                assert half_high > 0, (
+                    f"path={path} l={l_h} conf_int_upper not above beta"
                 )
-                assert het["conf_int"][1] == pytest.approx(
-                    expected_ci[1], rel=1e-12
+                assert half_low == pytest.approx(half_high, rel=1e-12), (
+                    f"path={path} l={l_h} conf_int asymmetric"
+                )
+                assert 0.0 <= het["p_value"] <= 1.0, (
+                    f"path={path} l={l_h} p_value out of [0, 1]"
                 )
                 checked += 1
         assert checked >= 1, (
@@ -10988,7 +10994,9 @@ class TestByPathHeterogeneity:
 
     def test_to_dataframe_by_path_includes_heterogeneity_columns(self):
         """``to_dataframe(level='by_path')`` includes het_* columns;
-        populated for positive horizons and NaN for placebo rows."""
+        populated for both forward and placebo horizons when
+        ``placebo=True`` and ``heterogeneity=`` are both set
+        (post-2026-05-15 #422)."""
         df = _by_path_het_data()
         est = ChaisemartinDHaultfoeuille(
             drop_larger_lower=False, by_path=2, placebo=True
@@ -11006,13 +11014,18 @@ class TestByPathHeterogeneity:
         assert "het_p_value" in out.columns
         assert "het_conf_int_lower" in out.columns
         assert "het_conf_int_upper" in out.columns
-        # Placebo rows: het_* must be NaN
-        if (out.horizon < 0).any():
-            placebo_rows = out[out.horizon < 0]
-            assert placebo_rows["het_beta"].isna().all()
         # Positive horizons: at least some entries are populated
         positive_rows = out[out.horizon > 0]
         assert positive_rows["het_beta"].notna().any()
+        # Placebo rows: NOW also populated (closes TODO #422). Pre-PR
+        # contract was hardcoded NaN; new contract reads from
+        # path_heterogeneity_effects negative-int keys.
+        if (out.horizon < 0).any():
+            placebo_rows = out[out.horizon < 0]
+            assert placebo_rows["het_beta"].notna().any(), (
+                "Expected at least one placebo row with non-NaN het_beta "
+                "after #422 (per-path placebo predict_het R-parity)."
+            )
 
     def test_per_path_heterogeneity_renders_in_summary(self):
         """``summary()`` includes per-path heterogeneity sub-block.
@@ -11083,3 +11096,365 @@ class TestByPathHeterogeneity:
         assert res.path_heterogeneity_effects is not None
         assert (1, 1, 1, 0) not in res.path_heterogeneity_effects
         assert (0, 1, 1, 1) in res.path_heterogeneity_effects
+
+
+def _single_path_het_data(seed=44, n_switchers=30, n_controls=15, n_periods=10):
+    """Single-path multi-cohort panel with binary `het_x` for telescope tests.
+
+    All 30 switchers follow path (0, 1, 1, 1) with F_g cycling in {3, 4, 5}
+    (10 groups per F_g). Mirrors `_by_path_het_data` shape but restricted
+    to a single observed path so `path_heterogeneity_effects[(0,1,1,1)]`
+    can be compared bit-exactly against global `heterogeneity_effects`.
+    """
+    rng = np.random.RandomState(seed)
+    rows = []
+    path = (0, 1, 1, 1)
+    for g in range(n_switchers):
+        F_g = 3 + ((g // 10) % 3)
+        het_x = 1 if g < n_switchers // 2 else 0
+        effect = 5.0 + 3.0 * het_x
+        for t in range(n_periods):
+            if F_g - 1 <= t < F_g - 1 + len(path):
+                d = path[t - (F_g - 1)]
+            elif t >= F_g - 1 + len(path):
+                d = path[-1]
+            else:
+                d = 0
+            y = 0.5 * t + effect * d + rng.normal(0, 0.5)
+            rows.append({
+                "group": g, "period": t, "treatment": d,
+                "outcome": y, "het_x": het_x,
+            })
+    for k in range(n_controls):
+        het_x = 1 if k < n_controls // 2 else 0
+        g = n_switchers + k
+        for t in range(n_periods):
+            y = 0.5 * t + rng.normal(0, 0.5)
+            rows.append({
+                "group": g, "period": t, "treatment": 0,
+                "outcome": y, "het_x": het_x,
+            })
+    return pd.DataFrame(rows)
+
+
+class TestByPathPredictHetPlacebo:
+    """`predict_het` × `placebo` × `by_path` (closes TODO #422 + pilot-412).
+
+    R-verified: `did_multiplegt_dyn(by_path, predict_het, placebo)` emits
+    per-path heterogeneity OLS results on backward (placebo) horizons via
+    R's per-by_level dispatcher. Python mirrors via
+    ``_compute_heterogeneity_test(..., placebo=L_max)`` when the user
+    sets ``placebo=True``.
+
+    R-parity coverage in
+    ``tests/test_chaisemartin_dhaultfoeuille_parity.py::
+    TestDCDHDynRParityByPathHeterogeneityWithPlacebo``.
+    """
+
+    def test_to_dataframe_by_path_emits_het_columns_on_placebo_rows(self):
+        """`to_dataframe(level="by_path")` placebo rows now have het_*."""
+        df = _by_path_het_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, placebo=True
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        out = res.to_dataframe(level="by_path")
+        placebo_rows = out[out["horizon"] < 0]
+        assert len(placebo_rows) > 0, "expected at least one placebo row"
+        finite_het_count = placebo_rows["het_beta"].notna().sum()
+        assert finite_het_count > 0, (
+            "Expected at least one placebo row with non-NaN het_beta. "
+            "Pre-#422 contract was hardcoded NaN; new contract populates "
+            "from path_heterogeneity_effects negative-key lookup."
+        )
+
+    def test_predict_het_placebo_survey_design_warns_and_skips_backward(self):
+        """survey_design + placebo + heterogeneity warns + emits forward-only.
+
+        Per codex R1 P1 #1: the previous eager-at-function-entry gate
+        broke the previously-supported forward-horizon survey + predict_het
+        path under the default `placebo=True` setting. Replaced with a
+        per-iteration backstop in `_compute_heterogeneity_test` (raises
+        only when actually computing a backward iteration under survey)
+        plus fit-time warn+skip at the global and per-path call sites
+        that pass `placebo=0` when survey is active. User gets a
+        UserWarning and forward-horizon results, NOT an exception.
+
+        The defensive direct-call gate is exercised separately by
+        `test_compute_heterogeneity_test_direct_call_raises_on_backward_survey`.
+        """
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_het_data()
+        df["sw"] = 1.0
+        df["stratum"] = df["group"] % 4
+        df["psu_id"] = df["group"]
+        sd = SurveyDesign(
+            weights="sw", strata="stratum", psu="psu_id",
+        )
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, placebo=True
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+                heterogeneity="het_x", survey_design=sd,
+            )
+        # Warning fired with the expected substring
+        het_warnings = [
+            w for w in caught
+            if "backward-horizon (placebo) predict_het" in str(w.message)
+        ]
+        assert het_warnings, (
+            "Expected UserWarning about backward-horizon survey gate. "
+            f"Got: {[str(w.message) for w in caught]}"
+        )
+        # Forward-horizon heterogeneity ran successfully
+        assert res.heterogeneity_effects is not None
+        # Only positive-int keys (forward); no negative (placebo) keys
+        het_keys = sorted(res.heterogeneity_effects.keys())
+        assert all(h > 0 for h in het_keys), (
+            f"Expected only positive horizons under survey gate, got: {het_keys}"
+        )
+        # Per-path heterogeneity also forward-only
+        assert res.path_heterogeneity_effects is not None
+        for path, horizons in res.path_heterogeneity_effects.items():
+            path_keys = sorted(horizons.keys())
+            assert all(h > 0 for h in path_keys), (
+                f"path={path}: expected only positive horizons, got {path_keys}"
+            )
+
+    def test_compute_heterogeneity_test_direct_call_raises_on_backward_survey(
+        self,
+    ):
+        """Direct calls to `_compute_heterogeneity_test` with survey +
+        backward horizon raise NotImplementedError.
+
+        Defensive backstop: fit() gates this case upstream, so the
+        function-level raise is unreachable via the normal flow. This
+        test exercises the per-iteration gate directly to lock the API
+        contract for any future internal call site.
+        """
+        from diff_diff.chaisemartin_dhaultfoeuille import (
+            _compute_heterogeneity_test,
+        )
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_het_data()
+        df["sw"] = 1.0
+        df["stratum"] = df["group"] % 4
+        df["psu_id"] = df["group"]
+        sd = SurveyDesign(
+            weights="sw", strata="stratum", psu="psu_id",
+        )
+        # Build a minimal valid obs_survey_info dict matching the
+        # function's contract. SurveyDesign.resolve() takes only the
+        # dataframe; group/time are inferred from the design context.
+        resolved = sd.resolve(df)
+        groups = sorted(df["group"].unique())
+        periods = sorted(df["period"].unique())
+        n_groups = len(groups)
+        n_periods = len(periods)
+        Y_mat = np.zeros((n_groups, n_periods))
+        N_mat = np.ones((n_groups, n_periods))
+        baselines = np.zeros(n_groups)
+        first_switch_idx = np.full(n_groups, 3, dtype=int)
+        switch_direction = np.ones(n_groups)
+        T_g = np.full(n_groups, n_periods - 1, dtype=int)
+        X_het = np.zeros(n_groups)
+        obs_survey_info = {
+            "group_ids": df["group"].to_numpy(),
+            "time_ids": df["period"].to_numpy(),
+            "weights": df["sw"].to_numpy(dtype=np.float64),
+            "resolved": resolved,
+            "periods": np.asarray(periods),
+        }
+        with pytest.raises(
+            NotImplementedError,
+            match=r"backward-horizon \(placebo\) predict_het",
+        ):
+            _compute_heterogeneity_test(
+                Y_mat=Y_mat,
+                N_mat=N_mat,
+                baselines=baselines,
+                first_switch_idx=first_switch_idx,
+                switch_direction=switch_direction,
+                T_g=T_g,
+                X_het=X_het,
+                L_max=2,
+                placebo=2,
+                group_ids_order=np.asarray(groups),
+                obs_survey_info=obs_survey_info,
+            )
+
+    def test_predict_het_placebo_survey_forward_only_still_works(self):
+        """survey + predict_het without placebo continues to work."""
+        from diff_diff.survey import SurveyDesign
+
+        df = _by_path_het_data()
+        df["sw"] = 1.0
+        df["stratum"] = df["group"] % 4
+        df["psu_id"] = df["group"]
+        sd = SurveyDesign(
+            weights="sw", strata="stratum", psu="psu_id",
+        )
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, placebo=False
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3,
+                heterogeneity="het_x", survey_design=sd,
+            )
+        assert res.path_heterogeneity_effects is not None
+        for path, horizons in res.path_heterogeneity_effects.items():
+            for h in [1, 2, 3]:
+                if h in horizons:
+                    assert np.isfinite(horizons[h]["beta"]), (
+                        f"path={path} h={h} beta non-finite under "
+                        f"forward+survey path"
+                    )
+
+    def test_predict_het_placebo_eligible_filter(self):
+        """`out_idx < 0` guard filters groups when F_g < |placebo|+1.
+
+        Backward horizon `l_h = -k` requires `out_idx = F_g - 1 - k >= 0`,
+        i.e., `F_g >= k + 1`. Groups with smaller F_g are filtered out
+        rather than producing wrong-cell numpy reads via negative indexing.
+        """
+        rng = np.random.RandomState(99)
+        rows = []
+        path = (0, 1, 1, 1)
+        n_switchers = 60
+        n_controls = 30
+        n_periods = 10
+        for g in range(n_switchers):
+            F_g = 2  # ALL switchers have F_g=2
+            het_x = 1 if g < n_switchers // 2 else 0
+            effect = 5.0 + 3.0 * het_x
+            for t in range(n_periods):
+                if F_g - 1 <= t < F_g - 1 + len(path):
+                    d = path[t - (F_g - 1)]
+                elif t >= F_g - 1 + len(path):
+                    d = path[-1]
+                else:
+                    d = 0
+                y = 0.5 * t + effect * d + rng.normal(0, 0.5)
+                rows.append({
+                    "group": g, "period": t, "treatment": d,
+                    "outcome": y, "het_x": het_x,
+                })
+        for k in range(n_controls):
+            het_x = 1 if k < n_controls // 2 else 0
+            g = n_switchers + k
+            for t in range(n_periods):
+                y = 0.5 * t + rng.normal(0, 0.5)
+                rows.append({
+                    "group": g, "period": t, "treatment": 0,
+                    "outcome": y, "het_x": het_x,
+                })
+        df = pd.DataFrame(rows)
+
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, paths_of_interest=[(0, 1, 1, 1)],
+            placebo=True,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+
+        assert res.path_heterogeneity_effects is not None
+        path_het = res.path_heterogeneity_effects.get((0, 1, 1, 1), {})
+        # -1 has out_idx=0 → eligible
+        # -2 has out_idx=-1 → all groups filtered, n_obs=0, NaN-consistent
+        # -3 has out_idx=-2 → all groups filtered, n_obs=0, NaN-consistent
+        if -2 in path_het:
+            assert path_het[-2]["n_obs"] == 0, (
+                f"placebo -2 should be filtered (out_idx<0): "
+                f"got n_obs={path_het[-2]['n_obs']}"
+            )
+            assert np.isnan(path_het[-2]["beta"])
+            assert np.isnan(path_het[-2]["se"])
+        if -3 in path_het:
+            assert path_het[-3]["n_obs"] == 0
+            assert np.isnan(path_het[-3]["beta"])
+
+    def test_path_heterogeneity_telescopes_to_global_on_single_path_panel(
+        self,
+    ):
+        """Single-path panel: per-path het == global het bit-exactly.
+
+        Cross-surface twin: when only one path is observed,
+        `path_heterogeneity_effects[(only_path,)]` should equal
+        `heterogeneity_effects` (forward + backward) because the
+        path-restricted regression has the same eligible group set as
+        the global regression.
+        """
+        df = _single_path_het_data()
+        est_g = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, placebo=True
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_g = est_g.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        est_p = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False,
+            paths_of_interest=[(0, 1, 1, 1)],
+            placebo=True,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_p = est_p.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        path_het = res_p.path_heterogeneity_effects[(0, 1, 1, 1)]
+        global_het = res_g.heterogeneity_effects
+
+        for h in list(global_het.keys()):
+            assert h in path_het, f"horizon {h} missing in path_het"
+            g_h = global_het[h]
+            p_h = path_het[h]
+            if not np.isfinite(g_h["beta"]):
+                assert not np.isfinite(p_h["beta"])
+                continue
+            np.testing.assert_allclose(
+                p_h["beta"], g_h["beta"], atol=1e-14, rtol=1e-14,
+                err_msg=f"horizon {h} beta telescope failed",
+            )
+            np.testing.assert_allclose(
+                p_h["se"], g_h["se"], atol=1e-14, rtol=1e-14,
+                err_msg=f"horizon {h} se telescope failed",
+            )
+            assert int(p_h["n_obs"]) == int(g_h["n_obs"])
+
+    def test_summary_renders_placebo_het_rows(self):
+        """`result.summary()` renders without error after #422."""
+        df = _by_path_het_data()
+        est = ChaisemartinDHaultfoeuille(
+            drop_larger_lower=False, by_path=3, placebo=True
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df, outcome="outcome", group="group", time="period",
+                treatment="treatment", L_max=3, heterogeneity="het_x",
+            )
+        s = res.summary()
+        assert isinstance(s, str)
+        assert len(s) > 0

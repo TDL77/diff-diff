@@ -980,14 +980,25 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
         heterogeneity : str, optional
             Column name for a time-invariant covariate to test for
             heterogeneous effects (Web Appendix Section 1.5, Lemma 7).
-            Partial implementation: post-treatment regressions only
-            (no placebo regressions or joint null test). Cannot be
-            combined with ``controls``, ``trends_linear``, or
-            ``trends_nonparam``. Requires ``L_max >= 1``. Under
-            ``by_path`` / ``paths_of_interest``, per-path
-            heterogeneity coefficients also surface on
-            ``results.path_heterogeneity_effects`` and on
-            ``to_dataframe(level="by_path")`` via ``het_*`` columns.
+            Per-horizon OLS regressions are computed for forward
+            horizons (1..L_max), and ALSO for backward (placebo)
+            horizons (-1..-L_max) when ``placebo=True`` is set
+            (post-2026-05-15: per-path placebo predict_het R-parity
+            against ``did_multiplegt_dyn(by_path, predict_het, placebo)``).
+            Joint Wald F-test across rows is NOT computed
+            (per-horizon inference only). Cannot be combined with
+            ``controls``, ``trends_linear``, or ``trends_nonparam``.
+            Requires ``L_max >= 1``. Under ``by_path`` /
+            ``paths_of_interest``, per-path heterogeneity coefficients
+            also surface on ``results.path_heterogeneity_effects`` and
+            on ``to_dataframe(level="by_path")`` via ``het_*`` columns
+            (positive AND negative-horizon rows populated when
+            ``placebo=True``). Under ``survey_design``, backward-
+            horizon (placebo) heterogeneity is NOT computed (the pre-
+            period Binder TSL cell allocator is deferred to a follow-
+            up methodology PR); a ``UserWarning`` fires at fit-time
+            and forward-horizon heterogeneity continues to compute
+            normally.
         design2 : bool, default=False
             If ``True``, identify and report switch-in/switch-out
             (Design-2) groups. Convenience wrapper (descriptive summary,
@@ -3875,6 +3886,28 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
             # event_study_effects but the het test uses level outcomes.
             Y_het = Y_mat if not _is_trends_linear else y_pivot.to_numpy()
             N_het = N_mat_orig
+            # Survey + placebo + heterogeneity: backward-horizon
+            # (placebo) predict_het is deferred under survey designs
+            # because the Binder TSL cell-period allocator's REGISTRY
+            # justification is tied to post-period attribution
+            # (pre-period cell allocator derivation gap). Compute
+            # forward-horizon heterogeneity only and warn so the user
+            # knows backward-horizon results are NOT silently produced.
+            _het_placebo = L_max if self.placebo else 0
+            if _het_placebo > 0 and _obs_survey_info is not None:
+                warnings.warn(
+                    "survey_design + heterogeneity + placebo=True: "
+                    "backward-horizon (placebo) predict_het is not yet "
+                    "supported under survey designs (pre-period cell "
+                    "allocator deferred — see REGISTRY.md "
+                    "ChaisemartinDHaultfoeuille placebo predict_het "
+                    "Note). Forward-horizon predict_het is computed "
+                    "normally. Drop placebo, drop heterogeneity, or "
+                    "drop survey_design to silence this warning.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                _het_placebo = 0
             heterogeneity_effects = _compute_heterogeneity_test(
                 Y_mat=Y_het,
                 N_mat=N_het,
@@ -3884,6 +3917,7 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                 T_g=T_g_arr,
                 X_het=X_het,
                 L_max=L_max,
+                placebo=_het_placebo,
                 alpha=self.alpha,
                 rank_deficient_action=self.rank_deficient_action,
                 group_ids_order=np.array(all_groups),
@@ -3902,6 +3936,17 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
         if heterogeneity is not None and (
             self.by_path is not None or self.paths_of_interest is not None
         ):
+            # Per-path placebo predict_het under survey: same gating
+            # rationale as the global call above. The global call's
+            # warning already fired (heterogeneity is computed at both
+            # surfaces in the same fit() flow), so per-path skips
+            # silently — no duplicate warning. Forward-horizon per-path
+            # predict_het + survey continues to work via the existing
+            # _compute_path_heterogeneity_test → _compute_heterogeneity_test
+            # forward path.
+            _path_het_placebo = L_max if self.placebo else 0
+            if _path_het_placebo > 0 and _obs_survey_info is not None:
+                _path_het_placebo = 0
             path_heterogeneity_effects = _compute_path_heterogeneity_test(
                 Y_mat=Y_het,
                 N_mat=N_het,
@@ -3914,6 +3959,7 @@ class ChaisemartinDHaultfoeuille(ChaisemartinDHaultfoeuilleBootstrapMixin):
                 by_path=self.by_path,
                 paths_of_interest=self.paths_of_interest,
                 D_mat=D_mat,
+                placebo=_path_het_placebo,
                 alpha=self.alpha,
                 rank_deficient_action=self.rank_deficient_action,
                 group_ids_order=np.array(all_groups),
@@ -4903,6 +4949,7 @@ def _compute_heterogeneity_test(
     T_g: np.ndarray,
     X_het: np.ndarray,
     L_max: int,
+    placebo: int = 0,
     alpha: float = 0.05,
     rank_deficient_action: str = "warn",
     group_ids_order: Optional[np.ndarray] = None,
@@ -4917,6 +4964,15 @@ def _compute_heterogeneity_test(
     (Lemma 7), the coefficient on ``X_g`` is an unbiased estimator of the
     variance-weighted average of effect differences. Standard OLS inference
     is valid - no need to account for DID estimation error.
+
+    Forward horizons ``l in 1..L_max`` use ``out_idx = F_g - 1 + l`` (post-
+    period). Backward placebo horizons ``l in -1..-placebo`` use the same
+    construction with negated ``l``, so ``out_idx = F_g - 1 + l < F_g - 1``
+    (pre-period). Lemma 7's OLS inference is symmetric — same regression
+    structure with negated time index — and mirrors R's
+    ``did_multiplegt_dyn(..., predict_het=list("X", c(-1)), placebo=N)``
+    per-horizon dispatcher (``DIDmultiplegtDYN:::did_multiplegt_main``
+    placebo block at the ``effect = matrix(-i, ...)`` rbind site).
 
     Parameters
     ----------
@@ -4992,7 +5048,14 @@ def _compute_heterogeneity_test(
     results: Dict[int, Dict[str, Any]] = {}
 
     # Survey setup (once, before horizon loop). When inactive, df_s=None and
-    # the existing plain-OLS path runs unchanged.
+    # the existing plain-OLS path runs unchanged. Forward-horizon survey
+    # heterogeneity is supported; the per-iteration backward-horizon gate
+    # below catches the unsupported case (survey + l_h < 0) defensively.
+    # Under normal `fit()` flow the global / per-path call sites pass
+    # `placebo=0` when survey is active (with a UserWarning), so the
+    # backward iterations are never reached and the gate is a defensive
+    # backstop only — direct callers passing `placebo > 0 + survey` get
+    # the explicit raise.
     use_survey = obs_survey_info is not None and group_ids_order is not None
     if use_survey:
         from diff_diff.survey import (
@@ -5032,7 +5095,31 @@ def _compute_heterogeneity_test(
     else:
         df_s = None
 
-    for l_h in range(1, L_max + 1):
+    # Iterate forward (1..L_max) and backward placebo (-1..-placebo)
+    # horizons in a single loop. Backward horizons emit "placebo
+    # predict_het" rows matching R's did_multiplegt_dyn(..., predict_het,
+    # placebo) per-by_level dispatcher (R's placebo block at the
+    # `effect = matrix(-i, ...)` rbind site).
+    horizons_to_compute = list(range(1, L_max + 1)) + list(range(-1, -placebo - 1, -1))
+    for l_h in horizons_to_compute:
+        # Per-iteration survey gate (defensive backstop). Forward
+        # iterations under survey work; backward iterations raise
+        # because the Binder TSL cell-period allocator's REGISTRY
+        # justification is tied to post-period attribution. fit() gates
+        # this upstream by passing `placebo=0` when survey is active
+        # (with a UserWarning when the user requested placebo het), so
+        # the raise is reachable only via direct callers.
+        if use_survey and l_h < 0:
+            raise NotImplementedError(
+                "survey_design with backward-horizon (placebo) "
+                "predict_het is not yet supported. The Binder TSL "
+                "cell-period allocator is derived for post-period "
+                "attribution (REGISTRY.md ChaisemartinDHaultfoeuille "
+                "survey IF expansion Note); pre-period (l < 0) "
+                "attribution requires a separate methodology "
+                "derivation. Forward-horizon predict_het + "
+                "survey_design is supported."
+            )
         # Eligible switchers at this horizon (same logic as multi-horizon DID)
         eligible = []
         dep_var = []
@@ -5050,6 +5137,14 @@ def _compute_heterogeneity_test(
             if out_idx >= n_periods:
                 continue
             if ref_idx < 0:
+                continue
+            if out_idx < 0:
+                # Backward horizons can push out_idx below 0 when
+                # F_g - 1 + l_h < 0 (e.g., F_g=2, l_h=-2). numpy
+                # negative indexing on N_mat[g, out_idx] would silently
+                # wrap to a tail period rather than skip — guard
+                # explicitly so the eligibility filter is correct for
+                # any l_h sign.
                 continue
             if N_mat[g, ref_idx] <= 0 or N_mat[g, out_idx] <= 0:
                 continue
@@ -5109,7 +5204,15 @@ def _compute_heterogeneity_test(
             continue
 
         if not use_survey:
-            # Plain OLS path (unchanged): standard inference per Lemma 7.
+            # Plain OLS path: standard inference per Lemma 7. df is the
+            # pre-drop column count (n_obs - n_params); matches R's
+            # did_multiplegt_dyn(predict_het=...) which uses the
+            # t-distribution with df = n - k from the OLS regression
+            # (DIDmultiplegtDYN:::did_multiplegt_main `t_stat <- qt(0.975,
+            # df.residual(model))` site). Under near-rank-deficient
+            # designs that solve_ols retains rather than NaN-out, n_params
+            # may exceed actual rank; see TODO row for the deferred
+            # rank-tracking follow-up.
             coefs, _residuals, vcov = solve_ols(
                 design,
                 dep_arr,
@@ -5120,7 +5223,7 @@ def _compute_heterogeneity_test(
             se_het = float("nan")
             if vcov is not None and np.isfinite(vcov[1, 1]) and vcov[1, 1] > 0:
                 se_het = float(np.sqrt(vcov[1, 1]))
-            t_stat, p_val, ci = safe_inference(beta_het, se_het, alpha=alpha, df=None)
+            t_stat, p_val, ci = safe_inference(beta_het, se_het, alpha=alpha, df=n_obs - n_params)
         else:
             # Survey-aware path: WLS with per-group weights + TSL IF variance.
             W_elig = W_g_all[eligible]
@@ -6510,6 +6613,7 @@ def _compute_path_heterogeneity_test(
     by_path: Optional[int],
     paths_of_interest: Optional[List[Tuple[int, ...]]],
     D_mat: np.ndarray,
+    placebo: int = 0,
     alpha: float = 0.05,
     rank_deficient_action: str = "warn",
     group_ids_order: Optional[np.ndarray] = None,
@@ -6527,6 +6631,13 @@ def _compute_path_heterogeneity_test(
     the R per-path dispatcher re-runs ``did_multiplegt_main(...,
     predict_het=...)`` on each path-restricted subsample, which is exactly
     what this helper does in Python.
+
+    When ``placebo > 0``, ``_compute_heterogeneity_test`` also emits
+    per-path heterogeneity on backward (placebo) horizons. Inner-dict keys
+    are negative ints ``-1..-placebo`` to match the global
+    ``heterogeneity_effects`` convention and the existing per-path
+    placebo allocator at ``_compute_path_placebos`` (negative keys for
+    unified ``{**positive, **negative}`` dict merging downstream).
 
     The ``_enumerate_treatment_paths`` call here re-derives the path
     enumeration (already computed elsewhere in fit() for ``path_effects``).
@@ -6567,6 +6678,7 @@ def _compute_path_heterogeneity_test(
             T_g=T_g,
             X_het=X_het,
             L_max=L_max,
+            placebo=placebo,
             alpha=alpha,
             rank_deficient_action=rank_deficient_action,
             group_ids_order=group_ids_order,

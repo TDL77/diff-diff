@@ -30,7 +30,16 @@ survey + by_path remains gated; no R parity since R
 and ``paths_of_interest`` also compose with ``heterogeneity="<col>"``:
 per-path heterogeneity coefficient surfaces on
 ``results.path_heterogeneity_effects`` (mirrors R
-``did_multiplegt_dyn(..., by_path, predict_het)`` per-by_level).
+``did_multiplegt_dyn(..., by_path, predict_het)`` per-by_level). When
+combined with ``placebo=True``, heterogeneity is also computed on
+backward (placebo) horizons and surfaced under negative-int keys —
+both globally on ``results.heterogeneity_effects[-l]`` and per-path
+on ``results.path_heterogeneity_effects[path][-l]``;
+``to_dataframe(level="by_path")`` placebo rows have populated ``het_*``
+columns. ``survey_design + placebo + heterogeneity`` emits a
+``UserWarning`` at fit-time and falls back to forward-horizon-only
+heterogeneity until the pre-period cell allocator is derived; forward-
+horizon ``predict_het + survey_design`` continues to work unchanged.
 
 The estimator:
 
