@@ -66,7 +66,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | Estimator | Module | R Reference | Status | Last Review |
 |-----------|--------|-------------|--------|-------------|
 | TripleDifference | `triple_diff.py` | `triplediff::ddd()` | **Complete** | 2026-02-18 |
-| StaggeredTripleDifference | `staggered_triple_diff.py` | `triplediff::staggered_ddd()` (planned) | **In Progress** | — |
+| StaggeredTripleDifference | `staggered_triple_diff.py` | `triplediff::ddd(panel=TRUE)` + `agg_ddd()` | **In Progress** | — |
 
 ### Counterfactual / Synthetic Estimators
 
@@ -797,7 +797,7 @@ and covariate-adjusted specifications.)
 |-------|-------|
 | Module | `staggered_triple_diff.py`, `staggered_triple_diff_results.py` |
 | Primary Reference | Ortiz-Villavicencio & Sant'Anna (2025) — same paper as TripleDifference, staggered case |
-| R Reference | `triplediff::staggered_ddd()` (planned) |
+| R Reference | `triplediff::ddd(panel=TRUE)` + `agg_ddd()` (per `benchmarks/R/benchmark_staggered_triplediff.R`) |
 | Status | **In Progress** |
 | Last Review | — |
 
@@ -809,7 +809,7 @@ and covariate-adjusted specifications.)
 
 **Outstanding for promotion:**
 - Paper review under `docs/methodology/papers/` covering Ortiz-Villavicencio & Sant'Anna (2025) for the staggered case (the primary paper is shared with TripleDifference, but no dedicated review file exists on disk yet)
-- R parity validation against `triplediff::staggered_ddd()` — CSV fixtures not committed (gitignored); tests skip without local R + `triplediff` (tracked in TODO.md row, PR #245)
+- R parity validation against `triplediff::ddd(panel=TRUE)` + `agg_ddd()` (per `benchmarks/R/benchmark_staggered_triplediff.R`) — CSV fixtures not committed (gitignored); tests skip without local R + `triplediff` (tracked in TODO.md row, PR #245)
 - Per-cohort group-effect SE convention: implementation includes WIF (conservative vs R's `wif=NULL`); documented in REGISTRY, deferred decision on whether to add an opt-in WIF-disable path (tracked in TODO.md row, PR #245)
 - Formal Verified Components walk-through here
 - Cluster-robust analytical SEs accepted but not wired (deferred per REGISTRY)
