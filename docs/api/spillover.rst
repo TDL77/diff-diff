@@ -190,8 +190,10 @@ planned as follow-up enhancements:
   event-time) spillover effects ``delta_jk`` as a ``att_dynamic``
   DataFrame plus MultiIndex ``spillover_effects``. The
   ``event_study_effects: Dict[int, Dict]`` alias mirrors
-  ``TwoStageDiD``'s schema for ``plot_event_study`` /
-  ``diagnostic_report.event_study_diagnostics`` consumption. Reference
+  ``TwoStageDiD``'s schema for ``plot_event_study`` consumption (the
+  plotter prefers the new ``reference_period`` attribute over the
+  legacy ``n_obs==0`` heuristic). ``DiagnosticReport`` routing for
+  ``SpilloverDiDResults`` is queued as a follow-up. Reference
   period ``-1 - anticipation`` (TwoStageDiD parity). ``horizon_max``
   bins event-times into endpoint pools (no row drop — divergence
   from TwoStageDiD's filtering semantic, intentional per

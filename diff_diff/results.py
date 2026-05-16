@@ -415,7 +415,11 @@ class SpilloverDiDResults(DiDResults):
     # Includes the reference period row with coef=0.0, se=0.0, n_obs=0.
     event_study_effects: Optional[Dict[int, Dict[str, Any]]] = field(default=None)
     # TwoStageDiD-compatible alias for ``att_dynamic`` consumable by
-    # ``plot_event_study`` and ``diagnostic_report.event_study_diagnostics``.
+    # ``plot_event_study`` (wired in Wave C via the ``reference_period``
+    # attribute fallback in ``_extract_plot_data``). ``DiagnosticReport``
+    # routing is NOT yet wired — registering ``SpilloverDiDResults`` in
+    # ``DiagnosticReport``'s applicability/method tables is a planned
+    # follow-up (see TODO.md).
     # Schema mirrors ``two_stage.py:1355-1389``:
     #   {k: {"effect", "se", "n_obs", "t_stat", "p_value", "conf_int": (low, high)}}
     # Reference row uses ``conf_int = (0.0, 0.0)`` (TwoStageDiD parity).

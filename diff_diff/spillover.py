@@ -2272,6 +2272,25 @@ class SpilloverDiD:
                 np.inf,
                 d_it_per_row,
             )
+            # PR #456 R7 perf fix: derive trigger_onset_per_row directly
+            # from the static distance result for the event-study path. In
+            # the non-staggered case there's only one cohort onset, so the
+            # trigger collapses to the shared effective onset for any unit
+            # within d_bar (NaN for far-away units). Avoids hitting
+            # `_compute_event_time_per_row`'s dense-fallback cohort loop.
+            if self.event_study:
+                d_per_unit_inrange = np.array(
+                    [
+                        (
+                            shared_effective_onset
+                            if unit_to_d.get(u, np.inf) <= self._effective_d_bar
+                            else np.nan
+                        )
+                        for u in unit_vals
+                    ],
+                    dtype=np.float64,
+                )
+                trigger_onset_per_row_cached = d_per_unit_inrange
 
         # Step 6: build ring indicators per row (Butts Eq 6 time-varying form).
         ring_masks = _build_ring_indicators(d_it_per_row, list(self.rings))
