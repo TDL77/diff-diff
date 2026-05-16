@@ -681,7 +681,7 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         unit: str,
         time: str,
         first_treat: str,
-        weights: str = "approximate",
+        weights: str = "exact",
     ) -> "BaconDecompositionResults":
         """
         Perform Goodman-Bacon decomposition of TWFE estimate.
@@ -703,13 +703,15 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         first_treat : str
             Name of column indicating when each unit was first treated.
             Use 0 (or np.inf) for never-treated units.
-        weights : str, default="approximate"
+        weights : str, default="exact"
             Weight calculation method:
 
-            - "approximate": Fast simplified formula (default). Good for
-              diagnostic purposes where relative weights are sufficient.
-            - "exact": Variance-based weights from Goodman-Bacon (2021)
-              Theorem 1. Use for publication-quality decompositions.
+            - "exact" (default): Variance-based weights from Goodman-Bacon
+              (2021) Theorem 1, Eqs. 7-9 and 10e-g. Paper-faithful and
+              the standard methodology contract.
+            - "approximate": Fast simplified formula. Opt in for
+              speed-sensitive diagnostic loops; numerical output may
+              differ from R ``bacondecomp::bacon()``.
 
         Returns
         -------

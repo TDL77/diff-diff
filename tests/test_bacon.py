@@ -119,7 +119,11 @@ class TestBaconDecomposition:
         assert abs(total_weight - 1.0) < 0.01, f"Weights sum to {total_weight}, not 1.0"
 
     def test_weighted_sum_equals_twfe(self):
-        """Test that weighted sum of 2x2 estimates equals TWFE."""
+        """Test that weighted sum of 2x2 estimates equals TWFE.
+
+        Under the default ``weights="exact"`` mode (Goodman-Bacon 2021
+        Theorem 1, Eqs. 10a-g), the identity holds to machine precision.
+        """
         data = generate_staggered_data(seed=456)
 
         results = bacon_decompose(
@@ -127,14 +131,15 @@ class TestBaconDecomposition:
             outcome='outcome',
             unit='unit',
             time='time',
-            first_treat='first_treat'
+            first_treat='first_treat',
+            weights='exact',
         )
 
         weighted_sum = sum(c.weight * c.estimate for c in results.comparisons)
 
-        # Allow for small numerical error
-        assert abs(results.twfe_estimate - weighted_sum) < 0.1, (
-            f"TWFE ({results.twfe_estimate:.4f}) != weighted sum ({weighted_sum:.4f})"
+        assert abs(results.twfe_estimate - weighted_sum) < 1e-10, (
+            f"TWFE ({results.twfe_estimate:.10f}) != weighted sum "
+            f"({weighted_sum:.10f}) under exact mode"
         )
 
     def test_comparison_types(self):
@@ -422,12 +427,18 @@ class TestVisualization:
 class TestWeightsParameter:
     """Tests for configurable weights parameter."""
 
-    def test_approximate_weights_default(self):
-        """Test that approximate weights are used by default."""
+    def test_exact_weights_default(self):
+        """Test that exact weights are used by default.
+
+        Goodman-Bacon (2021) Theorem 1 is the paper-faithful default
+        (Eqs. 10a-g). Prior releases defaulted to ``"approximate"``;
+        the default flipped to ``"exact"`` in PR-B (2026-05-16) so the
+        diagnostic surface matches R ``bacondecomp::bacon()``.
+        """
         data = generate_staggered_data(seed=789)
 
         decomp = BaconDecomposition()
-        assert decomp.weights == "approximate"
+        assert decomp.weights == "exact"
 
         results = decomp.fit(
             data,
@@ -438,6 +449,33 @@ class TestWeightsParameter:
         )
 
         # Weights should sum to 1
+        total_weight = sum(c.weight for c in results.comparisons)
+        assert abs(total_weight - 1.0) < 1e-10
+
+    def test_approximate_weights_opt_in(self):
+        """Test the legacy approximate-weights path still works.
+
+        ``weights="approximate"`` is retained for backward compatibility
+        and speed-sensitive diagnostic loops. Numerical output may differ
+        from R ``bacondecomp::bacon()`` (which implements the exact
+        Eqs. 7-9). The sum-to-1 contract is preserved via post-hoc
+        normalization.
+        """
+        data = generate_staggered_data(seed=789)
+
+        decomp = BaconDecomposition(weights="approximate")
+        assert decomp.weights == "approximate"
+
+        results = decomp.fit(
+            data,
+            outcome='outcome',
+            unit='unit',
+            time='time',
+            first_treat='first_treat'
+        )
+
+        # Sum-to-1 contract preserved via normalization, but tolerance is
+        # looser than exact-mode (legacy approximate floor).
         total_weight = sum(c.weight for c in results.comparisons)
         assert abs(total_weight - 1.0) < 0.01
 

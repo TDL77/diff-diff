@@ -1743,6 +1743,7 @@ class DiagnosticReport:
                 unit=unit,
                 time=time,
                 first_treat=first_treat,
+                weights="exact",  # paper-faithful Eqs. 7-9 / 10e-g
                 survey_design=self._survey_design,
             )
         except Exception as exc:  # noqa: BLE001
