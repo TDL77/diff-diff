@@ -1970,6 +1970,19 @@ class SpilloverDiD:
                 "SpilloverDiD does not yet support survey_design= ; planned "
                 "as a follow-up extension. See TODO.md."
             )
+        # Validate `anticipation` up front: must be a non-negative integer.
+        # Accepting fractional or negative values would silently shift
+        # treatment timing and ring exposure beyond what the estimator's
+        # identification contract supports. Validated BEFORE the
+        # event_study / horizon_max checks because the ref_period
+        # compatibility check below computes `-1 - self.anticipation` and
+        # would otherwise raise a raw TypeError on non-numeric input
+        # (PR #456 R2 fix).
+        if not isinstance(self.anticipation, (int, np.integer)) or self.anticipation < 0:
+            raise ValueError(
+                f"anticipation must be a non-negative integer; got "
+                f"{self.anticipation!r} (type {type(self.anticipation).__name__})."
+            )
         # Wave C: event-study path is now supported. Validate horizon_max
         # up front (fail-fast before any stage-1 work).
         if self.horizon_max is not None:
@@ -2003,15 +2016,6 @@ class SpilloverDiD:
                     f"falls inside the window. Silently shifting the reference "
                     f"to -horizon_max would change identification."
                 )
-        # Validate `anticipation` up front: must be a non-negative integer.
-        # Accepting fractional or negative values would silently shift
-        # treatment timing and ring exposure beyond what the estimator's
-        # identification contract supports.
-        if not isinstance(self.anticipation, (int, np.integer)) or self.anticipation < 0:
-            raise ValueError(
-                f"anticipation must be a non-negative integer; got "
-                f"{self.anticipation!r} (type {type(self.anticipation).__name__})."
-            )
         if covariates is not None and len(covariates) > 0:
             raise NotImplementedError(
                 "SpilloverDiD does not yet support covariates= in Wave B MVP. "

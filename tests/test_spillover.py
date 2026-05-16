@@ -3360,7 +3360,16 @@ class TestSpilloverDiDEventStudyReduceToAggregate:
     """
 
     def test_constant_tau_horizon_none_recovers_wave_b_att(self):
-        df = generate_butts_staggered_dgp(seed=42, tau_total=-0.07, delta_1=-0.04)
+        """Deterministic constant-tau DGP (`error_sd=0`) + `horizon_max=None` →
+        lincom-weighted scalar `att` reproduces Wave B's aggregate `tau_total`
+        bit-identically. Tightened per PR #456 R2 review to match the
+        CHANGELOG's claimed `atol=1e-10` contract instead of a loose 1e-3."""
+        df = generate_butts_staggered_dgp(
+            seed=42,
+            tau_total=-0.07,
+            delta_1=-0.04,
+            error_sd=0.0,  # deterministic — no noise.
+        )
         agg_est = SpilloverDiD(
             rings=[0.0, 50.0, 200.0],
             d_bar=200.0,
@@ -3373,9 +3382,15 @@ class TestSpilloverDiDEventStudyReduceToAggregate:
             _w.simplefilter("ignore", UserWarning)
             agg = agg_est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
         es = _fit_event_study(df, horizon_max=None)
-        # Constant-tau DGP: sample-share-weighted average of per-event-time
-        # coefs reproduces Wave B's aggregate att (exactly equal at MC scale).
-        assert abs(agg.att - es.att) < 1e-3
+        # With deterministic effects (error_sd=0), the equivalence holds at
+        # machine precision: under constant-tau, both the aggregate D_it
+        # column and the sample-share-weighted average over per-event-time
+        # tau_k columns produce identical regression output.
+        assert abs(agg.att - es.att) < 1e-10, (
+            f"Reduce-to-aggregate equivalence failed at error_sd=0: "
+            f"agg.att={agg.att:.15f}, es.att={es.att:.15f}, "
+            f"diff={abs(agg.att - es.att):.3e}"
+        )
 
     def test_lincom_att_matches_hand_computed(self):
         df = generate_butts_staggered_dgp(seed=11)
@@ -3419,6 +3434,36 @@ class TestSpilloverDiDEventStudyValidation:
         # horizon_max=None auto-detects H; ref=-3 with anticipation=2 always fits.
         res = _fit_event_study(df, horizon_max=None, anticipation=2)
         assert res.reference_period == -3
+
+    def test_non_numeric_anticipation_raises_targeted_value_error(self):
+        """PR #456 R2 P2: anticipation must be validated BEFORE the ref_period
+        compatibility check; otherwise `-1 - self.anticipation` would raise a
+        raw TypeError on non-numeric input instead of the targeted ValueError."""
+        df = generate_butts_staggered_dgp(seed=1)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=2,
+            anticipation="1",  # type: ignore[arg-type]
+        )
+        with pytest.raises(ValueError, match="anticipation must be a non-negative integer"):
+            est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+
+    def test_none_anticipation_raises_targeted_value_error(self):
+        """Same P2 fix: None anticipation must surface the targeted ValueError."""
+        df = generate_butts_staggered_dgp(seed=1)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=2,
+            anticipation=None,  # type: ignore[arg-type]
+        )
+        with pytest.raises(ValueError, match="anticipation must be a non-negative integer"):
+            est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
 
 
 class TestSpilloverDiDEventStudyBackwardCompat:

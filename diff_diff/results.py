@@ -452,31 +452,47 @@ class SpilloverDiDResults(DiDResults):
             insert_blocks.append("-" * 70)
 
         # Spillover block (per-ring OR per-(ring, k) under MultiIndex).
+        # When the index is a MultiIndex (event-study mode), the ring and `k`
+        # are rendered as separate columns so distinct horizons within the same
+        # ring remain visually distinguishable. The non-MultiIndex aggregate
+        # path retains the single `Ring` column for Wave B compatibility.
         if self.spillover_effects is not None and not self.spillover_effects.empty:
             insert_blocks.append("")
             insert_blocks.append("Spillover Effects (ring-indicator, Butts 2021)".center(70))
             insert_blocks.append("-" * 70)
-            insert_blocks.append(
-                f"{'Ring':<15} {'Estimate':>12} {'Std. Err.':>12} "
-                f"{'t-stat':>10} {'P>|t|':>10} {'':>5}"
-            )
-            insert_blocks.append("-" * 70)
+            is_multi = isinstance(self.spillover_effects.index, pd.MultiIndex)
+            if is_multi:
+                header = (
+                    f"{'Ring':<15} {'k':>5} {'Estimate':>12} {'Std. Err.':>12} "
+                    f"{'t-stat':>10} {'P>|t|':>10} {'':>5}"
+                )
+            else:
+                header = (
+                    f"{'Ring':<15} {'Estimate':>12} {'Std. Err.':>12} "
+                    f"{'t-stat':>10} {'P>|t|':>10} {'':>5}"
+                )
+            insert_blocks.append(header)
+            insert_blocks.append("-" * len(header.rstrip()))
             for label, row in self.spillover_effects.iterrows():
                 coef = row.get("coef", np.nan)
                 se = row.get("se", np.nan)
                 t_stat = row.get("t_stat", np.nan)
                 p_value = row.get("p_value", np.nan)
                 stars = _get_significance_stars(p_value)
-                label_str = (
-                    str(label)
-                    if not isinstance(label, tuple)
-                    else f"{label[0]} k={int(label[1]):+d}"
-                )
-                insert_blocks.append(
-                    f"{label_str[:15]:<15} {coef:>12.4f} {se:>12.4f} "
-                    f"{t_stat:>10.3f} {p_value:>10.4f} {stars:>5}"
-                )
-            insert_blocks.append("-" * 70)
+                if is_multi and isinstance(label, tuple):
+                    ring_str = str(label[0])[:15]
+                    k_str = f"{int(label[1]):+d}"
+                    insert_blocks.append(
+                        f"{ring_str:<15} {k_str:>5} {coef:>12.4f} {se:>12.4f} "
+                        f"{t_stat:>10.3f} {p_value:>10.4f} {stars:>5}"
+                    )
+                else:
+                    label_str = str(label)[:15]
+                    insert_blocks.append(
+                        f"{label_str:<15} {coef:>12.4f} {se:>12.4f} "
+                        f"{t_stat:>10.3f} {p_value:>10.4f} {stars:>5}"
+                    )
+            insert_blocks.append("-" * len(header.rstrip()))
 
         if not insert_blocks:
             return base
