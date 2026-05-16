@@ -7,7 +7,7 @@
 #   Rscript benchmarks/R/generate_clubsandwich_golden.R
 #
 # Requirements:
-#   clubSandwich (CRAN), jsonlite, readr
+#   clubSandwich (CRAN), jsonlite
 #
 # Output:
 #   benchmarks/data/clubsandwich_cr2_golden.json
@@ -50,12 +50,12 @@ for (nm in names(datasets)) {
   d <- datasets[[nm]]
   fit <- lm(y ~ x, data = d)
   vcov_cr2 <- vcovCR(fit, cluster = d$cluster, type = "CR2")
-  # Per-contrast Bell-McCaffrey DOF: one per coefficient via a unit contrast.
+  # Per-coefficient Bell-McCaffrey Satterthwaite DOF via coef_test()$df_Satt.
+  # (clubSandwich 0.7+ removed `Wald_test(..., test="Satterthwaite")`; the
+  # `df_Satt` column from coef_test() is the idiomatic per-coefficient form
+  # and is numerically identical to the old per-unit-contrast path.)
+  ct <- coef_test(fit, vcov = vcov_cr2)
   coef_names <- names(coef(fit))
-  dof_vec <- sapply(coef_names, function(nm_coef) {
-    ctr <- setNames(as.numeric(names(coef(fit)) == nm_coef), names(coef(fit)))
-    Wald_test(fit, constraints = matrix(ctr, 1), vcov = vcov_cr2, test = "Satterthwaite")$df
-  })
   output[[nm]] <- list(
     x = d$x,
     y = d$y,
@@ -64,7 +64,7 @@ for (nm in names(datasets)) {
     coef_names = coef_names,
     vcov_cr2 = as.numeric(vcov_cr2),
     vcov_shape = dim(vcov_cr2),
-    dof_bm = as.numeric(dof_vec),
+    dof_bm = as.numeric(ct$df_Satt),
     cluster_sizes = as.numeric(table(d$cluster))
   )
 }
