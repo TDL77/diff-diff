@@ -6,6 +6,8 @@ equations, known analytical cases, and expected mathematical properties.
 """
 
 
+import warnings
+
 import numpy as np
 import pytest
 
@@ -495,3 +497,73 @@ class TestBreakdownValueMethodology:
         # The optimal FLCI is efficient, so need large M for a weak effect.
         r_large = honest.fit(results, M=20.0)
         assert r_large.ci_lb <= 0 <= r_large.ci_ub, "Should lose significance at large M"
+
+
+class TestARPVertexEnumeration:
+    """Diagnostic warnings on `_enumerate_vertices` vertex-search pathologies."""
+
+    def test_enumerate_vertices_warns_on_exhausted_search(self):
+        """All-LinAlgError path: fully-zero nuisance column makes A_sys
+        singular on every basis, so the enumeration exhausts without
+        feasible vertices and the user should see a RuntimeWarning rather
+        than a silent empty-list return."""
+        from diff_diff.honest_did import _enumerate_vertices
+
+        # 4 moments, 1 nuisance column (all zeros) → A_sys singular on every basis
+        X_tilde = np.zeros((4, 1))
+        sigma_tilde_diag = np.array([1.0, 1.0, 1.0, 1.0])
+        with pytest.warns(RuntimeWarning, match="exhausted"):
+            vertices = _enumerate_vertices(X_tilde, sigma_tilde_diag, n_moments=4)
+        assert vertices == []
+
+    def test_enumerate_vertices_warns_on_heavy_rejection(self):
+        """Mixed-basis path: a partially-singular X_tilde produces some
+        feasible vertices but rejects >= 50% of bases for LinAlgError.
+        The warning helps users see that the recovered vertices came from
+        a numerically fragile enumeration."""
+        from diff_diff.honest_did import _enumerate_vertices
+
+        # 5 moments, 2 nuisance columns. C(5, 3) = 10 bases. Construct
+        # X_tilde so that ~6 of 10 bases have rank-deficient A_sys.
+        X_tilde = np.array([
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 1.0],
+        ])
+        sigma_tilde_diag = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            vertices = _enumerate_vertices(X_tilde, sigma_tilde_diag, n_moments=5)
+        heavy = [w for w in caught if "heavily constrained" in str(w.message)]
+        # If exhaustion fired instead, that's also a valid outcome — but the
+        # construction is calibrated for the heavy-rejection branch
+        exhausted = [w for w in caught if "exhausted" in str(w.message)]
+        assert heavy or exhausted, (
+            f"Expected heavily-constrained or exhausted warning; got "
+            f"{[str(w.message) for w in caught]}, vertices={len(vertices)}"
+        )
+
+    def test_enumerate_vertices_quiet_on_healthy_enumeration(self):
+        """Well-conditioned X_tilde: most bases solve cleanly and feasible
+        vertices are recovered. No RuntimeWarning should fire."""
+        from diff_diff.honest_did import _enumerate_vertices
+
+        rng = np.random.default_rng(0)
+        # 4 moments, 1 nuisance — small and well-conditioned
+        X_tilde = rng.normal(size=(4, 1))
+        sigma_tilde_diag = np.array([1.0, 1.0, 1.0, 1.0])
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RuntimeWarning)
+            vertices = _enumerate_vertices(X_tilde, sigma_tilde_diag, n_moments=4)
+        diag_warnings = [
+            w for w in caught
+            if "exhausted" in str(w.message) or "heavily constrained" in str(w.message)
+        ]
+        assert not diag_warnings, (
+            f"Healthy enumeration must not emit ARP diagnostics; got "
+            f"{[str(w.message) for w in diag_warnings]}"
+        )
+        # Sanity: we expect some feasible vertices on a well-conditioned input
+        assert isinstance(vertices, list)

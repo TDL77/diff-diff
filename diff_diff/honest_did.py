@@ -18,6 +18,7 @@ https://github.com/asheshrambachan/HonestDiD - R package implementation
 """
 
 from dataclasses import dataclass, field
+import warnings
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -1890,11 +1891,15 @@ def _enumerate_vertices(
     if n_eq > n_moments:
         return []
 
-    vertices = []
+    vertices: List[np.ndarray] = []
+    n_total = 0
+    n_linalg_error = 0
+    n_infeasible = 0
 
     # Each vertex has exactly n_eq non-zero (basic) variables
     for basis_idx in itertools.combinations(range(n_moments), n_eq):
         basis_idx = list(basis_idx)
+        n_total += 1
 
         # Build the system for basic variables
         # gamma[basis_idx]' @ X_tilde[basis_idx, :] = 0
@@ -1913,6 +1918,7 @@ def _enumerate_vertices(
         try:
             gamma_basic = np.linalg.solve(A_sys, b_sys)
         except np.linalg.LinAlgError:
+            n_linalg_error += 1
             continue
 
         # Check feasibility: gamma >= 0
@@ -1920,6 +1926,35 @@ def _enumerate_vertices(
             gamma = np.zeros(n_moments)
             gamma[basis_idx] = np.maximum(gamma_basic, 0)
             vertices.append(gamma)
+        else:
+            n_infeasible += 1
+
+    # Diagnostic warnings — surface vertex-search pathologies that would
+    # otherwise hide behind `_compute_arp_test` returning False
+    # (conservative non-rejection).
+    if n_total > 0 and len(vertices) == 0:
+        warnings.warn(
+            f"ARP vertex enumeration exhausted without feasible vertices: "
+            f"tried {n_total} bases, {n_linalg_error} rejected for "
+            f"LinAlgError, {n_infeasible} infeasible (negative basic "
+            f"variables). The caller (_compute_arp_test) will return False "
+            f"(conservative non-rejection). This may indicate near-singular "
+            f"nuisance constraints (X_tilde) or a degenerate "
+            f"moment-inequality system.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+    elif n_total > 0 and n_linalg_error / n_total >= 0.5:
+        warnings.warn(
+            f"ARP vertex enumeration heavily constrained: "
+            f"{n_linalg_error} of {n_total} bases ({100 * n_linalg_error / n_total:.0f}%) "
+            f"rejected for LinAlgError, {n_infeasible} infeasible. "
+            f"{len(vertices)} feasible vertex(es) recovered. Results may be "
+            f"numerically fragile; consider regularizing the moment-inequality "
+            f"system or reviewing the nuisance constraints (X_tilde).",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
     return vertices
 
