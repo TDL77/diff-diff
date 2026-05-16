@@ -866,32 +866,84 @@ class TestSpilloverDiDWithConley:
         assert result.conley_lag_cutoff == 0
         assert np.isfinite(result.se)
 
-    def test_conley_se_differs_from_hc1(self):
-        """Conley SE differs from HC1 baseline (spatial correlation in errors)."""
+    def test_conley_kwargs_threaded_to_solve_ols(self):
+        """Round-8 CI review P3 (test coverage gap): the previous test was a
+        smoke test that only asserted finite SE + ATT invariance — a silent
+        fallback to HC1 would have passed. This test plumbing-verifies that
+        `solve_ols` is actually called with `vcov_type="conley"` AND the
+        Conley-specific kwargs (`conley_coords`, `conley_cutoff_km`,
+        `conley_metric`, `conley_time`, `conley_unit`, `conley_lag_cutoff`).
+        """
+        from unittest.mock import patch
+
         df = generate_butts_nonstaggered_dgp(
             seed=42, n_treated=20, n_near_control=80, n_far_control=100
         )
-        est_hc1 = SpilloverDiD(
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            vcov_type="conley",
+            conley_cutoff_km=200.0,
+            conley_metric="haversine",
+            conley_lag_cutoff=0,
+        )
+        # Patch solve_ols at the import site in spillover.py so we can
+        # observe the kwargs SpilloverDiD passes through at stage 2.
+        import diff_diff.spillover as spillover_mod
+
+        captured: dict = {}
+
+        original_solve_ols = spillover_mod.solve_ols
+
+        def spy_solve_ols(*args, **kwargs):
+            # Capture the LAST call's kwargs (stage 2 is the last solve_ols
+            # invocation in fit()).
+            captured.clear()
+            captured.update(kwargs)
+            return original_solve_ols(*args, **kwargs)
+
+        with patch.object(spillover_mod, "solve_ols", side_effect=spy_solve_ols):
+            result = est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+
+        # Conley kwargs reached solve_ols (no silent HC1 fallback).
+        assert (
+            captured.get("vcov_type") == "conley"
+        ), f"expected solve_ols vcov_type='conley', got {captured.get('vcov_type')!r}"
+        assert captured.get("conley_cutoff_km") == 200.0
+        assert captured.get("conley_metric") == "haversine"
+        assert captured.get("conley_lag_cutoff") == 0
+        # The fit-time-derived spatial / temporal arrays must be present and
+        # have the right shape.
+        coords = captured.get("conley_coords")
+        assert coords is not None and coords.shape == (result.n_obs, 2)
+        conley_time = captured.get("conley_time")
+        conley_unit = captured.get("conley_unit")
+        assert conley_time is not None and len(conley_time) == result.n_obs
+        assert conley_unit is not None and len(conley_unit) == result.n_obs
+        # And the reported SE is finite (the actual Conley computation
+        # completed end-to-end).
+        assert np.isfinite(result.se)
+
+    def test_conley_att_invariant_vs_hc1(self):
+        """Point-estimate invariance: vcov choice does not change ATT
+        (the residualization + OLS fit are independent of variance).
+        """
+        df = generate_butts_nonstaggered_dgp(
+            seed=42, n_treated=20, n_near_control=80, n_far_control=100
+        )
+        result_hc1 = SpilloverDiD(
             rings=[0.0, 100.0],
             conley_coords=("lat", "lon"),
             vcov_type="hc1",
-        )
-        result_hc1 = est_hc1.fit(df, outcome="y", unit="unit", time="time", treatment="D")
-        est_conley = SpilloverDiD(
+        ).fit(df, outcome="y", unit="unit", time="time", treatment="D")
+        result_conley = SpilloverDiD(
             rings=[0.0, 100.0],
             conley_coords=("lat", "lon"),
             vcov_type="conley",
             conley_cutoff_km=200.0,
             conley_lag_cutoff=0,
-        )
-        result_conley = est_conley.fit(df, outcome="y", unit="unit", time="time", treatment="D")
-        # ATT point estimate unchanged across vcov; SE may differ.
+        ).fit(df, outcome="y", unit="unit", time="time", treatment="D")
         assert abs(result_hc1.att - result_conley.att) < 1e-10
-        # Conley SE may be larger or smaller than HC1 depending on spatial
-        # error correlation; just assert it's not identical.
-        # (Synthetic DGP has independent errors so they may be very close;
-        # use a loose tolerance — primarily a wiring test.)
-        assert np.isfinite(result_conley.se)
 
 
 # =============================================================================
