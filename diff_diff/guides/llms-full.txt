@@ -461,6 +461,69 @@ results = est.fit(data, outcome='outcome', unit='unit',
 results.print_summary()
 ```
 
+### SpilloverDiD
+
+Butts (2021) ring-indicator spillover-aware DiD. Augments two-stage Gardner with ring-indicator covariates that identify direct effect on treated (`tau_total`) and per-ring spillover effects on near-control units (`delta_j`). Handles non-staggered and staggered timing in one estimator. Recommends `vcov_type="conley"` with cutoff = `d_bar` (paper Section 3.1).
+
+```python
+SpilloverDiD(
+    rings: list[float],                  # K+1 sorted breakpoints; K rings
+    d_bar: float | None = None,          # Far-away cutoff (defaults to max(rings))
+    vcov_type: str = "hc1",              # "hc1", "conley", or default cluster
+    conley_coords: tuple[str, str] | None = None,  # (lat_col, lon_col), required
+    conley_metric: str = "haversine",    # or "euclidean" / callable
+    conley_cutoff_km: float | None = None,
+    conley_lag_cutoff: int | None = None,
+    cluster: str | None = None,
+    alpha: float = 0.05,
+    anticipation: int = 0,
+    event_study: bool = False,           # Deferred: raises NotImplementedError if True
+    horizon_max: int | None = None,      # Deferred (event-study mode)
+    rank_deficient_action: str = "warn",
+)
+```
+
+**fit() parameters:**
+
+```python
+sp.fit(
+    data: pd.DataFrame,
+    outcome: str,
+    unit: str,
+    time: str,
+    treatment: str | None = None,        # binary D_it; auto-converted to first_treat
+    first_treat: str | None = None,      # OR onset time per unit (Gardner)
+    covariates: list[str] | None = None, # Deferred: NotImplementedError if non-None
+    survey_design: object = None,        # Deferred: NotImplementedError if non-None
+) -> SpilloverDiDResults
+```
+
+**Restrictions (Wave B MVP — planned follow-ups):**
+
+- `covariates=` raises `NotImplementedError`. Gardner two-stage requires covariate effects estimated on the untreated-and-unexposed Omega_0 subsample at stage 1; appending raw covariates only at stage 2 silently biases `tau_total` / `delta_j` on panels with time-varying covariates. Planned follow-up.
+- `survey_design=` raises `NotImplementedError` (planned: SurveyDesign integration)
+- `event_study=True` raises `NotImplementedError` (planned: per-event-time × ring decomposition per Butts Table 2)
+- `horizon_max=` raises `NotImplementedError` (used only with event_study)
+- Stage-2 variance is `solve_ols` HC1 / Conley / cluster — Gardner GMM first-stage uncertainty correction NOT applied (planned follow-up; SE is biased downward / too small, CIs too narrow, p-values too small — treat reported significance conservatively until the GMM correction lands)
+- Only nearest-treated rings supported; `ring_method="count"` (count of treated neighbors in ring) not yet exposed
+
+**Usage:**
+
+```python
+from diff_diff import SpilloverDiD
+
+est = SpilloverDiD(
+    rings=[0, 50, 100, 200],
+    conley_coords=("lat", "lon"),
+    vcov_type="conley",
+    conley_cutoff_km=200.0,
+    conley_lag_cutoff=0,
+)
+results = est.fit(data, outcome="y", unit="unit", time="time", treatment="D")
+print(f"tau_total = {results.att:.4f}")
+print(results.spillover_effects)         # per-ring DataFrame
+```
+
 ### SyntheticDiD
 
 Synthetic Difference-in-Differences (Arkhangelsky et al. 2021). Combines DiD with synthetic control by re-weighting control units.

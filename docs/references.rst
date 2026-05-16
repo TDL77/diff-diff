@@ -182,6 +182,10 @@ Multi-Period and Staggered Adoption
 
 - **Butts, K., & Gardner, J. (2022).** "did2s: Two-Stage Difference-in-Differences." *The R Journal*, 14(1), 162-173. https://doi.org/10.32614/RJ-2022-048
 
+- **Butts, K. (2023).** "Difference-in-Differences with Spatial Spillovers." *arXiv:2105.03737v3* (originally posted 2021). https://arxiv.org/abs/2105.03737
+
+  Identifies the ring-indicator estimator implemented in our ``SpilloverDiD`` class. Section 2-3 covers non-staggered timing (Equations 5/6/8); Section 5 covers staggered timing via two-stage Gardner (Table 2). Section 3.1 (page 13) recommends Conley spatial-HAC for inference with cutoff = ``d_bar``.
+
 - **de Chaisemartin, C., & D'Haultfœuille, X. (2020).** "Two-Way Fixed Effects Estimators with Heterogeneous Treatment Effects." *American Economic Review*, 110(9), 2964-2996. https://doi.org/10.1257/aer.20181169
 
 - **de Chaisemartin, C., & D'Haultfœuille, X. (2022, revised 2024).** "Difference-in-Differences Estimators of Intertemporal Treatment Effects." *NBER Working Paper* 29873. https://www.nber.org/papers/w29873

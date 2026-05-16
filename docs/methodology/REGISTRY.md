@@ -25,6 +25,7 @@ This document provides the academic foundations and key implementation requireme
    - [StaggeredTripleDifference](#staggeredtripledifference)
    - [TROP](#trop)
    - [HeterogeneousAdoptionDiD](#heterogeneousadoptiondid)
+   - [SpilloverDiD](#spilloverdid)
 4. [Diagnostics & Sensitivity](#diagnostics--sensitivity)
    - [PlaceboTests](#placebotests)
    - [BaconDecomposition](#bacondecomposition)
@@ -2933,6 +2934,84 @@ should be a deliberate user choice.
 | HonestDiD | HonestDiD | `createSensitivityResults()` |
 | PreTrendsPower | pretrends | `pretrends()` |
 | PowerAnalysis | pwr / DeclareDesign | `pwr.t.test()` / simulation |
+
+---
+
+## SpilloverDiD
+
+**Primary source:** Butts, K. (2023). Difference-in-Differences with Spatial Spillovers. *arXiv:2105.03737v3* (originally posted 2021). https://arxiv.org/abs/2105.03737
+
+**Secondary sources:**
+- Gardner, J. (2022). Two-stage differences in differences. *arXiv:2207.05943*. The stage-1+2 residualization pattern this estimator reuses.
+- Conley, T. G. (1999). GMM Estimation with Cross-Sectional Dependence. *Journal of Econometrics* 92(1), 1-45. The spatial-HAC variance estimator recommended by Butts page 13 for inference with cutoff = `d_bar`.
+
+**Scope:** Spillover-aware Difference-in-Differences. Augments two-stage Gardner DiD with ring-indicator covariates that identify the direct effect on treated units (`tau_total`) alongside per-ring spillover effects on near-control units (`delta_j`). Handles both panel non-staggered timing and Section 5 staggered timing in a single estimator; non-staggered is the special case where all treated units share an onset time.
+
+**Note:** This estimator is a **documented synthesis** of ingredients — no single published software package implements the exact recipe. `did2s` (R/Stata, Butts & Gardner 2022) implements the Gardner two-stage residualization but does NOT support ring covariates. The Butts (2021/2023) paper proposes the ring estimator in Equations 5/6/8 (non-staggered) and Section 5 / Table 2 (staggered) but does not ship reference software. The diff-diff implementation combines: (a) Butts (2021) Section 5 / Table 2 identification, (b) Gardner (2022) two-stage residualize-then-fit, (c) Wave A's Conley spatial-HAC vcov.
+
+**Identification spec (committed):**
+
+The stage-2 regressor for ring `j` is the **time-varying** form
+
+```
+(1 - D_it) * Ring_{it,j}
+```
+
+where `D_it` is the treatment indicator (1 if unit `i` is treated by time `t`) and `Ring_{it,j}` is the indicator that unit `i`'s nearest currently-treated unit (treated by time `t`) is in distance bin `j`. For non-staggered timing, `Ring_{it,j}` is unit-static post-treatment and zero pre-treatment (no unit treated yet); for staggered timing, `Ring_{it,j}` is unit-time-varying.
+
+**Note:** Reading the literal unit-static `(1 - D_it) * S_i` from paper Equation 5 yields a **rank-deficient design** under TWFE: `(1 - D_it) * S_i = S_i - D_it * S_i = S_i - D_it` (since `D_it = 1 ⇒ S_i = 1`), and `S_i` is absorbed by the unit FE `mu_i`, leaving `-D_it`. The two regressors are perfectly anti-collinear after FE absorption. The paper's identification argument (Proposition 2.3, Section 3.1 subsample language) only resolves when `S_it = S_i * 1{t >= first_treat}` is read as the **time-varying** form — which the paper defines on page 12 (the line directly above Equation 5) and which Section 5 Table 2 makes explicit (`S^k_{it}`, `Ring^k_{it,j}`). The implementation matches the paper's intent once the `S_it` notation is interpreted as time-varying.
+
+**Note:** Stage-1 fits unit + time FE on Butts' STRICTER subsample `Omega_0 = {D_it = 0 AND S_it = 0}` (untreated AND unexposed) — the clean far-away control group. This differs from `TwoStageDiD`'s `Omega_0 = {D_it = 0}` (untreated; includes near-controls in post-treatment periods). The stricter Butts subsample prevents spillover-contaminated near-controls from biasing the time FE; near-controls post-treatment carry `delta_j` variation that the ring covariates pick up at stage 2.
+
+**Note (Omega_0 row-level identification — period strict, unit warn-and-drop, plus connectivity):** Every period must have at least one Omega_0 row (else time FE is structurally unidentified for that period, and dropping it would lose all units' cross-time identification) — hard `ValueError`. Units lacking Omega_0 rows (e.g. baseline-treated units with `D_it = 1` at every observed `t`) are warned-and-dropped: their unit FE is NaN, residualization writes NaN on their rows, and the downstream finite-mask path at stage 2 excludes them from estimation. This mirrors `TwoStageDiD`'s always-treated unit handling (`two_stage.py:294-336`) and Gardner's framework, which identifies effects from supported observations rather than requiring every unit estimable. **Connectivity:** the supported-units bipartite graph (supported units linked by shared Omega_0 periods) must form a single connected component. If the graph splits into K > 1 components, the iterative FE solver identifies (`mu_i`, `lambda_t`) only up to component-specific constants, and residualization combines `mu_i` from one component with `lambda_t` from another — silently corrupting `y_tilde` and downstream `tau_total` / `delta_j`. Balanced panel + per-unit/per-period Omega_0 coverage is NECESSARY but NOT SUFFICIENT; connectivity is the load-bearing identification condition. Under the current absorbing-treatment regime the disconnected case is plausibly unreachable in practice (we were unable to construct an example surviving the upstream validators), but `_check_omega_0_connectivity` is in place as defense-in-depth and future-proofs Wave B follow-ups (event-study, survey-design integration, reversible-treatment relaxation if ever added).
+
+**Note (Gardner identity, non-staggered):** Under non-staggered timing, the two-stage Gardner residualize-then-fit with the Omega_0-restricted stage 1 is **empirically bit-identical** to the single-stage TWFE ring regression on the full sample using the time-varying form `y_it ~ mu_i + lambda_t + tau * D_it + sum_j delta_j * (1 - D_it) * Ring_{it,j}`. This is the non-staggered ring estimator from Butts Equations 4-6. The empirical equivalence is verified by a 20-seed deterministic regression test (`TestSpilloverDiDNonStaggeredFEEquivalence`) at `atol=1e-10`. The Omega_0 restriction is therefore innocent for the non-staggered point estimate — it only changes the variance composition (which is why the stage-1 GMM correction enters at stage 2 in the staggered case). Reported `tau_total` for non-staggered timing IS the Butts Eqs. 4-6 estimator.
+
+**Note:** Treated units have `d_it = 0` (their own location) and fall in Ring_1 geometrically, but the `(1 - D_it)` factor zeros their ring contribution. `n_units_ever_in_ring` counts include treated units in Ring_1 by construction. Under staggered timing this field counts each unit in EVERY ring it visits across periods (not a clean partition); under non-staggered timing it IS a partition.
+
+**Note (anticipation shift):** The `anticipation: int` constructor kwarg (default 0) shifts BOTH the treatment and ring-membership clocks by `-anticipation` so the stage-1 Omega_0 subsample correctly excludes the `anticipation` pre-treatment periods (which would otherwise contaminate the FE estimation with anticipation effects). Concretely, the effective treatment indicator becomes `D'_it = 1{t >= first_treat - anticipation}` and ring membership uses the corresponding shifted "currently-treated" set when computing `d_it` for staggered timing. Stage 2 then estimates `tau_total` and `delta_j` net of the anticipation window. Mirrors `TwoStageDiD`'s `anticipation` parameter semantics — recommended use is a small integer (1-3 periods) when domain knowledge suggests treatment effects begin before formal onset (e.g., policy announcements). Setting `anticipation > 0` AND providing a `first_treat` column where `first_treat - anticipation < min(time)` for any unit will mark that unit as treated from the panel's first observation, with the same baseline-treated handling as if it were always-treated (warn-and-drop via the Omega_0 unit-level check above).
+
+**Note:** No published R/Stata software exists for the two-period ring estimator (Butts Eqs. 5-6). Correctness anchored on (a) synthetic-DGP Monte Carlo identification tests on the **non-staggered** DGP (50-seed default + 200-seed `@pytest.mark.slow` variant — both recover `tau_total` AND `delta_1` within 0.02 absolute tolerance on Butts-Assumption-satisfying DGPs) plus a **staggered**-DGP MC test (30-seed, no slow variant) that anchors `tau_total` only within 0.04 absolute tolerance (looser bound because each staggered DGP is larger and noisier); per-ring `delta_jk` recovery on staggered DGPs and a 200-seed slow staggered variant are queued as follow-ups alongside `event_study=True` support; (b) reduce-to-TWFE limit (non-staggered, 20-seed deterministic bit-identity at `atol=1e-10` via `TestSpilloverDiDNonStaggeredFEEquivalence`); (c) Wave A's Conley sparse-vs-dense parity inherited via `solve_ols`. A reduce-to-`TwoStageDiD` limit was scoped during planning but not shipped in Wave B (the Omega_0 stricter subsample requires additional fixture work to align with `TwoStageDiD`'s `{D_it = 0}` subsample); queued as a follow-up alongside the Gardner GMM correction.
+
+**Assumptions (Butts 2021):**
+
+- **Assumption 1 (Random Sampling)** — i.i.d. panel.
+- **Assumption 3 (Parallel Counterfactual Trends)** — counterfactual trends in absence of all treatment AND zero exposure do not depend on own treatment status.
+- **Assumption 5 (Spillovers Are Local):** (i) `min_{j: D_j=1} d(i,j) > d_bar ⇒ h_i(D-vector) = 0` (spillovers vanish past `d_bar`); (ii) at least one treated unit AND one control unit exist with `min d > d_bar` (clean far-away control group). The validator enforces (ii) via `_validate_far_away_exists` with a strict `> d_bar` check; failure raises `ValueError` citing the assumption.
+- **Assumption 6 (Total Effect Parallel Trends)** — counterfactual trends do not depend on `(D_i, S_i)`. Stronger than Assumption 3.
+- **Assumption 7 (Spillover Effect Parallel Trends)** — counterfactual trends do not depend on `(D_i, S_i)` for `S_i ∈ {0, 1}`. Required to identify `gamma_0` / `delta_j`.
+- **Assumption 8 (Parallel Counterfactual Trends, Staggered)** — additive unit + time FE structure on untreated/unexposed potential outcomes. Stronger than Assumption 3.
+
+**Variance (Wave B MVP — documented limitation):**
+
+The stage-2 variance is the standard `solve_ols` estimator (HC1 / Conley / cluster paths, all dispatched via `vcov_type`). The **Gardner GMM sandwich first-stage uncertainty correction is NOT applied** at stage 2 in this PR. The full GMM + Conley composition is queued as a follow-up enhancement that extends `two_stage.py::_compute_gmm_variance` to accept a Conley kernel matrix in place of HC1's identity at the influence-function outer-product step (see Wave B plan Risks #2 for the IF formula). The reported SE is therefore **biased downward** (underestimated by a few percent in typical settings) because it omits the additional variance contribution from estimating the stage-1 FE; confidence intervals are correspondingly too narrow and p-values too small. Treat reported significance conservatively until the GMM correction lands.
+
+**Edge cases (from paper Section 3.2 / Discussion):**
+
+| # | Edge case | Handling |
+|---|---|---|
+| 1 | No nearby control units (Assumption 5(ii) fails) | Hard error via `_validate_far_away_exists` |
+| 2 | `d_bar` too small (some affected units classified as far) | User responsibility; sensitivity analysis across `d_bar` values recommended (vary `rings[-1]`) |
+| 3 | `d_bar` too large (`S=0` group fewer characteristics) | Same as #2; bias-variance trade-off (paper page 13-14) |
+| 4 | Single-ring `S_i` attenuation (many unaffected units) | Use multiple rings (Equation 6 multi-ring spec); supported by passing more breakpoints |
+| 5 | Spillovers extend past largest ring | User inspects outermost `delta_K` significance; if non-zero, extend the outermost ring |
+| 6 | Additive spillovers in count of nearby treated | `ring_method="count"` deferred (paper notes count form re-introduces functional-form dependence) |
+| 7 | Staggered + negative Goodman-Bacon weights | Two-stage Gardner methodology avoids this (paper page 22) |
+
+**Restrictions / deferred features:**
+
+- `event_study=True` raises `NotImplementedError` — per-event-time × ring decomposition (Butts Table 2) queued for follow-up.
+- `survey_design=` raises `NotImplementedError` — planned follow-up.
+- `covariates=` raises `NotImplementedError` — Gardner-style stage-1 residualization not yet wired through; planned follow-up.
+- `ring_method="count"` not exposed — only the nearest-treated-ring specification.
+- `vcov_type` ∈ {`"hc2"`, `"hc2_bm"`} raises `NotImplementedError` — current stage-2 inference uses generic residual df rather than per-coefficient Bell-McCaffrey / CR2 DOF. Use `"hc1"`, `"classical"`, `"conley"`, or pair with `cluster=` for CR1.
+- **`rings[0]` must equal 0** — the partition must cover treated locations (`d_it = 0` belongs to Ring 1). Rings starting at a nonzero inner edge would leave units in `0 <= d_it < rings[0]` as exposed-but-unmodeled, silently biasing the estimator. Validator rejects such inputs.
+- **Balanced panel required (Wave B MVP)** — every unit must observe every period. An unbalanced (unit, time) Ω₀ bipartite graph can produce disconnected FE components and unidentified stage-1 residuals on treated rows. Exact graph-connectivity-based identification (which would relax this to a strictly weaker condition) is queued as a follow-up extension. Validator rejects unbalanced inputs.
+- **One row per `(unit, time)` cell required** — duplicate cells silently re-weight stage-1 FE estimation AND stage-2 OLS. Validator rejects duplicate cells.
+- Data-driven `d_bar` selection (Butts 2021b / Butts 2023 JUE Insight) not exposed.
+- Gardner GMM first-stage correction at stage 2 not applied (HC1/Conley/cluster only; documented limitation).
+
+**Implementation:** `diff_diff/spillover.py`. Public class `SpilloverDiD`; result class `SpilloverDiDResults(DiDResults)` at `diff_diff/results.py`. Tests at `tests/test_spillover.py`; DGP factories `tests/_dgp_utils.py::generate_butts_nonstaggered_dgp` / `generate_butts_staggered_dgp` (satisfy Butts Assumptions 1/3/5/7 by construction).
 
 ---
 
