@@ -408,37 +408,82 @@ class SpilloverDiDResults(DiDResults):
     event_study: Optional[bool] = field(default=None)
     stage1_n_obs: Optional[int] = field(default=None)
     anticipation: Optional[int] = field(default=None)
+    # Wave C event-study fields (None when event_study=False):
+    att_dynamic: Optional[pd.DataFrame] = field(default=None)
+    # Per-event-time direct effects DataFrame indexed by integer k.
+    # Columns: ["coef", "se", "t_stat", "p_value", "ci_low", "ci_high", "n_obs"].
+    # Includes the reference period row with coef=0.0, se=0.0, n_obs=0.
+    event_study_effects: Optional[Dict[int, Dict[str, Any]]] = field(default=None)
+    # TwoStageDiD-compatible alias for ``att_dynamic`` consumable by
+    # ``plot_event_study`` and ``diagnostic_report.event_study_diagnostics``.
+    # Schema mirrors ``two_stage.py:1355-1389``:
+    #   {k: {"effect", "se", "n_obs", "t_stat", "p_value", "conf_int": (low, high)}}
+    # Reference row uses ``conf_int = (0.0, 0.0)`` (TwoStageDiD parity).
+    horizon_max: Optional[int] = field(default=None)
+    reference_period: Optional[int] = field(default=None)
 
     def summary(self, alpha: Optional[float] = None) -> str:
-        """Extended summary with ATT row plus per-ring rows."""
+        """Extended summary with ATT row, per-event-time direct block, and
+        per-(ring, event-time) spillover block."""
         base = super().summary(alpha=alpha)
-        if self.spillover_effects is None or self.spillover_effects.empty:
+        insert_blocks: List[str] = []
+
+        # Wave C event-study: per-event-time direct effects block.
+        if self.att_dynamic is not None and not self.att_dynamic.empty:
+            insert_blocks.append("")
+            insert_blocks.append("Dynamic Direct Effects by Event Time".center(70))
+            insert_blocks.append("-" * 70)
+            insert_blocks.append(
+                f"{'k':<15} {'Estimate':>12} {'Std. Err.':>12} "
+                f"{'t-stat':>10} {'P>|t|':>10} {'':>5}"
+            )
+            insert_blocks.append("-" * 70)
+            for k, row in self.att_dynamic.iterrows():
+                coef = row.get("coef", np.nan)
+                se = row.get("se", np.nan)
+                t_stat = row.get("t_stat", np.nan)
+                p_value = row.get("p_value", np.nan)
+                stars = _get_significance_stars(p_value)
+                k_str = f"{int(k):+d}"
+                insert_blocks.append(
+                    f"{k_str:<15} {coef:>12.4f} {se:>12.4f} "
+                    f"{t_stat:>10.3f} {p_value:>10.4f} {stars:>5}"
+                )
+            insert_blocks.append("-" * 70)
+
+        # Spillover block (per-ring OR per-(ring, k) under MultiIndex).
+        if self.spillover_effects is not None and not self.spillover_effects.empty:
+            insert_blocks.append("")
+            insert_blocks.append("Spillover Effects (ring-indicator, Butts 2021)".center(70))
+            insert_blocks.append("-" * 70)
+            insert_blocks.append(
+                f"{'Ring':<15} {'Estimate':>12} {'Std. Err.':>12} "
+                f"{'t-stat':>10} {'P>|t|':>10} {'':>5}"
+            )
+            insert_blocks.append("-" * 70)
+            for label, row in self.spillover_effects.iterrows():
+                coef = row.get("coef", np.nan)
+                se = row.get("se", np.nan)
+                t_stat = row.get("t_stat", np.nan)
+                p_value = row.get("p_value", np.nan)
+                stars = _get_significance_stars(p_value)
+                label_str = (
+                    str(label)
+                    if not isinstance(label, tuple)
+                    else f"{label[0]} k={int(label[1]):+d}"
+                )
+                insert_blocks.append(
+                    f"{label_str[:15]:<15} {coef:>12.4f} {se:>12.4f} "
+                    f"{t_stat:>10.3f} {p_value:>10.4f} {stars:>5}"
+                )
+            insert_blocks.append("-" * 70)
+
+        if not insert_blocks:
             return base
         lines = base.split("\n")
-        # Find the closing separator line and inject ring rows before it.
-        ring_rows = ["", "Spillover Effects (ring-indicator, Butts 2021)".center(70), "-" * 70]
-        header = (
-            f"{'Ring':<15} {'Estimate':>12} {'Std. Err.':>12} "
-            f"{'t-stat':>10} {'P>|t|':>10} {'':>5}"
-        )
-        ring_rows.append(header)
-        ring_rows.append("-" * 70)
-        for label, row in self.spillover_effects.iterrows():
-            coef = row.get("coef", np.nan)
-            se = row.get("se", np.nan)
-            t_stat = row.get("t_stat", np.nan)
-            p_value = row.get("p_value", np.nan)
-            stars = _get_significance_stars(p_value)
-            label_str = str(label) if not isinstance(label, tuple) else f"{label[0]} k={label[1]}"
-            ring_rows.append(
-                f"{label_str[:15]:<15} {coef:>12.4f} {se:>12.4f} "
-                f"{t_stat:>10.3f} {p_value:>10.4f} {stars:>5}"
-            )
-        ring_rows.append("-" * 70)
-        # Insert ring block before the final "==..." line (last row of base).
         for idx in range(len(lines) - 1, -1, -1):
             if lines[idx].startswith("="):
-                lines = lines[:idx] + ring_rows + lines[idx:]
+                lines = lines[:idx] + insert_blocks + lines[idx:]
                 break
         return "\n".join(lines)
 
@@ -460,6 +505,14 @@ class SpilloverDiDResults(DiDResults):
                 "event_study": self.event_study,
                 "stage1_n_obs": self.stage1_n_obs,
                 "anticipation": self.anticipation,
+                "att_dynamic": (
+                    self.att_dynamic.reset_index().to_dict(orient="records")
+                    if self.att_dynamic is not None
+                    else None
+                ),
+                "event_study_effects": self.event_study_effects,
+                "horizon_max": self.horizon_max,
+                "reference_period": self.reference_period,
             }
         )
         return base

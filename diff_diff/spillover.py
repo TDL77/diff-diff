@@ -429,6 +429,500 @@ def _compute_nearest_treated_distance_staggered(
     return d_it, row_unit, row_time
 
 
+def _compute_event_time_per_row(
+    *,
+    data: pd.DataFrame,
+    unit: str,
+    row_unit: np.ndarray,
+    row_time: np.ndarray,
+    effective_onsets: Dict[Any, float],
+    coords: Tuple[str, str],
+    metric: SpilloverMetric,
+    d_bar: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute two event-time clocks per row for Wave C event-study mode.
+
+    Butts (2021) Section 5 / Table 2 uses one symbol ``K_it`` but operationally
+    there are TWO event-time clocks — one for the direct-effect series and one
+    for the spillover-exposure series. This helper returns both.
+
+    - ``K_direct[r] = row_time[r] - effective_onsets[row_unit[r]]`` for rows of
+      ever-treated units (any t, including pre-treatment k < 0 for placebo
+      coefficients). NaN for never-treated units.
+    - ``K_spill[r] = row_time[r] - trigger_onset[row_unit[r]]`` for rows where
+      the spillover-trigger cohort has activated by ``row_time[r]``. NaN
+      otherwise. ``trigger_onset[i]`` is the EARLIEST effective onset among
+      cohorts whose treated units fall within ``d_bar`` of unit ``i``.
+
+    Cohort onsets are iterated in ascending order so the trigger is the first
+    cohort that puts unit ``i`` in any ring — matching the running-min logic
+    used by :func:`_compute_nearest_treated_distance_staggered` for ``d_it``.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Panel data; used to extract one (lat, lon) coordinate per unit.
+    unit, coords, metric, d_bar
+        Mirror :func:`_compute_nearest_treated_distance_staggered`.
+    row_unit, row_time : ndarray of shape (n_rows,)
+        Per-row identifiers (anticipation-adjusted onsets are baked into
+        ``effective_onsets``; row_time is the raw period).
+    effective_onsets : dict
+        Mapping from unit identifier to anticipation-shifted first_treat
+        (``first_treat - anticipation``). ``np.inf`` for never-treated units.
+
+    Returns
+    -------
+    K_direct : ndarray of shape (n_rows,), float64 with NaN where undefined.
+    K_spill : ndarray of shape (n_rows,), float64 with NaN where undefined.
+    """
+    n_rows = len(row_unit)
+    row_time_arr = np.asarray(row_time, dtype=np.float64)
+
+    # K_direct: per-row, derived from row_unit -> own effective_onset.
+    K_direct = np.full(n_rows, np.nan, dtype=np.float64)
+    own_onsets = np.array([effective_onsets.get(uid, np.inf) for uid in row_unit], dtype=np.float64)
+    direct_defined = np.isfinite(own_onsets)
+    K_direct[direct_defined] = row_time_arr[direct_defined] - own_onsets[direct_defined]
+
+    # trigger_onset[i] = first effective_onset among cohorts whose treated
+    # units have d(i, treated_in_cohort) <= d_bar.
+    unit_coords_df = (
+        data[[unit, coords[0], coords[1]]].drop_duplicates(subset=[unit]).set_index(unit)
+    )
+    unit_index = np.asarray(unit_coords_df.index.values)
+    all_coords = np.asarray(unit_coords_df[[coords[0], coords[1]]].values, dtype=np.float64)
+    unit_to_pos = {uid: pos for pos, uid in enumerate(unit_index)}
+
+    unique_onsets = sorted({eff_ft for eff_ft in effective_onsets.values() if np.isfinite(eff_ft)})
+    trigger_onset_per_unit_pos = np.full(len(unit_index), np.nan, dtype=np.float64)
+
+    for onset in unique_onsets:
+        # Units treated AT THIS ONSET (not by/before; we want the cohort's
+        # own treated set so we can compute the per-onset distance front).
+        treated_at_onset_ids = [uid for uid, ft in effective_onsets.items() if ft == onset]
+        treated_positions = np.array(
+            [unit_to_pos[uid] for uid in treated_at_onset_ids if uid in unit_to_pos],
+            dtype=np.intp,
+        )
+        if treated_positions.size == 0:
+            continue
+        treated_coords = all_coords[treated_positions]
+        dists_to_cohort = _pairwise_ring_distances(all_coords, treated_coords, metric).min(axis=1)
+        in_range_for_cohort = dists_to_cohort <= d_bar
+        not_yet_triggered = np.isnan(trigger_onset_per_unit_pos)
+        trigger_onset_per_unit_pos[in_range_for_cohort & not_yet_triggered] = onset
+
+    # Broadcast trigger onset to rows; K_spill = t - trigger when t >= trigger.
+    row_pos = np.array([unit_to_pos.get(uid, -1) for uid in row_unit], dtype=np.intp)
+    K_spill = np.full(n_rows, np.nan, dtype=np.float64)
+    valid_pos = row_pos >= 0
+    row_trigger = np.where(
+        valid_pos, trigger_onset_per_unit_pos[np.where(valid_pos, row_pos, 0)], np.nan
+    )
+    triggered = np.isfinite(row_trigger)
+    post_trigger = triggered & (row_time_arr >= row_trigger)
+    K_spill[post_trigger] = row_time_arr[post_trigger] - row_trigger[post_trigger]
+
+    return K_direct, K_spill
+
+
+def _apply_horizon_binning(
+    K_arr: np.ndarray,
+    horizon_max: Optional[int],
+) -> np.ndarray:
+    """Clip per-row event-time values into ``[-horizon_max, +horizon_max]`` bins.
+
+    Wave C event-study path uses bin-into-endpoint-pools semantics: rows with
+    event-time ``k < -H`` aggregate into a single ``k = -H`` dummy; rows with
+    ``k > +H`` aggregate into a single ``k = +H`` dummy. No observations are
+    dropped (cf. TwoStageDiD's ``horizon_max`` which filters rows).
+
+    NaN values in ``K_arr`` propagate through (``np.clip`` preserves NaN by
+    default). Omega_0 / never-treated rows carry NaN K values, which cause
+    ``1{K_binned = k}`` to evaluate False at every k — so they contribute 0
+    to all event-time dummies (correct identification: those rows enter
+    stage 1 only, not the event-time decomposition).
+
+    Parameters
+    ----------
+    K_arr : ndarray
+        Per-row event-time values. NaN entries are passed through unchanged.
+    horizon_max : int or None
+        Bin width; if ``None``, no clipping (used for auto-detect path where
+        ``H = max(|K_it|)`` provides the natural bound).
+
+    Returns
+    -------
+    ndarray of same shape and dtype as input, with NaN-preserving clamp applied.
+    """
+    if horizon_max is None:
+        return K_arr.astype(np.float64, copy=False)
+    if not isinstance(horizon_max, (int, np.integer)) or horizon_max < 0:
+        raise ValueError(
+            f"horizon_max must be a non-negative integer or None; "
+            f"got {horizon_max!r} (type {type(horizon_max).__name__})."
+        )
+    return np.clip(K_arr.astype(np.float64, copy=False), -float(horizon_max), float(horizon_max))
+
+
+def _build_event_study_design(
+    *,
+    D_it: np.ndarray,
+    ring_masks: np.ndarray,
+    ring_labels: List[str],
+    K_direct_binned: np.ndarray,
+    K_spill_binned: np.ndarray,
+    event_time_grid: List[int],
+    ref_period: int,
+) -> Tuple[
+    np.ndarray,
+    List[str],
+    List[Tuple[str, Optional[str], int]],
+    List[Tuple[str, Optional[str], int]],
+    np.ndarray,
+]:
+    """Build per-event-time × ring stage-2 design matrix for Wave C event-study.
+
+    The design has two series of dummies:
+
+    - **Direct effect**: ``D^k_{it} := 1{K_direct_{it} = k AND row is ever-treated}``
+      for each ``k ∈ event_time_grid \\ {ref_period}``. NaN entries in
+      ``K_direct_binned`` (never-treated rows) cause the indicator to evaluate
+      False, naturally yielding zero contribution.
+    - **Spillover**: ``Ring^k_{it,j} := (1 - D_it) * ring_masks[:, j] * 1{K_spill_{it} = k}``
+      for each ring ``j`` and each ``k ∈ event_time_grid \\ {ref_period}``.
+
+    All-zero columns are pre-filtered (one summary warning instead of many),
+    but the FULL rectangular grid of (series, ring, k) tuples is also returned
+    so downstream code can emit the MultiIndex ``spillover_effects`` schema
+    with NaN coefficients for empty cells (per Wave C plan: rectangular).
+
+    Parameters
+    ----------
+    D_it : ndarray of shape (n_rows,), float
+        Per-row binary indicator (treated AND post-treatment).
+    ring_masks : ndarray of shape (n_rows, K), bool
+        Per-row ring-membership indicators (from :func:`_build_ring_indicators`).
+    ring_labels : list of K strings
+        Human-readable labels for each ring band.
+    K_direct_binned, K_spill_binned : ndarray of shape (n_rows,), float64
+        Per-row event-time clocks (NaN where undefined). Already passed through
+        :func:`_apply_horizon_binning` if applicable.
+    event_time_grid : list of int
+        The full event-time bin set (e.g. ``[-3, -2, -1, 0, 1, 2, 3]`` for
+        ``horizon_max=3``). Reference period is dropped from this list inside
+        the helper.
+    ref_period : int
+        The event-time integer to drop from BOTH series.
+
+    Returns
+    -------
+    X_2 : ndarray of shape (n_rows, n_kept_cols)
+        Stage-2 design matrix (only non-empty columns kept).
+    kept_col_names : list of str
+        Column labels matching X_2 columns. Convention: ``"D^k=+0"``,
+        ``"_spillover_[0, 50)^k=-2"``, with signed integer suffix.
+    kept_col_meta : list of (series, ring_label_or_None, k)
+        Tuple metadata per kept column (``series ∈ {"direct", "spillover"}``).
+    rectangular_grid : list of (series, ring_label_or_None, k)
+        FULL grid of (series, ring, k) entries including those dropped because
+        the column was all zeros. Used for rectangular MultiIndex emission.
+        Order matches the design layout (direct first, then per-ring spillover).
+    n_obs_per_col : ndarray of shape (n_kept_cols,), int64
+        Count of rows with a non-zero contribution to each kept column.
+    """
+    if not isinstance(ref_period, (int, np.integer)):
+        raise TypeError(
+            f"ref_period must be an integer; got {ref_period!r} "
+            f"(type {type(ref_period).__name__})."
+        )
+    K = ring_masks.shape[1]
+    if len(ring_labels) != K:
+        raise ValueError(
+            f"ring_labels length ({len(ring_labels)}) must match number of " f"rings ({K})."
+        )
+
+    # The grid of event-times to emit dummies for, with the reference dropped.
+    k_grid = [int(k) for k in event_time_grid if int(k) != int(ref_period)]
+
+    one_minus_D = 1.0 - D_it.astype(np.float64)
+    ring_masks_f = ring_masks.astype(np.float64)
+    K_direct_f = np.asarray(K_direct_binned, dtype=np.float64)
+    K_spill_f = np.asarray(K_spill_binned, dtype=np.float64)
+
+    def _signed(k: int) -> str:
+        return f"{k:+d}"
+
+    # Build candidate columns in canonical order:
+    #   1) all direct-effect dummies, ascending k
+    #   2) per-ring spillover dummies (ascending ring, ascending k within)
+    candidate_cols: List[Tuple[str, Optional[str], int, np.ndarray]] = []
+    rectangular_grid: List[Tuple[str, Optional[str], int]] = []
+
+    for k in k_grid:
+        # Direct-effect dummy: D_i (implicit via NaN-on-never-treated) * 1{K_direct = k}.
+        col = (K_direct_f == float(k)).astype(np.float64)
+        candidate_cols.append(("direct", None, k, col))
+        rectangular_grid.append(("direct", None, k))
+
+    for j in range(K):
+        ring_lab = ring_labels[j]
+        for k in k_grid:
+            # Spillover dummy: (1 - D_it) * Ring_j * 1{K_spill = k}.
+            col = one_minus_D * ring_masks_f[:, j] * (K_spill_f == float(k)).astype(np.float64)
+            candidate_cols.append(("spillover", ring_lab, k, col))
+            rectangular_grid.append(("spillover", ring_lab, k))
+
+    # Pre-filter all-zero columns to keep solve_ols's rank-deficient warning
+    # noise low. Track the kept set.
+    kept_indices: List[int] = []
+    kept_cols_list: List[np.ndarray] = []
+    kept_col_names: List[str] = []
+    kept_col_meta: List[Tuple[str, Optional[str], int]] = []
+    n_obs_list: List[int] = []
+    n_dropped = 0
+
+    for idx, (series, ring_lab, k, col) in enumerate(candidate_cols):
+        n_nonzero = int(np.count_nonzero(col))
+        if n_nonzero == 0:
+            n_dropped += 1
+            continue
+        kept_indices.append(idx)
+        kept_cols_list.append(col)
+        if series == "direct":
+            kept_col_names.append(f"D^k={_signed(k)}")
+        else:
+            kept_col_names.append(f"_spillover_{ring_lab}^k={_signed(k)}")
+        kept_col_meta.append((series, ring_lab, k))
+        n_obs_list.append(n_nonzero)
+
+    if n_dropped > 0:
+        warnings.warn(
+            f"SpilloverDiD event-study: {n_dropped} of "
+            f"{len(candidate_cols)} stage-2 design column(s) were "
+            "all-zero (no rows contribute) and dropped before fitting. "
+            "Empty (series, ring, event_time) cells appear in the result "
+            "with coef=NaN and n_obs=0 (rectangular schema). To shrink the "
+            "emitted grid, reduce horizon_max or use horizon_max=None for "
+            "auto-detection.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    if not kept_cols_list:
+        # All columns dropped — degenerate. Return empty design; caller
+        # handles via downstream df_resid check + safe_inference NaN
+        # propagation.
+        X_2 = np.zeros((len(D_it), 0), dtype=np.float64)
+    else:
+        X_2 = np.column_stack(kept_cols_list)
+
+    n_obs_per_col = np.asarray(n_obs_list, dtype=np.int64)
+    return X_2, kept_col_names, kept_col_meta, rectangular_grid, n_obs_per_col
+
+
+def _extract_event_study_results(
+    *,
+    coef: np.ndarray,
+    vcov: Optional[np.ndarray],
+    col_names_all: List[str],
+    kept_col_meta: List[Tuple[str, Optional[str], int]],
+    rectangular_grid: List[Tuple[str, Optional[str], int]],
+    n_obs_per_col: np.ndarray,
+    ref_period: int,
+    df_resid: int,
+    alpha: float,
+    ring_labels: List[str],
+) -> Tuple[
+    float,
+    float,
+    float,
+    float,
+    Tuple[float, float],
+    Optional[pd.DataFrame],
+    Optional[pd.DataFrame],
+    Optional[Dict[int, Dict[str, Any]]],
+    Dict[str, float],
+]:
+    """Extract per-event-time inference and the share-weighted scalar ``att``.
+
+    Builds three output surfaces from a single stage-2 fit:
+
+    - ``att_dynamic`` : per-event-time direct-effect DataFrame indexed by ``k``.
+      Includes the reference period row with ``coef=0.0, se=0.0, n_obs=0``.
+      Rectangular emission across the full direct-effect event-time grid.
+    - ``spillover_effects`` : MultiIndex ``(ring_label, event_time)`` DataFrame
+      with the same columns. Rectangular over the full spillover grid.
+    - ``event_study_effects`` : TwoStageDiD-compatible alias matching
+      ``two_stage.py:1355-1389`` schema (``conf_int`` as ``(low, high)`` tuple,
+      reference period as ``(0.0, 0.0)``).
+
+    Scalar ``att`` uses sample-share weighting on post-treatment ``tau_k``
+    with SE from linear-combination inference on the corresponding vcov
+    submatrix.
+    """
+    # Per-coefficient inference dict keyed by (series, ring_label, k).
+    per_coef: Dict[Tuple[str, Optional[str], int], Dict[str, Any]] = {}
+    for i, (series, ring_label, k) in enumerate(kept_col_meta):
+        coef_i = float(coef[i]) if np.isfinite(coef[i]) else float("nan")
+        if vcov is not None and np.isfinite(vcov[i, i]):
+            se_i = float(np.sqrt(max(vcov[i, i], 0.0)))
+        else:
+            se_i = float("nan")
+        t_i, p_i, ci_i = safe_inference(coef_i, se_i, alpha=alpha, df=df_resid)
+        per_coef[(series, ring_label, k)] = {
+            "coef": coef_i,
+            "se": se_i,
+            "t_stat": t_i,
+            "p_value": p_i,
+            "ci_low": ci_i[0],
+            "ci_high": ci_i[1],
+            "n_obs": int(n_obs_per_col[i]),
+        }
+
+    direct_k_set = sorted({k for (s, _, k) in rectangular_grid if s == "direct"})
+    spillover_k_set = sorted({k for (s, _, k) in rectangular_grid if s == "spillover"})
+
+    # Build att_dynamic: rectangular over direct event-time grid + reference row.
+    all_direct_ks = sorted(set(direct_k_set) | {ref_period})
+    direct_rows: List[Dict[str, Any]] = []
+    for k in all_direct_ks:
+        if k == ref_period:
+            direct_rows.append(
+                {
+                    "k": k,
+                    "coef": 0.0,
+                    "se": 0.0,
+                    "t_stat": float("nan"),
+                    "p_value": float("nan"),
+                    "ci_low": 0.0,
+                    "ci_high": 0.0,
+                    "n_obs": 0,
+                }
+            )
+        elif ("direct", None, k) in per_coef:
+            r = per_coef[("direct", None, k)]
+            direct_rows.append({"k": k, **r})
+        else:
+            direct_rows.append(
+                {
+                    "k": k,
+                    "coef": float("nan"),
+                    "se": float("nan"),
+                    "t_stat": float("nan"),
+                    "p_value": float("nan"),
+                    "ci_low": float("nan"),
+                    "ci_high": float("nan"),
+                    "n_obs": 0,
+                }
+            )
+    att_dynamic_df = pd.DataFrame(direct_rows).set_index("k").sort_index() if direct_rows else None
+
+    # Build spillover_effects: rectangular over (ring_label, k) grid.
+    spillover_rows: List[Dict[str, Any]] = []
+    for ring_lab in ring_labels:
+        for k in spillover_k_set:
+            key = ("spillover", ring_lab, k)
+            if key in per_coef:
+                r = per_coef[key]
+                spillover_rows.append({"ring": ring_lab, "k": k, **r})
+            else:
+                spillover_rows.append(
+                    {
+                        "ring": ring_lab,
+                        "k": k,
+                        "coef": float("nan"),
+                        "se": float("nan"),
+                        "t_stat": float("nan"),
+                        "p_value": float("nan"),
+                        "ci_low": float("nan"),
+                        "ci_high": float("nan"),
+                        "n_obs": 0,
+                    }
+                )
+    spillover_df = (
+        pd.DataFrame(spillover_rows).set_index(["ring", "k"]).sort_index()
+        if spillover_rows
+        else None
+    )
+
+    # Build event_study_effects dict (TwoStageDiD-compatible).
+    event_study_effects: Dict[int, Dict[str, Any]] = {}
+    for k in all_direct_ks:
+        if k == ref_period:
+            event_study_effects[k] = {
+                "effect": 0.0,
+                "se": 0.0,
+                "n_obs": 0,
+                "t_stat": float("nan"),
+                "p_value": float("nan"),
+                "conf_int": (0.0, 0.0),
+            }
+        elif ("direct", None, k) in per_coef:
+            r = per_coef[("direct", None, k)]
+            event_study_effects[k] = {
+                "effect": r["coef"],
+                "se": r["se"],
+                "n_obs": r["n_obs"],
+                "t_stat": r["t_stat"],
+                "p_value": r["p_value"],
+                "conf_int": (r["ci_low"], r["ci_high"]),
+            }
+        else:
+            event_study_effects[k] = {
+                "effect": float("nan"),
+                "se": float("nan"),
+                "n_obs": 0,
+                "t_stat": float("nan"),
+                "p_value": float("nan"),
+                "conf_int": (float("nan"), float("nan")),
+            }
+
+    # Scalar att via sample-share-weighted average over post-treatment direct
+    # coefficients (k >= 0). SE via linear-combination on the vcov submatrix
+    # of those kept columns.
+    post_direct_indices = [
+        i for i, (s, _, k) in enumerate(kept_col_meta) if s == "direct" and k >= 0
+    ]
+    if post_direct_indices and vcov is not None:
+        n_obs_post = np.array([n_obs_per_col[i] for i in post_direct_indices], dtype=np.float64)
+        total_post_obs = n_obs_post.sum()
+        if total_post_obs > 0:
+            weights = n_obs_post / total_post_obs
+            coefs_post = np.array([coef[i] for i in post_direct_indices], dtype=np.float64)
+            att = float(np.nansum(weights * coefs_post))
+            vcov_subset = vcov[np.ix_(post_direct_indices, post_direct_indices)]
+            var_att = float(weights @ vcov_subset @ weights)
+            att_se = float(np.sqrt(max(var_att, 0.0))) if np.isfinite(var_att) else float("nan")
+        else:
+            att = float("nan")
+            att_se = float("nan")
+    else:
+        att = float("nan")
+        att_se = float("nan")
+    att_t, att_p, att_ci = safe_inference(att, att_se, alpha=alpha, df=df_resid)
+
+    # Coefficients dict — name → value for every kept stage-2 coefficient.
+    coefficients_full: Dict[str, float] = {}
+    for i, name in enumerate(col_names_all):
+        val = float(coef[i]) if np.isfinite(coef[i]) else float("nan")
+        coefficients_full[name] = val
+    coefficients_full["ATT"] = att
+
+    return (
+        att,
+        att_se,
+        att_t,
+        att_p,
+        att_ci,
+        spillover_df,
+        att_dynamic_df,
+        event_study_effects,
+        coefficients_full,
+    )
+
+
 def _build_ring_indicators(
     d_values: np.ndarray,
     rings: List[float],
@@ -1427,19 +1921,39 @@ class SpilloverDiD:
                 "SpilloverDiD does not yet support survey_design= ; planned "
                 "as a follow-up extension. See TODO.md."
             )
-        if self.event_study:
-            raise NotImplementedError(
-                "SpilloverDiD does not yet support event_study=True ; the "
-                "per-event-time × ring decomposition (Butts Table 2) is "
-                "planned as a follow-up extension. The base "
-                "(event_study=False) aggregate spec is fully supported and "
-                "handles both non-staggered and staggered timing."
-            )
+        # Wave C: event-study path is now supported. Validate horizon_max
+        # up front (fail-fast before any stage-1 work).
         if self.horizon_max is not None:
-            raise NotImplementedError(
-                "SpilloverDiD does not yet support horizon_max= (used only "
-                "in event-study mode); planned as a follow-up extension."
-            )
+            if not isinstance(self.horizon_max, (int, np.integer)) or self.horizon_max < 0:
+                raise ValueError(
+                    f"horizon_max must be a non-negative integer or None; "
+                    f"got {self.horizon_max!r} "
+                    f"(type {type(self.horizon_max).__name__})."
+                )
+            if not self.event_study and self.horizon_max is not None:
+                # horizon_max is only meaningful in event-study mode.
+                warnings.warn(
+                    "horizon_max is ignored when event_study=False (it controls "
+                    "event-time binning in the per-event-time design). Set "
+                    "event_study=True to use horizon_max.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        # Lock the ref_period × horizon_max compatibility: the reference period
+        # must fall inside the binning window or silently floor would change
+        # identification (rejected per `feedback_no_silent_failures`).
+        if self.event_study and self.horizon_max is not None:
+            ref_period_check = -1 - self.anticipation
+            if ref_period_check < -self.horizon_max:
+                raise ValueError(
+                    f"Reference period (-1 - anticipation = {ref_period_check}) "
+                    f"falls outside the binning window [-{self.horizon_max}, "
+                    f"+{self.horizon_max}]. Either reduce anticipation "
+                    f"(currently {self.anticipation}) or increase horizon_max "
+                    f"(currently {self.horizon_max}) so the reference period "
+                    f"falls inside the window. Silently shifting the reference "
+                    f"to -horizon_max would change identification."
+                )
         # Validate `anticipation` up front: must be a non-negative integer.
         # Accepting fractional or negative values would silently shift
         # treatment timing and ring exposure beyond what the estimator's
@@ -1780,15 +2294,100 @@ class SpilloverDiD:
                 stacklevel=2,
             )
 
-        # Step 13: build stage-2 design [D_it, (1-D_it)*Ring_{it,j}].
-        ring_covariates = np.zeros((len(data), K), dtype=np.float64)
-        for j in range(K):
-            ring_covariates[:, j] = (1.0 - D_it) * ring_masks[:, j].astype(np.float64)
-
-        X_2 = np.column_stack([D_it.reshape(-1, 1), ring_covariates])
-
+        # Step 13: build stage-2 design.
         ring_labels = [_ring_label(list(self.rings), j) for j in range(K)]
-        col_names_all = ["treatment"] + [f"_spillover_{lab}" for lab in ring_labels]
+
+        # Wave C: when event_study=True, compute per-row event-time clocks AND
+        # build the per-event-time × ring design instead of the aggregate design.
+        # ``event_study_meta`` carries the rectangular-grid metadata + binned K
+        # arrays needed downstream for rectangular MultiIndex emission. None in
+        # the aggregate path.
+        event_study_meta: Optional[Dict[str, Any]] = None
+
+        if self.event_study:
+            K_direct_raw, K_spill_raw = _compute_event_time_per_row(
+                data=data,
+                unit=unit,
+                row_unit=np.asarray(unit_vals),
+                row_time=np.asarray(time_vals),
+                effective_onsets=effective_onsets,
+                coords=(
+                    self.conley_coords if self.conley_coords is not None else ("__lat__", "__lon__")
+                ),
+                metric=self.conley_metric,
+                d_bar=self._effective_d_bar,
+            )
+            # event_study=True without conley_coords requires fallback coords for
+            # ring-trigger computation. The validator already requires either
+            # conley_coords or none; for now require conley_coords when
+            # event_study=True (we read coords from `self.conley_coords` which
+            # was validated). Defensive guard:
+            if self.conley_coords is None:
+                raise ValueError(
+                    "event_study=True requires conley_coords to be set so the "
+                    "spillover-trigger cohort onset can be computed per row. "
+                    "Set conley_coords=(lat_col, lon_col) on the estimator."
+                )
+            # Apply horizon binning (NaN-preserving).
+            K_direct_binned = _apply_horizon_binning(K_direct_raw, self.horizon_max)
+            K_spill_binned = _apply_horizon_binning(K_spill_raw, self.horizon_max)
+            # Reference period: mirror TwoStageDiD's convention.
+            ref_period = -1 - int(self.anticipation)
+            # Event-time grid:
+            #   - With horizon_max: [-H, ..., +H].
+            #   - With None: auto-detect from observed finite K values across
+            #     BOTH clocks. The grid is the union (excluding NaN).
+            if self.horizon_max is not None:
+                H = int(self.horizon_max)
+                event_time_grid = list(range(-H, H + 1))
+            else:
+                observed_k_direct = K_direct_binned[np.isfinite(K_direct_binned)]
+                observed_k_spill = K_spill_binned[np.isfinite(K_spill_binned)]
+                if observed_k_direct.size == 0 and observed_k_spill.size == 0:
+                    raise ValueError(
+                        "event_study=True but no rows have a defined K_direct "
+                        "or K_spill (the panel has no ever-treated unit AND no "
+                        "spillover-exposed unit). Cannot fit event-study design."
+                    )
+                k_union: set = set()
+                if observed_k_direct.size:
+                    k_union.update(int(k) for k in np.unique(observed_k_direct))
+                if observed_k_spill.size:
+                    k_union.update(int(k) for k in np.unique(observed_k_spill))
+                # Ensure ref_period is in the grid (so the helper drops it cleanly
+                # rather than emitting it as a fitted dummy when it doesn't appear
+                # in the observed K set).
+                k_union.add(ref_period)
+                event_time_grid = sorted(k_union)
+            # Build stage-2 design (all-zero columns pre-filtered with summary
+            # warning; rectangular_grid retains the full (series, ring, k) tuples).
+            X_2, kept_col_names, kept_col_meta, rectangular_grid, n_obs_per_col = (
+                _build_event_study_design(
+                    D_it=D_it,
+                    ring_masks=ring_masks,
+                    ring_labels=ring_labels,
+                    K_direct_binned=K_direct_binned,
+                    K_spill_binned=K_spill_binned,
+                    event_time_grid=event_time_grid,
+                    ref_period=ref_period,
+                )
+            )
+            col_names_all = kept_col_names
+            event_study_meta = {
+                "kept_col_meta": kept_col_meta,
+                "rectangular_grid": rectangular_grid,
+                "n_obs_per_col": n_obs_per_col,
+                "ref_period": ref_period,
+                "K_direct_binned": K_direct_binned,
+                "K_spill_binned": K_spill_binned,
+                "event_time_grid": event_time_grid,
+            }
+        else:
+            ring_covariates = np.zeros((len(data), K), dtype=np.float64)
+            for j in range(K):
+                ring_covariates[:, j] = (1.0 - D_it) * ring_masks[:, j].astype(np.float64)
+            X_2 = np.column_stack([D_it.reshape(-1, 1), ring_covariates])
+            col_names_all = ["treatment"] + [f"_spillover_{lab}" for lab in ring_labels]
 
         # Step 14: subset arrays to the estimation sample (finite y_tilde rows).
         # Apply to design, outcome, cluster ids, AND the Conley spatial/temporal
@@ -1836,14 +2435,7 @@ class SpilloverDiD:
 
         coef, residuals, vcov = solve_ols(X_2_fit, y_tilde_fit, **solve_kwargs)  # type: ignore[misc]
 
-        # Step 16: extract coefficients and inference.
-        tau_total = float(coef[0])
-        # Degrees of freedom for t-distribution inference. Use the EFFECTIVE
-        # rank after solve_ols drops rank-deficient (NaN) coefficient
-        # columns, NOT the raw column count. On rank-deficient stage-2
-        # fits (e.g. an empty ring covariate dropped by solve_ols's QR),
-        # using raw `X_2_fit.shape[1]` would understate df_resid and
-        # silently inflate p-values and CI widths.
+        # Step 16a: shared df_resid computation.
         n_obs_eff = int(finite_mask.sum())
         k_effective = int(np.isfinite(coef).sum())
         df_resid = n_obs_eff - k_effective
@@ -1863,43 +2455,84 @@ class SpilloverDiD:
             )
             df_resid = 0
 
-        # Clamp negative diagonals to 0 before sqrt: indefinite Conley or
-        # near-singular sandwich variances can produce numerically tiny
-        # negative values that would otherwise NaN the entire inference
-        # row. Matches the sibling-estimator convention
-        # (two_stage.py:1183, estimators.py:606, stacked_did.py:515).
-        tau_se = (
-            float(np.sqrt(max(vcov[0, 0], 0.0)))
-            if vcov is not None and np.isfinite(vcov[0, 0])
-            else float("nan")
-        )
-        tau_t, tau_p, tau_ci = safe_inference(tau_total, tau_se, alpha=self.alpha, df=df_resid)
+        # Step 16b: branch on event_study mode for result extraction.
+        att_dynamic_df: Optional[pd.DataFrame] = None
+        event_study_effects_dict: Optional[Dict[int, Dict[str, Any]]] = None
+        reference_period_used: Optional[int] = None
 
-        # Per-ring inference.
-        ring_rows = []
-        for j in range(K):
-            idx = 1 + j  # 0 is treatment; rings follow.
-            coef_j = float(coef[idx])
-            se_j = (
-                float(np.sqrt(max(vcov[idx, idx], 0.0)))
-                if vcov is not None and np.isfinite(vcov[idx, idx])
+        if self.event_study:
+            assert event_study_meta is not None  # set in Step 13 above
+            (
+                tau_total,
+                tau_se,
+                tau_t,
+                tau_p,
+                tau_ci,
+                spillover_df,
+                att_dynamic_df,
+                event_study_effects_dict,
+                coefficients_full,
+            ) = _extract_event_study_results(
+                coef=coef,
+                vcov=vcov,
+                col_names_all=col_names_all,
+                kept_col_meta=event_study_meta["kept_col_meta"],
+                rectangular_grid=event_study_meta["rectangular_grid"],
+                n_obs_per_col=event_study_meta["n_obs_per_col"],
+                ref_period=event_study_meta["ref_period"],
+                df_resid=df_resid,
+                alpha=self.alpha,
+                ring_labels=ring_labels,
+            )
+            reference_period_used = event_study_meta["ref_period"]
+        else:
+            # Wave B aggregate path: extract treatment coef + per-ring inference.
+            tau_total = float(coef[0])
+            # Clamp negative diagonals to 0 before sqrt: indefinite Conley or
+            # near-singular sandwich variances can produce numerically tiny
+            # negative values that would otherwise NaN the entire inference
+            # row. Matches the sibling-estimator convention
+            # (two_stage.py:1183, estimators.py:606, stacked_did.py:515).
+            tau_se = (
+                float(np.sqrt(max(vcov[0, 0], 0.0)))
+                if vcov is not None and np.isfinite(vcov[0, 0])
                 else float("nan")
             )
-            t_j, p_j, ci_j = safe_inference(coef_j, se_j, alpha=self.alpha, df=df_resid)
-            ring_rows.append(
-                {
-                    "ring": ring_labels[j],
-                    "coef": coef_j,
-                    "se": se_j,
-                    "t_stat": t_j,
-                    "p_value": p_j,
-                    "ci_low": ci_j[0],
-                    "ci_high": ci_j[1],
-                }
-            )
-        spillover_df = pd.DataFrame(ring_rows).set_index("ring") if ring_rows else None
+            tau_t, tau_p, tau_ci = safe_inference(tau_total, tau_se, alpha=self.alpha, df=df_resid)
 
-        # Step 16: counts for the result class.
+            # Per-ring inference.
+            ring_rows = []
+            for j in range(K):
+                idx = 1 + j  # 0 is treatment; rings follow.
+                coef_j = float(coef[idx])
+                se_j = (
+                    float(np.sqrt(max(vcov[idx, idx], 0.0)))
+                    if vcov is not None and np.isfinite(vcov[idx, idx])
+                    else float("nan")
+                )
+                t_j, p_j, ci_j = safe_inference(coef_j, se_j, alpha=self.alpha, df=df_resid)
+                ring_rows.append(
+                    {
+                        "ring": ring_labels[j],
+                        "coef": coef_j,
+                        "se": se_j,
+                        "t_stat": t_j,
+                        "p_value": p_j,
+                        "ci_low": ci_j[0],
+                        "ci_high": ci_j[1],
+                    }
+                )
+            spillover_df = pd.DataFrame(ring_rows).set_index("ring") if ring_rows else None
+
+            # Coefficients dict — Wave B name → value layout. "ATT" alias points
+            # at the treatment slot (sibling-estimator convention).
+            coefficients_full = {}
+            for i, name in enumerate(col_names_all):
+                val = float(coef[i]) if np.isfinite(coef[i]) else float("nan")
+                coefficients_full[name] = val
+            coefficients_full["ATT"] = tau_total
+
+        # Step 16c: counts for the result class.
         n_units_ever_in_ring: Dict[str, int] = {}
         for j in range(K):
             in_ring_units = data.loc[ring_masks[:, j], unit].nunique()
@@ -1909,16 +2542,6 @@ class SpilloverDiD:
         # reflect the actual stage-2 estimation sample (after dropping NaN
         # y_tilde rows), matching solve_ols's HC1/CR1 sample-size adjustments.
         D_it_fit = D_it[finite_mask] if n_nan > 0 else D_it
-
-        # Populate coefficients dict with ALL stage-2 coefficients (treatment
-        # + K rings) keyed by their col_names_all labels so consumers can
-        # align names to vcov rows/cols. "ATT" is exposed as an alias for the
-        # treatment slot to match the sibling-estimator convention.
-        coefficients_full: Dict[str, float] = {}
-        for i, name in enumerate(col_names_all):
-            val = float(coef[i]) if np.isfinite(coef[i]) else float("nan")
-            coefficients_full[name] = val
-        coefficients_full["ATT"] = tau_total
 
         result = SpilloverDiDResults(
             att=tau_total,
@@ -1951,6 +2574,10 @@ class SpilloverDiD:
             event_study=self.event_study,
             stage1_n_obs=stage1_n_obs,
             anticipation=self.anticipation,
+            att_dynamic=att_dynamic_df,
+            event_study_effects=event_study_effects_dict,
+            horizon_max=self.horizon_max if self.event_study else None,
+            reference_period=reference_period_used,
         )
         self.results_ = result
         self.is_fitted_ = True

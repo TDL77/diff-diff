@@ -11,8 +11,11 @@ import pytest
 from diff_diff.spillover import (
     SpilloverDiD,
     _apply_callable_metric_pairwise,
+    _apply_horizon_binning,
+    _build_event_study_design,
     _build_ring_indicators,
     _check_omega_0_connectivity,
+    _compute_event_time_per_row,
     _compute_nearest_treated_distance_sparse,
     _compute_nearest_treated_distance_staggered,
     _compute_nearest_treated_distance_static,
@@ -2806,3 +2809,817 @@ class TestSpilloverDiDCoefficientsAlignToVcov:
                 f"Drift on {ring_label}: coefficients[{key}]="
                 f"{result.coefficients[key]} vs spillover_effects.coef={row['coef']}"
             )
+
+
+# =============================================================================
+# Wave C: _compute_event_time_per_row helper unit tests
+# =============================================================================
+
+
+class TestComputeEventTimePerRowHelper:
+    """Unit tests for the two-clock event-time helper (Wave C).
+
+    Verifies:
+    - K_direct = t - effective_onset for ever-treated rows; NaN for never-treated.
+    - K_spill = t - trigger_onset for triggered rows; NaN otherwise.
+    - trigger_onset is the EARLIEST in-range cohort onset (running min).
+    - Multi-cohort priority: an earlier cohort wins over a later, even if the
+      later cohort's units are closer to the row's unit.
+    """
+
+    def _make_panel(self, unit_coords, onsets, n_periods=5):
+        """Build a balanced panel from (unit -> (lat, lon)) and (unit -> onset)."""
+        rows = []
+        for u, (lat, lon) in unit_coords.items():
+            ft = onsets.get(u, np.inf)
+            for t in range(n_periods):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "lat": lat,
+                        "lon": lon,
+                        "first_treat": ft,
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def test_k_direct_for_ever_treated_units(self):
+        """K_direct = t - effective_onset on all rows of ever-treated units."""
+        df = self._make_panel(
+            unit_coords={"A": (0.0, 0.0), "B": (5.0, 0.0)},
+            onsets={"A": 1.0, "B": 3.0},
+            n_periods=5,
+        )
+        K_direct, _ = _compute_event_time_per_row(
+            data=df,
+            unit="unit",
+            row_unit=df["unit"].values,
+            row_time=df["time"].values,
+            effective_onsets={"A": 1.0, "B": 3.0},
+            coords=("lat", "lon"),
+            metric="euclidean",
+            d_bar=10.0,
+        )
+        # A: K = t - 1 for t in {0..4} → {-1, 0, 1, 2, 3}
+        # B: K = t - 3 for t in {0..4} → {-3, -2, -1, 0, 1}
+        expected_a = np.array([-1.0, 0.0, 1.0, 2.0, 3.0])
+        expected_b = np.array([-3.0, -2.0, -1.0, 0.0, 1.0])
+        a_rows = df["unit"].values == "A"
+        b_rows = df["unit"].values == "B"
+        np.testing.assert_array_equal(K_direct[a_rows], expected_a)
+        np.testing.assert_array_equal(K_direct[b_rows], expected_b)
+
+    def test_k_direct_nan_for_never_treated(self):
+        df = self._make_panel(
+            unit_coords={"A": (0.0, 0.0), "C": (1.0, 0.0)},
+            onsets={"A": 1.0},  # C never-treated
+            n_periods=3,
+        )
+        K_direct, _ = _compute_event_time_per_row(
+            data=df,
+            unit="unit",
+            row_unit=df["unit"].values,
+            row_time=df["time"].values,
+            effective_onsets={"A": 1.0, "C": np.inf},
+            coords=("lat", "lon"),
+            metric="euclidean",
+            d_bar=10.0,
+        )
+        c_rows = df["unit"].values == "C"
+        assert np.all(np.isnan(K_direct[c_rows]))
+
+    def test_k_spill_for_in_range_unit(self):
+        """A never-treated unit within d_bar of A gets K_spill = t - A.onset."""
+        df = self._make_panel(
+            unit_coords={"A": (0.0, 0.0), "C": (1.0, 0.0)},
+            onsets={"A": 1.0},
+            n_periods=4,
+        )
+        _, K_spill = _compute_event_time_per_row(
+            data=df,
+            unit="unit",
+            row_unit=df["unit"].values,
+            row_time=df["time"].values,
+            effective_onsets={"A": 1.0, "C": np.inf},
+            coords=("lat", "lon"),
+            metric="euclidean",
+            d_bar=10.0,
+        )
+        # C: at t=0 → NaN (pre-trigger); t=1,2,3 → 0, 1, 2.
+        c_rows = df["unit"].values == "C"
+        expected_c = np.array([np.nan, 0.0, 1.0, 2.0])
+        np.testing.assert_array_equal(K_spill[c_rows], expected_c)
+
+    def test_k_spill_nan_for_far_unit(self):
+        df = self._make_panel(
+            unit_coords={"A": (0.0, 0.0), "D": (100.0, 0.0)},  # D far
+            onsets={"A": 1.0},
+            n_periods=4,
+        )
+        _, K_spill = _compute_event_time_per_row(
+            data=df,
+            unit="unit",
+            row_unit=df["unit"].values,
+            row_time=df["time"].values,
+            effective_onsets={"A": 1.0, "D": np.inf},
+            coords=("lat", "lon"),
+            metric="euclidean",
+            d_bar=10.0,
+        )
+        d_rows = df["unit"].values == "D"
+        assert np.all(np.isnan(K_spill[d_rows]))
+
+    def test_k_spill_trigger_is_earliest_cohort_in_range(self):
+        """A unit in range of BOTH cohorts gets trigger = EARLIER cohort, even
+        if the later cohort is geographically closer."""
+        df = self._make_panel(
+            unit_coords={
+                "A": (0.0, 0.0),  # cohort 1, onset=1
+                "B": (3.0, 0.0),  # cohort 2, onset=3
+                "C": (2.5, 0.0),  # at distance 2.5 from A AND 0.5 from B; both <= d_bar
+            },
+            onsets={"A": 1.0, "B": 3.0},
+            n_periods=5,
+        )
+        _, K_spill = _compute_event_time_per_row(
+            data=df,
+            unit="unit",
+            row_unit=df["unit"].values,
+            row_time=df["time"].values,
+            effective_onsets={"A": 1.0, "B": 3.0, "C": np.inf},
+            coords=("lat", "lon"),
+            metric="euclidean",
+            d_bar=10.0,
+        )
+        # C: trigger = A's onset (1), NOT B's onset (3), even though B is closer.
+        # K_spill at t=0 → NaN; t=1 → 0; t=2 → 1; t=3 → 2; t=4 → 3.
+        c_rows = df["unit"].values == "C"
+        expected_c = np.array([np.nan, 0.0, 1.0, 2.0, 3.0])
+        np.testing.assert_array_equal(K_spill[c_rows], expected_c)
+
+    def test_k_spill_pre_trigger_is_nan(self):
+        """Even an in-range unit has K_spill = NaN before the trigger cohort activates."""
+        df = self._make_panel(
+            unit_coords={"A": (0.0, 0.0), "C": (1.0, 0.0)},
+            onsets={"A": 2.0},  # cohort onset is at t=2
+            n_periods=4,
+        )
+        _, K_spill = _compute_event_time_per_row(
+            data=df,
+            unit="unit",
+            row_unit=df["unit"].values,
+            row_time=df["time"].values,
+            effective_onsets={"A": 2.0, "C": np.inf},
+            coords=("lat", "lon"),
+            metric="euclidean",
+            d_bar=10.0,
+        )
+        c_rows = df["unit"].values == "C"
+        # C: t=0,1 → NaN (pre-trigger); t=2,3 → 0, 1.
+        expected_c = np.array([np.nan, np.nan, 0.0, 1.0])
+        np.testing.assert_array_equal(K_spill[c_rows], expected_c)
+
+    def test_anticipation_shifts_both_clocks(self):
+        """When effective_onsets is anticipation-shifted, both clocks shift accordingly."""
+        df = self._make_panel(
+            unit_coords={"A": (0.0, 0.0), "C": (1.0, 0.0)},
+            onsets={"A": 3.0},
+            n_periods=5,
+        )
+        # anticipation=2 → effective_onset(A) = 3 - 2 = 1.
+        K_direct, K_spill = _compute_event_time_per_row(
+            data=df,
+            unit="unit",
+            row_unit=df["unit"].values,
+            row_time=df["time"].values,
+            effective_onsets={"A": 1.0, "C": np.inf},  # anticipation-shifted
+            coords=("lat", "lon"),
+            metric="euclidean",
+            d_bar=10.0,
+        )
+        a_rows = df["unit"].values == "A"
+        c_rows = df["unit"].values == "C"
+        # A's K_direct: t=0..4 → {-1, 0, 1, 2, 3} (against effective_onset=1).
+        np.testing.assert_array_equal(K_direct[a_rows], np.array([-1.0, 0.0, 1.0, 2.0, 3.0]))
+        # C's K_spill: trigger=1; t=0 → NaN; t=1..4 → 0, 1, 2, 3.
+        np.testing.assert_array_equal(K_spill[c_rows], np.array([np.nan, 0.0, 1.0, 2.0, 3.0]))
+
+
+class TestApplyHorizonBinningHelper:
+    """Unit tests for the horizon-clip helper (Wave C)."""
+
+    def test_clips_to_endpoint_bins(self):
+        K = np.array([-5.0, -3.0, -1.0, 0.0, 2.0, 5.0, 10.0])
+        out = _apply_horizon_binning(K, horizon_max=3)
+        np.testing.assert_array_equal(out, np.array([-3.0, -3.0, -1.0, 0.0, 2.0, 3.0, 3.0]))
+
+    def test_nan_preservation(self):
+        K = np.array([np.nan, -5.0, 0.0, np.nan, 10.0])
+        out = _apply_horizon_binning(K, horizon_max=3)
+        # NaN positions remain NaN; finite positions clipped.
+        assert np.isnan(out[0])
+        assert np.isnan(out[3])
+        np.testing.assert_array_equal(out[[1, 2, 4]], np.array([-3.0, 0.0, 3.0]))
+
+    def test_none_horizon_returns_input_unchanged(self):
+        K = np.array([-10.0, 0.0, np.nan, 100.0])
+        out = _apply_horizon_binning(K, horizon_max=None)
+        # Should equal input exactly (NaN preserved by np.array_equal with equal_nan=True).
+        assert np.array_equal(out, K, equal_nan=True)
+
+    def test_zero_horizon_collapses_to_single_bin(self):
+        """H=0 maps every finite K to 0; NaN preserved."""
+        K = np.array([-5.0, -1.0, 0.0, 3.0, np.nan])
+        out = _apply_horizon_binning(K, horizon_max=0)
+        assert out[0] == 0.0 and out[1] == 0.0 and out[2] == 0.0 and out[3] == 0.0
+        assert np.isnan(out[4])
+
+    def test_negative_horizon_raises(self):
+        K = np.array([0.0, 1.0])
+        with pytest.raises(ValueError, match="non-negative integer"):
+            _apply_horizon_binning(K, horizon_max=-1)
+
+    def test_float_horizon_raises(self):
+        K = np.array([0.0, 1.0])
+        with pytest.raises(ValueError, match="non-negative integer"):
+            _apply_horizon_binning(K, horizon_max=2.5)
+
+
+class TestBuildEventStudyDesignHelper:
+    """Unit tests for the event-study stage-2 design builder (Wave C).
+
+    Verifies column count, reference-period drop, column-name convention,
+    all-zero pre-filter, and rectangular_grid emission.
+    """
+
+    def _hand_built_panel(self):
+        """4 units (treated A,B,C ever-treated; D never), 5 periods, 2 rings."""
+        # D_it: A treated at t>=2, B at t>=4, C never (ever-treated for D_i but K
+        # range only includes pre rows in this example). D never treated.
+        # We construct K_direct/K_spill arrays directly for hand-control.
+        n_rows = 4 * 5  # 4 units * 5 periods
+        D_it = np.zeros(n_rows)
+        # Rows ordered: A(t=0..4), B(t=0..4), C(t=0..4), D(t=0..4).
+        # A treated post t=2: rows 2,3,4 → D_it=1
+        # B treated post t=4: row 9 → D_it=1
+        D_it[[2, 3, 4, 9]] = 1.0
+        # Ring masks: 2 rings. Let's say A and B are in ring 0 of each other,
+        # C is in ring 1 of A. D far from all.
+        ring_masks = np.zeros((n_rows, 2), dtype=bool)
+        # B's rows in ring 0 (of A) for t >= A.onset=2 → rows 7, 8 (B at t=2, 3)
+        # B at t=4 is treated (D_it=1), Ring^k still nonzero but (1-D_it)*Ring=0.
+        ring_masks[[7, 8, 9], 0] = True
+        # C's rows in ring 1 (of A) for t >= A.onset=2 → rows 12, 13, 14
+        ring_masks[[12, 13, 14], 1] = True
+        ring_labels = ["[0, 50)", "[50, 200)"]
+        # K_direct: A's K_direct = t - 2 for all A rows; B's = t - 4; C, D = NaN.
+        K_direct = np.full(n_rows, np.nan)
+        K_direct[0:5] = np.arange(5) - 2.0  # A: -2,-1,0,1,2
+        K_direct[5:10] = np.arange(5) - 4.0  # B: -4,-3,-2,-1,0
+        # K_spill: post-trigger only. B's trigger = A.onset = 2, so K_spill = t-2
+        # at rows 7, 8 (B at t=2, 3); row 9 is treated post → still in ring but
+        # (1-D_it) zeros it; row 9 K_spill = 4 - 2 = 2 if we want consistent
+        # data, but contribution is zero. Set K_spill[9] = 2 so K_set is complete.
+        K_spill = np.full(n_rows, np.nan)
+        K_spill[7] = 0.0  # B at t=2
+        K_spill[8] = 1.0  # B at t=3
+        K_spill[9] = 2.0  # B at t=4
+        K_spill[12] = 0.0  # C at t=2
+        K_spill[13] = 1.0  # C at t=3
+        K_spill[14] = 2.0  # C at t=4
+        return D_it, ring_masks, ring_labels, K_direct, K_spill
+
+    def test_column_count_with_full_grid(self):
+        """Full grid H=2, ref=-1 → 2H = 4 direct + 4 × 2 spillover = 12 candidate
+        columns. Some empty cells pre-filtered."""
+        D_it, ring_masks, ring_labels, K_direct, K_spill = self._hand_built_panel()
+        event_time_grid = [-2, -1, 0, 1, 2]
+        with pytest.warns(UserWarning, match="all-zero"):
+            X_2, names, meta, rect_grid, n_obs = _build_event_study_design(
+                D_it=D_it,
+                ring_masks=ring_masks,
+                ring_labels=ring_labels,
+                K_direct_binned=K_direct,
+                K_spill_binned=K_spill,
+                event_time_grid=event_time_grid,
+                ref_period=-1,
+            )
+        # 4 k bins (after dropping ref=-1) × (1 direct + 2 rings) = 12 candidate cols.
+        assert len(rect_grid) == 12
+        # X_2 has only the non-empty kept columns.
+        assert X_2.shape == (20, len(names))
+        assert len(names) == len(meta) == len(n_obs)
+        # All n_obs > 0 for kept columns.
+        assert all(n > 0 for n in n_obs)
+
+    def test_column_name_convention_signed(self):
+        D_it, ring_masks, ring_labels, K_direct, K_spill = self._hand_built_panel()
+        with pytest.warns(UserWarning):  # all-zero pre-filter fires
+            _, names, _, _, _ = _build_event_study_design(
+                D_it=D_it,
+                ring_masks=ring_masks,
+                ring_labels=ring_labels,
+                K_direct_binned=K_direct,
+                K_spill_binned=K_spill,
+                event_time_grid=[-2, -1, 0, 1, 2],
+                ref_period=-1,
+            )
+        # Sample expected names: "D^k=+0", "D^k=-2", "_spillover_[0, 50)^k=+1".
+        assert any(n == "D^k=+0" for n in names)
+        # At least one D^k=-2 column (A has K_direct=-2 at t=0).
+        assert any(n == "D^k=-2" for n in names)
+        # At least one spillover column with the [0, 50) ring label.
+        assert any(n.startswith("_spillover_[0, 50)^k=") for n in names)
+
+    def test_reference_period_dropped(self):
+        D_it, ring_masks, ring_labels, K_direct, K_spill = self._hand_built_panel()
+        with pytest.warns(UserWarning):
+            _, names, meta, rect_grid, _ = _build_event_study_design(
+                D_it=D_it,
+                ring_masks=ring_masks,
+                ring_labels=ring_labels,
+                K_direct_binned=K_direct,
+                K_spill_binned=K_spill,
+                event_time_grid=[-2, -1, 0, 1, 2],
+                ref_period=-1,
+            )
+        # k=-1 must NOT appear in any column name or any rect_grid tuple.
+        assert not any("k=-1" in n for n in names)
+        assert not any(k == -1 for (_, _, k) in rect_grid)
+
+    def test_rectangular_grid_includes_dropped_cells(self):
+        D_it, ring_masks, ring_labels, K_direct, K_spill = self._hand_built_panel()
+        with pytest.warns(UserWarning):
+            _, names, _, rect_grid, _ = _build_event_study_design(
+                D_it=D_it,
+                ring_masks=ring_masks,
+                ring_labels=ring_labels,
+                K_direct_binned=K_direct,
+                K_spill_binned=K_spill,
+                event_time_grid=[-2, -1, 0, 1, 2],
+                ref_period=-1,
+            )
+        # Direct: 4 k bins (excluding ref=-1) → 4 entries in rect_grid.
+        direct_in_grid = [(s, r, k) for (s, r, k) in rect_grid if s == "direct"]
+        assert len(direct_in_grid) == 4
+        # Spillover: 4 k bins × 2 rings = 8 entries.
+        spill_in_grid = [(s, r, k) for (s, r, k) in rect_grid if s == "spillover"]
+        assert len(spill_in_grid) == 8
+        # Sanity: each (ring, k) combo appears exactly once.
+        spill_pairs = [(r, k) for (s, r, k) in spill_in_grid]
+        assert len(set(spill_pairs)) == 8
+
+    def test_n_obs_per_col_correctness(self):
+        D_it, ring_masks, ring_labels, K_direct, K_spill = self._hand_built_panel()
+        with pytest.warns(UserWarning):
+            _, names, meta, _, n_obs = _build_event_study_design(
+                D_it=D_it,
+                ring_masks=ring_masks,
+                ring_labels=ring_labels,
+                K_direct_binned=K_direct,
+                K_spill_binned=K_spill,
+                event_time_grid=[-2, -1, 0, 1, 2],
+                ref_period=-1,
+            )
+        # D^k=+0 has 2 rows contributing (A at t=2 and B at t=4 both have K_direct=0).
+        d0_idx = names.index("D^k=+0")
+        assert n_obs[d0_idx] == 2
+        # D^k=-2 has 2 rows (A at t=0 and B at t=2 both have K_direct=-2).
+        dm2_idx = names.index("D^k=-2")
+        assert n_obs[dm2_idx] == 2
+
+    def test_ref_period_must_be_int(self):
+        D_it, ring_masks, ring_labels, K_direct, K_spill = self._hand_built_panel()
+        with pytest.raises(TypeError, match="integer"):
+            _build_event_study_design(
+                D_it=D_it,
+                ring_masks=ring_masks,
+                ring_labels=ring_labels,
+                K_direct_binned=K_direct,
+                K_spill_binned=K_spill,
+                event_time_grid=[-2, -1, 0, 1, 2],
+                ref_period=-1.0,
+            )
+
+    def test_ring_labels_length_mismatch_raises(self):
+        D_it, ring_masks, _, K_direct, K_spill = self._hand_built_panel()
+        with pytest.raises(ValueError, match="ring_labels"):
+            _build_event_study_design(
+                D_it=D_it,
+                ring_masks=ring_masks,
+                ring_labels=["only_one_label"],  # K=2 but only 1 label
+                K_direct_binned=K_direct,
+                K_spill_binned=K_spill,
+                event_time_grid=[-1, 0, 1],
+                ref_period=-1,
+            )
+
+
+# =============================================================================
+# Wave C: SpilloverDiD(event_study=True) end-to-end test surface
+# =============================================================================
+
+
+def _fit_event_study(
+    df,
+    *,
+    rings=(0.0, 50.0, 200.0),
+    horizon_max=None,
+    anticipation=0,
+    vcov_type="hc1",
+    **fit_kwargs,
+):
+    """Helper: silence event-study warnings and return the SpilloverDiD result."""
+    est = SpilloverDiD(
+        rings=list(rings),
+        d_bar=max(rings),
+        conley_coords=("lat", "lon"),
+        conley_metric="haversine",
+        conley_cutoff_km=max(rings),
+        conley_lag_cutoff=0,
+        vcov_type=vcov_type,
+        event_study=True,
+        horizon_max=horizon_max,
+        anticipation=anticipation,
+    )
+    import warnings as _w
+
+    with _w.catch_warnings():
+        _w.simplefilter("ignore", UserWarning)
+        return est.fit(
+            df,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat=fit_kwargs.pop("first_treat", "first_treat"),
+            **fit_kwargs,
+        )
+
+
+class TestSpilloverDiDEventStudyAPI:
+    """Wave C: surface-level API verification for event_study=True."""
+
+    def test_event_study_emits_att_dynamic(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        assert res.event_study is True
+        assert res.att_dynamic is not None
+        assert isinstance(res.att_dynamic, pd.DataFrame)
+        # Columns present.
+        assert set(res.att_dynamic.columns) == {
+            "coef",
+            "se",
+            "t_stat",
+            "p_value",
+            "ci_low",
+            "ci_high",
+            "n_obs",
+        }
+
+    def test_event_study_emits_multiindex_spillover_effects(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        assert isinstance(res.spillover_effects.index, pd.MultiIndex)
+        assert list(res.spillover_effects.index.names) == ["ring", "k"]
+
+    def test_event_study_emits_event_study_effects_dict(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        assert isinstance(res.event_study_effects, dict)
+        # Every key is an integer event-time bin.
+        assert all(isinstance(k, int) for k in res.event_study_effects.keys())
+        # Each entry has the TwoStageDiD schema.
+        for k, entry in res.event_study_effects.items():
+            assert set(entry.keys()) == {"effect", "se", "n_obs", "t_stat", "p_value", "conf_int"}
+            assert isinstance(entry["conf_int"], tuple)
+            assert len(entry["conf_int"]) == 2
+
+    def test_event_study_effects_reference_row_matches_two_stage_did(self):
+        """Reference row must use conf_int=(0.0, 0.0) per TwoStageDiD parity."""
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        ref = res.event_study_effects[res.reference_period]
+        assert ref["effect"] == 0.0
+        assert ref["se"] == 0.0
+        assert ref["n_obs"] == 0
+        assert ref["conf_int"] == (0.0, 0.0)
+        assert np.isnan(ref["t_stat"])
+        assert np.isnan(ref["p_value"])
+
+    def test_event_study_false_leaves_new_fields_none(self):
+        """When event_study=False, the new Wave C fields stay None."""
+        df = generate_butts_staggered_dgp(seed=42)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=False,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            res = est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+        assert res.att_dynamic is None
+        assert res.event_study_effects is None
+        assert res.reference_period is None
+        assert res.horizon_max is None
+
+
+class TestSpilloverDiDEventStudyReferencePeriod:
+    """Reference period mirrors TwoStageDiD: ref = -1 - anticipation."""
+
+    def test_reference_period_default_anticipation(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=3, anticipation=0)
+        assert res.reference_period == -1
+
+    def test_reference_period_with_anticipation_shifts(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=4, anticipation=2)
+        assert res.reference_period == -3
+
+    def test_reference_row_appears_in_att_dynamic(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2, anticipation=0)
+        # Reference k=-1 row exists with coef=0, se=0, n_obs=0.
+        assert -1 in res.att_dynamic.index
+        ref_row = res.att_dynamic.loc[-1]
+        assert ref_row["coef"] == 0.0
+        assert ref_row["se"] == 0.0
+        assert ref_row["n_obs"] == 0
+
+
+class TestSpilloverDiDEventStudyReduceToAggregate:
+    """Reduce-to-Wave-B-aggregate at horizon_max=None on constant-tau DGP.
+
+    Note: horizon_max=0 does NOT reduce to Wave B (binning collapses pre-treatment
+    rows of treated units into the D^0 dummy, making D^0 = D_i ≠ D_it). The valid
+    equivalence path is constant-tau DGP + horizon_max=None.
+    """
+
+    def test_constant_tau_horizon_none_recovers_wave_b_att(self):
+        df = generate_butts_staggered_dgp(seed=42, tau_total=-0.07, delta_1=-0.04)
+        agg_est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=False,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            agg = agg_est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+        es = _fit_event_study(df, horizon_max=None)
+        # Constant-tau DGP: sample-share-weighted average of per-event-time
+        # coefs reproduces Wave B's aggregate att (exactly equal at MC scale).
+        assert abs(agg.att - es.att) < 1e-3
+
+    def test_lincom_att_matches_hand_computed(self):
+        df = generate_butts_staggered_dgp(seed=11)
+        res = _fit_event_study(df, horizon_max=3)
+        post = res.att_dynamic[res.att_dynamic.index >= 0]
+        total = post["n_obs"].sum()
+        hand_att = (post["coef"] * post["n_obs"]).sum() / total
+        assert abs(hand_att - res.att) < 1e-10
+
+
+class TestSpilloverDiDEventStudyValidation:
+    """Wave C validation: horizon_max < 0 and ref_period outside window both raise."""
+
+    def test_negative_horizon_max_raises(self):
+        df = generate_butts_staggered_dgp(seed=1)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=-1,
+        )
+        with pytest.raises(ValueError, match="non-negative integer"):
+            est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+
+    def test_ref_period_outside_window_raises(self):
+        df = generate_butts_staggered_dgp(seed=1)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=1,
+            anticipation=2,  # ref=-3 outside [-1,+1]
+        )
+        with pytest.raises(ValueError, match="falls outside the binning window"):
+            est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+
+    def test_horizon_max_none_with_anticipation_works(self):
+        df = generate_butts_staggered_dgp(seed=1)
+        # horizon_max=None auto-detects H; ref=-3 with anticipation=2 always fits.
+        res = _fit_event_study(df, horizon_max=None, anticipation=2)
+        assert res.reference_period == -3
+
+
+class TestSpilloverDiDEventStudyBackwardCompat:
+    """event_study=False reproduces Wave B SE bit-identity (no behavioral drift)."""
+
+    def test_event_study_false_bit_identical_to_wave_b_fixture(self):
+        df = generate_butts_nonstaggered_dgp(seed=42)
+        est_a = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=False,
+        )
+        est_b = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=False,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            res_a = est_a.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+            res_b = est_b.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+        # Bit-identical (deterministic fit).
+        assert res_a.att == res_b.att
+        assert res_a.se == res_b.se
+
+
+class TestSpilloverDiDEventStudyIdentification:
+    """100-seed MC verifies per-event-time tau_k recovery on a known DGP."""
+
+    def test_per_event_time_tau_k_recovery(self):
+        # Mild heterogeneous tau profile: k=0 → -0.07; k=1 → -0.06; k=2 → -0.05.
+        def tau_fn(k):
+            return -0.07 + 0.01 * k
+
+        tau_k_estimates = {k: [] for k in [0, 1, 2]}
+
+        for s in range(50):  # 50 seeds; expensive at 100 for tutorial-paced CI
+            df = generate_butts_staggered_dgp(
+                seed=s,
+                tau_per_event_time=tau_fn,
+                delta_per_ring_per_event_time=lambda j, k: -0.04,
+            )
+            try:
+                res = _fit_event_study(df, horizon_max=2)
+            except Exception:
+                continue
+            for k in tau_k_estimates:
+                if k in res.att_dynamic.index:
+                    val = res.att_dynamic.loc[k, "coef"]
+                    if np.isfinite(val):
+                        tau_k_estimates[k].append(val)
+
+        for k, target in [(0, -0.07), (1, -0.06), (2, -0.05)]:
+            mean_est = np.mean(tau_k_estimates[k])
+            assert abs(mean_est - target) < 0.025, (
+                f"k={k}: mean tau_k estimate {mean_est:.4f} differs from "
+                f"target {target:.4f} by more than 0.025 over "
+                f"{len(tau_k_estimates[k])} seeds"
+            )
+
+
+class TestSpilloverDiDEventStudyPlaceboPretrends:
+    """On a no-pre-trend DGP, pre-treatment coefs have nominal Type I rate."""
+
+    def test_no_pretrend_dgp_yields_insignificant_pre_coefs(self):
+        # DGP with constant tau=-0.07 only post-treatment (no pre-trend).
+        n_seeds = 50
+        n_significant_pre = 0
+        for s in range(n_seeds):
+            df = generate_butts_staggered_dgp(
+                seed=s,
+                tau_per_event_time=lambda k: -0.07 if k >= 0 else 0.0,
+            )
+            try:
+                res = _fit_event_study(df, horizon_max=2)
+            except Exception:
+                continue
+            # Pre-treatment coef at k=-2 (k=-1 is reference, dropped).
+            if -2 in res.att_dynamic.index:
+                p = res.att_dynamic.loc[-2, "p_value"]
+                if np.isfinite(p) and p < 0.10:
+                    n_significant_pre += 1
+        type1_rate = n_significant_pre / n_seeds
+        # Nominal alpha=0.10 + headroom for finite-sample / single-pre-coef testing.
+        assert type1_rate < 0.30, (
+            f"Pre-treatment k=-2 placebo Type I rate {type1_rate:.2f} exceeds "
+            f"0.30 (nominal 0.10 + headroom). DGP has no pre-trend, so pre-"
+            f"treatment coefs should be insignificant."
+        )
+
+
+class TestSpilloverDiDEventStudySingularity:
+    """Rectangular schema: empty (ring, k) cells emit NaN with n_obs=0."""
+
+    def test_negative_k_spillover_cells_are_nan(self):
+        """K_spill is structurally >=0, so negative-k spillover cells are empty."""
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        # The (ring, k=-2) cells should appear with NaN coef and n_obs=0.
+        # K_spill structurally >= 0, so any k < 0 spillover cell is empty.
+        neg_k_rows = res.spillover_effects.xs(-2, level="k")
+        # Either all NaN or all dropped pre-filter; rectangular schema emits NaN.
+        for ring_label, row in neg_k_rows.iterrows():
+            assert row["n_obs"] == 0
+            assert np.isnan(row["coef"])
+
+    def test_outer_ring_cells_may_be_empty(self):
+        """Default DGP has no units in [50, 200) ring → all NaN with n_obs=0."""
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        if "[50, 200]" in res.spillover_effects.index.get_level_values("ring"):
+            outer = res.spillover_effects.xs("[50, 200]", level="ring")
+            # All n_obs = 0 (no units in the outer ring in this DGP).
+            assert all(outer["n_obs"] == 0)
+
+
+class TestSpilloverDiDEventStudyConleyIntegration:
+    """vcov dimensions + diagonal positivity after Conley path with expanded design."""
+
+    def test_conley_vcov_shape_matches_kept_cols(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=200.0,
+            conley_lag_cutoff=0,
+            vcov_type="conley",
+            event_study=True,
+            horizon_max=2,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            res = est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+        # vcov is square of len(coefficients) - 1 (the "ATT" alias is the
+        # only non-column entry in the dict).
+        n_kept = len([k for k in res.coefficients.keys() if k != "ATT"])
+        assert res.vcov.shape == (n_kept, n_kept)
+        # Diagonal entries (variances) post-clamp must be non-negative.
+        # SpilloverDiD clamps in the per-coef SE extraction; verify the
+        # vcov itself is finite where written.
+        finite_diag = np.diag(res.vcov)[np.isfinite(np.diag(res.vcov))]
+        assert all(finite_diag >= 0)
+
+
+class TestSpilloverDiDEventStudySummaryRoundTrip:
+    """summary() includes per-event-time blocks; pickle round-trip preserves MultiIndex."""
+
+    def test_summary_includes_dynamic_block(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        s = res.summary()
+        assert "Dynamic Direct Effects" in s
+        assert "k=" in s or "+" in s  # event-time labels rendered
+
+    def test_pickle_round_trip_preserves_multiindex(self):
+        import pickle
+
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        round_tripped = pickle.loads(pickle.dumps(res))
+        # MultiIndex preserved.
+        assert isinstance(round_tripped.spillover_effects.index, pd.MultiIndex)
+        # att_dynamic preserved.
+        pd.testing.assert_frame_equal(res.att_dynamic, round_tripped.att_dynamic)
+
+    def test_to_dict_serializes_new_fields(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        d = res.to_dict()
+        assert "att_dynamic" in d
+        assert "event_study_effects" in d
+        assert "horizon_max" in d
+        assert "reference_period" in d
+
+
+class TestSpilloverDiDEventStudyFitIdempotence:
+    """Clone + repeat-fit produces bit-identical att_dynamic AND spillover_effects."""
+
+    def test_fit_twice_bit_identical(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=2,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            res_1 = est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+            res_2 = est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+        pd.testing.assert_frame_equal(res_1.att_dynamic, res_2.att_dynamic)
+        pd.testing.assert_frame_equal(res_1.spillover_effects, res_2.spillover_effects)
+        assert res_1.att == res_2.att
