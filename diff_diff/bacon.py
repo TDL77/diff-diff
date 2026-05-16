@@ -475,7 +475,15 @@ class BaconDecomposition:
             excluding the never-treated sentinels ``0`` and ``np.inf``)
             are automatically remapped to the ``U`` (untreated) bucket
             per Goodman-Bacon (2021) footnote 11, with a
-            ``UserWarning``. Detection uses ordered-time logic on the
+            ``UserWarning``. **Library boundary extension:** the paper
+            uses the strict inequality ``t_i < 1`` (units treated
+            *before* the first observable period); the library uses the
+            **inclusive** ``first_treat <= min(time)`` rule, additionally
+            folding units treated *at* the first observable period
+            (``first_treat == min(time)``) into ``U`` because such units
+            have no untreated cell in-panel. See REGISTRY's
+            ``**Deviation (first-period boundary extension on
+            always-treated remap)**`` block for the full contract. Detection uses ordered-time logic on the
             **time axis** so panels whose ``time`` column contains
             negative or zero-crossing labels (e.g. event-time
             ``time ∈ [-2,..,3]``) are handled correctly; the ``0``
