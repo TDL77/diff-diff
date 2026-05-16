@@ -78,7 +78,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 
 | Tool | Module | R Reference | Status | Last Review |
 |------|--------|-------------|--------|-------------|
-| BaconDecomposition | `bacon.py` | `bacondecomp::bacon()` | **In Progress** | — |
+| BaconDecomposition | `bacon.py` | `bacondecomp::bacon()` | **Complete** (R parity pending) | 2026-05-16 |
 | HonestDiD | `honest_did.py` | `HonestDiD` package | **Complete** | 2026-04-01 |
 | PreTrendsPower | `pretrends.py` | `pretrends` package | **In Progress** | — |
 | PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | **In Progress** | — |
@@ -909,18 +909,41 @@ and covariate-adjusted specifications.)
 | Module | `bacon.py` |
 | Primary Reference | Goodman-Bacon (2021), *Difference-in-differences with variation in treatment timing*, J. Econometrics 225(2), 254-277 |
 | R Reference | `bacondecomp::bacon()` |
-| Status | **In Progress** |
-| Last Review | — |
+| Status | **Complete** (R parity goldens pending) |
+| Last Review | 2026-05-16 |
 
-**Documentation in place:**
-- REGISTRY.md section: `## BaconDecomposition` (three comparison types — treated_vs_never, earlier_vs_later, later_vs_earlier; weight construction; TWFE reconstitution; weighted survey path under Phase 3)
-- Implementation: `tests/test_bacon.py` (basic decomposition, weight properties, integration with `TwoWayFixedEffects.decompose()`)
+**Verified Components:**
+- [x] Theorem 1 decomposition identity: `β̂^DD = Σ s · β̂^{2x2}` at `atol=1e-10` (hand-calculable + noisy DGPs)
+- [x] Weight sum-to-1: `Σ s = 1.0` at `atol=1e-10` under `weights="exact"`
+- [x] Three comparison types correctly classified: `treated_vs_never`, `earlier_vs_later`, `later_vs_earlier`
+- [x] Eq. 7 hand-checked: `V̂_{kU}^D = n_{kU}(1-n_{kU}) · D̄_k(1-D̄_k)` (via weight-ratio test, `atol=1e-10`)
+- [x] Eq. 8 hand-checked: `V̂_{kℓ}^{D,k} = n_{kℓ}(1-n_{kℓ}) · (D̄_k-D̄_ℓ)/(1-D̄_ℓ) · (1-D̄_k)/(1-D̄_ℓ)`
+- [x] Eq. 9 hand-checked: `V̂_{kℓ}^{D,ℓ} = n_{kℓ}(1-n_{kℓ}) · D̄_ℓ/D̄_k · (D̄_k-D̄_ℓ)/D̄_k`
+- [x] Eq. 10b 2x2 estimator value: hand-calculable panel → β̂_{kU}^{2x2} = ATT exactly
+- [x] Always-treated remap to U (paper footnote 11): `first_treat <= min(time)` (excluding never-treated sentinels `0` and `np.inf`) units auto-remapped via internal column, user's data preserved, count exposed on result
+- [x] `weights="exact"` is the default (PR-B 2026-05-16); `weights="approximate"` retained as opt-in
+- [x] Unbalanced panel: accepted with `UserWarning` (paper assumes balanced; library extension)
+- [x] No untreated group: `s_{kU}` terms drop, weights renormalize, sum-to-1 still holds
+- [x] Single timing group with U: only `treated_vs_never` comparisons
+- [x] Survey design composes cleanly with exact mode and warn+remap
+- [ ] R `bacondecomp::bacon()` parity at `atol=1e-6` — R generator script committed; JSON goldens pending follow-up R install (see TODO.md)
 
-**Outstanding for promotion:**
-- **Substantive review pass — first target chosen during the 2026-05-15 methodology-review refresh session.** Read Goodman-Bacon (2021), audit `bacon.py` against the paper's decomposition (Equation 11, weight construction in Section 3, three comparison types in Section 4), generate R parity fixtures via `bacondecomp::bacon()`, write `tests/test_methodology_bacon.py` with paper-equation-numbered assertions, populate Verified Components / Corrections Made / Deviations here.
-- Paper review under `docs/methodology/papers/goodman-bacon-2021-review.md`
-- R parity fixture against `bacondecomp::bacon()` covering treated_vs_never, earlier_vs_later, later_vs_earlier weight buckets and their relative shares
-- Verify the REGISTRY Implementation Checklist (all rows currently unchecked except the survey-design Phase 3 row)
+**Test Coverage:**
+- 24 methodology tests in `tests/test_methodology_bacon.py` across 6 classes (21 active + 3 R-parity tests that skip on missing goldens)
+- 32 existing tests in `tests/test_bacon.py` (basic decomposition, weight properties, weights-parameter API, TWFE integration, visualization, balanced-panel warnings, edge cases)
+
+**R Comparison Results:**
+- **Pending**: `bacondecomp` R package not installed in the local R 4.5.2 library at PR-B authoring time. R generator script committed at `benchmarks/R/generate_bacon_golden.R`; running it requires `install.packages("bacondecomp")` + `install.packages("jsonlite")` then `cd benchmarks/R && Rscript generate_bacon_golden.R`. JSON goldens land at `benchmarks/data/r_bacondecomp_golden.json` once generated. `tests/test_methodology_bacon.py::TestBaconParityR` skips with a pointer until then. Tracked in TODO.md follow-up row.
+
+**Corrections Made:**
+1. **Theorem 1 exact-weights rewrite** (`bacon.py:_recompute_exact_weights`, lines ~740-880). The previous "exact" mode implementation did not actually compute Eqs. 7-9 / 10e-g — it was missing the `(1 - n_kU)` factor in the within-subsample treatment variance, did not square the sample share, and added an extraneous `unit_share` factor not present in the paper. The post-hoc sum-to-1 normalization masked the relative-weight error but produced a decomposition error of ~0.3% (0.007 absolute) against TWFE on a 3-cohort + never-treated DGP. **Rewrote** the function to compute the exact numerators of Eqs. 10e/f/g (with proper Eqs. 7-9 variances) and let the post-hoc normalization handle the `V̂^D` denominator (Theorem 1 identity guarantees `V̂^D = Σ numerators`). Now matches TWFE at `atol=1e-10`. The existing `test_weighted_sum_equals_twfe` tolerance was tightened from `< 0.1` to `< 1e-10` to lock the contract.
+2. **Default `weights` flipped from `"approximate"` to `"exact"`** at three entry points: `BaconDecomposition.__init__()` (`bacon.py:397`), `bacon_decompose()` convenience function (`bacon.py:1064`), `TwoWayFixedEffects.decompose()` (`twfe.py:684`). The paper-faithful Theorem 1 weights are now the default; the simplified approximate path remains opt-in via explicit `weights="approximate"`. `diff_diff/diagnostic_report.py:1740` (production diagnostic surface) was updated to pass explicit `weights="exact"`.
+3. **Always-treated warn+remap via internal column** (`bacon.py:fit()`, lines ~487-525). Paper footnote 11 puts units with `t_i < 1` in `U`, but `bacon.py` previously only mapped `first_treat ∈ {0, np.inf}` into U. Added detection using ordered-time logic on the **time axis** (`first_treat <= min(time)` while excluding the never-treated sentinels `0` and `np.inf`) with `UserWarning` and automatic remap via an internal column (`__bacon_first_treat_internal__`), preserving the user's `first_treat` column unchanged. Detection handles event-time-encoded panels (`time ∈ [-2,..,3]`) correctly; the `0` sentinel restriction applies only to `first_treat`. Count exposed via new `BaconDecompositionResults.n_always_treated_remapped` field.
+
+**Deviations from R's `bacondecomp::bacon()`:**
+1. **Unbalanced panel acceptance** (library extension): R errors on unbalanced panels; Python emits a `UserWarning` and decomposes. The paper's Appendix A proof assumes balanced panels — decomposition on unbalanced panels is approximate to Theorem 1.
+2. **Approximate weight mode** (Python-only optimization): `weights="approximate"` is a library-only fast path with simplified variance computation, not present in R. Users who want Python-R numerical parity should pass `weights="exact"` (the new default).
+3. **NaN for invalid inference fields not applicable**: the decomposition is deterministic; there are no SE/p-value fields on the comparison output. The `decomposition_error` field is a finite float (zero in well-conditioned cases).
 
 ---
 

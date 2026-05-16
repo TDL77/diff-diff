@@ -2598,61 +2598,82 @@ Shipped in `diff_diff/had_pretests.py` as `stute_joint_pretest()` (residuals-in 
 
 ## BaconDecomposition
 
-**Primary source:** [Goodman-Bacon, A. (2021). Difference-in-differences with variation in treatment timing. *Journal of Econometrics*, 225(2), 254-277.](https://doi.org/10.1016/j.jeconom.2021.03.014)
+**Primary source:** [Goodman-Bacon, A. (2021). Difference-in-differences with variation in treatment timing. *Journal of Econometrics*, 225(2), 254-277.](https://doi.org/10.1016/j.jeconom.2021.03.014). Paper review on file: `docs/methodology/papers/goodman-bacon-2021-review.md`.
+
+**Scope:** Decomposes the two-way fixed-effects DD (TWFEDD) estimator in Equation (2) when treatment timing varies across units. Theorem 1 expresses `β̂^DD` as a **positively-weighted average of all possible 2x2 DD estimators** in the data, with weights summing to 1. The decomposition is a **diagnostic tool**, not a treatment-effect estimator: it explains *which comparisons drive* the TWFEDD coefficient and *why* the estimator can fail to identify an interpretable causal parameter when treatment effects vary over time.
 
 **Key implementation requirements:**
 
 *Assumption checks / warnings:*
 - Requires variation in treatment timing (staggered adoption)
-- Warns if only one treatment cohort (decomposition not meaningful)
-- Uses never-treated units as controls when present; falls back to timing-only comparisons otherwise
+- Always-treated units (`first_treat <= min(time)`, excluding the never-treated sentinels `0` and `np.inf`; paper footnote 11) are automatically remapped to the `U` (untreated) bucket with a `UserWarning`; see the `**Note (always-treated remap)**` below for the full ordered-time / sentinel contract
+- Unbalanced panels are accepted with a `UserWarning`; the paper's Appendix A proof assumes balanced panels
+- Falls back to timing-only comparisons when no never-treated units are present (no untreated group → `s_{kU}` terms drop, weights rescale to sum to 1; **VWCT and ΔATT can still bias the result** — see paper Eqs. 14-15)
 
-*Estimator equation (as implemented):*
+*Estimator equation (Theorem 1, Equation 10a):*
 
-TWFE decomposes as:
 ```
-τ̂^TWFE = Σ_k s_k × τ̂_k
+β̂^DD = Σ_{k ≠ U} s_{kU} · β̂_{kU}^{2x2}
+      + Σ_{k ≠ U} Σ_{ℓ > k} [ s_{kℓ}^k · β̂_{kℓ}^{2x2,k} + s_{kℓ}^ℓ · β̂_{kℓ}^{2x2,ℓ} ]
 ```
-where k indexes 2×2 comparisons and s_k are Bacon weights.
 
-Three comparison types:
-1. **Treated vs. Never-treated** (if never-treated exist):
-   ```
-   τ̂_{T,U} = (Ȳ_{T,post} - Ȳ_{T,pre}) - (Ȳ_{U,post} - Ȳ_{U,pre})
-   ```
+The three 2x2 estimators (Eqs. 10b-d):
+```
+β̂_{kU}^{2x2}   = (ȳ_k^POST(k)   - ȳ_k^PRE(k))    - (ȳ_U^POST(k)   - ȳ_U^PRE(k))         (Eq. 10b)
+β̂_{kℓ}^{2x2,k} = (ȳ_k^MID(k,ℓ) - ȳ_k^PRE(k))    - (ȳ_ℓ^MID(k,ℓ) - ȳ_ℓ^PRE(k))         (Eq. 10c)
+β̂_{kℓ}^{2x2,ℓ} = (ȳ_ℓ^POST(ℓ)  - ȳ_ℓ^MID(k,ℓ)) - (ȳ_k^POST(ℓ)  - ȳ_k^MID(k,ℓ))        (Eq. 10d)
+```
 
-2. **Earlier vs. Later-treated** (Earlier as treated, Later as control pre-treatment):
-   ```
-   τ̂_{k,l} = DiD using early-treated as treatment, late-treated as control
-   ```
+Comparison-type labels in `BaconDecompositionResults.comparisons`:
+- `"treated_vs_never"` ↔ Eq. 10b
+- `"earlier_vs_later"` ↔ Eq. 10c (k = early = treated; ℓ = late = control during MID)
+- `"later_vs_earlier"` ↔ Eq. 10d (ℓ = late = treated; k = early = already-treated control)
 
-3. **Later vs. Earlier-treated** (problematic: uses post-treatment outcomes as control):
-   ```
-   τ̂_{l,k} = DiD using late-treated as treatment, early-treated (post) as control
-   ```
+*Weight construction (Eqs. 7-9 for variances, 10e-g for weights):*
 
-Weights depend on group sizes and variance in treatment timing.
+Fixed-effects-adjusted treatment-dummy variances:
+```
+V̂_{kU}^D     = n_{kU}(1 - n_{kU}) · D̄_k(1 - D̄_k)                              (Eq. 7)
+V̂_{kℓ}^{D,k} = n_{kℓ}(1 - n_{kℓ}) · (D̄_k - D̄_ℓ)/(1 - D̄_ℓ) · (1 - D̄_k)/(1 - D̄_ℓ)   (Eq. 8)
+V̂_{kℓ}^{D,ℓ} = n_{kℓ}(1 - n_{kℓ}) · D̄_ℓ/D̄_k · (D̄_k - D̄_ℓ)/D̄_k                  (Eq. 9)
+```
+
+Decomposition weights:
+```
+s_{kU}   = ((n_k + n_U)^2 · V̂_{kU}^D)        / V̂^D                                  (Eq. 10e)
+s_{kℓ}^k = ((n_k + n_ℓ)(1 - D̄_ℓ))^2 · V̂_{kℓ}^{D,k} / V̂^D                            (Eq. 10f)
+s_{kℓ}^ℓ = ((n_k + n_ℓ) · D̄_k)^2 · V̂_{kℓ}^{D,ℓ}    / V̂^D                            (Eq. 10g)
+```
+
+Where `n_k` is the sample share of timing group `k`, `n_{kℓ} = n_k / (n_k + n_ℓ)`, and `D̄_k = (T - k + 1)/T` is the share of periods group `k` spends treated. Weights are **strictly positive** and sum to 1 (Theorem 1).
 
 *Standard errors:*
-- Not typically computed (decomposition is exact)
-- Individual 2×2 estimates can have SEs
+- The decomposition is a deterministic algebraic identity; standard errors are not the paper's focus. The point estimates and weights are exact given the data, and on **balanced** panels `β̂^DD` from the decomposition matches the OLS coefficient from TWFEDD to machine precision under `weights="exact"`. The machine-precision claim does **not** extend to unbalanced panels (see edge cases below).
+- Inference for the TWFEDD coefficient itself is typically cluster-robust at the unit level.
 
 *Edge cases:*
 - Continuous treatment: not supported, requires binary
-- Weights may be negative for later-vs-earlier comparisons
-- Single treatment time: no decomposition possible
+- Single treatment time: K=1 with U is valid (only `treated_vs_never` terms); K=1 without U has no decomposition (zero variation in `D`).
+- `D̄_k → 0` or `D̄_k → 1`: subsample treatment variance goes to zero, that timing group contributes zero weight
+- Always-treated units: see `**Note (always-treated remap)**` below
 
 **Reference implementation(s):**
-- R: `bacondecomp::bacon()`
-- Stata: `bacondecomp`
+- R: `bacondecomp::bacon()` (CRAN). Parity script at `benchmarks/R/generate_bacon_golden.R`; goldens pending follow-up R install (see TODO.md).
+- Stata: `bacondecomp` (SSC). Authors: Goodman-Bacon, Goldring, Nichols (2019).
 
 **Requirements checklist:**
-- [ ] Three comparison types: treated_vs_never, earlier_vs_later, later_vs_earlier
-- [ ] Weights sum to approximately 1 (numerical precision)
-- [ ] TWFE coefficient ≈ weighted sum of 2×2 estimates
-- [ ] Visualization shows weight vs. estimate by comparison type
+- [x] Three comparison types: treated_vs_never, earlier_vs_later, later_vs_earlier
+- [x] Weights sum to 1 (machine precision under `weights="exact"` on **balanced** panels; see PR-B audit)
+- [x] TWFE coefficient = weighted sum of 2×2 estimates (machine precision under `weights="exact"` on **balanced** panels)
+- [x] Visualization shows weight vs. estimate by comparison type
+- [x] Always-treated remap to U per Goodman-Bacon (2021) footnote 11 (PR-B audit)
+- [x] Hand-calculable Theorem 1 verification: `tests/test_methodology_bacon.py::TestBaconHandCalculation` (7 tests, atol=1e-10)
+- [ ] R `bacondecomp::bacon()` parity at atol=1e-6 (R generator script committed; JSON goldens pending follow-up R install — `tests/test_methodology_bacon.py::TestBaconParityR` skips when missing)
 - [x] Survey design support (Phase 3): weighted cell means, weighted within-transform, weighted group shares
-- **Note:** Bacon decomposition with survey weights is diagnostic; exact-sum guarantee is approximate; `weights="exact"` requires within-unit-constant survey columns (approximate path accepts time-varying weights)
+- **Note (weight modes):** `weights="exact"` (default, paper-faithful Eqs. 7-9 + 10e-g) vs `weights="approximate"` (simplified variance, opt-in for speed-sensitive diagnostic loops). The PR-A paper review (#451) and PR-B audit established `"exact"` as the default with the **intent** to match R `bacondecomp::bacon()` and the paper's Theorem 1 contract; R parity is validated by hand-calculation (atol=1e-10) and TWFE-vs-weighted-sum identity (atol=1e-10) but the direct R bit-by-bit parity at atol=1e-6 is still pending the R `bacondecomp` install — see Test Coverage checklist above. The approximate path is retained for backward compatibility; numerical output may differ from R.
+- **Note (always-treated remap):** Units whose `first_treat` is at or before the first observable period (`first_treat <= min(time)`, excluding the never-treated sentinels `0` and `np.inf`) are automatically remapped to the `U` bucket via an internal column (`__bacon_first_treat_internal__`) with a `UserWarning` — per paper footnote 11. Detection uses ordered-time logic on the **time axis**, so panels whose `time` column has negative or zero-crossing labels (e.g. event-time `time ∈ [-2,..,3]`) are handled correctly: a cohort at `first_treat=-1` on such a panel is a valid timing group; a cohort at `first_treat=-3` is remapped to U. The user's original `first_treat` column on the input `data` frame is preserved unchanged. The count of remapped units is surfaced via `BaconDecompositionResults.n_always_treated_remapped`. **Sentinel restriction:** `first_treat ∈ {0, np.inf}` is reserved as the never-treated marker and is not configurable today; a real treatment cohort with `first_treat == 0` would be folded into `U` and should be re-labeled to a non-sentinel value before fitting. The `0` reservation applies to `first_treat` only, not to `time`.
+- **Note (Bacon survey diagnostic):** Bacon decomposition with survey weights is diagnostic; exact-sum guarantee holds at machine precision under `weights="exact"` **on balanced panels**. `weights="exact"` requires within-unit-constant survey columns (approximate path accepts time-varying weights).
+- **Deviation (unbalanced-panel library extension):** Unbalanced panels are accepted with a `UserWarning` ("Unbalanced panel detected. Bacon decomposition assumes balanced panels. Results may be inaccurate."). Goodman-Bacon (2021) Appendix A's proof assumes a balanced panel; under unbalance, the Theorem 1 identity holds only approximately. The decomposition still returns finite, well-defined outputs but `weights="exact"` does NOT achieve the machine-precision algebraic identity that the balanced-panel claims above describe.
 
 ---
 

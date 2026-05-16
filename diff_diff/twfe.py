@@ -681,7 +681,7 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         unit: str,
         time: str,
         first_treat: str,
-        weights: str = "approximate",
+        weights: str = "exact",
     ) -> "BaconDecompositionResults":
         """
         Perform Goodman-Bacon decomposition of TWFE estimate.
@@ -702,14 +702,28 @@ class TwoWayFixedEffects(DifferenceInDifferences):
             Name of time period column.
         first_treat : str
             Name of column indicating when each unit was first treated.
-            Use 0 (or np.inf) for never-treated units.
-        weights : str, default="approximate"
+            The values ``0`` and ``np.inf`` are **reserved as
+            never-treated sentinels**; a real treatment cohort with
+            ``first_treat == 0`` would be folded into ``U`` and should
+            be re-labeled to a non-sentinel value before fitting. Units
+            whose ``first_treat`` is at or before the first observable
+            period (``first_treat <= min(time)``, excluding the
+            sentinels) are automatically remapped to the ``U``
+            (untreated) bucket per Goodman-Bacon (2021) footnote 11
+            with a ``UserWarning``. See ``BaconDecomposition.fit()`` for
+            the full contract and
+            ``BaconDecompositionResults.n_always_treated_remapped`` for
+            the count. The user's original ``first_treat`` column is
+            preserved unchanged.
+        weights : str, default="exact"
             Weight calculation method:
 
-            - "approximate": Fast simplified formula (default). Good for
-              diagnostic purposes where relative weights are sufficient.
-            - "exact": Variance-based weights from Goodman-Bacon (2021)
-              Theorem 1. Use for publication-quality decompositions.
+            - "exact" (default): Variance-based weights from Goodman-Bacon
+              (2021) Theorem 1, Eqs. 7-9 and 10e-g. Paper-faithful and
+              the standard methodology contract.
+            - "approximate": Fast simplified formula. Opt in for
+              speed-sensitive diagnostic loops; numerical output may
+              differ from R ``bacondecomp::bacon()``.
 
         Returns
         -------
