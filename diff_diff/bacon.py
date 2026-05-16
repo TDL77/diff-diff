@@ -575,9 +575,10 @@ class BaconDecomposition:
                 f"(first_treat <= {min_period}, excluding sentinel values "
                 f"0 and np.inf). Remapping to U bucket per Goodman-Bacon "
                 f"(2021) footnote 11. The original first_treat column is "
-                f"preserved; remapping happens in an internal column. Pass "
-                f"first_treat=0 or first_treat=np.inf explicitly to silence "
-                f"this warning.",
+                f"preserved; remapping happens in an internal column. To "
+                f"silence this warning, recode the affected rows' "
+                f"first_treat values to 0 or np.inf in your input data "
+                f"before fitting.",
                 UserWarning,
                 stacklevel=2,
             )

@@ -487,14 +487,25 @@ def _panel_with_always_treated() -> pd.DataFrame:
 
 
 class TestBaconAlwaysTreatedRemap:
-    """Goodman-Bacon (2021) footnote 11: t_i < 1 units go in U.
+    """Goodman-Bacon (2021) footnote 11 with the library's first-period
+    boundary convention.
 
-    bacon.py automatically remaps units whose ``first_treat <= min(time)``
-    (excluding the never-treated sentinels ``0`` and ``np.inf``) via an
-    internal column (``__bacon_first_treat_internal__``), preserving the
-    user's original ``first_treat`` column unchanged. Detection uses
-    ordered-time logic on the **time axis**, so event-time-encoded
-    panels (``time ∈ [-2,..,3]``) are handled correctly.
+    The paper's footnote 11 says units treated before the first observable
+    period (``t_i < 1`` under the paper's 1-indexed convention) belong in
+    ``U``. The library generalizes this to units whose
+    ``first_treat <= min(time)`` (i.e. includes ``first_treat == min(time)``,
+    which the paper's strict ``<`` shorthand excludes). The library
+    convention is pragmatic: units treated at the first observable period
+    have no untreated cell within the panel and cannot contribute to any
+    valid 2x2 DD as a treated cohort, so folding them into ``U`` mirrors
+    the always-treated handling. The never-treated sentinels
+    (``first_treat ∈ {0, np.inf}``) are excluded from the remap.
+
+    bacon.py applies the remap via an internal column
+    (``__bacon_first_treat_internal__``), preserving the user's original
+    ``first_treat`` column unchanged. Detection uses ordered-time logic
+    on the **time axis**, so event-time-encoded panels
+    (``time ∈ [-2,..,3]``) are handled correctly.
     """
 
     def test_warn_emitted_on_remap(self) -> None:
