@@ -545,6 +545,12 @@ class TestCR2BMCluster:
         for name, d in golden.items():
             if name == "meta":
                 continue
+            # Skip scenarios that don't fit this test's `y ~ x` two-column
+            # contract (e.g. `absorbed_fe_did` is a multi-column DiD design
+            # tested separately via the DiD estimator path in
+            # `test_estimators_vcov_type.py::TestDiDAbsorbedFERParity`).
+            if "x" not in d:
+                continue
             x = np.array(d["x"])
             y = np.array(d["y"])
             cluster = np.array(d["cluster"])

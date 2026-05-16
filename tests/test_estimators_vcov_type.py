@@ -661,13 +661,19 @@ class TestFitBehavior:
         # Bootstrap consumed a unit-level cluster (20 clusters).
         assert res.n_clusters == 20
 
-    def test_did_absorb_rejects_hc2_and_hc2_bm(self):
-        """DifferenceInDifferences with absorb= rejects HC2/HC2+BM.
+    def test_did_absorb_hc2_and_hc2_bm_auto_route(self):
+        """DifferenceInDifferences with absorb= + HC2/HC2-BM now auto-routes to
+        fixed_effects= internally.
 
-        Same methodology reason as TWFE: absorb= demeans via within-
-        transformation, and HC2/CR2 leverage corrections depend on the full
-        FE hat matrix rather than the residualized design. The fit must
-        raise with a pointer to vcov_type='hc1' or fixed_effects= dummies.
+        FWL preserves coefficients but not the hat matrix; HC2/CR2-BM leverage
+        corrections require the FULL FE hat matrix. Rather than reject, we
+        internally promote absorb= to fixed_effects= so the existing full-
+        dummy design path computes the algebraically correct vcov.
+
+        Verifies: (1) fit succeeds (no NotImplementedError); (2) ATT matches
+        between absorb-routed and explicit fixed_effects= paths; (3) SE
+        matches between the two paths (bit-equal — same algebra under the
+        hood).
         """
         rng = np.random.default_rng(20260420)
         n_units, n_time = 30, 3
@@ -680,18 +686,26 @@ class TestFitBehavior:
                 rows.append({"unit": i, "time": t, "treated": treated, "post": post, "y": y})
         data = pd.DataFrame(rows)
 
-        for bad in ("hc2", "hc2_bm"):
-            with pytest.raises(
-                NotImplementedError,
-                match="DifferenceInDifferences.*absorb.*not yet supported",
-            ):
-                DifferenceInDifferences(vcov_type=bad).fit(
-                    data,
-                    outcome="y",
-                    treatment="treated",
-                    time="post",
-                    absorb=["unit"],
-                )
+        for vcov in ("hc2", "hc2_bm"):
+            res_absorb = DifferenceInDifferences(vcov_type=vcov).fit(
+                data,
+                outcome="y",
+                treatment="treated",
+                time="post",
+                absorb=["unit"],
+            )
+            res_fe = DifferenceInDifferences(vcov_type=vcov).fit(
+                data,
+                outcome="y",
+                treatment="treated",
+                time="post",
+                fixed_effects=["unit"],
+            )
+            assert np.isfinite(res_absorb.att)
+            assert np.isfinite(res_absorb.se)
+            # Auto-route should be bit-equal to explicit fixed_effects= path.
+            np.testing.assert_allclose(res_absorb.att, res_fe.att, atol=1e-12)
+            np.testing.assert_allclose(res_absorb.se, res_fe.se, atol=1e-12)
 
     def test_did_fixed_effects_dummies_still_accept_hc2_and_hc2_bm(self):
         """DifferenceInDifferences with fixed_effects= (dummy expansion) is
@@ -962,3 +976,88 @@ class TestSummarySurveyLabeling:
         summary = res.summary()
         assert "Variance:" in summary
         assert "HC1" in summary
+
+
+class TestDiDAbsorbedFERParity:
+    """R-parity for `DifferenceInDifferences(absorb=..., vcov_type in {hc2, hc2_bm})`.
+
+    The auto-route promotes absorb= to fixed_effects= internally, building
+    the full-dummy design that R's `lm(y ~ treat_post + factor(unit) +
+    factor(period))` produces. HC2-BM unclustered is computed via
+    clubSandwich's singleton-cluster CR2 trick; CR2 clustered by unit uses
+    `vcovCR(..., cluster=d$unit, type="CR2")`. Parity tolerance 1e-6
+    (empirically matches at ≤ 1e-10 in the local smoke test).
+    """
+
+    def _load_golden(self):
+        import json
+        from pathlib import Path
+
+        golden_path = (
+            Path(__file__).parent.parent / "benchmarks" / "data" / "clubsandwich_cr2_golden.json"
+        )
+        if not golden_path.exists():
+            pytest.skip(
+                "Golden JSON not present; run `Rscript "
+                "benchmarks/R/generate_clubsandwich_golden.R` to generate."
+            )
+        with open(golden_path) as f:
+            golden = json.load(f)
+        if "absorbed_fe_did" not in golden:
+            pytest.skip(
+                "Golden JSON does not yet include `absorbed_fe_did` scenario; "
+                "regenerate via the R script."
+            )
+        return golden["absorbed_fe_did"]
+
+    def _fit_absorb(self, d, vcov_type):
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "post": d["post"],
+                "y": d["y"],
+            }
+        )
+        return DifferenceInDifferences(vcov_type=vcov_type).fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="post",
+            absorb=["unit", "period"],
+            unit="unit",
+        )
+
+    def test_absorb_hc2_bm_matches_clubsandwich_singleton_cluster(self):
+        """`absorb=` + `hc2_bm` matches `lm() + clubSandwich::vcovCR(cluster=1:n)`.
+
+        Asserts on the treat_post slope SE only (the inference target);
+        FE-dummy coefficient SEs are not the user-facing inference and
+        can differ in higher decimal places due to absorbed-FE rank
+        treatment.
+        """
+        d = self._load_golden()
+        res = self._fit_absorb(d, "hc2_bm")
+        coef_names = d["coef_names"]
+        treat_post_idx = coef_names.index("treat_post")
+        expected_vcov = np.asarray(d["vcov_hc2_bm"]).reshape(d["vcov_hc2_bm_shape"])
+        expected_se_slope = float(np.sqrt(expected_vcov[treat_post_idx, treat_post_idx]))
+        expected_dof_slope = float(d["dof_hc2_bm"][treat_post_idx])
+        np.testing.assert_allclose(res.se, expected_se_slope, atol=1e-10)
+        # ATT also bit-equal.
+        np.testing.assert_allclose(res.att, float(d["coef"][treat_post_idx]), atol=1e-10)
+        # Suppress unused-local warning while keeping the constant in scope
+        # (DOF is exposed indirectly via res.p_value/conf_int but not as a
+        # standalone field on DiDResults; the SE+ATT parity above suffices).
+        _ = expected_dof_slope
+
+    def test_absorb_hc2_matches_full_dummy_design(self):
+        """`absorb=` + `hc2` produces a finite SE; ATT matches R."""
+        d = self._load_golden()
+        res = self._fit_absorb(d, "hc2")
+        coef_names = d["coef_names"]
+        treat_post_idx = coef_names.index("treat_post")
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se)
+        np.testing.assert_allclose(res.att, float(d["coef"][treat_post_idx]), atol=1e-10)

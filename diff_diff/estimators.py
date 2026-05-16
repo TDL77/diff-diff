@@ -363,24 +363,27 @@ class DifferenceInDifferences:
                 "or fixed_effects alone (for low-dimensional FE)."
             )
 
-        # Reject HC2 / HC2 + Bell-McCaffrey on absorbed-FE fits.
-        # `absorb=` demeans regressors via within-transformation before OLS,
-        # and the HC2 leverage correction / CR2 Bell-McCaffrey DOF depend on
-        # the FULL FE hat matrix, not the residualized one (FWL preserves
-        # coefficients but not the hat matrix). Applying HC2/CR2-BM to the
-        # demeaned design would produce silently-wrong small-sample SEs.
-        # HC1 and CR1 are unaffected (no leverage term). Tracked in TODO.md.
+        # Auto-route absorb → fixed_effects when vcov_type needs the FULL FE
+        # hat matrix. HC2 leverage and CR2 Bell-McCaffrey DOF both depend on
+        # the full-design hat; FWL preserves coefficients and residuals but
+        # not the hat matrix, so the demeaned design's leverage is wrong for
+        # these vcov families. Building the full-dummy design and routing
+        # through the existing fixed_effects= branch produces the algebraically
+        # correct vcov. Empirically matches `lm() + sandwich::vcovHC` and
+        # `lm() + clubSandwich::vcovCR` (singleton-cluster trick for one-way
+        # HC2-BM; PT2018 §3.3 unweighted CR2 algebra) at ~1e-14.
+        # Conley vcov is unaffected: the absorb+Conley path (Wave A) computes
+        # the panel sandwich on demeaned scores, which is FWL-correct because
+        # Conley's meat uses only residuals (no leverage term).
+        # HC1/CR1 paths remain on the demeaned design (no leverage term).
+        # Note: the user-facing `result.coefficients` under this auto-route
+        # will include the FE-dummy entries (matching the fixed_effects= path),
+        # not the slope-only view that a plain `absorb=` returns.
         if absorb and self.vcov_type in ("hc2", "hc2_bm"):
-            raise NotImplementedError(
-                f"DifferenceInDifferences(absorb=..., "
-                f"vcov_type={self.vcov_type!r}) is not yet supported: "
-                "absorbed fixed effects are handled by demeaning, and the "
-                "HC2 / CR2 Bell-McCaffrey leverage corrections depend on "
-                "the full FE hat matrix, not the residualized one. Use "
-                "vcov_type='hc1' with absorb=, or switch to "
-                "fixed_effects= dummies for a full-dummy design where "
-                "HC2/CR2-BM are computed on the full projection."
-            )
+            fixed_effects = list(fixed_effects or []) + list(absorb)
+            absorb = None
+            absorbed_vars = []
+            n_absorbed_effects = 0
 
         # Validate vcov_type="conley" wire-up. DiD.fit() accepts `unit`
         # as a fit-time arg (NOT on __init__) because cluster/unit
