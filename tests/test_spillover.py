@@ -3354,9 +3354,10 @@ class TestSpilloverDiDEventStudyReferencePeriod:
 class TestSpilloverDiDEventStudyReduceToAggregate:
     """Reduce-to-Wave-B-aggregate at horizon_max=None on constant-tau DGP.
 
-    Note: horizon_max=0 does NOT reduce to Wave B (binning collapses pre-treatment
-    rows of treated units into the D^0 dummy, making D^0 = D_i ≠ D_it). The valid
-    equivalence path is constant-tau DGP + horizon_max=None.
+    Note: horizon_max=0 is REJECTED under event_study=True (PR #456 R5 fix):
+    single bin k=0 leaves no event-time pair to anchor the reference period
+    against. Users wanting a single aggregate direct effect should use
+    event_study=False instead.
     """
 
     def test_constant_tau_horizon_none_recovers_wave_b_att(self):
@@ -3435,6 +3436,22 @@ class TestSpilloverDiDEventStudyValidation:
         res = _fit_event_study(df, horizon_max=None, anticipation=2)
         assert res.reference_period == -3
 
+    def test_horizon_max_zero_with_event_study_raises(self):
+        """PR #456 R5 P1: horizon_max=0 is rejected under event_study=True
+        (the single k=0 bin has no event-time pair to anchor the reference
+        against). Users wanting a single aggregate effect should use
+        event_study=False."""
+        df = generate_butts_staggered_dgp(seed=1)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=0,
+        )
+        with pytest.raises(ValueError, match="horizon_max=0 is not supported"):
+            est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+
     def test_non_numeric_anticipation_raises_targeted_value_error(self):
         """PR #456 R2 P2: anticipation must be validated BEFORE the ref_period
         compatibility check; otherwise `-1 - self.anticipation` would raise a
@@ -3467,13 +3484,18 @@ class TestSpilloverDiDEventStudyValidation:
 
 
 class TestSpilloverDiDEventStudyBackwardCompat:
-    """event_study=False reproduces Wave B SE bit-identity (no behavioral drift).
+    """event_study=False reproduces the unchanged Wave B aggregate path.
 
-    The golden values below were captured against the Wave C event_study=False
-    path on `generate_butts_nonstaggered_dgp(seed=42)`. Since Wave C does not
-    modify the aggregate (Wave B) stage-2 design, fit, or extraction logic,
-    these values ARE the Wave B numerics. Any future drift on this PIN
-    indicates an accidental change to the aggregate path.
+    The golden values below were captured against the current (Wave C)
+    `event_study=False` path on `generate_butts_nonstaggered_dgp(seed=42)`.
+    Wave C does not modify the aggregate stage-2 design construction
+    (``spillover.py`` lines around the ``else`` branch at the `event_study`
+    dispatch), the stage-2 fit, or the aggregate extraction logic — those
+    lines are byte-identical to Wave B in this PR. The PIN therefore anchors
+    the unchanged aggregate path against accidental drift, but it is not a
+    literal "pre-Wave-C" checkout artifact. Any future change to the
+    aggregate path must update both these goldens and the CHANGELOG
+    aggregate-path bit-identity claim simultaneously.
     """
 
     # PR #456 R3 golden capture (event_study=False on the seed-42 fixture).
@@ -3964,3 +3986,49 @@ class TestSpilloverDiDEventStudyReferencePeriodSpilloverRows:
             assert row["ci_high"] == 0.0
             assert np.isnan(row["t_stat"])
             assert np.isnan(row["p_value"])
+
+
+class TestSpilloverDiDEventStudyPlotIntegration:
+    """PR #456 R5 P2: plot_event_study must honor reference_period.
+
+    Wave C's rectangular event_study_effects emits multiple rows with
+    `n_obs = 0` (empty horizons + the reference). The legacy plot reference
+    detection picks the FIRST `n_obs == 0` row, which may be a non-reference
+    horizon. The fix prefers `results.reference_period` when present.
+    """
+
+    def test_plot_event_study_uses_explicit_reference_period(self):
+        """Set an oversized horizon_max so multiple horizons have n_obs=0.
+        The reference detection must still pick the documented reference
+        period (-1 with default anticipation=0), not the first empty
+        horizon found by iteration order."""
+        from diff_diff.visualization._event_study import _extract_plot_data
+
+        df = generate_butts_staggered_dgp(seed=42)
+        # horizon_max=4 on a 6-period panel yields several empty post-direct
+        # horizons (e.g. cohort onset=3 only has k=0..2 in-panel, so k=+3, +4
+        # are empty for that cohort's contribution) plus the reference at -1.
+        res = _fit_event_study(df, horizon_max=4)
+        (
+            effects,
+            se,
+            periods,
+            pre_periods,
+            post_periods,
+            ref_period,
+            ref_inferred,
+            *_,
+        ) = _extract_plot_data(
+            res,
+            periods=None,
+            pre_periods=None,
+            post_periods=None,
+            reference_period=None,
+        )
+        # Reference inference uses the explicit attribute (preferred over the
+        # n_obs==0 heuristic that could pick any empty horizon).
+        assert ref_inferred is True
+        assert ref_period == res.reference_period == -1, (
+            f"plot_event_study picked reference_period={ref_period}, "
+            f"expected {res.reference_period} from explicit attribute"
+        )

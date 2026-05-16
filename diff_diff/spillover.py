@@ -2003,6 +2003,24 @@ class SpilloverDiD:
                     f"got {self.horizon_max!r} "
                     f"(type {type(self.horizon_max).__name__})."
                 )
+            # Reject horizon_max=0 under event_study=True (PR #456 R4 fix).
+            # H=0 puts the entire panel into a single k=0 bin and the
+            # reference period -1-anticipation always falls outside [-0, +0],
+            # so the ref_period guard below would reject it anyway. We
+            # surface a clearer error explaining the right alternative:
+            # users wanting "one aggregate effect" should use
+            # event_study=False (Wave B static spec); event-study mode
+            # requires at least one event-time bin pair so a reference
+            # period can be anchored.
+            if self.event_study and self.horizon_max == 0:
+                raise ValueError(
+                    "horizon_max=0 is not supported when event_study=True: "
+                    "the single bin k=0 leaves no event-time pair to anchor "
+                    "the reference period against. For a single aggregate "
+                    "direct effect, use event_study=False (Wave B static "
+                    "spec); for the event-study decomposition, use "
+                    "horizon_max>=1 or horizon_max=None (auto-detect)."
+                )
             if not self.event_study and self.horizon_max is not None:
                 # horizon_max is only meaningful in event-study mode.
                 warnings.warn(

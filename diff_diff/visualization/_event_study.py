@@ -6,10 +6,10 @@ import numpy as np
 import pandas as pd
 
 if TYPE_CHECKING:
-    from diff_diff.honest_did import HonestDiDResults
     from diff_diff.chaisemartin_dhaultfoeuille_results import (
         ChaisemartinDHaultfoeuilleResults,
     )
+    from diff_diff.honest_did import HonestDiDResults
     from diff_diff.imputation import ImputationDiDResults
     from diff_diff.results import MultiPeriodDiDResults
     from diff_diff.stacked_did import StackedDiDResults
@@ -745,18 +745,28 @@ def _extract_plot_data(
         # Track if reference_period was explicitly provided vs auto-inferred
         reference_inferred = False
 
-        # Reference period is typically -1 for event study
+        # Reference period is typically -1 for event study.
         if reference_period is None:
             reference_inferred = True  # We're about to infer it
-            # Detect reference period from n_groups=0 marker (normalization constraint)
-            # This handles anticipation > 0 where reference is at e = -1 - anticipation
-            for period, effect_data in results.event_study_effects.items():
-                if effect_data.get("n_groups", 1) == 0 or effect_data.get("n_obs", 1) == 0:
-                    reference_period = period
-                    break
-            # Fallback to -1 if no marker found (backward compatibility)
-            if reference_period is None:
-                reference_period = -1
+            # Prefer an explicit `reference_period` attribute on the result
+            # (Wave C ``SpilloverDiDResults`` sets this directly). The
+            # legacy `n_obs == 0` heuristic was ambiguous for rectangular
+            # outputs like SpilloverDiD's `event_study_effects`, which
+            # legitimately emits multiple empty non-reference horizons.
+            explicit_ref = getattr(results, "reference_period", None)
+            if explicit_ref is not None:
+                reference_period = int(explicit_ref)
+            else:
+                # Detect reference period from n_groups=0 marker (normalization
+                # constraint). This handles anticipation > 0 where reference
+                # is at e = -1 - anticipation.
+                for period, effect_data in results.event_study_effects.items():
+                    if effect_data.get("n_groups", 1) == 0 or effect_data.get("n_obs", 1) == 0:
+                        reference_period = period
+                        break
+                # Fallback to -1 if no marker found (backward compatibility).
+                if reference_period is None:
+                    reference_period = -1
 
         if pre_periods is None:
             pre_periods = [p for p in periods if p < 0]
