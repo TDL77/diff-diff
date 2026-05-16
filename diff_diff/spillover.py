@@ -1499,8 +1499,19 @@ class SpilloverDiD:
         2 staggered specification). The result's ``spillover_effects``
         DataFrame uses a ``MultiIndex`` over ``(ring, event_time)``.
     horizon_max : int, optional
-        Maximum absolute event-study horizon. Mirrors
-        :class:`diff_diff.two_stage.TwoStageDiD`.
+        Maximum absolute event-study horizon. Used only when
+        ``event_study=True``. Event-times outside ``[-horizon_max,
+        +horizon_max]`` are **binned into endpoint pools** (``k <= -H``
+        aggregated into a single pre-bin coefficient; ``k >= +H`` into a
+        single post-bin coefficient), so no observations are dropped.
+        This intentionally **diverges** from
+        :class:`diff_diff.two_stage.TwoStageDiD`, which filters rows with
+        ``|K| > horizon_max`` out of the stage-2 sample. The endpoint-pool
+        semantic honors the library's no-silent-data-drop policy
+        (``feedback_no_silent_failures``). When ``None``, the helper
+        auto-detects the bin set from observed K values. If ``ref_period
+        = -1 - anticipation`` falls outside ``[-horizon_max, +horizon_max]``
+        the fit raises ``ValueError``.
     rank_deficient_action : {"warn", "error", "silent"}, default="warn"
         Action when the stage-2 design is rank-deficient.
 
