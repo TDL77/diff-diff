@@ -195,7 +195,11 @@ planned as follow-up enhancements:
   period ``-1 - anticipation`` (TwoStageDiD parity). ``horizon_max``
   bins event-times into endpoint pools (no row drop — divergence
   from TwoStageDiD's filtering semantic, intentional per
-  ``feedback_no_silent_failures``). Scalar ``att`` becomes a
+  ``feedback_no_silent_failures``). ``horizon_max`` must be ``>=1`` or
+  ``None`` under ``event_study=True``; ``horizon_max=0`` is rejected
+  (the single bin ``k=0`` leaves no event-time pair to anchor the
+  reference period — for a single aggregate effect, use
+  ``event_study=False`` instead). Scalar ``att`` becomes a
   sample-share-weighted average of post-treatment ``tau_k`` with SE
   from linear-combination inference on the post-treatment vcov block.
   Per-event-time SEs share the same Wave B Gardner-GMM caveat

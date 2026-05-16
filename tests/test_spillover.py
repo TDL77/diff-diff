@@ -359,7 +359,7 @@ class TestComputeNearestTreatedDistanceStaggered:
 
     def test_inf_pre_any_treatment(self, staggered_panel):
         df, ft = staggered_panel
-        d_it, row_unit, row_time = _compute_nearest_treated_distance_staggered(
+        d_it, row_unit, row_time, _trigger = _compute_nearest_treated_distance_staggered(
             df,
             unit="unit",
             time="time",
@@ -373,7 +373,7 @@ class TestComputeNearestTreatedDistanceStaggered:
 
     def test_cohort_a_active_at_t1(self, staggered_panel):
         df, ft = staggered_panel
-        d_it, row_unit, row_time = _compute_nearest_treated_distance_staggered(
+        d_it, row_unit, row_time, _trigger = _compute_nearest_treated_distance_staggered(
             df,
             unit="unit",
             time="time",
@@ -394,7 +394,7 @@ class TestComputeNearestTreatedDistanceStaggered:
 
     def test_running_min_across_cohorts_at_t2(self, staggered_panel):
         df, ft = staggered_panel
-        d_it, row_unit, row_time = _compute_nearest_treated_distance_staggered(
+        d_it, row_unit, row_time, _trigger = _compute_nearest_treated_distance_staggered(
             df,
             unit="unit",
             time="time",

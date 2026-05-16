@@ -478,7 +478,7 @@ SpilloverDiD(
     alpha: float = 0.05,
     anticipation: int = 0,
     event_study: bool = False,           # Wave C: per-event-time × ring decomposition (Butts Table 2)
-    horizon_max: int | None = None,      # Bin event-times outside [-H,+H] into endpoint pools (event-study mode)
+    horizon_max: int | None = None,      # Bin event-times outside [-H,+H] into endpoint pools (event-study mode); H>=1 or None — H=0 rejected (use event_study=False for aggregate spec)
     rank_deficient_action: str = "warn",
 )
 ```
