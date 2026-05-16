@@ -1312,13 +1312,14 @@ def bacon_decompose(
     >>> # Default: paper-faithful Goodman-Bacon (2021) Theorem 1 weights
     >>> # (weights="exact"); matches R bacondecomp::bacon() at atol=1e-6 on
     >>> # the aggregate (TWFE coefficient + weights-sum) across all panels,
-    >>> # and on the per-component breakdown when first_treat is bounded
-    >>> # below by min(time) (no always-treated). For panels with
-    >>> # always-treated units, the per-component breakdown diverges by
-    >>> # convention (Python remaps to U per paper footnote 11; R emits
-    >>> # `Later vs Always Treated`); see REGISTRY note on R parity
-    >>> # convention divergence. Validated via
-    >>> # tests/test_methodology_bacon.py::TestBaconParityR.
+    >>> # and on the per-component breakdown when there are no
+    >>> # always-treated / first-period-treated cohorts (i.e. all
+    >>> # non-sentinel first_treat values are strictly greater than
+    >>> # min(time)). For panels with always-treated units, the
+    >>> # per-component breakdown diverges by convention (Python remaps
+    >>> # to U per paper footnote 11; R emits `Later vs Always Treated`);
+    >>> # see REGISTRY note on R parity convention divergence. Validated
+    >>> # via tests/test_methodology_bacon.py::TestBaconParityR.
     >>> results = bacon_decompose(
     ...     data=panel_df,
     ...     outcome='earnings',
