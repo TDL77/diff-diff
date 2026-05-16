@@ -481,11 +481,13 @@ class TestBaconParityR:
     def test_always_treated_remapped_fold_back_matches_r(self, golden) -> None:
         """Pin the documented R→Python fold-back for the always-treated U bucket.
 
-        The per-component test above skips ``always_treated_remapped`` because
-        R and Python decompose the U bucket differently — but the documented
-        REGISTRY claim is that **aggregating** R's `Later vs Always Treated`
-        + `Treated vs Untreated` rows by treated cohort matches Python's
-        single `treated_vs_never` cell for that cohort. Assert that fold-back
+        The per-component test above carves out **only the U-bucket rows**
+        from ``always_treated_remapped`` (the 6 timing-vs-timing rows are
+        still asserted directly at atol=1e-6); R and Python decompose the
+        U bucket differently — but the documented REGISTRY claim is that
+        **aggregating** R's `Later vs Always Treated` + `Treated vs
+        Untreated` rows by treated cohort matches Python's single
+        `treated_vs_never` cell for that cohort. Assert that fold-back
         directly so a cohort-level regression can't slip through under
         overall TWFE parity.
 
