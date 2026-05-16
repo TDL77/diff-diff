@@ -3623,3 +3623,199 @@ class TestSpilloverDiDEventStudyFitIdempotence:
         pd.testing.assert_frame_equal(res_1.att_dynamic, res_2.att_dynamic)
         pd.testing.assert_frame_equal(res_1.spillover_effects, res_2.spillover_effects)
         assert res_1.att == res_2.att
+
+
+class TestSpilloverDiDEventStudyFiniteMaskPath:
+    """PR #456 R1 fix: event_study=True must use post-finite_mask counts.
+
+    When stage-1 warn-and-drop excludes baseline-treated units (those with
+    no Omega_0 rows), the per-event-time `n_obs` values in att_dynamic /
+    event_study_effects AND the share weights for the scalar `att` must
+    reflect the POST-mask sample — not the pre-mask design.
+    """
+
+    def _make_warn_and_drop_panel(self):
+        rng = np.random.default_rng(1)
+        rows = []
+        # 4 baseline-treated units (no Omega_0 rows → warned-dropped).
+        for k in range(4):
+            for t in (0, 1, 2):
+                rows.append(
+                    {
+                        "unit": f"baseline_{k}",
+                        "time": t,
+                        "lat": 0.0 + k * 0.001,
+                        "lon": 0.0,
+                        "D": 1,
+                        "y": rng.normal(),
+                    }
+                )
+        # 3 validly-treated units (treated from t=1; supported).
+        for k in range(3):
+            for t in (0, 1, 2):
+                rows.append(
+                    {
+                        "unit": f"treated_t1_{k}",
+                        "time": t,
+                        "lat": 10.0 + k * 0.01,
+                        "lon": 0.0,
+                        "D": int(t >= 1),
+                        "y": rng.normal(),
+                    }
+                )
+        # 5 far-controls (full Omega_0 support).
+        for k in range(5):
+            for t in (0, 1, 2):
+                rows.append(
+                    {
+                        "unit": f"far_control_{k}",
+                        "time": t,
+                        "lat": 20.0 + k * 0.01,
+                        "lon": 0.0,
+                        "D": 0,
+                        "y": rng.normal(),
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def test_n_obs_in_att_dynamic_reflects_post_mask_sample(self):
+        df = self._make_warn_and_drop_panel()
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=1,
+        )
+        with pytest.warns(UserWarning):
+            res = est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+        # 4 baselines × 3 periods = 12 rows excluded. Remaining: 3 treated +
+        # 5 controls = 8 units × 3 periods = 24 rows. n_treated = 3 supported
+        # treated units × 2 post-treatment periods (t=1, t=2) = 6.
+        assert res.n_obs == 24, f"n_obs={res.n_obs} (expected 24)"
+        # att_dynamic: pre-mask, baseline_{0..3} had D=1 at every t, but
+        # those rows are now excluded. The n_obs per k should ONLY count the
+        # treated_t1_{0..2} rows.
+        # At k=0 (t=1, supported treated): 3 rows.
+        # At k=1 (t=2, supported treated): 3 rows.
+        # At k=-1 (t=0, supported treated; reference): 0 rows (reference is dropped).
+        assert res.att_dynamic.loc[0, "n_obs"] == 3, (
+            f"k=0 n_obs={res.att_dynamic.loc[0, 'n_obs']} (expected 3 — the 3 "
+            "supported treated_t1 rows at t=1, NOT 7 including pre-mask baselines)"
+        )
+        assert (
+            res.att_dynamic.loc[1, "n_obs"] == 3
+        ), f"k=+1 n_obs={res.att_dynamic.loc[1, 'n_obs']} (expected 3)"
+
+    def test_event_study_effects_n_obs_reflects_post_mask_sample(self):
+        df = self._make_warn_and_drop_panel()
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=1,
+        )
+        with pytest.warns(UserWarning):
+            res = est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+        # event_study_effects dict mirrors att_dynamic, must be consistent.
+        for k in res.att_dynamic.index:
+            es_n = res.event_study_effects[int(k)]["n_obs"]
+            dyn_n = res.att_dynamic.loc[k, "n_obs"]
+            assert es_n == dyn_n, (
+                f"k={k}: event_study_effects n_obs ({es_n}) disagrees "
+                f"with att_dynamic n_obs ({dyn_n})"
+            )
+
+    def test_scalar_att_weights_use_post_mask_counts(self):
+        """Lincom att = sum_{k>=0} w_k * tau_k where w_k = post-mask n_obs / total."""
+        df = self._make_warn_and_drop_panel()
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=1,
+        )
+        with pytest.warns(UserWarning):
+            res = est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+        # Hand-compute share-weighted att from att_dynamic post-mask n_obs.
+        post = res.att_dynamic[res.att_dynamic.index >= 0]
+        total = post["n_obs"].sum()
+        if total > 0 and not post["coef"].isna().any():
+            hand_att = (post["coef"] * post["n_obs"]).sum() / total
+            assert abs(hand_att - res.att) < 1e-10, (
+                f"att={res.att}, hand-computed from post-mask n_obs={hand_att}, "
+                f"diff={abs(hand_att - res.att):.2e}"
+            )
+
+
+class TestSpilloverDiDEventStudyRankDeficientFailClosed:
+    """PR #456 R1 fix: when solve_ols drops a post-direct column as NaN,
+    the scalar `att` must fail closed (NaN with warning), not silently
+    discard weight mass via np.nansum on a fixed weight vector.
+    """
+
+    def test_nan_post_direct_coef_yields_nan_att_with_warning(self, monkeypatch):
+        """Monkey-patch solve_ols to NaN out one post-treatment direct coef
+        and assert att=NaN with the documented warning."""
+        df = generate_butts_staggered_dgp(seed=42)
+        from diff_diff import spillover as spillover_mod
+        from diff_diff.linalg import solve_ols as real_solve_ols
+
+        def solve_ols_with_nan_post_direct(*args, **kwargs):
+            coef, residuals, vcov = real_solve_ols(*args, **kwargs)
+            column_names = kwargs.get("column_names", [])
+            # Find the first post-treatment direct column (D^k=+N with N>=0)
+            # and NaN out its coefficient.
+            for i, name in enumerate(column_names):
+                if name.startswith("D^k=+") and name != "D^k=-0":
+                    coef[i] = float("nan")
+                    if vcov is not None:
+                        vcov[i, :] = float("nan")
+                        vcov[:, i] = float("nan")
+                    break
+            return coef, residuals, vcov
+
+        monkeypatch.setattr(spillover_mod, "solve_ols", solve_ols_with_nan_post_direct)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=2,
+        )
+        with pytest.warns(UserWarning, match="scalar `att` is NaN"):
+            res = est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+        assert np.isnan(res.att), f"Expected att=NaN, got {res.att}"
+        assert np.isnan(res.se), f"Expected se=NaN, got {res.se}"
+
+
+class TestSpilloverDiDEventStudyReferencePeriodSpilloverRows:
+    """PR #456 R1 fix (P3): rectangular spillover_effects must include
+    (ring, ref_period) rows with coef=0.0, se=0.0, n_obs=0 (matching the
+    direct-effect reference row convention)."""
+
+    def test_ref_period_row_present_per_ring(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        ref = res.reference_period
+        # Every ring should have a (ring, ref_period) row.
+        for ring_label in res.spillover_effects.index.get_level_values("ring").unique():
+            assert (
+                ring_label,
+                ref,
+            ) in res.spillover_effects.index, (
+                f"Missing (ring={ring_label}, k={ref}) row in spillover_effects"
+            )
+
+    def test_ref_period_row_uses_zero_anchor(self):
+        df = generate_butts_staggered_dgp(seed=42)
+        res = _fit_event_study(df, horizon_max=2)
+        ref = res.reference_period
+        for ring_label in res.spillover_effects.index.get_level_values("ring").unique():
+            row = res.spillover_effects.loc[(ring_label, ref)]
+            assert row["coef"] == 0.0
+            assert row["se"] == 0.0
+            assert row["n_obs"] == 0
+            assert row["ci_low"] == 0.0
+            assert row["ci_high"] == 0.0
+            assert np.isnan(row["t_stat"])
+            assert np.isnan(row["p_value"])

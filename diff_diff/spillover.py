@@ -820,9 +820,36 @@ def _extract_event_study_results(
     att_dynamic_df = pd.DataFrame(direct_rows).set_index("k").sort_index() if direct_rows else None
 
     # Build spillover_effects: rectangular over (ring_label, k) grid.
+    #
+    # PR #456 R1 fix (P3): the spillover grid must INCLUDE the reference
+    # period row per ring. The pre-filter in _build_event_study_design drops
+    # `ref_period` from the fitted column set, but the rectangular schema
+    # for spillover must still emit (ring, ref_period) with `coef=0.0,
+    # se=0.0, n_obs=0` for symmetry with the direct-effect series (which
+    # emits its reference row at k=ref_period). Without this, consumers
+    # iterating `[-H, ..., +H]` would hit a missing (ring, ref_period)
+    # slice — the registry promises rectangular emission over the full
+    # event-time grid.
+    all_spillover_ks = sorted(set(spillover_k_set) | {ref_period})
     spillover_rows: List[Dict[str, Any]] = []
     for ring_lab in ring_labels:
-        for k in spillover_k_set:
+        for k in all_spillover_ks:
+            if k == ref_period:
+                # Reference-period spillover row: 0-anchored (mirrors direct).
+                spillover_rows.append(
+                    {
+                        "ring": ring_lab,
+                        "k": k,
+                        "coef": 0.0,
+                        "se": 0.0,
+                        "t_stat": float("nan"),
+                        "p_value": float("nan"),
+                        "ci_low": 0.0,
+                        "ci_high": 0.0,
+                        "n_obs": 0,
+                    }
+                )
+                continue
             key = ("spillover", ring_lab, k)
             if key in per_coef:
                 r = per_coef[key]
@@ -882,16 +909,38 @@ def _extract_event_study_results(
     # Scalar att via sample-share-weighted average over post-treatment direct
     # coefficients (k >= 0). SE via linear-combination on the vcov submatrix
     # of those kept columns.
+    #
+    # Fail-closed contract (PR #456 R1 fix): if ANY post-treatment direct
+    # coefficient is NaN (solve_ols dropped the column as rank-deficient),
+    # the aggregate is structurally unidentified. Set att = NaN with a
+    # warning rather than silently zeroing the dropped column's contribution
+    # via np.nansum (which would change the point estimate without
+    # renormalizing weights). Matches the library-wide
+    # `feedback_no_silent_failures` invariant.
     post_direct_indices = [
         i for i, (s, _, k) in enumerate(kept_col_meta) if s == "direct" and k >= 0
     ]
     if post_direct_indices and vcov is not None:
         n_obs_post = np.array([n_obs_per_col[i] for i in post_direct_indices], dtype=np.float64)
         total_post_obs = n_obs_post.sum()
-        if total_post_obs > 0:
+        coefs_post = np.array([coef[i] for i in post_direct_indices], dtype=np.float64)
+        has_nan_post = bool(np.any(~np.isfinite(coefs_post)))
+        if has_nan_post:
+            warnings.warn(
+                "SpilloverDiD event-study: scalar `att` is NaN because at "
+                "least one post-treatment direct-effect coefficient was "
+                "dropped as rank-deficient (or otherwise non-finite). The "
+                "aggregate is unidentified under this design; inspect "
+                "`att_dynamic` for the per-event-time coefficients and "
+                "re-aggregate manually if appropriate.",
+                UserWarning,
+                stacklevel=2,
+            )
+            att = float("nan")
+            att_se = float("nan")
+        elif total_post_obs > 0:
             weights = n_obs_post / total_post_obs
-            coefs_post = np.array([coef[i] for i in post_direct_indices], dtype=np.float64)
-            att = float(np.nansum(weights * coefs_post))
+            att = float(np.sum(weights * coefs_post))
             vcov_subset = vcov[np.ix_(post_direct_indices, post_direct_indices)]
             var_att = float(weights @ vcov_subset @ weights)
             att_se = float(np.sqrt(max(var_att, 0.0))) if np.isfinite(var_att) else float("nan")
@@ -2410,6 +2459,17 @@ class SpilloverDiD:
             cluster_ids_fit = cluster_ids_full
             time_vals_fit = np.asarray(time_vals)
             unit_vals_fit = np.asarray(unit_vals)
+
+        # Wave C P1 fix (PR #456 R1): for event_study=True, recompute
+        # n_obs_per_col on the POST-finite-mask sample. The original
+        # n_obs_per_col from _build_event_study_design counted rows on the
+        # pre-mask design — using those stale counts for `att_dynamic`,
+        # `event_study_effects[k]["n_obs"]`, and the scalar `att` share
+        # weights would mix two samples and change the point estimate on
+        # warn-and-drop fits. The post-mask counts reflect the actual
+        # stage-2 estimation sample that solve_ols sees.
+        if self.event_study and event_study_meta is not None:
+            event_study_meta["n_obs_per_col"] = (X_2_fit != 0).sum(axis=0).astype(np.int64)
 
         # Step 15: stage-2 OLS with configured vcov via solve_ols.
         solve_kwargs: Dict[str, Any] = {

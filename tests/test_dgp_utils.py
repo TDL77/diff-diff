@@ -101,24 +101,57 @@ class TestButtsStaggeredDgpCallableKwargs:
         np.testing.assert_array_equal(df_scalar["y"].values, df_callable["y"].values)
 
     def test_per_event_time_tau_recovers_exact_y_with_zero_noise(self) -> None:
-        """With ``error_sd=0`` and a known tau callable, y matches the formula exactly."""
-        tau_fn = lambda k: -0.05 - 0.01 * k  # noqa: E731
+        """With ``error_sd=0`` and a known tau callable, treated row Y values
+        exactly match the closed-form ``y = mu_i + lambda_t + tau_fn(k)``.
+
+        Strengthened per PR #456 R1 review: the previous version only
+        checked that k=0 treated rows existed without verifying the formula.
+        """
+
+        def tau_fn(k):
+            return -0.05 - 0.01 * k
+
         df = generate_butts_staggered_dgp(
             seed=11,
             error_sd=0.0,
             tau_per_event_time=tau_fn,
             delta_per_ring_per_event_time=lambda j, k: 0.0,
         )
-        # For each treated row in post-period, expected y - y_clean == tau_fn(t - first_treat).
-        # We can isolate effect by subtracting the unit's pre-treatment baseline behavior:
-        # y_pre = mu_i + lambda_pre + 0; y_post = mu_i + lambda_post + tau_fn(k).
-        # Difference between two periods for the same unit: (lambda_t2 - lambda_t1) + effect_change.
-        treated = df[(df["D"] == 1)].copy()
-        treated["k"] = treated["time"] - treated["first_treat"]
-        # All treated rows with k >= 0 should have y - (mu_i + lambda_t) = tau_fn(k).
-        # Pull a sample: unit's first treated period (k=0).
-        first_period_treated = treated[treated["k"] == 0]
-        assert len(first_period_treated) > 0, "DGP produced no k=0 treated rows"
+        # The DGP sets y = mu_i + lambda_t + effect (effect=0 pre-treatment).
+        # For each treated unit, derive mu_i + lambda_t at a pre-treatment
+        # observation, then verify each post-treatment row matches the
+        # closed-form expectation y = (mu_i + lambda_pre) + (lambda_t -
+        # lambda_pre) + tau_fn(k).
+        treated_mask = df["D"] == 1
+        treated_df = df[treated_mask].copy()
+        treated_df["k"] = (treated_df["time"] - treated_df["first_treat"]).astype(int)
+
+        n_checked = 0
+        for u in treated_df["unit"].unique():
+            unit_rows = df[df["unit"] == u].sort_values("time")
+            pre_rows = unit_rows[unit_rows["D"] == 0]
+            if pre_rows.empty:
+                continue
+            pre = pre_rows.iloc[0]
+            y_pre = pre["y"]
+            t_pre = pre["time"]
+            unit_treated = treated_df[treated_df["unit"] == u]
+            for _, row in unit_treated.iterrows():
+                k = int(row["k"])
+                # lambda_t spec from generate_butts_staggered_dgp: 0.05 * t.
+                lambda_diff = 0.05 * (row["time"] - t_pre)
+                expected_y = y_pre + lambda_diff + tau_fn(k)
+                np.testing.assert_allclose(
+                    row["y"],
+                    expected_y,
+                    atol=1e-12,
+                    err_msg=(
+                        f"unit={u}, t={row['time']}, k={k}: "
+                        f"y={row['y']:.10f}, expected={expected_y:.10f}"
+                    ),
+                )
+                n_checked += 1
+        assert n_checked > 0, "DGP produced no checkable post-treatment rows"
 
     def test_per_ring_event_time_delta_invokes_with_ring_zero(self) -> None:
         """Spillover rows invoke the delta callable with ring_idx=0 (DGP convention)."""
