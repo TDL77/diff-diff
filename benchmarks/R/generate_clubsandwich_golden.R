@@ -94,6 +94,9 @@ make_did_panel <- function(n_units, n_periods, treatment_period, seed) {
 
 d_did <- make_did_panel(n_units = 8, n_periods = 4, treatment_period = 2, seed = 404)
 fit_did <- lm(y ~ treat_post + unit + period, data = d_did)
+# HC2 via sandwich::vcovHC(type = "HC2"). Pins the in-tree HC2-parity claim
+# the changelog/registry make for the absorb auto-route on the hc2 lane.
+vcov_did_hc2 <- sandwich::vcovHC(fit_did, type = "HC2")
 # HC2-BM unclustered via singleton-cluster CR2 (PT2018-blessed workaround,
 # since clubSandwich::vcovCR requires a cluster arg).
 vcov_did_hc2_bm <- vcovCR(fit_did, cluster = seq_len(nrow(d_did)), type = "CR2")
@@ -109,6 +112,8 @@ output$absorbed_fe_did <- list(
   y = d_did$y,
   coef = as.numeric(coef(fit_did)),
   coef_names = names(coef(fit_did)),
+  vcov_hc2 = as.numeric(vcov_did_hc2),
+  vcov_hc2_shape = dim(vcov_did_hc2),
   vcov_hc2_bm = as.numeric(vcov_did_hc2_bm),
   vcov_hc2_bm_shape = dim(vcov_did_hc2_bm),
   dof_hc2_bm = as.numeric(ct_did_hc2_bm$df_Satt),

@@ -1052,14 +1052,25 @@ class TestDiDAbsorbedFERParity:
         # standalone field on DiDResults; the SE+ATT parity above suffices).
         _ = expected_dof_slope
 
-    def test_absorb_hc2_matches_full_dummy_design(self):
-        """`absorb=` + `hc2` produces a finite SE; ATT matches R."""
+    def test_absorb_hc2_matches_sandwich_vcovhc(self):
+        """`absorb=` + `hc2` matches `lm() + sandwich::vcovHC(type="HC2")`.
+
+        Pins the HC2 SE on the treat_post slope against an external R target
+        (the R generator computes `sandwich::vcovHC(fit_did, type="HC2")` on
+        the full-dummy design and stores `vcov_hc2`).
+        """
         d = self._load_golden()
+        if "vcov_hc2" not in d:
+            pytest.skip(
+                "Golden JSON does not yet include `vcov_hc2` for absorbed_fe_did; "
+                "regenerate via the R script."
+            )
         res = self._fit_absorb(d, "hc2")
         coef_names = d["coef_names"]
         treat_post_idx = coef_names.index("treat_post")
-        assert np.isfinite(res.att)
-        assert np.isfinite(res.se)
+        expected_vcov = np.asarray(d["vcov_hc2"]).reshape(d["vcov_hc2_shape"])
+        expected_se_slope = float(np.sqrt(expected_vcov[treat_post_idx, treat_post_idx]))
+        np.testing.assert_allclose(res.se, expected_se_slope, atol=1e-10)
         np.testing.assert_allclose(res.att, float(d["coef"][treat_post_idx]), atol=1e-10)
 
     def test_absorb_hc2_bm_clustered_matches_clubsandwich(self):
