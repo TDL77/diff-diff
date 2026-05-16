@@ -517,32 +517,23 @@ class TestARPVertexEnumeration:
         assert vertices == []
 
     def test_enumerate_vertices_warns_on_heavy_rejection(self):
-        """Mixed-basis path: a partially-singular X_tilde produces some
-        feasible vertices but rejects >= 50% of bases for LinAlgError.
-        The warning helps users see that the recovered vertices came from
-        a numerically fragile enumeration."""
+        """Mixed-basis path: 5 moments, 1 nuisance column. C(5, 2) = 10
+        bases. By design, 6 bases hit LinAlgError (the singular pairs
+        among indices {0,1,2,3} that share aligned nuisance/sigma values)
+        and 4 bases produce feasible vertices (the (i, 4) pairs that pair
+        a positive-X_tilde row with the unique negative-X_tilde row at
+        index 4). 60% rejection rate trips the `heavily constrained`
+        branch specifically, not the exhausted branch."""
         from diff_diff.honest_did import _enumerate_vertices
 
-        # 5 moments, 2 nuisance columns. C(5, 3) = 10 bases. Construct
-        # X_tilde so that ~6 of 10 bases have rank-deficient A_sys.
-        X_tilde = np.array([
-            [1.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 0.0],
-            [0.0, 1.0],
-            [0.0, 1.0],
-        ])
-        sigma_tilde_diag = np.array([1.0, 1.0, 1.0, 1.0, 1.0])
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", RuntimeWarning)
+        X_tilde = np.array([[1.0], [1.0], [1.0], [2.0], [-1.0]])
+        sigma_tilde_diag = np.array([1.0, 1.0, 1.0, 2.0, 1.0])
+        with pytest.warns(RuntimeWarning, match="heavily constrained"):
             vertices = _enumerate_vertices(X_tilde, sigma_tilde_diag, n_moments=5)
-        heavy = [w for w in caught if "heavily constrained" in str(w.message)]
-        # If exhaustion fired instead, that's also a valid outcome — but the
-        # construction is calibrated for the heavy-rejection branch
-        exhausted = [w for w in caught if "exhausted" in str(w.message)]
-        assert heavy or exhausted, (
-            f"Expected heavily-constrained or exhausted warning; got "
-            f"{[str(w.message) for w in caught]}, vertices={len(vertices)}"
+        assert len(vertices) >= 1, (
+            f"Heavy-rejection construction must still produce some feasible "
+            f"vertices (otherwise the exhausted branch fires); got "
+            f"{len(vertices)} vertices."
         )
 
     def test_enumerate_vertices_quiet_on_healthy_enumeration(self):
