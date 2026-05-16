@@ -205,11 +205,21 @@ df2 <- build_panel(
 fixture_2 <- extract_bacon(df2, "two_groups_no_never_treated")
 
 cat("Building fixture 3: always_treated_remapped...\n")
-# 3 timing-cohorts + 5 always-treated units (first_treat = 1, i.e., treated
-# in every observable period) + 30 never-treated. R's bacondecomp natively
-# groups the first_treat=1 cohort with U (since they are treated throughout
-# every observable period and never serve as a within-window control), which
-# matches what diff-diff's warn+remap does in Python.
+# 3 timing-cohorts (3, 4, 5) + 5 always-treated units (first_treat = 1, i.e.,
+# treated in every observable period) + 25 never-treated. R's bacondecomp
+# keeps the first_treat=1 cohort as a *separate* timing cohort (not in U) and
+# emits a `Later vs Always Treated` comparison row for each later cohort
+# alongside the standard `Treated vs Untreated` row. Python's paper-footnote-11
+# convention remaps these units into the U bucket and folds R's two columns
+# of components into a single `treated_vs_never` cell per treated cohort.
+# The aggregate (TWFE coefficient + weights-sum) is invariant per Theorem 1,
+# but the per-component breakdown differs by convention — see REGISTRY
+# `**Note (R parity convention divergence on always-treated)**` and
+# `**Deviation (first-period boundary extension on always-treated remap)**`.
+# `tests/test_methodology_bacon.py::TestBaconParityR` carves out the U-bucket
+# rows for direct per-component parity (keeping the 6 timing-vs-timing rows
+# under direct parity) and asserts the U-bucket fold-back separately via
+# `test_always_treated_remapped_fold_back_matches_r` at atol=1e-6.
 df3 <- build_panel(
   n_units_per_cohort   = 25L,
   n_periods            = 6L,
