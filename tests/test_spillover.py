@@ -3508,10 +3508,14 @@ class TestSpilloverDiDEventStudyBackwardCompat:
 
     def test_event_study_false_matches_wave_b_golden(self):
         """Pre-Wave-C golden parity (not just determinism): pin att/se on a
-        deterministic DGP and assert bit-identical reproduction. Strengthened
+        deterministic DGP at 1e-14 tolerance and assert reproduction within
+        ULP-scale BLAS reduction-order drift across runners. Strengthened
         per PR #456 R3 review — the previous determinism check (fit twice on
         the current code path) did not actually anchor against a pre-Wave-C
-        baseline."""
+        baseline. Tolerance softened from `==` to `assert_allclose(rtol=1e-14,
+        atol=1e-14)` after CI Pure Python Fallback (Linux py3.14) flagged a
+        1-ULP drift from the macOS Accelerate capture machine — the
+        identification claim is unchanged; the platform-pinning was."""
         df = generate_butts_nonstaggered_dgp(seed=42)
         est = SpilloverDiD(
             rings=[0.0, 50.0, 200.0],
@@ -3524,27 +3528,49 @@ class TestSpilloverDiDEventStudyBackwardCompat:
         with _w.catch_warnings():
             _w.simplefilter("ignore", UserWarning)
             res = est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
-        # Scalar att/se must match the pre-Wave-C golden at machine precision.
-        assert res.att == self._WAVE_B_GOLDEN_ATT, (
-            f"event_study=False att drift: got {res.att!r}, "
-            f"expected {self._WAVE_B_GOLDEN_ATT!r}"
+        # Goldens were captured on a single machine (BLAS reduction order is
+        # platform-dependent); pin at 1e-14 tolerance per
+        # `feedback_assert_allclose_numerical_parity`. Tight enough to catch
+        # real aggregate-path drift, loose enough to absorb ULP-scale
+        # cross-runner reduction-order differences (Pure Python Fallback on
+        # Linux py3.14 drifts ~1 ULP from macOS Accelerate captures).
+        np.testing.assert_allclose(
+            res.att,
+            self._WAVE_B_GOLDEN_ATT,
+            rtol=1e-14,
+            atol=1e-14,
+            err_msg=f"event_study=False att drift: got {res.att!r}, expected {self._WAVE_B_GOLDEN_ATT!r}",
         )
-        assert res.se == self._WAVE_B_GOLDEN_SE, (
-            f"event_study=False se drift: got {res.se!r}, " f"expected {self._WAVE_B_GOLDEN_SE!r}"
+        np.testing.assert_allclose(
+            res.se,
+            self._WAVE_B_GOLDEN_SE,
+            rtol=1e-14,
+            atol=1e-14,
+            err_msg=f"event_study=False se drift: got {res.se!r}, expected {self._WAVE_B_GOLDEN_SE!r}",
         )
         # Per-ring entries must also match.
         inner = res.spillover_effects.loc["[0, 50)"]
-        assert inner["coef"] == self._WAVE_B_GOLDEN_RING_INNER_COEF, (
-            f"inner ring coef drift: got {inner['coef']!r}, "
-            f"expected {self._WAVE_B_GOLDEN_RING_INNER_COEF!r}"
+        np.testing.assert_allclose(
+            inner["coef"],
+            self._WAVE_B_GOLDEN_RING_INNER_COEF,
+            rtol=1e-14,
+            atol=1e-14,
+            err_msg=f"inner ring coef drift: got {inner['coef']!r}, expected {self._WAVE_B_GOLDEN_RING_INNER_COEF!r}",
         )
-        assert inner["se"] == self._WAVE_B_GOLDEN_RING_INNER_SE, (
-            f"inner ring se drift: got {inner['se']!r}, "
-            f"expected {self._WAVE_B_GOLDEN_RING_INNER_SE!r}"
+        np.testing.assert_allclose(
+            inner["se"],
+            self._WAVE_B_GOLDEN_RING_INNER_SE,
+            rtol=1e-14,
+            atol=1e-14,
+            err_msg=f"inner ring se drift: got {inner['se']!r}, expected {self._WAVE_B_GOLDEN_RING_INNER_SE!r}",
         )
         outer = res.spillover_effects.loc["[50, 200]"]
-        assert outer["coef"] == self._WAVE_B_GOLDEN_RING_OUTER_COEF
-        assert outer["se"] == self._WAVE_B_GOLDEN_RING_OUTER_SE
+        np.testing.assert_allclose(
+            outer["coef"], self._WAVE_B_GOLDEN_RING_OUTER_COEF, rtol=1e-14, atol=1e-14
+        )
+        np.testing.assert_allclose(
+            outer["se"], self._WAVE_B_GOLDEN_RING_OUTER_SE, rtol=1e-14, atol=1e-14
+        )
 
     def test_event_study_false_bit_identical_to_wave_b_fixture(self):
         df = generate_butts_nonstaggered_dgp(seed=42)
