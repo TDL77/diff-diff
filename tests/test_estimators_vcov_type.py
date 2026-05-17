@@ -1213,6 +1213,14 @@ class TestMPDAbsorbedFERParity:
     pin parity on a per-period interaction (`treated:period_4`) which is
     identified independent of that choice, exposed as
     `result.period_effects[4]`.
+
+    Time-FE skip note: when the routed (or explicit) `fixed_effects` list
+    contains the `time` column, MPD silently skips emitting `<time>_<X>`
+    dummies for that entry because the design already absorbs the time
+    dimension via the non-reference period dummies. The
+    `test_absorb_hc2_result_surface_invariants_multi_absorb` test pins
+    that the resulting `coefficients` dict cardinality matches `vcov`
+    rank and has no duplicate names.
     """
 
     def _load_golden(self):
@@ -1279,6 +1287,58 @@ class TestMPDAbsorbedFERParity:
         pe_f = res_f.period_effects[target_period]
         np.testing.assert_allclose(pe_a.effect, pe_f.effect, atol=1e-12)
         np.testing.assert_allclose(pe_a.se, pe_f.se, atol=1e-12)
+
+    def test_absorb_hc2_result_surface_invariants_multi_absorb(self):
+        """Result-surface contract on the multi-absorb auto-route: the
+        returned `MultiPeriodDiDResults.coefficients` dict must remain
+        complete (one entry per fitted column), uniquely named, and aligned
+        in cardinality with `vcov`.
+
+        Regression for the duplicate-name collision the auto-route would
+        otherwise expose: MPD already includes period dummies in its
+        event-study design, so adding the `time` column as a fixed-effect
+        dummy via `pd.get_dummies(prefix="period", drop_first=True)` would
+        produce a second `period_<X>` block. Under `var_names`-keyed
+        `coef_dict` construction, the duplicates silently collapse and the
+        original event-study period coefficients are overwritten by the
+        rank-deficient NaN drops on the redundant FE block. The fix at
+        `estimators.py:fit()` (skip `fe == time` in the fixed_effects
+        loop) eliminates the duplicate columns entirely. Test pins both
+        the auto-route and the explicit `fixed_effects=` paths.
+        """
+        d = self._load_golden()
+        target_period = int(d["target_period"])
+        from collections import Counter
+
+        for kwarg in ("absorb", "fixed_effects"):
+            res = MultiPeriodDiD(vcov_type="hc2").fit(
+                self._make_data(d),
+                outcome="y",
+                treatment="treated",
+                time="period",
+                **{kwarg: ["unit", "period"]},
+                reference_period=int(d["reference_period"]),
+                unit="unit",
+            )
+            assert res.vcov is not None
+            assert len(res.coefficients) == res.vcov.shape[0], (
+                f"[{kwarg}=] coefficients dict length ({len(res.coefficients)}) "
+                f"must match vcov rank ({res.vcov.shape[0]}); duplicate var_names "
+                "collapsed the dict and broke coefficients-vs-vcov alignment."
+            )
+            assert res.vcov.shape[0] == res.vcov.shape[1]
+            dups = {k: v for k, v in Counter(res.coefficients.keys()).items() if v > 1}
+            assert not dups, f"[{kwarg}=] duplicate names in coefficients: {dups}"
+            # Sanity: the event-study period coefficients should be finite
+            # (they are MPD's own non-reference period dummies, NOT the
+            # redundant FE-block that was skipped).
+            pe_name = f"period_{target_period}"
+            assert pe_name in res.coefficients
+            assert np.isfinite(res.coefficients[pe_name]), (
+                f"[{kwarg}=] event-study {pe_name!r} should remain finite "
+                "after the time-FE-skip fix (the duplicate FE-block that "
+                "would have NaN'd it is no longer emitted)."
+            )
 
     def test_absorb_hc2_matches_fixed_effects_dummies_multi_absorb(self):
         """`absorb=["unit","time"]` invariant: with both unit and time
