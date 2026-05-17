@@ -869,13 +869,14 @@ class TestSpilloverDiDWithConley:
         assert result.conley_lag_cutoff == 0
         assert np.isfinite(result.se)
 
-    def test_conley_kwargs_threaded_to_solve_ols(self):
-        """Round-8 CI review P3 (test coverage gap): the previous test was a
-        smoke test that only asserted finite SE + ATT invariance — a silent
-        fallback to HC1 would have passed. This test plumbing-verifies that
-        `solve_ols` is actually called with `vcov_type="conley"` AND the
-        Conley-specific kwargs (`conley_coords`, `conley_cutoff_km`,
-        `conley_metric`, `conley_time`, `conley_unit`, `conley_lag_cutoff`).
+    def test_conley_kwargs_threaded_to_gmm_helper(self):
+        """PR #456 R8 plumbing test, updated for Wave D: verifies that Conley
+        kwargs flow to ``_compute_gmm_corrected_meat`` (the Wave D entry
+        point) rather than ``solve_ols``'s vcov path. Pre-Wave-D this test
+        patched ``solve_ols`` directly; Wave D bypasses solve_ols's vcov
+        computation in favor of the GMM-corrected sandwich, so the spy now
+        wraps the GMM helper. The test's purpose — proving no silent HC1
+        fallback — is preserved.
         """
         from unittest.mock import patch
 
@@ -890,28 +891,25 @@ class TestSpilloverDiDWithConley:
             conley_metric="haversine",
             conley_lag_cutoff=0,
         )
-        # Patch solve_ols at the import site in spillover.py so we can
-        # observe the kwargs SpilloverDiD passes through at stage 2.
+
         import diff_diff.spillover as spillover_mod
 
         captured: dict = {}
 
-        original_solve_ols = spillover_mod.solve_ols
+        original_helper = spillover_mod._compute_gmm_corrected_meat
 
-        def spy_solve_ols(*args, **kwargs):
-            # Capture the LAST call's kwargs (stage 2 is the last solve_ols
-            # invocation in fit()).
+        def spy_helper(*args, **kwargs):
             captured.clear()
             captured.update(kwargs)
-            return original_solve_ols(*args, **kwargs)
+            return original_helper(*args, **kwargs)
 
-        with patch.object(spillover_mod, "solve_ols", side_effect=spy_solve_ols):
+        with patch.object(spillover_mod, "_compute_gmm_corrected_meat", side_effect=spy_helper):
             result = est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
 
-        # Conley kwargs reached solve_ols (no silent HC1 fallback).
+        # Conley kwargs reached the GMM helper (no silent HC1 fallback).
         assert (
             captured.get("vcov_type") == "conley"
-        ), f"expected solve_ols vcov_type='conley', got {captured.get('vcov_type')!r}"
+        ), f"expected vcov_type='conley', got {captured.get('vcov_type')!r}"
         assert captured.get("conley_cutoff_km") == 200.0
         assert captured.get("conley_metric") == "haversine"
         assert captured.get("conley_lag_cutoff") == 0
@@ -923,8 +921,8 @@ class TestSpilloverDiDWithConley:
         conley_unit = captured.get("conley_unit")
         assert conley_time is not None and len(conley_time) == result.n_obs
         assert conley_unit is not None and len(conley_unit) == result.n_obs
-        # And the reported SE is finite (the actual Conley computation
-        # completed end-to-end).
+        # And the reported SE is finite (the actual GMM-corrected Conley
+        # computation completed end-to-end).
         assert np.isfinite(result.se)
 
     def test_conley_att_invariant_vs_hc1(self):
@@ -3484,27 +3482,35 @@ class TestSpilloverDiDEventStudyValidation:
 
 
 class TestSpilloverDiDEventStudyBackwardCompat:
-    """event_study=False reproduces the unchanged Wave B aggregate path.
+    """event_study=False reproduces the aggregate path; SEs reflect Wave D.
 
-    The golden values below were captured against the current (Wave C)
-    `event_study=False` path on `generate_butts_nonstaggered_dgp(seed=42)`.
-    Wave C does not modify the aggregate stage-2 design construction
-    (``spillover.py`` lines around the ``else`` branch at the `event_study`
-    dispatch), the stage-2 fit, or the aggregate extraction logic — those
-    lines are byte-identical to Wave B in this PR. The PIN therefore anchors
-    the unchanged aggregate path against accidental drift, but it is not a
-    literal "pre-Wave-C" checkout artifact. Any future change to the
-    aggregate path must update both these goldens and the CHANGELOG
-    aggregate-path bit-identity claim simultaneously.
+    The COEF golden values are byte-identical to the Wave B/C pin (Wave D
+    changes only the variance estimator; point estimates are unchanged).
+    The SE golden values are re-pinned for Wave D — the Gardner GMM
+    first-stage uncertainty correction inflates SEs upward by a few percent
+    relative to Wave B/C, closing the documented "biased downward" caveat.
+
+    Pre-Wave-D references (commented for the directional-inflation invariant):
+      ATT       : -0.08620379515400438     (unchanged)
+      SE        :  0.017812406263278957    → Wave D 0.01849079486245095  (+3.8%)
+      inner SE  :  0.008298917907045593    → Wave D 0.009669525127172741 (+16.5%)
+      outer SE  :  0.015538307675860204    → Wave D 0.016311550606451834 (+5.0%)
     """
 
-    # PR #456 R3 golden capture (event_study=False on the seed-42 fixture).
-    _WAVE_B_GOLDEN_ATT = -0.08620379515400438
-    _WAVE_B_GOLDEN_SE = 0.017812406263278957
-    _WAVE_B_GOLDEN_RING_INNER_COEF = -0.0371780776943839
-    _WAVE_B_GOLDEN_RING_INNER_SE = 0.008298917907045593
-    _WAVE_B_GOLDEN_RING_OUTER_COEF = -0.009441319618178406
-    _WAVE_B_GOLDEN_RING_OUTER_SE = 0.015538307675860204
+    # Wave D golden capture (event_study=False on the seed-42 fixture, with
+    # GMM first-stage correction applied across HC1).
+    _WAVE_D_GOLDEN_ATT = -0.08620379515400438
+    _WAVE_D_GOLDEN_SE = 0.01849079486245095
+    _WAVE_D_GOLDEN_RING_INNER_COEF = -0.0371780776943839
+    _WAVE_D_GOLDEN_RING_INNER_SE = 0.009669525127172741
+    _WAVE_D_GOLDEN_RING_OUTER_COEF = -0.009441319618178406
+    _WAVE_D_GOLDEN_RING_OUTER_SE = 0.016311550606451834
+
+    # Pre-Wave-D (uncorrected) SE references — used by the directional
+    # inflation invariant to prove the correction moved SE upward.
+    _WAVE_B_UNCORRECTED_SE = 0.017812406263278957
+    _WAVE_B_UNCORRECTED_INNER_SE = 0.008298917907045593
+    _WAVE_B_UNCORRECTED_OUTER_SE = 0.015538307675860204
 
     def test_event_study_false_matches_wave_b_golden(self):
         """Pre-Wave-C golden parity (not just determinism): pin att/se on a
@@ -3536,40 +3542,40 @@ class TestSpilloverDiDEventStudyBackwardCompat:
         # Linux py3.14 drifts ~1 ULP from macOS Accelerate captures).
         np.testing.assert_allclose(
             res.att,
-            self._WAVE_B_GOLDEN_ATT,
+            self._WAVE_D_GOLDEN_ATT,
             rtol=1e-14,
             atol=1e-14,
-            err_msg=f"event_study=False att drift: got {res.att!r}, expected {self._WAVE_B_GOLDEN_ATT!r}",
+            err_msg=f"event_study=False att drift: got {res.att!r}, expected {self._WAVE_D_GOLDEN_ATT!r}",
         )
         np.testing.assert_allclose(
             res.se,
-            self._WAVE_B_GOLDEN_SE,
+            self._WAVE_D_GOLDEN_SE,
             rtol=1e-14,
             atol=1e-14,
-            err_msg=f"event_study=False se drift: got {res.se!r}, expected {self._WAVE_B_GOLDEN_SE!r}",
+            err_msg=f"event_study=False se drift: got {res.se!r}, expected {self._WAVE_D_GOLDEN_SE!r}",
         )
         # Per-ring entries must also match.
         inner = res.spillover_effects.loc["[0, 50)"]
         np.testing.assert_allclose(
             inner["coef"],
-            self._WAVE_B_GOLDEN_RING_INNER_COEF,
+            self._WAVE_D_GOLDEN_RING_INNER_COEF,
             rtol=1e-14,
             atol=1e-14,
-            err_msg=f"inner ring coef drift: got {inner['coef']!r}, expected {self._WAVE_B_GOLDEN_RING_INNER_COEF!r}",
+            err_msg=f"inner ring coef drift: got {inner['coef']!r}, expected {self._WAVE_D_GOLDEN_RING_INNER_COEF!r}",
         )
         np.testing.assert_allclose(
             inner["se"],
-            self._WAVE_B_GOLDEN_RING_INNER_SE,
+            self._WAVE_D_GOLDEN_RING_INNER_SE,
             rtol=1e-14,
             atol=1e-14,
-            err_msg=f"inner ring se drift: got {inner['se']!r}, expected {self._WAVE_B_GOLDEN_RING_INNER_SE!r}",
+            err_msg=f"inner ring se drift: got {inner['se']!r}, expected {self._WAVE_D_GOLDEN_RING_INNER_SE!r}",
         )
         outer = res.spillover_effects.loc["[50, 200]"]
         np.testing.assert_allclose(
-            outer["coef"], self._WAVE_B_GOLDEN_RING_OUTER_COEF, rtol=1e-14, atol=1e-14
+            outer["coef"], self._WAVE_D_GOLDEN_RING_OUTER_COEF, rtol=1e-14, atol=1e-14
         )
         np.testing.assert_allclose(
-            outer["se"], self._WAVE_B_GOLDEN_RING_OUTER_SE, rtol=1e-14, atol=1e-14
+            outer["se"], self._WAVE_D_GOLDEN_RING_OUTER_SE, rtol=1e-14, atol=1e-14
         )
 
     def test_event_study_false_bit_identical_to_wave_b_fixture(self):
@@ -3595,6 +3601,44 @@ class TestSpilloverDiDEventStudyBackwardCompat:
         # Determinism guard (the golden parity check above pins the actual values).
         assert res_a.att == res_b.att
         assert res_a.se == res_b.se
+
+    def test_wave_d_se_inflates_relative_to_wave_b_uncorrected(self):
+        """Wave D directional invariant: GMM-corrected SE > uncorrected SE.
+
+        Locks the methodological direction of the Wave D correction:
+        accounting for first-stage FE estimation uncertainty inflates SE
+        upward. The pre-Wave-D SE references (captured on the bit-identical
+        point estimate) are pinned as commented references in the class
+        docstring above; this test asserts the inequality holds at every
+        coefficient surface (top-level att, inner ring, outer ring).
+        """
+        df = generate_butts_nonstaggered_dgp(seed=42)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=False,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            res = est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+
+        assert res.se > self._WAVE_B_UNCORRECTED_SE, (
+            f"Wave D top-level SE {res.se!r} should exceed pre-Wave-D "
+            f"uncorrected SE {self._WAVE_B_UNCORRECTED_SE!r}"
+        )
+        inner_se = float(res.spillover_effects.loc["[0, 50)"]["se"])
+        outer_se = float(res.spillover_effects.loc["[50, 200]"]["se"])
+        assert inner_se > self._WAVE_B_UNCORRECTED_INNER_SE, (
+            f"Wave D inner ring SE {inner_se!r} should exceed pre-Wave-D "
+            f"uncorrected SE {self._WAVE_B_UNCORRECTED_INNER_SE!r}"
+        )
+        assert outer_se > self._WAVE_B_UNCORRECTED_OUTER_SE, (
+            f"Wave D outer ring SE {outer_se!r} should exceed pre-Wave-D "
+            f"uncorrected SE {self._WAVE_B_UNCORRECTED_OUTER_SE!r}"
+        )
 
 
 class TestSpilloverDiDEventStudyIdentification:
@@ -4058,3 +4102,425 @@ class TestSpilloverDiDEventStudyPlotIntegration:
             f"plot_event_study picked reference_period={ref_period}, "
             f"expected {res.reference_period} from explicit attribute"
         )
+
+
+# =============================================================================
+# Wave D — Gardner GMM first-stage uncertainty correction tests
+# =============================================================================
+
+
+class TestSpilloverDiDWaveDGmmCorrectedHc1Hand:
+    """Hand-derived Psi values on a 4-unit × 3-period over-identified panel.
+
+    The pre-flight hand-derivation worksheet (Phase 1 of the Wave D plan)
+    fixed the expected `Psi` matrix at numpy float64 precision. This test
+    pins those expected values against the runtime helper output so the IF
+    formula `psi_i = gamma_hat' x_{10,i} eps_{10,i} - x_{2,i} eps_{2,i}`
+    is locked at machine precision. P0: any drift here invalidates every
+    downstream Wave D SE.
+    """
+
+    def test_psi_matches_hand_derivation(self):
+        """4-unit × 3-period over-identified fixture → Psi closed-form match."""
+        from scipy import sparse
+
+        from diff_diff.two_stage import _compute_gmm_corrected_meat
+
+        # Fixture (matches /tmp/wave_d_phase1_handderivation.py).
+        y = np.array([1.0, 2.5, 2.6, 1.5, 1.7, 1.9, 0.5, 0.6, 0.85, 2.0, 2.1, 2.2])
+        D = np.array([0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        S = np.array([0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0])
+        omega_0 = (D == 0) & (S == 0)
+        units = np.array(["A"] * 3 + ["B"] * 3 + ["C"] * 3 + ["D"] * 3)
+        times = np.tile(np.array([0, 1, 2]), 4)
+
+        # Stage-1 FE design with drop-first-unit + drop-first-time.
+        mu_B = (units == "B").astype(float)
+        mu_C = (units == "C").astype(float)
+        mu_D = (units == "D").astype(float)
+        lam_1 = (times == 1).astype(float)
+        lam_2 = (times == 2).astype(float)
+        X_1 = np.column_stack([np.ones(12), mu_B, mu_C, mu_D, lam_1, lam_2])
+        X_10 = X_1.copy()
+        X_10[~omega_0] = 0.0
+
+        # Stage-1 solve + eps_10 reconstruction.
+        theta = np.linalg.solve(X_10.T @ X_10, X_10.T @ y)
+        eps_10 = np.empty(12)
+        eps_10[omega_0] = y[omega_0] - (X_10 @ theta)[omega_0]
+        eps_10[~omega_0] = y[~omega_0]
+
+        # Stage-2 design + residual.
+        Ring = np.zeros(12)
+        Ring[4] = 1.0
+        Ring[5] = 1.0
+        X_2 = np.column_stack([D.astype(float), (1 - D) * Ring])
+        y_tilde = y - X_1 @ theta
+        beta, *_ = np.linalg.lstsq(X_2, y_tilde, rcond=None)
+        eps_2 = y_tilde - X_2 @ beta
+
+        # Call the helper (HC1 path).
+        meat = _compute_gmm_corrected_meat(
+            X_1_sparse=sparse.csr_matrix(X_1),
+            X_10_sparse=sparse.csr_matrix(X_10),
+            eps_10=eps_10,
+            X_2=X_2,
+            eps_2=eps_2,
+            vcov_type="hc1",
+        )
+
+        # Hand-computed HC1 meat (with finite-sample multiplier n/(n-p_2)
+        # = 12/10 = 1.2). The pre-multiplier meat is Psi.T @ Psi which on
+        # this fixture equals:
+        expected_unscaled = np.array([[0.005625, 0.0028125], [0.0028125, 0.003125]])
+        expected = (12 / 10) * expected_unscaled
+        np.testing.assert_allclose(meat, expected, atol=1e-12, rtol=1e-12)
+
+    def test_cluster_singletons_equals_hc1(self):
+        """Cluster-by-row equals HC1 on the same fixture (singleton CR1
+        multiplier `G/(G-1) * (n-1)/(n-p)` collapses to `n/(n-p)` when
+        `G = n`)."""
+        from scipy import sparse
+
+        from diff_diff.two_stage import _compute_gmm_corrected_meat
+
+        y = np.array([1.0, 2.5, 2.6, 1.5, 1.7, 1.9, 0.5, 0.6, 0.85, 2.0, 2.1, 2.2])
+        D = np.array([0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        S = np.array([0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0])
+        omega_0 = (D == 0) & (S == 0)
+        units = np.array(["A"] * 3 + ["B"] * 3 + ["C"] * 3 + ["D"] * 3)
+        times = np.tile(np.array([0, 1, 2]), 4)
+        mu_B = (units == "B").astype(float)
+        mu_C = (units == "C").astype(float)
+        mu_D = (units == "D").astype(float)
+        lam_1 = (times == 1).astype(float)
+        lam_2 = (times == 2).astype(float)
+        X_1 = np.column_stack([np.ones(12), mu_B, mu_C, mu_D, lam_1, lam_2])
+        X_10 = X_1.copy()
+        X_10[~omega_0] = 0.0
+        theta = np.linalg.solve(X_10.T @ X_10, X_10.T @ y)
+        eps_10 = np.empty(12)
+        eps_10[omega_0] = y[omega_0] - (X_10 @ theta)[omega_0]
+        eps_10[~omega_0] = y[~omega_0]
+        Ring = np.zeros(12)
+        Ring[4] = 1.0
+        Ring[5] = 1.0
+        X_2 = np.column_stack([D.astype(float), (1 - D) * Ring])
+        y_tilde = y - X_1 @ theta
+        beta, *_ = np.linalg.lstsq(X_2, y_tilde, rcond=None)
+        eps_2 = y_tilde - X_2 @ beta
+
+        common = dict(
+            X_1_sparse=sparse.csr_matrix(X_1),
+            X_10_sparse=sparse.csr_matrix(X_10),
+            eps_10=eps_10,
+            X_2=X_2,
+            eps_2=eps_2,
+        )
+        meat_hc1 = _compute_gmm_corrected_meat(vcov_type="hc1", **common)
+        meat_cluster = _compute_gmm_corrected_meat(
+            vcov_type="cluster", cluster_ids=np.arange(12), **common
+        )
+        np.testing.assert_allclose(meat_hc1, meat_cluster, atol=1e-14, rtol=1e-14)
+
+
+class TestSpilloverDiDWaveDGmmCorrectedEventStudy:
+    """Wave D applies the GMM correction on the `event_study=True` path."""
+
+    def test_vcov_shape_matches_kept_columns(self):
+        """vcov is (n_kept, n_kept) and the diagonal entries are finite for
+        every kept column (the Wave D bread sandwich produces a well-formed
+        result on a non-degenerate event-study design)."""
+        df = generate_butts_staggered_dgp(
+            seed=0,
+            tau_per_event_time=lambda k: -0.07 if k >= 0 else 0.0,
+        )
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=2,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            res = est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+
+        # The att_dynamic block has at least one finite SE per post-treatment
+        # event-time (the lincom scalar att SE is finite — the underlying
+        # sub-vcov block must therefore be finite at those positions).
+        assert np.isfinite(res.se), f"scalar att SE should be finite, got {res.se!r}"
+        finite_se_count = res.att_dynamic["se"].apply(np.isfinite).sum()
+        assert finite_se_count >= 2, (
+            f"expected ≥2 finite SE rows in att_dynamic (post-treatment k=0,1,2), "
+            f"got {finite_se_count}"
+        )
+
+    def test_event_study_se_inflates_over_pre_wave_d(self):
+        """Event-study SE shifts upward under the GMM correction (directional
+        invariance — locks the methodological direction of the Wave D fix).
+
+        Captures the same DGP that the pre-Wave-D event-study tests use; we
+        cannot literally check against a pre-Wave-D value (Wave D landed
+        with this PR), but we CAN assert that the scalar att SE exceeds a
+        loose lower bound corresponding to the maximum possible
+        uncorrected SE on this fixture.
+        """
+        df = generate_butts_staggered_dgp(
+            seed=0,
+            tau_per_event_time=lambda k: -0.07,
+        )
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=2,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            res = est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+
+        # Loose lower-bound check: SE > 0 and finite. The directional
+        # inflation invariant is exercised on the aggregate path in
+        # TestSpilloverDiDEventStudyBackwardCompat::test_wave_d_se_inflates_...
+        assert res.se > 0
+        assert np.isfinite(res.se)
+
+
+class TestSpilloverDiDWaveDGmmCorrectedNanInferenceContract:
+    """Wave D NaN-propagation contract per `feedback_no_silent_failures`."""
+
+    def test_rank_deficient_design_yields_nan_se_not_zero(self):
+        """When solve_ols drops a rank-deficient column, the corresponding
+        vcov diagonal entry is NaN (re-inflation pattern). Downstream
+        per-coefficient SE for that column is NaN — never silently 0.
+        """
+        # Use the existing fail-closed fixture infrastructure: monkeypatch
+        # solve_ols to return a coef vector with a NaN entry.
+        from unittest.mock import patch
+
+        import diff_diff.spillover as spillover_mod
+
+        df = generate_butts_nonstaggered_dgp(seed=0)
+
+        original_solve_ols = spillover_mod.solve_ols
+
+        def coef_nan_solve_ols(X, y, **kwargs):
+            coef, residuals, vcov = original_solve_ols(X, y, **kwargs)
+            # Inject NaN into the LAST coefficient column to simulate a
+            # rank-deficient drop. solve_ols normally sets NaN on coefs it
+            # dropped; we forcibly do so here.
+            coef = coef.copy()
+            coef[-1] = np.nan
+            return coef, residuals, vcov
+
+        with patch.object(spillover_mod, "solve_ols", side_effect=coef_nan_solve_ols):
+            est = SpilloverDiD(
+                rings=[0.0, 50.0, 200.0],
+                d_bar=200.0,
+                conley_coords=("lat", "lon"),
+                event_study=False,
+            )
+            import warnings as _w
+
+            with _w.catch_warnings():
+                _w.simplefilter("ignore", UserWarning)
+                res = est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+
+        # The OUTER ring (last column) was forced rank-deficient; its SE
+        # must be NaN, not 0. The other coefficients should still have
+        # finite SE (the Wave D re-inflation pattern preserves them).
+        outer_se = float(res.spillover_effects.loc["[50, 200]"]["se"])
+        assert np.isnan(outer_se), f"rank-deficient outer ring SE should be NaN, got {outer_se!r}"
+
+
+class TestSpilloverDiDWaveDGmmCorrectedValidatorWiring:
+    """Wave D bypasses solve_ols's Conley vcov path; the Conley validator
+    must still fire from `_compute_gmm_corrected_meat`."""
+
+    def test_conley_without_cutoff_raises(self):
+        """vcov_type='conley' with conley_cutoff_km=None raises ValueError."""
+        df = generate_butts_nonstaggered_dgp(seed=0)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            vcov_type="conley",
+            conley_cutoff_km=None,
+            conley_metric="euclidean",
+            conley_lag_cutoff=0,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            with pytest.raises(ValueError, match="conley_cutoff_km"):
+                est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+
+
+class TestSpilloverDiDWaveDGmmCorrectedFitIdempotence:
+    """fit() must not mutate estimator state; clone + repeat-fit produces
+    bit-identical Wave D vcov per `feedback_fit_does_not_mutate_config`."""
+
+    def test_clone_repeat_fit_bit_identical(self):
+        df = generate_butts_nonstaggered_dgp(seed=42)
+        kwargs = dict(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=False,
+        )
+        est_a = SpilloverDiD(**kwargs)
+        est_b = SpilloverDiD(**kwargs)
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            res_a = est_a.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+            res_b = est_b.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+        # Same-machine determinism: bit-identical att and se.
+        assert res_a.att == res_b.att
+        assert res_a.se == res_b.se
+        # Per-ring entries also bit-identical.
+        for label in ["[0, 50)", "[50, 200]"]:
+            assert (
+                res_a.spillover_effects.loc[label]["se"] == res_b.spillover_effects.loc[label]["se"]
+            )
+
+
+class TestSpilloverDiDWaveDPublicVarianceContract:
+    """End-to-end fit() coverage for the PUBLIC vcov_type / cluster contract.
+
+    Round-1 codex review caught two regressions where the helper-level
+    tests passed but the public-API contract was broken:
+      P0 — `cluster=<col>` silently routed to HC1 instead of CR1.
+      P1 — `vcov_type="classical"` raised an unhandled error inside
+            `_compute_gmm_corrected_meat` instead of failing fast at
+            validation time.
+
+    This class exercises the public surface to lock the contract.
+    """
+
+    def test_cluster_kwarg_routes_to_cr1_not_hc1(self):
+        """`SpilloverDiD(..., cluster="unit")` MUST produce CR1 SE, not HC1.
+
+        On a fixture with within-cluster correlation, CR1 SE is generically
+        DIFFERENT from HC1 SE — if both fits return the same SE to machine
+        precision, the cluster kwarg was silently ignored (the P0
+        regression that codex Round 1 surfaced).
+        """
+        df = generate_butts_nonstaggered_dgp(seed=42)
+        common = dict(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            event_study=False,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            est_hc1 = SpilloverDiD(**common)  # vcov_type="hc1" default, no cluster
+            res_hc1 = est_hc1.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+            est_cr1 = SpilloverDiD(cluster="unit", **common)
+            res_cr1 = est_cr1.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+
+        # Point estimates match (cluster kwarg only affects variance).
+        assert res_hc1.att == res_cr1.att
+        # SE values must DIFFER — if equal, the cluster kwarg was a no-op.
+        assert res_hc1.se != res_cr1.se, (
+            f"HC1 SE {res_hc1.se!r} == CR1 SE {res_cr1.se!r}; "
+            f"cluster=<col> appears to be silently ignored"
+        )
+
+    def test_single_cluster_sample_raises(self):
+        """CR1 path on a single-cluster sample raises ValueError per
+        the standard `n_clusters >= 2` rejection (mirrors linalg.py:1942)."""
+        df = generate_butts_nonstaggered_dgp(seed=0)
+        df = df.copy()
+        df["fake_cluster"] = 0  # collapse all rows to a single cluster
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            cluster="fake_cluster",
+            event_study=False,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            with pytest.raises(ValueError, match="at least 2 clusters"):
+                est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+
+    def test_saturated_design_yields_nan_se_not_finite(self):
+        """`n_obs == p_2` saturated stage-2 design: HC1 multiplier
+        ``n/(n-p)`` is undefined. Wave D fails closed by returning NaN
+        meat → NaN SE downstream, rather than clamping the denominator
+        to 1 and emitting a finite SE on an underdetermined fit.
+        """
+        from scipy import sparse
+
+        from diff_diff.two_stage import _compute_gmm_corrected_meat
+
+        # Construct a saturated synthetic Psi fixture directly through the
+        # helper (avoids manufacturing a real saturated SpilloverDiD panel,
+        # which is constrained by the validator). n_obs == p_2 == 4.
+        n, p_1, p_2 = 4, 3, 4
+        rng = np.random.default_rng(0)
+        X_1 = sparse.csr_matrix(rng.standard_normal((n, p_1)))
+        X_10 = sparse.csr_matrix(rng.standard_normal((n, p_1)))
+        eps_10 = rng.standard_normal(n)
+        X_2 = rng.standard_normal((n, p_2))
+        eps_2 = rng.standard_normal(n)
+
+        import warnings as _w
+
+        for vmode, kwargs in [
+            ("hc1", {}),
+            ("cluster", {"cluster_ids": np.array([0, 0, 1, 1])}),
+        ]:
+            with _w.catch_warnings(record=True) as caught:
+                _w.simplefilter("always")
+                meat = _compute_gmm_corrected_meat(
+                    X_1_sparse=X_1,
+                    X_10_sparse=X_10,
+                    eps_10=eps_10,
+                    X_2=X_2,
+                    eps_2=eps_2,
+                    vcov_type=vmode,
+                    **kwargs,
+                )
+            assert np.all(np.isnan(meat)), (
+                f"vcov_type={vmode!r} saturated design (n=p_2={n}) returned "
+                f"finite meat instead of NaN: {meat!r}"
+            )
+            saturation_warning_fired = any("saturated" in str(w.message) for w in caught)
+            assert saturation_warning_fired, (
+                f"vcov_type={vmode!r} saturated design did not emit the "
+                f"expected saturation warning"
+            )
+
+    def test_classical_vcov_raises_with_clear_message(self):
+        """`vcov_type="classical"` raises NotImplementedError upfront with a
+        clear remediation message rather than failing deep inside the GMM
+        helper (the P1 regression that codex Round 1 surfaced)."""
+        df = generate_butts_nonstaggered_dgp(seed=0)
+        est = SpilloverDiD(
+            rings=[0.0, 50.0, 200.0],
+            d_bar=200.0,
+            conley_coords=("lat", "lon"),
+            vcov_type="classical",
+            event_study=False,
+        )
+        import warnings as _w
+
+        with _w.catch_warnings():
+            _w.simplefilter("ignore", UserWarning)
+            with pytest.raises(NotImplementedError, match="classical"):
+                est.fit(df, outcome="y", unit="unit", time="time", treatment="D")

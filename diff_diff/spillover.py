@@ -30,6 +30,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
+from scipy import sparse
 
 from diff_diff.conley import (
     _CONLEY_EARTH_RADIUS_KM,
@@ -39,6 +40,7 @@ from diff_diff.conley import (
 )
 from diff_diff.linalg import solve_ols
 from diff_diff.results import SpilloverDiDResults
+from diff_diff.two_stage import _compute_gmm_corrected_meat
 from diff_diff.utils import safe_inference
 
 # Type alias mirroring diff_diff.conley.ConleyMetric so callers can supply
@@ -1495,6 +1497,89 @@ def _residualize_butts(
     return y_full - mu_per_row - lambda_per_row
 
 
+def _build_butts_fe_design_csr(
+    unit_codes: np.ndarray,
+    time_codes: np.ndarray,
+    omega_0_mask: np.ndarray,
+) -> Tuple[sparse.csr_matrix, sparse.csr_matrix]:
+    """Build sparse FE design matrices for Wave D Gardner GMM correction.
+
+    Column layout: ``[unit_1, ..., unit_{U-1}, time_1, ..., time_{T-1}]``.
+    Drops the first unit dummy AND the first time dummy for identification
+    (mirrors ``TwoStageDiD._build_fe_design`` at ``two_stage.py:2046``).
+
+    Parameters
+    ----------
+    unit_codes : np.ndarray of shape (n,)
+        Integer codes 0..U-1 (from ``pd.factorize``).
+    time_codes : np.ndarray of shape (n,)
+        Integer codes 0..T-1 (from ``pd.factorize``).
+    omega_0_mask : np.ndarray of shape (n,)
+        Boolean mask. ``X_10`` rows where this is False are zeroed out
+        (treated AND exposed rows). ``X_1`` keeps all rows.
+
+    Returns
+    -------
+    X_1 : sparse.csr_matrix, shape (n, (U-1) + (T-1))
+        Full-sample FE design with identification dropping.
+    X_10 : sparse.csr_matrix, shape (n, (U-1) + (T-1))
+        Same column space as ``X_1`` but with ``~omega_0_mask`` rows zeroed.
+        Sharing column space is required for the Gardner cross-moment
+        ``gamma_hat = (X_10' X_10)^{-1} (X_1' X_2)``.
+
+    Notes
+    -----
+    Rank-deficient ``X_10' X_10`` (e.g. warn-and-drop units with no
+    Omega_0 rows) is detected downstream by ``_compute_gmm_corrected_meat``
+    via ``sparse_factorized`` failure → ``np.linalg.lstsq`` fallback with
+    a documented ``UserWarning``.
+
+    **Re-factorization on entry:** when callers pass pre-mask integer
+    codes that have had interior values dropped via ``finite_mask`` (a
+    supported warn-and-drop fit), the input code arrays can be sparse —
+    e.g. ``unit_codes = [0, 1, 3, 4]`` with code 2 dropped. Building
+    ``X_10`` on the raw codes would materialize an all-zero FE column at
+    index 2, forcing ``sparse_factorized`` onto the dense
+    ``lstsq``/``XtX_10.toarray()`` fallback unnecessarily (large-memory
+    path on big panels). To avoid this, re-factorize via
+    :func:`pd.factorize` on entry to compact the code space to
+    ``0..n_unique-1`` (no-op when codes are already contiguous; mirrors
+    the column-space convention of ``TwoStageDiD._build_fe_design``).
+    """
+    # Compact the code space before column construction — see Notes.
+    unit_codes = pd.factorize(unit_codes)[0]
+    time_codes = pd.factorize(time_codes)[0]
+
+    n = unit_codes.shape[0]
+    n_units = int(unit_codes.max()) + 1 if n > 0 else 0
+    n_times = int(time_codes.max()) + 1 if n > 0 else 0
+    n_fe_cols = max(n_units - 1, 0) + max(n_times - 1, 0)
+
+    def _build(mask: Optional[np.ndarray]) -> sparse.csr_matrix:
+        # Unit dummies (drop unit_code == 0 for identification).
+        u_keep = unit_codes > 0
+        if mask is not None:
+            u_keep = u_keep & mask
+        u_rows = np.flatnonzero(u_keep)
+        u_cols = unit_codes[u_keep] - 1
+
+        # Time dummies (drop time_code == 0 for identification).
+        t_keep = time_codes > 0
+        if mask is not None:
+            t_keep = t_keep & mask
+        t_rows = np.flatnonzero(t_keep)
+        t_cols = (max(n_units - 1, 0)) + (time_codes[t_keep] - 1)
+
+        rows = np.concatenate([u_rows, t_rows])
+        cols = np.concatenate([u_cols, t_cols])
+        data = np.ones(len(rows), dtype=np.float64)
+        return sparse.csr_matrix((data, (rows, cols)), shape=(n, n_fe_cols))
+
+    X_1 = _build(mask=None)
+    X_10 = _build(mask=omega_0_mask)
+    return X_1, X_10
+
+
 # =============================================================================
 # Public estimator (skeleton — fit() implemented in Step 3)
 # =============================================================================
@@ -2026,11 +2111,19 @@ class SpilloverDiD:
 
         Notes
         -----
-        Wave B MVP: stage-2 variance is the standard solve_ols estimator
-        (HC1 / Conley / cluster). The Gardner GMM sandwich first-stage
-        uncertainty correction is NOT applied (planned follow-up; see
-        TODO and plan Risks #2). Variance is therefore approximate (likely
-        underestimated by a few percent in typical settings).
+        Stage-2 variance applies the Wave D Gardner (2022) GMM first-stage
+        uncertainty correction across all supported ``vcov_type`` paths
+        (``"hc1"``, ``"conley"``, ``"cluster"`` via ``cluster=<col>``). The
+        unified IF outer-product formula is
+        ``psi_i = gamma_hat' * X_{10,i} * eps_{10,i} - X_{2,i} * eps_{2,i}``
+        with ``meat = Psi' K Psi`` where ``K`` is path-dependent (identity
+        for HC1, block-indicator for cluster, spatial kernel for Conley).
+        Documented synthesis of Butts (2021) §3.1 + Gardner (2022) §4 +
+        Conley (1999); no reference software combines all three.
+        ``vcov_type="classical"`` raises ``NotImplementedError`` because
+        the Wave D synthesis has not been derived for the homoskedastic
+        meat structure ``sigma_hat^2 * (X_10' X_10)``; use ``"hc1"`` for
+        heteroskedasticity-robust SE with the GMM correction.
         """
         if survey_design is not None:
             raise NotImplementedError(
@@ -2122,8 +2215,30 @@ class SpilloverDiD:
                 "degrees of freedom for correct p-values and CIs. Routing "
                 "stage 2 through LinearRegression (which supplies the "
                 "per-coefficient DOF metadata) is queued as a follow-up "
-                "extension. Use vcov_type='hc1', 'classical', 'conley', or "
+                "extension. Use vcov_type='hc1' or 'conley', or "
                 "leave default; combine with cluster=<col> for CR1."
+            )
+        if self.vcov_type == "classical":
+            # Wave D scope (user-confirmed 2026-05-17): the Gardner GMM
+            # first-stage uncertainty correction is implemented for HC1,
+            # Conley, and CR1 only. The classical (homoskedastic) variance
+            # has not been derived for the IF outer-product form in this
+            # PR — under classical assumptions the meat structure changes
+            # (`sigma_hat^2 * (X_10' X_10)` rather than `Psi' Psi`) and
+            # the Wave D synthesis (Butts §3.1 + Gardner §4 + Conley 1999)
+            # does not carry through directly. Reject upfront with a clear
+            # remediation message rather than silently HC1-ifying the
+            # request (per `feedback_no_silent_failures`).
+            raise NotImplementedError(
+                "SpilloverDiD does not support vcov_type='classical' under "
+                "the Wave D Gardner GMM first-stage uncertainty correction. "
+                "Wave D applies the GMM correction unconditionally and the "
+                "classical homoskedastic variance does not have a derived "
+                "IF outer-product form in the Wave D synthesis (Butts §3.1 "
+                "+ Gardner §4 + Conley 1999). Use vcov_type='hc1' for "
+                "heteroskedasticity-robust SE with the GMM correction, or "
+                "combine with cluster=<col> for CR1 with the GMM correction. "
+                "Future PR may extend Wave D to the classical path."
             )
 
         # Step 0: defensive copy so the caller's DataFrame is never mutated.
@@ -2590,29 +2705,151 @@ class SpilloverDiD:
         if self.event_study and event_study_meta is not None:
             event_study_meta["n_obs_per_col"] = (X_2_fit != 0).sum(axis=0).astype(np.int64)
 
-        # Step 15: stage-2 OLS with configured vcov via solve_ols.
+        # Step 15: stage-2 OLS — coef + residuals only. Wave D computes the
+        # vcov below via the Gardner GMM first-stage uncertainty correction
+        # (documented synthesis of Butts §3.1 + Gardner §4 + Conley 1999).
+        # `solve_ols` returns vcov=None when return_vcov=False.
         solve_kwargs: Dict[str, Any] = {
-            "return_vcov": True,
+            "return_vcov": False,
             "rank_deficient_action": self.rank_deficient_action,
             "column_names": col_names_all,
-            "vcov_type": self.vcov_type,
-            "cluster_ids": cluster_ids_fit,
         }
+        coef, residuals, _ = solve_ols(X_2_fit, y_tilde_fit, **solve_kwargs)  # type: ignore[misc]
+
+        # Wave D: Gardner GMM first-stage uncertainty correction.
+        #
+        # Reconstruct the stage-1 residual `eps_10` on the FULL sample:
+        #   - On Omega_0 rows: eps_10 = y - mu_hat[i] - lambda_hat[t]
+        #   - On ~Omega_0 rows: eps_10 = y (since X_10[i, :] = 0 collapses
+        #     the IF product to just the stage-2 term; matches the Gardner
+        #     formula at `two_stage.py:1633-1637`).
+        # unit_fe_arr / time_fe_arr may have NaN at warn-and-drop units;
+        # the downstream `finite_mask` subset drops those rows BEFORE the
+        # GMM helper builds Psi (NaN in eps_10 is intentionally tolerated
+        # at this stage — it is masked out before any matrix operation).
+        alpha_full = unit_fe_arr[np.asarray(unit_codes_full)]
+        beta_full = time_fe_arr[np.asarray(time_codes_full)]
+        eps_10_full = np.where(omega_0_mask, y_full - alpha_full - beta_full, y_full)
+
+        # Subset stage-1 inputs to the fit sample (post-finite_mask).
+        if n_nan > 0:
+            eps_10_fit = eps_10_full[finite_mask]
+            unit_codes_fit = np.asarray(unit_codes_full)[finite_mask]
+            time_codes_fit = np.asarray(time_codes_full)[finite_mask]
+            omega_0_mask_fit = omega_0_mask[finite_mask]
+        else:
+            eps_10_fit = eps_10_full
+            unit_codes_fit = np.asarray(unit_codes_full)
+            time_codes_fit = np.asarray(time_codes_full)
+            omega_0_mask_fit = omega_0_mask
+
+        # Handle rank-deficient column drops from solve_ols (NaN coefs).
+        # Subset to kept columns before building Psi; re-inflate vcov with
+        # NaN at dropped positions at the end so downstream indexing
+        # (vcov[0, 0] for tau_se, etc.) behaves like the pre-Wave-D path.
+        kept_col_mask = np.isfinite(coef)
+        n_kept = int(kept_col_mask.sum())
+        if n_kept < len(coef):
+            X_2_kept = X_2_fit[:, kept_col_mask]
+            coef_kept = coef[kept_col_mask]
+        else:
+            X_2_kept = X_2_fit
+            coef_kept = coef
+        eps_2_fit = y_tilde_fit - X_2_kept @ coef_kept
+
+        # Build stage-1 FE designs on the fit sample. Column space:
+        # [unit_1, ..., unit_{U-1}, time_1, ..., time_{T-1}] (drop-first
+        # identification, matches `TwoStageDiD._build_fe_design`).
+        X_1_sparse_fit, X_10_sparse_fit = _build_butts_fe_design_csr(
+            unit_codes_fit,
+            time_codes_fit,
+            omega_0_mask_fit,
+        )
+
+        # Conley spatial kwargs only when vcov_type == "conley".
         if self.vcov_type == "conley":
             coord_array_full = np.asarray(data[list(self.conley_coords)].values, dtype=np.float64)
             coord_array_fit = coord_array_full[finite_mask] if n_nan > 0 else coord_array_full
-            solve_kwargs.update(
-                {
-                    "conley_coords": coord_array_fit,
-                    "conley_cutoff_km": self.conley_cutoff_km,
-                    "conley_metric": self.conley_metric,
-                    "conley_time": time_vals_fit,
-                    "conley_unit": unit_vals_fit,
-                    "conley_lag_cutoff": self.conley_lag_cutoff,
-                }
-            )
+            _conley_coords_arg = coord_array_fit
+            _conley_cutoff_arg = self.conley_cutoff_km
+            _conley_metric_arg = self.conley_metric
+            _conley_time_arg = time_vals_fit
+            _conley_unit_arg = unit_vals_fit
+            _conley_lag_arg = self.conley_lag_cutoff
+        else:
+            _conley_coords_arg = None
+            _conley_cutoff_arg = None
+            _conley_metric_arg = None
+            _conley_time_arg = None
+            _conley_unit_arg = None
+            _conley_lag_arg = None
 
-        coef, residuals, vcov = solve_ols(X_2_fit, y_tilde_fit, **solve_kwargs)  # type: ignore[misc]
+        # Derive the Wave D variance mode from the PUBLIC contract:
+        #   - vcov_type="conley"          → "conley" (Conley spatial-HAC + GMM)
+        #   - cluster=<col> supplied      → "cluster" (CR1 + GMM)
+        #   - vcov_type="hc1" (default)   → "hc1"
+        # `self.vcov_type` can be "hc1" / "classical" / "conley"; the public
+        # `cluster=<col>` kwarg ORTHOGONALLY selects CR1. Pre-Wave-D the
+        # routing happened inside solve_ols; Wave D bypasses that path, so
+        # the dispatch must be reconstructed here. (Round 1 codex P0 fix:
+        # without this derivation, a user-supplied `cluster=<col>` was
+        # silently ignored on the default hc1 path, yielding HC1 SEs when
+        # CR1 was requested.)
+        if self.vcov_type == "conley":
+            _wave_d_vcov_mode: "Literal['hc1', 'conley', 'cluster']" = "conley"
+        elif cluster_ids_fit is not None:
+            _wave_d_vcov_mode = "cluster"
+        else:
+            _wave_d_vcov_mode = "hc1"
+
+        # Compute the GMM-corrected meat (Psi' K Psi). Caller-side bread
+        # sandwich below mirrors `TwoStageDiD._compute_gmm_variance`
+        # at `two_stage.py:1763-1791`.
+        meat_kept = _compute_gmm_corrected_meat(
+            X_1_sparse=X_1_sparse_fit,
+            X_10_sparse=X_10_sparse_fit,
+            eps_10=eps_10_fit,
+            X_2=X_2_kept,
+            eps_2=eps_2_fit,
+            vcov_type=_wave_d_vcov_mode,
+            cluster_ids=cluster_ids_fit,
+            conley_coords=_conley_coords_arg,
+            conley_cutoff_km=_conley_cutoff_arg,
+            conley_metric=_conley_metric_arg,
+            conley_kernel="bartlett",
+            conley_time=_conley_time_arg,
+            conley_unit=_conley_unit_arg,
+            conley_lag_cutoff=_conley_lag_arg,
+        )
+
+        # Bread sandwich: A_22^{-1} = (X_2' X_2)^{-1} via `np.linalg.solve`
+        # with dense lstsq fallback + UserWarning (mirrors the bread-fallback
+        # pattern at `two_stage.py:1763-1788`).
+        A_22_kept = X_2_kept.T @ X_2_kept
+        eye_kept = np.eye(A_22_kept.shape[0])
+        try:
+            bread_kept = np.linalg.solve(A_22_kept, eye_kept)
+        except np.linalg.LinAlgError:
+            warnings.warn(
+                "SpilloverDiD Wave D bread: A_22 = X_2' X_2 is singular; "
+                "falling back to dense lstsq. SE may be unreliable.",
+                UserWarning,
+                stacklevel=2,
+            )
+            bread_kept = np.linalg.lstsq(A_22_kept, eye_kept, rcond=None)[0]
+        vcov_kept = bread_kept @ meat_kept @ bread_kept
+
+        # Re-inflate to (k, k) with NaN at rank-deficient column positions
+        # so downstream code (which indexes vcov[i, i] for per-coef SE) sees
+        # NaN for dropped columns — matches the pre-Wave-D solve_ols
+        # behavior at `linalg.py` (rank-deficient drops produce NaN coefs +
+        # NaN vcov entries).
+        if n_kept < len(coef):
+            vcov = np.full((len(coef), len(coef)), np.nan)
+            kept_idx = np.flatnonzero(kept_col_mask)
+            vcov[np.ix_(kept_idx, kept_idx)] = vcov_kept
+        else:
+            vcov = vcov_kept
 
         # Step 16a: shared df_resid computation.
         n_obs_eff = int(finite_mask.sum())

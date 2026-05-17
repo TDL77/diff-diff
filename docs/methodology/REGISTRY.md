@@ -3034,7 +3034,7 @@ The standard error comes from **linear-combination inference** on the post-treat
 
 **Reduce-to-aggregate equivalence:** Under a **constant-tau DGP** with `horizon_max=None`, the sample-share-weighted scalar `att` reproduces Wave B's aggregate `tau_total` (bit-identical at machine precision in the deterministic limit; small MC noise on realized panels). This is the canonical equivalence path. Note: `horizon_max=0` is **not supported** under `event_study=True` (rejected at validation with a clear remediation message): the single bin `k=0` leaves no event-time pair to anchor the reference period `ref_period = -1 - anticipation` against. Users wanting a single aggregate direct effect should use `event_study=False` (the Wave B static spec); event-study mode requires `horizon_max>=1` or `horizon_max=None`.
 
-**Variance:** Same caveat as Wave B — per-event-time SEs use the standard `solve_ols` estimator (HC1 / Conley / cluster paths) WITHOUT the Gardner GMM first-stage uncertainty correction. Per-`tau_k` and per-`delta_jk` SEs are biased downward by the same few percent. The Wave D follow-up will close this.
+**Variance:** Per-event-time SEs apply the Wave D Gardner GMM first-stage uncertainty correction (see "Variance (Wave D)" subsection below). Per-`tau_k` and per-`delta_jk` SEs are shifted upward by a few percent relative to Wave C uncorrected SEs.
 
 **Assumptions (Butts 2021):**
 
@@ -3045,9 +3045,31 @@ The standard error comes from **linear-combination inference** on the post-treat
 - **Assumption 7 (Spillover Effect Parallel Trends)** — counterfactual trends do not depend on `(D_i, S_i)` for `S_i ∈ {0, 1}`. Required to identify `gamma_0` / `delta_j`.
 - **Assumption 8 (Parallel Counterfactual Trends, Staggered)** — additive unit + time FE structure on untreated/unexposed potential outcomes. Stronger than Assumption 3.
 
-**Variance (Wave B MVP — documented limitation):**
+**Variance (Wave D — Gardner GMM first-stage correction across HC1 / Conley / cluster):**
 
-The stage-2 variance is the standard `solve_ols` estimator (HC1 / Conley / cluster paths, all dispatched via `vcov_type`). The **Gardner GMM sandwich first-stage uncertainty correction is NOT applied** at stage 2 in this PR. The full GMM + Conley composition is queued as a follow-up enhancement that extends `two_stage.py::_compute_gmm_variance` to accept a Conley kernel matrix in place of HC1's identity at the influence-function outer-product step (see Wave B plan Risks #2 for the IF formula). The reported SE is therefore **biased downward** (underestimated by a few percent in typical settings) because it omits the additional variance contribution from estimating the stage-1 FE; confidence intervals are correspondingly too narrow and p-values too small. Treat reported significance conservatively until the GMM correction lands.
+Stage-2 variance applies the Gardner (2022) GMM sandwich influence-function correction for stage-1 FE estimation uncertainty across all three `vcov_type` paths. The unified IF outer-product formula:
+
+```
+psi_i  = gamma_hat' * X_{10,i} * eps_{10,i} - X_{2,i} * eps_{2,i}     # shape (p_2,)
+Psi    = [psi_1; ...; psi_n]                                          # (n, p_2)
+gamma_hat = (X_10' X_10)^{-1} (X_1' X_2)                              # (p_1, p_2)
+meat   = Psi' @ K @ Psi                                               # (p_2, p_2)
+vcov   = (X_2' X_2)^{-1} @ meat @ (X_2' X_2)^{-1}
+```
+
+where the kernel `K` is path-dependent:
+
+- **HC1**: `K = I_n` → `meat = Psi' Psi` with `n / (n - p_2)` finite-sample multiplier.
+- **Cluster CR1**: `K_ij = 1{cluster_i = cluster_j}` → per-cluster sum + outer product, with `G / (G-1) * (n-1) / (n - p_2)` finite-sample multiplier.
+- **Conley**: `K_ij = kernel(d_ij / cutoff) * 1{cluster_i = cluster_j}` (cross-sectional) or panel-block decomposed (`conley_time` / `conley_unit` / `conley_lag_cutoff` set). No finite-sample multiplier — matches `conleyreg` convention.
+
+The correction applies unconditionally (no opt-out kwarg). Point estimates (`tau_total`, `delta_j`, event-study `tau_k` / `delta_jk`) are byte-identical to the pre-Wave-D path; SE values shift upward by 1-few percent.
+
+- **Note (documented synthesis):** no R / Stata software combines all three ingredients (Butts (2021) §3.1 IF construction for spillover-aware DiD + Gardner (2022) §4 two-stage GMM sandwich + Conley (1999) spatial kernel). `did2s` (Gardner) implements GMM with HC1/cluster but no Conley. `conleyreg` / `acreg` implement Conley but no two-stage correction. Wave D is the documented synthesis.
+- **Note (no finite-sample multiplier on Conley path):** preserves the `conleyreg` / Wave B convention. HC1 and cluster paths apply the standard `n/(n-p)` and `G/(G-1) * (n-1)/(n-p)` multipliers respectively.
+- **Note (Conley meat may be non-PSD):** the radial 1-D Bartlett and uniform kernels are practitioner specializations of Conley 1999 and are not formally PSD-guaranteed; a `UserWarning` fires when the smallest meat eigenvalue is < -1e-12. Applies on both standard-sandwich and GMM-corrected sandwich paths.
+
+**Implementation:** new module-level helper `_compute_gmm_corrected_meat` at `diff_diff/two_stage.py` (NOT a modification of the existing `_compute_gmm_variance` method — TwoStageDiD's path is unchanged); new helper `_build_butts_fe_design_csr` at `diff_diff/spillover.py`; `_compute_conley_meat` factored out of `_compute_conley_vcov` at `diff_diff/conley.py` so the same kernel-application code path handles both standard sandwich (`X * residuals`) and Wave D IF outer product (`Psi`).
 
 **Edge cases (from paper Section 3.2 / Discussion):**
 
@@ -3067,12 +3089,12 @@ The stage-2 variance is the standard `solve_ols` estimator (HC1 / Conley / clust
 - `survey_design=` raises `NotImplementedError` — planned follow-up.
 - `covariates=` raises `NotImplementedError` — Gardner-style stage-1 residualization not yet wired through; planned follow-up.
 - `ring_method="count"` not exposed — only the nearest-treated-ring specification.
-- `vcov_type` ∈ {`"hc2"`, `"hc2_bm"`} raises `NotImplementedError` — current stage-2 inference uses generic residual df rather than per-coefficient Bell-McCaffrey / CR2 DOF. Use `"hc1"`, `"classical"`, `"conley"`, or pair with `cluster=` for CR1.
+- `vcov_type` ∈ {`"hc2"`, `"hc2_bm"`, `"classical"`} raises `NotImplementedError` — `hc2`/`hc2_bm` because current stage-2 inference uses generic residual df rather than per-coefficient Bell-McCaffrey / CR2 DOF; `classical` because the Wave D Gardner GMM first-stage correction has not been derived for the classical homoskedastic variance (different meat structure `sigma_hat^2 * (X_10' X_10)` vs the Wave D IF outer product `Psi' Psi`). Use `"hc1"` or `"conley"`, or pair with `cluster=` for CR1 — all three apply the Wave D GMM correction.
 - **`rings[0]` must equal 0** — the partition must cover treated locations (`d_it = 0` belongs to Ring 1). Rings starting at a nonzero inner edge would leave units in `0 <= d_it < rings[0]` as exposed-but-unmodeled, silently biasing the estimator. Validator rejects such inputs.
 - **Balanced panel required (Wave B MVP)** — every unit must observe every period. An unbalanced (unit, time) Ω₀ bipartite graph can produce disconnected FE components and unidentified stage-1 residuals on treated rows. Exact graph-connectivity-based identification (which would relax this to a strictly weaker condition) is queued as a follow-up extension. Validator rejects unbalanced inputs.
 - **One row per `(unit, time)` cell required** — duplicate cells silently re-weight stage-1 FE estimation AND stage-2 OLS. Validator rejects duplicate cells.
 - Data-driven `d_bar` selection (Butts 2021b / Butts 2023 JUE Insight) not exposed.
-- Gardner GMM first-stage correction at stage 2 not applied (HC1/Conley/cluster only; documented limitation).
+- Gardner GMM first-stage correction at stage 2 SHIPPED in Wave D — see "Variance (Wave D)" subsection above. Applies unconditionally across HC1 / Conley / cluster.
 
 **Implementation:** `diff_diff/spillover.py`. Public class `SpilloverDiD`; result class `SpilloverDiDResults(DiDResults)` at `diff_diff/results.py`. Tests at `tests/test_spillover.py`; DGP factories `tests/_dgp_utils.py::generate_butts_nonstaggered_dgp` / `generate_butts_staggered_dgp` (satisfy Butts Assumptions 1/3/5/7 by construction).
 

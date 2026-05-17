@@ -23,18 +23,18 @@ Butts, K. & Gardner, J. (2022). did2s: Two-Stage
 
 import warnings
 from dataclasses import replace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 from scipy import sparse
 from scipy.sparse.linalg import factorized as sparse_factorized
 
-# Maximum number of elements before falling back to per-column sparse aggregation.
-# 10M float64 elements ≈ 80 MB peak allocation. Above this, per-column .getcol()
-# trades throughput for bounded memory. Keep in sync with two_stage_bootstrap.py.
-_SPARSE_DENSE_THRESHOLD = 10_000_000
-
+from diff_diff.conley import (
+    ConleyMetric,
+    _compute_conley_meat,
+    _validate_conley_kwargs,
+)
 from diff_diff.linalg import solve_ols
 from diff_diff.two_stage_bootstrap import TwoStageDiDBootstrapMixin
 from diff_diff.two_stage_results import (
@@ -42,6 +42,253 @@ from diff_diff.two_stage_results import (
     TwoStageDiDResults,
 )  # noqa: F401 (re-export)
 from diff_diff.utils import safe_inference, warn_if_not_converged
+
+# Maximum number of elements before falling back to per-column sparse aggregation.
+# 10M float64 elements ≈ 80 MB peak allocation. Above this, per-column .getcol()
+# trades throughput for bounded memory. Keep in sync with two_stage_bootstrap.py.
+_SPARSE_DENSE_THRESHOLD = 10_000_000
+
+# =============================================================================
+# Wave D — Gardner GMM-corrected meat for SpilloverDiD
+# =============================================================================
+
+
+def _compute_gmm_corrected_meat(
+    *,
+    X_1_sparse: sparse.csr_matrix,
+    X_10_sparse: sparse.csr_matrix,
+    eps_10: np.ndarray,
+    X_2: np.ndarray,
+    eps_2: np.ndarray,
+    vcov_type: Literal["hc1", "conley", "cluster"],
+    cluster_ids: Optional[np.ndarray] = None,
+    conley_coords: Optional[np.ndarray] = None,
+    conley_cutoff_km: Optional[float] = None,
+    conley_metric: Optional[ConleyMetric] = None,
+    conley_kernel: str = "bartlett",
+    conley_time: Optional[np.ndarray] = None,
+    conley_unit: Optional[np.ndarray] = None,
+    conley_lag_cutoff: Optional[int] = None,
+) -> np.ndarray:
+    """Gardner (2022) GMM first-stage uncertainty correction — unified IF meat.
+
+    Returns the (p_2, p_2) meat matrix ``Psi' K Psi`` where:
+
+        psi_i  = gamma_hat' @ x_{10,i} * eps_{10,i} - x_{2,i} * eps_{2,i}
+        Psi    = [psi_1; ...; psi_n]                    shape (n, p_2)
+        K      = path-dependent kernel matrix
+        meat   = Psi' @ K @ Psi                         shape (p_2, p_2)
+
+    The caller wraps with the bread ``A_22^{-1} = (X_2' W X_2)^{-1}``:
+    ``V = A_22^{-1} @ meat @ A_22^{-1}``.
+
+    **Methodology synthesis** (Wave D): no reference software combines all
+    three ingredients. Butts (2021) §3.1 gives the IF construction for
+    spillover-aware DiD; Gardner (2022) §4 gives the two-stage GMM sandwich;
+    Conley (1999) gives the spatial kernel.
+
+    **Kernel dispatch:**
+
+    - ``vcov_type="hc1"``: ``K = I_n``; ``meat = Psi' @ Psi`` with
+      ``n / (n - p_2)`` finite-sample multiplier.
+    - ``vcov_type="cluster"``: ``K_ij = 1{cluster_i = cluster_j}``;
+      ``meat = S_cluster' @ S_cluster`` where ``S_cluster[g] = sum_{i in g} psi_i``,
+      with ``G/(G-1) * (n-1)/(n - p_2)`` finite-sample multiplier.
+    - ``vcov_type="conley"``: ``K_ij = K_space(d_ij/h) * 1{cluster_i = cluster_j}``
+      (cross-sectional) or panel-block decomposed (``conley_time`` /
+      ``conley_unit`` / ``conley_lag_cutoff`` set). No finite-sample
+      multiplier — preserves the ``conleyreg`` / Wave B convention.
+
+    **`gamma_hat` solve** (mirror of `TwoStageDiD._compute_gmm_variance`
+    pattern at `two_stage.py:1648-1670`): factorize ``X_10' X_10`` via
+    ``sparse_factorized`` (fast path); fall back to dense ``lstsq`` with
+    UserWarning when factorization fails. ``gamma_hat`` has shape
+    ``(p_1, p_2)``.
+
+    **Survey weights:** NOT supported in Wave D (parameter omitted).
+    Wave E will extend with stratified-survey × GMM × Conley methodology.
+
+    Parameters
+    ----------
+    X_1_sparse : sparse.csr_matrix, shape (n, p_1)
+        Full-sample FE design (drop-first-unit + drop-first-time
+        identification).
+    X_10_sparse : sparse.csr_matrix, shape (n, p_1)
+        FE design with treated AND exposed rows zeroed. Same column space
+        as X_1_sparse.
+    eps_10 : np.ndarray, shape (n,)
+        Stage-1 residual on Omega_0 rows; equal to y on ~Omega_0 rows
+        (the X_{10,i} = 0 product collapses the IF contribution to just
+        the stage-2 term).
+    X_2 : np.ndarray, shape (n, p_2)
+        Stage-2 design (treatment + ring columns for SpilloverDiD).
+    eps_2 : np.ndarray, shape (n,)
+        Stage-2 residual ``y_tilde - X_2 @ coef``.
+    vcov_type : {"hc1", "conley", "cluster"}
+        Kernel dispatch.
+    cluster_ids : np.ndarray of shape (n,), optional
+        Cluster identifiers. Required for ``vcov_type="cluster"``;
+        used as the product-kernel cluster mask under ``vcov_type="conley"``
+        when supplied. HC1 path passes ``None``.
+    conley_coords, conley_cutoff_km, conley_metric, conley_kernel,
+    conley_time, conley_unit, conley_lag_cutoff
+        Conley spatial-HAC kwargs. Required when ``vcov_type="conley"``.
+        See :func:`diff_diff.conley._compute_conley_meat` for semantics.
+
+    Returns
+    -------
+    meat : np.ndarray of shape (p_2, p_2)
+        The IF outer-product meat, including any finite-sample multiplier.
+        Caller wraps with the bread for the full vcov.
+    """
+    n, p_2 = X_2.shape
+
+    # Validate Conley kwargs explicitly here. SpilloverDiD's Wave D path
+    # bypasses solve_ols's vcov computation, so _validate_vcov_args /
+    # _validate_conley_kwargs would not otherwise fire on this call.
+    if vcov_type == "conley":
+        _validate_conley_kwargs(
+            conley_coords,
+            conley_cutoff_km,
+            conley_metric,  # type: ignore[arg-type]  # validator raises ValueError if None
+            conley_kernel,
+            n,
+            time=conley_time,
+            unit=conley_unit,
+            lag_cutoff=conley_lag_cutoff,
+            cluster_ids=cluster_ids,
+        )
+
+    # 1. gamma_hat = (X_10' X_10)^{-1} (X_1' X_2). Mirror the existing
+    #    TwoStageDiD method at two_stage.py:1648-1670 — sparse_factorized
+    #    fast path with dense lstsq fallback + UserWarning on singular.
+    XtX_10 = X_10_sparse.T @ X_10_sparse  # (p_1, p_1) sparse
+    Xt1_X2 = X_1_sparse.T @ X_2  # (p_1, p_2) dense
+
+    try:
+        solve_XtX = sparse_factorized(XtX_10.tocsc())
+        if Xt1_X2.ndim == 1:
+            gamma_hat = solve_XtX(Xt1_X2).reshape(-1, 1)
+        else:
+            gamma_hat = np.column_stack([solve_XtX(Xt1_X2[:, j]) for j in range(Xt1_X2.shape[1])])
+    except RuntimeError as exc:
+        warnings.warn(
+            "SpilloverDiD Wave D GMM sandwich: sparse factorization of "
+            f"(X_10' X_10) failed ({type(exc).__name__}); falling back to "
+            "dense lstsq. This may indicate a rank-deficient or "
+            "near-singular Stage 1 design and SE estimates may be less "
+            "reliable.",
+            UserWarning,
+            stacklevel=2,
+        )
+        gamma_hat = np.linalg.lstsq(XtX_10.toarray(), Xt1_X2, rcond=None)[0]
+        if gamma_hat.ndim == 1:
+            gamma_hat = gamma_hat.reshape(-1, 1)
+
+    # 2. Psi = (X_10 @ gamma_hat) * eps_10[:, None] - X_2 * eps_2[:, None].
+    #    sparse @ dense = dense; element-wise scale by eps_10; subtract
+    #    the stage-2 contribution. Shape (n, p_2).
+    Psi_stage1 = X_10_sparse @ gamma_hat  # (n, p_2) dense
+    Psi = Psi_stage1 * eps_10[:, None] - X_2 * eps_2[:, None]
+
+    if not np.all(np.isfinite(Psi)):
+        # Defensive: NaN in Psi would propagate silently through Psi.T @ Psi.
+        # Surface as a warning + return NaN meat so the downstream
+        # safe_inference path NaN-propagates per `feedback_no_silent_failures`.
+        warnings.warn(
+            "SpilloverDiD Wave D GMM sandwich: Psi matrix contains "
+            "non-finite values. Returning NaN meat; downstream inference "
+            "will NaN-propagate. This usually indicates rank-deficient "
+            "stage-1 FE design or non-finite residuals upstream.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return np.full((p_2, p_2), np.nan)
+
+    # 3. Kernel dispatch.
+    if vcov_type == "hc1":
+        # K = I_n: meat = Psi' Psi with HC1 finite-sample multiplier.
+        # Fail closed when n - p_2 <= 0 (saturated design — every degree
+        # of freedom consumed by the stage-2 design): the multiplier
+        # n / (n - p_2) is undefined, so NaN-propagate per
+        # `feedback_no_silent_failures` rather than clamping the
+        # denominator and emitting finite SE on an underdetermined fit.
+        if n - p_2 <= 0:
+            warnings.warn(
+                "SpilloverDiD Wave D HC1 sandwich: saturated stage-2 design "
+                f"(n_obs={n}, effective_rank={p_2}, n-p_2={n - p_2} <= 0). "
+                "The HC1 finite-sample multiplier n/(n-p) is undefined. "
+                "Returning NaN meat so downstream inference NaN-propagates.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return np.full((p_2, p_2), np.nan)
+        meat_unscaled = Psi.T @ Psi
+        multiplier = n / (n - p_2)
+        meat = multiplier * meat_unscaled
+    elif vcov_type == "cluster":
+        if cluster_ids is None:
+            raise ValueError(
+                "_compute_gmm_corrected_meat: vcov_type='cluster' requires "
+                "cluster_ids; got None."
+            )
+        # K_ij = 1{cluster_i = cluster_j}: aggregate Psi per-cluster then
+        # outer-product. S_cluster[g] = sum_{i in g} psi_i.
+        unique_clusters, cluster_indices = np.unique(cluster_ids, return_inverse=True)
+        G = len(unique_clusters)
+        # Mirror linalg.py:1942 — reject G<2 so the CR1 finite-sample
+        # multiplier G/(G-1) doesn't fabricate finite output on a degenerate
+        # one-cluster sample.
+        if G < 2:
+            raise ValueError(f"Need at least 2 clusters for cluster-robust SEs, got {G}")
+        # Fail closed on saturated design (n - p_2 <= 0). The CR1
+        # multiplier (n-1)/(n-p) is undefined; emitting finite SE here
+        # would be silently wrong.
+        if n - p_2 <= 0:
+            warnings.warn(
+                "SpilloverDiD Wave D CR1 sandwich: saturated stage-2 design "
+                f"(n_obs={n}, effective_rank={p_2}, n-p_2={n - p_2} <= 0). "
+                "The CR1 finite-sample multiplier (n-1)/(n-p) is undefined. "
+                "Returning NaN meat so downstream inference NaN-propagates.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return np.full((p_2, p_2), np.nan)
+        S_cluster = np.zeros((G, p_2))
+        for j in range(p_2):
+            np.add.at(S_cluster[:, j], cluster_indices, Psi[:, j])
+        meat_unscaled = S_cluster.T @ S_cluster
+        # CR1 finite-sample multiplier: G/(G-1) * (n-1)/(n-p_2). Standard
+        # cluster-robust convention (Stata, R `sandwich::vcovCL(type='CR1')`).
+        multiplier = (G / (G - 1)) * ((n - 1) / (n - p_2))
+        meat = multiplier * meat_unscaled
+    elif vcov_type == "conley":
+        if conley_coords is None or conley_cutoff_km is None or conley_metric is None:
+            raise ValueError(
+                "_compute_gmm_corrected_meat: vcov_type='conley' requires "
+                "conley_coords, conley_cutoff_km, and conley_metric."
+            )
+        # Delegate to the shared kernel-application helper. No finite-sample
+        # multiplier on the Conley path (matches conleyreg / Wave B convention).
+        meat = _compute_conley_meat(
+            Psi,
+            conley_coords,
+            conley_cutoff_km,
+            conley_metric,
+            conley_kernel,
+            time=conley_time,
+            unit=conley_unit,
+            lag_cutoff=conley_lag_cutoff,
+            cluster_ids=cluster_ids,
+        )
+    else:
+        raise ValueError(
+            f"_compute_gmm_corrected_meat: vcov_type must be one of "
+            f"'hc1', 'conley', 'cluster'; got {vcov_type!r}."
+        )
+
+    return meat
+
 
 # =============================================================================
 # Main Estimator
