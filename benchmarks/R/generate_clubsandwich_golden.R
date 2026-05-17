@@ -122,6 +122,56 @@ output$absorbed_fe_did <- list(
   dof_cr2 = as.numeric(ct_did_cr2$df_Satt)
 )
 
+# --- Absorbed-FE MultiPeriodDiD event-study scenario (gate lift PR) ----------
+# Mirrors MPD(fixed_effects=["unit"]) destination of the absorb auto-route on
+# MultiPeriodDiD. MPD parameterization: const + treated + period_f (non-ref)
+# + treated:period_X (non-ref) + factor(unit). Build the interaction columns
+# explicitly so the R fit's coefficient names match MPD's `treated:period_X`.
+
+make_mpd_panel <- function(n_total, units_per_cohort, n_periods, seed) {
+  set.seed(seed)
+  d <- expand.grid(unit = seq_len(n_total), period = seq_len(n_periods))
+  d$cohort <- ((d$unit - 1L) %/% units_per_cohort) + 1L
+  n_cohorts <- n_total %/% units_per_cohort
+  # Last cohort is never-treated control; preceding cohorts ever-treated.
+  d$treated <- as.integer(d$cohort < n_cohorts)
+  d$y <- 1 + 0.5 * d$treated * (d$period >= 3) +
+         rnorm(nrow(d), sd = 0.5) +
+         0.1 * d$unit + 0.2 * d$period
+  d
+}
+
+d_mpd <- make_mpd_panel(n_total = 25, units_per_cohort = 5, n_periods = 5,
+                        seed = 12345)
+d_mpd$period_f <- relevel(factor(d_mpd$period), ref = "1")
+# Explicit interaction columns to match MPD's parameterization exactly.
+for (p in 2:5) {
+  d_mpd[[paste0("treated_period_", p)]] <- d_mpd$treated * (d_mpd$period == p)
+}
+fit_mpd <- lm(y ~ treated + period_f +
+                  treated_period_2 + treated_period_3 +
+                  treated_period_4 + treated_period_5 +
+                  factor(unit),
+              data = d_mpd)
+vcov_mpd_hc2 <- sandwich::vcovHC(fit_mpd, type = "HC2")
+vcov_mpd_hc2_bm <- vcovCR(fit_mpd, cluster = seq_len(nrow(d_mpd)), type = "CR2")
+ct_mpd_hc2_bm <- coef_test(fit_mpd, vcov = vcov_mpd_hc2_bm)
+output$mpd_absorbed_fe_did <- list(
+  unit = d_mpd$unit,
+  period = d_mpd$period,
+  treated = d_mpd$treated,
+  y = d_mpd$y,
+  coef = as.numeric(coef(fit_mpd)),
+  coef_names = names(coef(fit_mpd)),
+  vcov_hc2 = as.numeric(vcov_mpd_hc2),
+  vcov_hc2_shape = dim(vcov_mpd_hc2),
+  vcov_hc2_bm = as.numeric(vcov_mpd_hc2_bm),
+  vcov_hc2_bm_shape = dim(vcov_mpd_hc2_bm),
+  dof_hc2_bm = as.numeric(ct_mpd_hc2_bm$df_Satt),
+  reference_period = 1L,
+  target_period = 4L
+)
+
 output$meta <- list(
   source = "clubSandwich",
   clubSandwich_version = as.character(packageVersion("clubSandwich")),
