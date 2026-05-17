@@ -224,6 +224,15 @@ and planned follow-up enhancements:
   per-coefficient BM / CR2 DOF and raise ``NotImplementedError``.
   Routing stage 2 through ``LinearRegression`` (which supplies the
   per-coefficient DOF metadata) is queued.
+- **`vcov_type="classical"` (Wave D restriction)** — raises
+  ``NotImplementedError``. The Wave D Gardner GMM first-stage
+  uncertainty correction has not been derived for the classical
+  homoskedastic variance (different meat structure
+  ``sigma_hat^2 * (X_10' X_10)`` vs the Wave D IF outer product
+  ``Psi' Psi``). Use ``vcov_type="hc1"`` for heteroskedasticity-robust
+  SE with the GMM correction, or combine with ``cluster=<col>`` for
+  CR1 with the GMM correction; both apply the Wave D synthesis
+  (Butts §3.1 + Gardner §4 + Conley 1999) unconditionally.
 - **Balanced panel required** — every unit must observe every period.
   An unbalanced (unit, time) Ω₀ bipartite graph can produce disconnected
   FE components and unidentified stage-1 residuals on treated rows.
