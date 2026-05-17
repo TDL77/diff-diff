@@ -249,9 +249,14 @@ class PreTrendsPowerResults:
             weights = np.zeros(n_pre)
             weights[-1] = 1.0
         else:
-            # Defensive fallback for unknown violation_type values added
-            # in the future; equal weights at least produce a valid number.
-            weights = np.ones(n_pre)
+            # Fail loud on unknown violation_type values. Mirrors the raise
+            # at the end of _get_violation_weights(); prevents silent
+            # equal-weights output if a future violation_type is added to
+            # fit() but not threaded through power_at().
+            raise ValueError(
+                f"Unknown violation_type: {self.violation_type!r}. "
+                f"Expected one of: 'linear', 'constant', 'last_period', 'custom'."
+            )
 
         # Normalize weights to unit L2 norm
         norm = np.linalg.norm(weights)
