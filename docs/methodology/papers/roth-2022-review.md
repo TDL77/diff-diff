@@ -121,8 +121,10 @@ or 80% power"). Roth uses 80% as a benchmark following Cohen (1988); 50% is supp
 Under joint normality, these probabilities and conditional moments can be calculated
 ANALYTICALLY using results from Cartinhour (1990) and Manjunath & Wilhelm (2012) — Roth
 implements via the R package `tmvtnorm`. Roth verifies simulations yield similar results.
-The library should support both an analytical truncated-multivariate-normal path AND a
-simulation fallback.
+The paper-derived requirement is to compute the correct conditional moments and
+probabilities; the specific backend (analytical via `tmvtnorm`-equivalent, an
+independent port, a Monte Carlo simulator, etc.) is a library implementation choice —
+see "Library design choices" above for the proposed `method` / `n_sim` knobs.
 
 *Standard errors (Section II.C; footnote 7 equivariance):*
 - Power calculations are EXACT (no sampling variability — gamma is computed against a hypothesized population trend, not estimated)
@@ -215,7 +217,7 @@ simulation fallback.
 
 ### Relation to Existing diff-diff Estimators
 - **Pre-existing `diff_diff/pretrends.py`** (1133 lines) — implements a Wald-test-based pre-trends MDV/power workflow framed around Roth (2022); the current code path computes Wald power/MDV from the pre-period variance-covariance block rather than the full arbitrary-Sigma Proposition 1 / Proposition 3 / Proposition 4 conditional-moment computations. This paper review's main use is to audit the existing surface against the paper's exact equations and identify which Roth-2022 quantities are missing.
-- **Composes with**: `MultiPeriodDiD`, `CallawaySantAnna`, `SunAbraham`, `TwoWayFixedEffects` — any estimator producing an event-study coefficient vector and a consistent variance estimator
+- **Currently composes with** (per the shipped `compute_pretrends_power` adapter in `diff_diff/pretrends.py`): `MultiPeriodDiDResults`, `CallawaySantAnnaResults`, `SunAbrahamResults`. The adapter raises `TypeError` for other result types. Theoretical compatibility extends to any estimator producing an event-study coefficient vector and a consistent variance estimator (e.g., `TwoWayFixedEffects`), but adapters for additional result families are a follow-up audit decision.
 - **Complement to `HonestDiD` (Rambachan-Roth 2023)**: Roth 2022 asks "what bias survives a pretest under linear violations?"; Rambachan-Roth 2023 asks "what is the identified set of tau_post under bounded violations?" Both use the same (beta_hat, Sigma_hat) input contract — the library should expose a unified entry-point that can produce both Roth-2022 and HonestDiD reports from one event-study result object.
 - **Shares zero-anticipation convention with HonestDiD**: tau_pre = 0, so beta_pre = delta_pre. Cross-reference the existing `diff_diff/honest_did.py` for the contract.
 
@@ -261,7 +263,7 @@ Quoting Roth's key empirical results (for cross-validation):
 
 ## Gaps and Uncertainties
 
-- **Joint Wald acceptance region**: paper mentions joint tests only briefly (Section I.B notes 1 of 12 papers uses one). Power, bias, and coverage formulas all apply by replacing B_NIS with the joint Wald acceptance region B_W, but Roth does not work out a separate table. Library should implement both but test against R `pretrends` for the joint-Wald case (Roth's package supports it).
+- **Joint Wald acceptance region**: paper mentions joint tests only briefly (Section I.B notes 1 of 12 papers uses one). Power, bias, and coverage formulas all apply by replacing B_NIS with the joint Wald acceptance region B_W (convex, so Propositions 1+3+4 all hold), but Roth does not work out a separate table. Joint Wald is theoretically admissible under the paper's propositions, but the published R `pretrends` package surface is NIS-based (`pretrends()`, `slope_for_power()`, `*_NIS` helpers) and does NOT expose a joint-Wald parity target — any library implementation of joint-Wald PreTrendsPower will need an independent fixture or derivation rather than direct R-package parity.
 - **"Slope-of-best-fit-line t-test" acceptance region**: Table 1 column shows the t-stat for the slope of the linear pre-trend. Paper does not analyze pretests based on this t-stat as a separate acceptance region; library should NOT extrapolate without further reading the `pretrends` package source.
 - **Nonlinear violations**: Section I.C formally tabulates power only against linear violations; Section I.D extends the sign-of-bias result (Proposition 2) to monotone violations under homoskedasticity. Section III ("Practical Recommendations") explicitly endorses power analyses against hypothesized nonlinear trends via the `pretrends` package, so the general nonlinear capability is paper-supported even though the paper does not separately tabulate it. The specific named shapes the library exposes ("constant", "last_period") are R-package API conventions, not separately analyzed in the paper.
 - **Custom delta vector interface**: paper Section III endorses "power analyses for the types of violations of parallel trends deemed to be most relevant in their context," which is the paper-level framing for a user-supplied delta vector; the specific `violation_weights`-style INTERFACE used in the library and the R `pretrends` package is a package-API convention layered on top of that paper-level framework.
