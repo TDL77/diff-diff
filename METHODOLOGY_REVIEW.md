@@ -1057,7 +1057,7 @@ and covariate-adjusted specifications.)
 
 **Outstanding for promotion:**
 - Dedicated `tests/test_methodology_pretrends.py` with paper-equation-numbered Verified Components walk-through
-- R parity fixture against the `pretrends` R package (the four power calculations: linear, constant, last-period, custom). Note that `compute_pretrends_power` does not accept `violation_weights` today, so `"custom"` parity has to run through `PreTrendsPower(..., violation_weights=...)` directly until the helper is extended (TODO.md tracks the helper-extension follow-up); helper-only parity is limited to `linear` / `constant` / `last_period`.
+- R parity fixture against the `pretrends` R package at a **pinned revision** (TODO.md tracks the revision-pin follow-up; until that lands, the R-package surface claims in `docs/methodology/papers/roth-2022-review.md` are provisional). Covers the four power calculations: linear, constant, last-period, custom. Note that `compute_pretrends_power` does not accept `violation_weights` today, so `"custom"` parity has to run through `PreTrendsPower(..., violation_weights=...)` directly until the helper is extended (TODO.md tracks the helper-extension follow-up); helper-only parity is limited to `linear` / `constant` / `last_period`.
 - Verify the REGISTRY Implementation Checklist (all four items currently unchecked)
 
 ---

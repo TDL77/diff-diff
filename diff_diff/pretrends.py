@@ -1067,7 +1067,12 @@ def compute_pretrends_power(
     target_power : float, default=0.80
         Target power for MDV calculation.
     violation_type : str, default='linear'
-        Type of violation pattern.
+        Type of violation pattern. Note: this convenience helper does NOT
+        accept ``violation_weights``, so ``violation_type='custom'`` is
+        unusable from the helper (only ``linear`` / ``constant`` /
+        ``last_period`` are supported here). For custom weights, instantiate
+        ``PreTrendsPower(..., violation_weights=...)`` directly. Tracked in
+        TODO.md as a planned helper extension.
     pre_periods : list of int, optional
         Explicit list of pre-treatment periods. If None, attempts to infer
         from results. Use when you've estimated all periods as post_periods.
@@ -1114,7 +1119,12 @@ def compute_mdv(
     target_power : float, default=0.80
         Target power for MDV calculation.
     violation_type : str, default='linear'
-        Type of violation pattern.
+        Type of violation pattern. Note: this convenience helper does NOT
+        accept ``violation_weights``, so ``violation_type='custom'`` is
+        unusable from the helper (only ``linear`` / ``constant`` /
+        ``last_period`` are supported here). For custom weights, instantiate
+        ``PreTrendsPower(..., violation_weights=...)`` directly. Tracked in
+        TODO.md as a planned helper extension.
     pre_periods : list of int, optional
         Explicit list of pre-treatment periods. If None, attempts to infer
         from results. Use when you've estimated all periods as post_periods.
