@@ -46,7 +46,7 @@ This corresponds to checking individual 95% CIs of each pre-period coefficient (
 Alternative acceptance regions:
 - **Joint Wald (chi-squared)**: B_W(Sigma) = { b in R^K : b' Sigma_22^{-1} b <= chi^2_{1-alpha, K} }. **Note:** mentioned in the paper as a less common applied convention (1 of 12 surveyed papers, Section I.B). Propositions 1, 3, 4 apply to this B since it is convex; Roth does NOT separately tabulate power/bias/coverage for the Wald form.
 - **Slope-of-best-fit-line t-test**: the paper's Table 1 reports the t-statistic for the slope as an observed property of surveyed papers, but **Note (deviation from paper):** Roth does NOT analyze a slope-t-statistic acceptance region as a pretest framework. Library support for this acceptance form is an extension beyond Roth (2022).
-- **Custom user-supplied B(Sigma)**: any (measurable) acceptance set; Propositions 1, 3, 4 apply for any B (paper-supported framework). Proposition 2 (sign of bias under monotone trend) requires the specific NIS form plus Assumption 1.
+- **Custom user-supplied B(Sigma)**: any (measurable) acceptance set; Propositions 1 and 3 (conditional mean and variance) apply to any B. Proposition 4 (variance reduction / over-coverage under parallel trends) requires B to be **convex** — Roth's statement begins "Suppose that B(Sigma) is a convex set." Nonconvex custom pretests therefore lose Roth's variance-reduction / over-coverage guarantee even though the conditional mean/variance formulas still hold. Proposition 2 (sign of bias under monotone trend) requires the specific NIS form plus Assumption 1.
 
 *Conditional bias after pretesting (Proposition 1):*
 
@@ -156,7 +156,7 @@ simulation fallback.
 - R dependency: [`tmvtnorm`](https://cran.r-project.org/package=tmvtnorm) (Manjunath & Wilhelm 2012) for truncated multivariate normal moments and CDF
 
 **Requirements checklist:**
-- [ ] Acceptance regions: NIS (individual t, paper-analyzed); joint Wald and custom B (paper-supported via Propositions 1, 3, 4, not separately tabulated by Roth); **Note (deviation from paper):** slope-of-best-fit-line is an extension beyond Roth (2022) — paper tabulates the slope t-stat but does not analyze a slope-t pretest framework
+- [ ] Acceptance regions: NIS (individual t, paper-analyzed); joint Wald (convex, Propositions 1+3+4 all apply); custom B (Propositions 1+3 apply to any measurable B, Proposition 4 only if B is convex); **Note (deviation from paper):** slope-of-best-fit-line is an extension beyond Roth (2022) — paper tabulates the slope t-stat but does not analyze a slope-t pretest framework
 - [ ] Power calculation against linear violation with slope gamma — solve for gamma_{0.5} and gamma_{0.8}
 - [ ] Analytical truncated multivariate normal path (tmvtnorm-equivalent) + simulation fallback
 - [ ] Unconditional and conditional bias for arbitrary linear contrast l in R^M (using Sigma_11 for the post-treatment variance)
@@ -192,8 +192,8 @@ simulation fallback.
 | `alpha` | float in (0, 1) | 0.05 | **Current** (matches `pretrends.py`) | Standard significance level for pretest and reporting CI |
 | `target_power` | list[float] in (0, 1) | [0.5, 0.8] | **Proposed** (current API exposes scalar `power=0.8` only) | Roth's reported benchmarks (Cohen 1988 conventional 0.8; 0.5 for "even-odds detection") |
 | `l` (contrast) | array in R^M | uniform 1/M | **Proposed** (not in current API) | User-specified linear functional of tau_post |
-| `pretest_form` | enum | "individual" (NIS) | **Proposed** (current API uses `violation_type`, a different axis) | "individual" (paper-analyzed); "joint_wald" / "custom" (paper-supported via Propositions 1/3/4); "slope" — **deviation from paper**, R-package extension |
-| `acceptance_region` | callable or set | B_NIS | **Proposed** (not in current API) | Custom B(Sigma) for "custom" pretest_form (paper-supported: Propositions 1, 3, 4 apply to any B) |
+| `pretest_form` | enum | "individual" (NIS) | **Proposed** (current API uses `violation_type`, a different axis) | "individual" (paper-analyzed); "joint_wald" (convex, Propositions 1+3+4 all apply); "custom" (Propositions 1+3 always; Proposition 4 only if user's B is convex); "slope" — **deviation from paper**, R-package extension |
+| `acceptance_region` | callable or set | B_NIS | **Proposed** (not in current API) | Custom B(Sigma) for "custom" pretest_form (Propositions 1, 3 apply to any measurable B; Proposition 4 / variance-reduction guarantee additionally requires B to be convex) |
 | `method` | enum | "analytical" | **Proposed** (not in current API) | "analytical" (tmvtnorm-equivalent) or "simulation" |
 | `n_sim` | int | 10000 | **Proposed** (not in current API) | Monte Carlo iterations when method="simulation" |
 
