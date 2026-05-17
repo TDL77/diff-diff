@@ -10,7 +10,9 @@
 
 ## Methodology Registry Entry
 
-*Formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries — copy the `## PreTrendsPower` section into the registry (replacing the existing `## PreTrendsPower` stub).*
+**Status: proposed replacement text for a future REGISTRY update.** This block has **not** been merged into `docs/methodology/REGISTRY.md` yet. The current `## PreTrendsPower` stub in `REGISTRY.md` remains the **sole authoritative methodology contract** until the follow-up audit PR for `diff_diff/pretrends.py` (PR-B in the 3-PR sequence) lands and replaces it. That audit PR will also assess which proposed parameters and capabilities below are already in the shipped surface (`diff_diff/pretrends.py:442-447` currently exposes `alpha`, `power`, `violation_type`, `violation_weights`) and which require API extension.
+
+*Formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries — copy the `## PreTrendsPower` section into the registry (replacing the existing `## PreTrendsPower` stub) once PR-B is ready.*
 
 ## PreTrendsPower
 
@@ -183,15 +185,17 @@ simulation fallback.
 
 ### Tuning Parameters
 
-| Parameter | Type | Default | Selection Method |
-|-----------|------|---------|-----------------|
-| `alpha` | float in (0, 1) | 0.05 | Standard significance level for pretest and reporting CI |
-| `target_power` | list[float] in (0, 1) | [0.5, 0.8] | Roth's reported benchmarks (Cohen 1988 conventional 0.8; 0.5 for "even-odds detection") |
-| `l` (contrast) | array in R^M | uniform 1/M | User-specified linear functional of tau_post |
-| `pretest_form` | enum | "individual" (NIS) | "individual" (paper-analyzed); "joint_wald" / "custom" (paper-supported via Propositions 1/3/4); "slope" — **deviation from paper**, R-package extension |
-| `acceptance_region` | callable or set | B_NIS | Custom B(Sigma) for "custom" pretest_form (paper-supported: Propositions 1, 3, 4 apply to any B) |
-| `method` | enum | "analytical" | "analytical" (tmvtnorm-equivalent) or "simulation" |
-| `n_sim` | int | 10000 | Monte Carlo iterations when method="simulation" |
+**Note:** The parameters below are what Roth's framework requires — they are NOT necessarily the current library's exposed API. The PR-B audit will compare these proposed knobs against `diff_diff/pretrends.py:442-447` (which currently exposes `alpha`, `power`, `violation_type`, `violation_weights`) and decide which to keep, rename, extend, or defer.
+
+| Parameter | Type | Default | Status | Selection Method |
+|-----------|------|---------|--------|-----------------|
+| `alpha` | float in (0, 1) | 0.05 | **Current** (matches `pretrends.py`) | Standard significance level for pretest and reporting CI |
+| `target_power` | list[float] in (0, 1) | [0.5, 0.8] | **Proposed** (current API exposes scalar `power=0.8` only) | Roth's reported benchmarks (Cohen 1988 conventional 0.8; 0.5 for "even-odds detection") |
+| `l` (contrast) | array in R^M | uniform 1/M | **Proposed** (not in current API) | User-specified linear functional of tau_post |
+| `pretest_form` | enum | "individual" (NIS) | **Proposed** (current API uses `violation_type`, a different axis) | "individual" (paper-analyzed); "joint_wald" / "custom" (paper-supported via Propositions 1/3/4); "slope" — **deviation from paper**, R-package extension |
+| `acceptance_region` | callable or set | B_NIS | **Proposed** (not in current API) | Custom B(Sigma) for "custom" pretest_form (paper-supported: Propositions 1, 3, 4 apply to any B) |
+| `method` | enum | "analytical" | **Proposed** (not in current API) | "analytical" (tmvtnorm-equivalent) or "simulation" |
+| `n_sim` | int | 10000 | **Proposed** (not in current API) | Monte Carlo iterations when method="simulation" |
 
 ### Relation to Existing diff-diff Estimators
 - **Pre-existing `diff_diff/pretrends.py`** (1133 lines) — implements a Roth-2022 framework; this paper review's main use is to audit the existing surface against the paper's exact equations
@@ -206,7 +210,7 @@ simulation fallback.
 | # | Statement | Implementation use |
 |---|-----------|---------------------|
 | **Proposition 1** | For any B(Sigma): E[beta_hat_post | beta_hat_pre in B] = tau_post + delta_post + Sigma_{12} Sigma_{22}^{-1} (E[beta_hat_pre | beta_hat_pre in B] - beta_pre) | The main bias decomposition formula. Drives the conditional-bias computation in step 4 of the algorithm. |
-| **Proposition 2** | Under Assumption 1 (homoskedastic-equicorrelated Sigma) and monotone trend (delta_pre < 0, delta_post > 0): E[beta_hat_post | beta_hat_pre in B_NIS] > beta_post > tau_post | Justifies WARN that conditional bias is worse than unconditional bias under monotone trends — applicable in many but not all empirical settings. Library should detect when Assumption 1 holds (e.g., balanced panel + cluster-robust at unit level + equicorrelated errors) and surface this warning more strongly. |
+| **Proposition 2** | Under Assumption 1 (homoskedastic-equicorrelated Sigma) and monotone trend (delta_pre < 0, delta_post > 0): E[beta_hat_post | beta_hat_pre in B_NIS] > beta_post > tau_post | Justifies a WARN that conditional bias is worse than unconditional bias under monotone trends — applicable in many but not all empirical settings. Assumption 1 is a condition on the *estimated covariance matrix* Sigma, not on design metadata; any sharper warning must therefore be triggered by a *direct numerical check* of Sigma (approximately-constant diagonal entries + approximately-constant positive off-diagonal entries below the diagonal). Without such a check, the library should issue only the generic caveat that the sign-of-bias result is ambiguous outside Assumption 1. |
 | **Proposition 3** | Var[beta_hat_post | beta_hat_pre in B] = Var[beta_hat_post] + (Sigma_{12} Sigma_{22}^{-1}) (Var[beta_hat_pre | beta_hat_pre in B] - Var[beta_hat_pre]) (Sigma_{12} Sigma_{22}^{-1})' | The conditional-variance formula; drives the over/under-coverage analysis. |
 | **Proposition 4** | If B(Sigma) is convex: Var[beta_hat_post | beta_hat_pre in B] <= Var[beta_hat_post]. CIs based on unconditional Sigma OVER-cover under parallel trends, UNDER-cover under violations. | Justifies the "do not interpret a wide CI as ample power" warning. |
 
@@ -249,6 +253,6 @@ Quoting Roth's key empirical results (for cross-validation):
 - **K = 0 (no pre-periods)**: trivially no pretest possible; library should error.
 - **Heteroskedastic Sigma**: Proposition 2 requires Assumption 1. Library implements computations under arbitrary Sigma via Proposition 1; the sign of the bias-amplification effect is then NOT guaranteed. Library should NOT print "pretest amplifies bias under monotone trends" unless Assumption 1 is approximately satisfied (or just always issue the conditional warning).
 - **Equation 4 publication-rules analysis**: not standardly implemented in PreTrendsPower-style tools. Roth notes it as part of the discussion (Section II.D) but does not provide a numerical workflow for users. Library should NOT attempt to implement Equation 4 unless requested.
-- **Connection to `compute_pretrends_power` library helper** (referenced in feedback memory `feedback_verdict_powered_by_tools.md`): the paper review confirms that "minimum slope detectable at 80% power" is exactly Roth's gamma_{0.8}, and the library helper should compute and surface this. Need to verify the existing helper's calling convention against the paper's framework when auditing `diff_diff/pretrends.py`.
+- **Connection to `compute_pretrends_power` library helper**: the paper review confirms that "minimum slope detectable at 80% power" is exactly Roth's gamma_{0.8}, and the library helper should compute and surface this. Need to verify the existing helper's calling convention against the paper's framework when auditing `diff_diff/pretrends.py`.
 - **R `pretrends` package version**: paper cites the package at https://github.com/jonathandroth/pretrends; no specific version cited. R-parity work should pin to a specific commit and document.
 - **Compatibility with multi-cohort estimators**: Remark 1 lists Callaway-Sant'Anna, Sun-Abraham, etc. as compatible. The paper does not detail how to construct (beta_hat, Sigma_hat) from those estimators when the event-study output is multi-cohort (e.g., cohort × event-time matrix). Library should document the aggregation convention (per Sun-Abraham overall ATT or per Callaway-Sant'Anna `aggregate=event`).
