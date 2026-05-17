@@ -209,8 +209,30 @@ class PreTrendsPowerResults:
         -------
         float
             Power to detect violation of magnitude M.
+
+        Raises
+        ------
+        NotImplementedError
+            If the fit was made with ``violation_type="custom"``. The
+            ``PreTrendsPowerResults`` dataclass does not currently persist
+            the fitted ``violation_weights``, so this method cannot
+            reconstruct the custom weights. Refit
+            ``PreTrendsPower(violation_type="custom", violation_weights=...)``
+            with the new ``M`` instead. Tracked in TODO.md as a planned
+            follow-up to persist the fitted weights.
         """
         from scipy import stats
+
+        if self.violation_type == "custom":
+            raise NotImplementedError(
+                "PreTrendsPowerResults.power_at() does not support "
+                "violation_type='custom': fitted violation_weights are "
+                "not persisted on the result object, so the custom weights "
+                "cannot be reconstructed. Refit "
+                "PreTrendsPower(violation_type='custom', "
+                "violation_weights=...) with the new M instead. "
+                "See TODO.md (PreTrendsPower power_at custom path)."
+            )
 
         n_pre = self.n_pre_periods
 
@@ -227,8 +249,14 @@ class PreTrendsPowerResults:
             weights = np.zeros(n_pre)
             weights[-1] = 1.0
         else:
-            # For custom, we can't reconstruct - use equal weights as fallback
-            weights = np.ones(n_pre)
+            # Fail loud on unknown violation_type values. Mirrors the raise
+            # at the end of _get_violation_weights(); prevents silent
+            # equal-weights output if a future violation_type is added to
+            # fit() but not threaded through power_at().
+            raise ValueError(
+                f"Unknown violation_type: {self.violation_type!r}. "
+                f"Expected one of: 'linear', 'constant', 'last_period', 'custom'."
+            )
 
         # Normalize weights to unit L2 norm
         norm = np.linalg.norm(weights)
@@ -1067,7 +1095,18 @@ def compute_pretrends_power(
     target_power : float, default=0.80
         Target power for MDV calculation.
     violation_type : str, default='linear'
-        Type of violation pattern.
+        Type of violation pattern. This convenience helper supports
+        ``linear`` / ``constant`` / ``last_period`` only and does NOT
+        accept ``violation_weights``, so passing
+        ``violation_type='custom'`` will raise ``ValueError`` from the
+        underlying ``PreTrendsPower`` constructor (which requires
+        ``violation_weights`` when ``violation_type='custom'``). To use a
+        custom violation pattern, instantiate ``PreTrendsPower(...,
+        violation_weights=...)`` directly. Note that
+        ``PreTrendsPowerResults.power_at()`` on such a fit raises
+        ``NotImplementedError`` because fitted weights are not yet
+        persisted on the result object; refit with the new ``M`` instead.
+        Both gaps are tracked in TODO.md until the follow-up audit lands.
     pre_periods : list of int, optional
         Explicit list of pre-treatment periods. If None, attempts to infer
         from results. Use when you've estimated all periods as post_periods.
@@ -1114,7 +1153,18 @@ def compute_mdv(
     target_power : float, default=0.80
         Target power for MDV calculation.
     violation_type : str, default='linear'
-        Type of violation pattern.
+        Type of violation pattern. This convenience helper supports
+        ``linear`` / ``constant`` / ``last_period`` only and does NOT
+        accept ``violation_weights``, so passing
+        ``violation_type='custom'`` will raise ``ValueError`` from the
+        underlying ``PreTrendsPower`` constructor (which requires
+        ``violation_weights`` when ``violation_type='custom'``). To use a
+        custom violation pattern, instantiate ``PreTrendsPower(...,
+        violation_weights=...)`` directly. Note that
+        ``PreTrendsPowerResults.power_at()`` on such a fit raises
+        ``NotImplementedError`` because fitted weights are not yet
+        persisted on the result object; refit with the new ``M`` instead.
+        Both gaps are tracked in TODO.md until the follow-up audit lands.
     pre_periods : list of int, optional
         Explicit list of pre-treatment periods. If None, attempts to infer
         from results. Use when you've estimated all periods as post_periods.

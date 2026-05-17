@@ -328,13 +328,20 @@ a library setting.
   `DiagnosticReport.pretrends_power` block records
   `covariance_source: "diag_fallback_available_full_vcov_unused"` in
   that case, and `BusinessReport` downgrades a `well_powered` tier to
-  `moderately_powered` before rendering prose. This is a known
-  conservative deviation from the documented "use the full pre-period
-  covariance" position — it prevents the diagonal approximation from
-  producing an overly optimistic "well-powered" claim when correlated
-  pre-period errors could tighten the MDV. The right long-term fix is
-  to teach `compute_pretrends_power()` to consume `event_study_vcov`
-  and `event_study_vcov_index`; until that lands this downgrade stays.
+  `moderately_powered` before rendering prose. This is a documented
+  deviation from the paper-derived "use the full pre-period covariance"
+  position. **Not provably conservative**: under Roth (2022)'s NIS
+  framework and the library's Wald form, the MDV/power objects depend
+  on the off-diagonals of Σ_22, and the direction of the discrepancy
+  between full-Σ_22 and diag(ses^2) depends on the sign and magnitude
+  of the dropped correlations — see the `**Note (deviation from paper
+  — diagonal pre-period VCV fallback):**` block under `## PreTrendsPower`
+  in `docs/methodology/REGISTRY.md`. The `well_powered → moderately_powered`
+  downgrade in BusinessReport reduces the chance of an overly optimistic
+  claim in practice, but it is not a proof of conservatism. The right
+  long-term fix is to teach `compute_pretrends_power()` to consume
+  `event_study_vcov` and `event_study_vcov_index`; until that lands the
+  downgrade stays.
 
 - **Note:** Unit-translation policy. BusinessReport does not
   arithmetically translate log-points to percents or level effects to

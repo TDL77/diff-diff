@@ -2761,7 +2761,7 @@ CRITICAL: δ_pre = β_pre pins pre-treatment violations to observed coefficients
 
 ## PreTrendsPower
 
-**Primary source:** [Roth, J. (2022). Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends. *American Economic Review: Insights*, 4(3), 305-322.](https://doi.org/10.1257/aeri.20210236)
+**Primary source:** [Roth, J. (2022). Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends. *American Economic Review: Insights*, 4(3), 305-322.](https://doi.org/10.1257/aeri.20210236). Paper review on file: `docs/methodology/papers/roth-2022-review.md` (non-authoritative source audit; this REGISTRY entry remains the authoritative methodology contract).
 
 **Key implementation requirements:**
 
@@ -2793,6 +2793,10 @@ Violation types:
 - **Last period**: δ_{-1} = c, others zero
 - **Custom**: user-specified pattern
 
+- **Note (deviation from paper — `linear` violation pattern):** the shipped `PreTrendsPower._get_violation_weights("linear")` constructs `[n_pre-1, ..., 1, 0]` from `n_pre` alone and `PreTrendsPower.fit()` never threads the actual relative-time labels into that construction (`pretrends.py:488-531`, `pretrends.py:862-866`). For irregular or anticipation-shifted pre-period grids (e.g., `t ∈ {-5, -3, -1}`), this means the slope reported as MDV is NOT in Roth's `γ` units — the shifted/normalized direction effectively assumes contiguous relative times `{-(n_pre-1), ..., -1}`. The follow-up audit (tracked in TODO.md) will either rebuild `linear` weights from the sorted actual relative-time values and expose the parameter in Roth's `γ` units, or formally retain the current shifted/normalized contract with this Note as the deviation record.
+
+- **Note (silent-failure guard — `power_at()` with `violation_type="custom"`):** `PreTrendsPowerResults` does not currently persist the fitted `violation_weights`, so `power_at(M)` cannot reconstruct the custom direction. As of this commit, `PreTrendsPowerResults.power_at()` raises `NotImplementedError` for `violation_type="custom"` rather than silently returning equal-weights output. To compute power at a new `M` for a custom fit, refit `PreTrendsPower(violation_type="custom", violation_weights=...)` with the new `M`. Tracked in TODO.md as a planned follow-up to persist the fitted weights and lift the guard.
+
 *Standard errors:*
 - Power calculations are exact (no sampling variability)
 - Uncertainty comes from estimated Σ
@@ -2801,6 +2805,13 @@ Violation types:
 - Perfect collinearity in pre-periods: test not well-defined
 - Single pre-period: power calculation trivial
 - Very high power: MDV approaches zero
+
+- **Note (deviation from paper — diagonal pre-period VCV fallback):** Roth (2022)'s power and bias objects (both the paper-analyzed NIS box probability and the library's Wald / noncentral-χ² form) operate on the full pre-period covariance block Σ_22. The shipped `compute_pretrends_power` adapter currently uses different sources for the pre-period covariance by result type:
+  - `MultiPeriodDiDResults` (`pretrends.py:592-601`): extracts the full pre-period sub-block from `results.vcov` when `interaction_indices` is populated; falls back to `diag(ses^2)` otherwise.
+  - `CallawaySantAnnaResults` (`pretrends.py:609-652`): hard-codes `vcov = diag(ses^2)`. Non-bootstrap CS fits persist a full `event_study_vcov` matrix (`staggered_results.py:126-128`), so the diag fallback is a deliberate choice in that path. Bootstrap CS fits clear `event_study_vcov` before storing results (`staggered.py:2032-2036`) to prevent mixing analytical VCV with bootstrap SEs, so the full-Σ22 route is not available for bootstrap fits at all.
+  - `SunAbrahamResults` (`pretrends.py:660-687`): hard-codes `vcov = diag(ses^2)`; the diag fallback is *forced* because `SunAbrahamResults` does not currently expose an event-study or cohort covariance matrix.
+
+  Dropping the off-diagonals is NOT a paper-supported numerical choice and is NOT guaranteed to be conservative for MDV/power (the direction of the discrepancy depends on the sign and magnitude of the dropped correlations). The PR-B follow-up audit (tracked in `TODO.md`) will either extend full-sub-VCV consumption to all three paths (with SA also requiring upstream surface work on `SunAbrahamResults`) or formally retain the diag fallback with explicit miscalibration framing. See `docs/methodology/papers/roth-2022-review.md` for the full derivation.
 
 **Reference implementation(s):**
 - R: `pretrends` package (Roth's official package)

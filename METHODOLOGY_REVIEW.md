@@ -1053,11 +1053,11 @@ and covariate-adjusted specifications.)
 **Documentation in place:**
 - REGISTRY.md section: `## PreTrendsPower` (MDV at target power, four violation types — linear/constant/last_period/custom, power curve plotting, HonestDiD integration)
 - Implementation: `tests/test_pretrends.py` (point-estimator, MDV, power curve, sensitivity) plus event-study coverage in `tests/test_pretrends_event_study.py`
+- Paper review on file: `docs/methodology/papers/roth-2022-review.md` (added 2026-05-17; non-authoritative source audit — registry entry remains authoritative until the follow-up audit PR)
 
 **Outstanding for promotion:**
-- Paper review under `docs/methodology/papers/roth-2022-review.md`
 - Dedicated `tests/test_methodology_pretrends.py` with paper-equation-numbered Verified Components walk-through
-- R parity fixture against the `pretrends` R package (the four power calculations: linear, constant, last-period, custom)
+- R parity fixture against the `pretrends` R package at a **pinned revision** (TODO.md tracks the revision-pin follow-up; until that lands, the R-package surface claims in `docs/methodology/papers/roth-2022-review.md` are provisional). Covers the four power calculations: linear, constant, last-period, custom. Note that `compute_pretrends_power` does not accept `violation_weights` today, so `"custom"` parity has to run through `PreTrendsPower(..., violation_weights=...)` directly until the helper is extended (TODO.md tracks the helper-extension follow-up); helper-only parity is limited to `linear` / `constant` / `last_period`.
 - Verify the REGISTRY Implementation Checklist (all four items currently unchecked)
 
 ---
