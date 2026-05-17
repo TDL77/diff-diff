@@ -1092,14 +1092,16 @@ def compute_pretrends_power(
     violation_type : str, default='linear'
         Type of violation pattern. This convenience helper supports
         ``linear`` / ``constant`` / ``last_period`` only and does NOT
-        accept ``violation_weights``, so ``violation_type='custom'`` is
-        unusable from the helper. The custom path on
-        ``PreTrendsPower(..., violation_weights=...)`` accepts custom
-        weights at fit time but has known issues with
-        ``PreTrendsPowerResults.power_at()`` (fitted weights are not
-        persisted on the result object; ``power_at()`` silently falls
-        back to equal weights). Both gaps are tracked in TODO.md until
-        a follow-up audit lands.
+        accept ``violation_weights``, so passing
+        ``violation_type='custom'`` will raise ``ValueError`` from the
+        underlying ``PreTrendsPower`` constructor (which requires
+        ``violation_weights`` when ``violation_type='custom'``). To use a
+        custom violation pattern, instantiate ``PreTrendsPower(...,
+        violation_weights=...)`` directly. Note that
+        ``PreTrendsPowerResults.power_at()`` on such a fit raises
+        ``NotImplementedError`` because fitted weights are not yet
+        persisted on the result object; refit with the new ``M`` instead.
+        Both gaps are tracked in TODO.md until the follow-up audit lands.
     pre_periods : list of int, optional
         Explicit list of pre-treatment periods. If None, attempts to infer
         from results. Use when you've estimated all periods as post_periods.
@@ -1148,14 +1150,16 @@ def compute_mdv(
     violation_type : str, default='linear'
         Type of violation pattern. This convenience helper supports
         ``linear`` / ``constant`` / ``last_period`` only and does NOT
-        accept ``violation_weights``, so ``violation_type='custom'`` is
-        unusable from the helper. The custom path on
-        ``PreTrendsPower(..., violation_weights=...)`` accepts custom
-        weights at fit time but has known issues with
-        ``PreTrendsPowerResults.power_at()`` (fitted weights are not
-        persisted on the result object; ``power_at()`` silently falls
-        back to equal weights). Both gaps are tracked in TODO.md until
-        a follow-up audit lands.
+        accept ``violation_weights``, so passing
+        ``violation_type='custom'`` will raise ``ValueError`` from the
+        underlying ``PreTrendsPower`` constructor (which requires
+        ``violation_weights`` when ``violation_type='custom'``). To use a
+        custom violation pattern, instantiate ``PreTrendsPower(...,
+        violation_weights=...)`` directly. Note that
+        ``PreTrendsPowerResults.power_at()`` on such a fit raises
+        ``NotImplementedError`` because fitted weights are not yet
+        persisted on the result object; refit with the new ``M`` instead.
+        Both gaps are tracked in TODO.md until the follow-up audit lands.
     pre_periods : list of int, optional
         Explicit list of pre-treatment periods. If None, attempts to infer
         from results. Use when you've estimated all periods as post_periods.

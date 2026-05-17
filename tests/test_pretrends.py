@@ -581,6 +581,33 @@ class TestConvenienceFunctions:
         assert isinstance(mdv, float)
         assert mdv > 0
 
+    def test_compute_pretrends_power_rejects_custom_violation_type(
+        self, mock_multiperiod_results
+    ):
+        """compute_pretrends_power(..., violation_type='custom') must raise ValueError.
+
+        The helper does not accept ``violation_weights``, so a custom-type
+        call cannot supply the required weights vector. The underlying
+        PreTrendsPower constructor must raise to prevent the helper from
+        silently coercing a custom request into a degenerate fit. See
+        REGISTRY.md PreTrendsPower section + docs/methodology/papers/
+        roth-2022-review.md (helper/class API gap).
+        """
+        with pytest.raises(ValueError, match="violation_weights"):
+            compute_pretrends_power(
+                mock_multiperiod_results, violation_type="custom"
+            )
+
+    def test_compute_mdv_rejects_custom_violation_type(self, mock_multiperiod_results):
+        """compute_mdv(..., violation_type='custom') must raise ValueError.
+
+        Same contract as ``compute_pretrends_power``: the helper does not
+        accept ``violation_weights``, so the custom path is unusable from
+        the helper.
+        """
+        with pytest.raises(ValueError, match="violation_weights"):
+            compute_mdv(mock_multiperiod_results, violation_type="custom")
+
 
 # =============================================================================
 # Tests for get_params and set_params
