@@ -1200,15 +1200,18 @@ class TestMPDAbsorbedFERParity:
     builds the full-dummy design that R's `lm()` produces.
 
     Collinearity note: MPD's `treated` is a time-invariant ever-treated
-    indicator, so it is perfectly collinear with the sum of treated-cohort
-    unit dummies post-auto-route. `solve_ols` resolves this by dropping
-    one column from that collinear set under R-style rank-deficiency
-    handling. In the shipped parity fixture the dropped column is a unit
-    dummy from the never-treated cohort (`unit_25`) — the `treated` main
-    effect remains finite there — but the specific column dropped is
-    pivot-order dependent and not guaranteed across fixtures. Tests
-    therefore pin parity on a per-period interaction (`treated:period_4`)
-    which is identified independent of that choice, exposed as
+    indicator, so it lies in the span of the intercept and the
+    post-auto-route unit FE dummies (under `pd.get_dummies(drop_first=True)`
+    the dropped reference unit is folded into the intercept; the exact
+    alias relation depends on the omitted category and is NOT simply
+    "the sum of treated-cohort unit dummies"). `solve_ols` resolves this
+    by dropping one column from the collinear set under R-style
+    rank-deficiency handling. In the shipped parity fixture the dropped
+    column is a unit dummy from the never-treated cohort (`unit_25`) and
+    the `treated` main effect remains finite, but the specific column
+    dropped is pivot-order and dummy-coding dependent. Tests therefore
+    pin parity on a per-period interaction (`treated:period_4`) which is
+    identified independent of that choice, exposed as
     `result.period_effects[4]`.
     """
 
@@ -1483,3 +1486,74 @@ class TestMPDAbsorbedFERParity:
         np.testing.assert_allclose(pe_a.se, pe_f.se, atol=1e-12)
         np.testing.assert_allclose(res.avg_att, res_fe.avg_att, atol=1e-12)
         np.testing.assert_allclose(res.avg_se, res_fe.avg_se, atol=1e-12)
+
+    def test_absorb_hc2_bm_replicate_weights_auto_routes(self):
+        """Replicate-weight survey design + absorb + HC2-BM auto-routes
+        through `compute_replicate_vcov` on the full-dummy design.
+
+        The CHANGELOG/REGISTRY claim that, under the auto-route, the
+        survey-replicate absorb-refit branch at `estimators.py:1693` is
+        short-circuited (no per-replicate refit needed because the
+        full-dummy design does not depend on replicate weights — the
+        standard `compute_replicate_vcov` path applies directly). This
+        test pins the parity invariant on a JK1 fixture: `absorb=`
+        + replicate weights must produce the same `period_effects`
+        and `avg_att` SEs as the explicit `fixed_effects=` form."""
+        from diff_diff import SurveyDesign
+
+        d = self._load_golden()
+        rng = np.random.default_rng(20260420)
+        n = len(d["y"])
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "y": d["y"],
+                "weight": rng.uniform(0.5, 2.0, size=n),
+            }
+        )
+        # 10 JK1 jackknife replicate-weight columns; weights drawn from
+        # {0.5, 1.5} match the BRR pattern of the existing replicate
+        # tests in this file.
+        rep_cols = [f"rep{r}" for r in range(10)]
+        for col in rep_cols:
+            data[col] = rng.choice([0.5, 1.5], size=n)
+        sd = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            replicate_scale=1.0,
+        )
+        res_absorb = MultiPeriodDiD(vcov_type="hc2_bm").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="period",
+            absorb=["unit", "period"],
+            reference_period=int(d["reference_period"]),
+            unit="unit",
+            survey_design=sd,
+        )
+        res_fe = MultiPeriodDiD(vcov_type="hc2_bm").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="period",
+            fixed_effects=["unit", "period"],
+            reference_period=int(d["reference_period"]),
+            unit="unit",
+            survey_design=sd,
+        )
+        target_period = int(d["target_period"])
+        pe_a = res_absorb.period_effects[target_period]
+        pe_f = res_fe.period_effects[target_period]
+        assert np.isfinite(pe_a.effect)
+        assert np.isfinite(pe_a.se)
+        # The auto-route short-circuits the absorb-refit branch and routes
+        # both calls through the standard replicate-vcov path; SE parity
+        # is therefore exact (bit-identical, not just to within 1e-10).
+        np.testing.assert_allclose(pe_a.effect, pe_f.effect, atol=1e-12)
+        np.testing.assert_allclose(pe_a.se, pe_f.se, atol=1e-12)
+        np.testing.assert_allclose(res_absorb.avg_att, res_fe.avg_att, atol=1e-12)
+        np.testing.assert_allclose(res_absorb.avg_se, res_fe.avg_se, atol=1e-12)
