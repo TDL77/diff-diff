@@ -208,8 +208,23 @@ def _compute_gmm_corrected_meat(
     # 3. Kernel dispatch.
     if vcov_type == "hc1":
         # K = I_n: meat = Psi' Psi with HC1 finite-sample multiplier.
+        # Fail closed when n - p_2 <= 0 (saturated design — every degree
+        # of freedom consumed by the stage-2 design): the multiplier
+        # n / (n - p_2) is undefined, so NaN-propagate per
+        # `feedback_no_silent_failures` rather than clamping the
+        # denominator and emitting finite SE on an underdetermined fit.
+        if n - p_2 <= 0:
+            warnings.warn(
+                "SpilloverDiD Wave D HC1 sandwich: saturated stage-2 design "
+                f"(n_obs={n}, effective_rank={p_2}, n-p_2={n - p_2} <= 0). "
+                "The HC1 finite-sample multiplier n/(n-p) is undefined. "
+                "Returning NaN meat so downstream inference NaN-propagates.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return np.full((p_2, p_2), np.nan)
         meat_unscaled = Psi.T @ Psi
-        multiplier = n / max(n - p_2, 1)
+        multiplier = n / (n - p_2)
         meat = multiplier * meat_unscaled
     elif vcov_type == "cluster":
         if cluster_ids is None:
@@ -223,16 +238,29 @@ def _compute_gmm_corrected_meat(
         G = len(unique_clusters)
         # Mirror linalg.py:1942 — reject G<2 so the CR1 finite-sample
         # multiplier G/(G-1) doesn't fabricate finite output on a degenerate
-        # one-cluster sample. (Round 1 codex P0 fix.)
+        # one-cluster sample.
         if G < 2:
             raise ValueError(f"Need at least 2 clusters for cluster-robust SEs, got {G}")
+        # Fail closed on saturated design (n - p_2 <= 0). The CR1
+        # multiplier (n-1)/(n-p) is undefined; emitting finite SE here
+        # would be silently wrong.
+        if n - p_2 <= 0:
+            warnings.warn(
+                "SpilloverDiD Wave D CR1 sandwich: saturated stage-2 design "
+                f"(n_obs={n}, effective_rank={p_2}, n-p_2={n - p_2} <= 0). "
+                "The CR1 finite-sample multiplier (n-1)/(n-p) is undefined. "
+                "Returning NaN meat so downstream inference NaN-propagates.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return np.full((p_2, p_2), np.nan)
         S_cluster = np.zeros((G, p_2))
         for j in range(p_2):
             np.add.at(S_cluster[:, j], cluster_indices, Psi[:, j])
         meat_unscaled = S_cluster.T @ S_cluster
         # CR1 finite-sample multiplier: G/(G-1) * (n-1)/(n-p_2). Standard
         # cluster-robust convention (Stata, R `sandwich::vcovCL(type='CR1')`).
-        multiplier = (G / (G - 1)) * ((n - 1) / max(n - p_2, 1))
+        multiplier = (G / (G - 1)) * ((n - 1) / (n - p_2))
         meat = multiplier * meat_unscaled
     elif vcov_type == "conley":
         if conley_coords is None or conley_cutoff_km is None or conley_metric is None:

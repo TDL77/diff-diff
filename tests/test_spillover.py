@@ -4458,6 +4458,54 @@ class TestSpilloverDiDWaveDPublicVarianceContract:
             with pytest.raises(ValueError, match="at least 2 clusters"):
                 est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
 
+    def test_saturated_design_yields_nan_se_not_finite(self):
+        """`n_obs == p_2` saturated stage-2 design: HC1 multiplier
+        ``n/(n-p)`` is undefined. Wave D fails closed by returning NaN
+        meat → NaN SE downstream, rather than clamping the denominator
+        to 1 and emitting a finite SE on an underdetermined fit.
+        """
+        from scipy import sparse
+
+        from diff_diff.two_stage import _compute_gmm_corrected_meat
+
+        # Construct a saturated synthetic Psi fixture directly through the
+        # helper (avoids manufacturing a real saturated SpilloverDiD panel,
+        # which is constrained by the validator). n_obs == p_2 == 4.
+        n, p_1, p_2 = 4, 3, 4
+        rng = np.random.default_rng(0)
+        X_1 = sparse.csr_matrix(rng.standard_normal((n, p_1)))
+        X_10 = sparse.csr_matrix(rng.standard_normal((n, p_1)))
+        eps_10 = rng.standard_normal(n)
+        X_2 = rng.standard_normal((n, p_2))
+        eps_2 = rng.standard_normal(n)
+
+        import warnings as _w
+
+        for vmode, kwargs in [
+            ("hc1", {}),
+            ("cluster", {"cluster_ids": np.array([0, 0, 1, 1])}),
+        ]:
+            with _w.catch_warnings(record=True) as caught:
+                _w.simplefilter("always")
+                meat = _compute_gmm_corrected_meat(
+                    X_1_sparse=X_1,
+                    X_10_sparse=X_10,
+                    eps_10=eps_10,
+                    X_2=X_2,
+                    eps_2=eps_2,
+                    vcov_type=vmode,
+                    **kwargs,
+                )
+            assert np.all(np.isnan(meat)), (
+                f"vcov_type={vmode!r} saturated design (n=p_2={n}) returned "
+                f"finite meat instead of NaN: {meat!r}"
+            )
+            saturation_warning_fired = any("saturated" in str(w.message) for w in caught)
+            assert saturation_warning_fired, (
+                f"vcov_type={vmode!r} saturated design did not emit the "
+                f"expected saturation warning"
+            )
+
     def test_classical_vcov_raises_with_clear_message(self):
         """`vcov_type="classical"` raises NotImplementedError upfront with a
         clear remediation message rather than failing deep inside the GMM

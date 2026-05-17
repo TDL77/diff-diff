@@ -160,19 +160,19 @@ Estimator Comparison
      - ``D=0`` (untreated)
      - N/A (single stage)
    * - Conley spatial-HAC SE
-     - Yes (via solve_ols at stage 2)
+     - Yes (Wave D GMM-corrected sandwich)
      - Not yet supported
      - Yes
    * - Cluster-robust SE
-     - Yes (HC1 + CR1 via solve_ols)
+     - Yes (HC1 + CR1, Wave D GMM-corrected sandwich)
      - Yes (GMM sandwich + clusters)
      - Yes
 
-Wave B MVP limitations
-----------------------
+Restrictions and follow-ups
+---------------------------
 
-The current implementation has the following documented limitations,
-planned as follow-up enhancements:
+The current implementation has the following documented restrictions
+and planned follow-up enhancements:
 
 - **Gardner GMM first-stage correction at stage 2** — SHIPPED in Wave D.
   Stage-2 variance now applies the influence-function-based correction
