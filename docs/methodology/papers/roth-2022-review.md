@@ -2,9 +2,9 @@
 
 **Authors:** Jonathan Roth
 **Citation:** Roth, J. (2022). Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends. *American Economic Review: Insights*, 4(3), 305-322.
-**PDF reviewed:** papers/roth-2022.pdf (18 pages, content pages 1-15)
-**Review date:** 2026-05-16
 **DOI:** https://doi.org/10.1257/aeri.20210236
+**Source reviewed:** AER:I 4(3), 305-322 (18 pages, content pages 1-15). PDF was reviewed externally and is not committed to the repository (the `/papers/` working directory is gitignored). Reproduce by downloading the published article via the DOI above or from the author's page at https://www.jonathandroth.com/.
+**Review date:** 2026-05-16
 
 ---
 
