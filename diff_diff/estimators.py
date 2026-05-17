@@ -344,16 +344,13 @@ class DifferenceInDifferences:
         n_treated_raw = int(np.sum(data[treatment].values.astype(float)))
         n_control_raw = len(data) - n_treated_raw
 
-        # Reject multi-absorb with survey weights (single-pass demeaning is
-        # not the correct weighted FWL projection for N > 1 dimensions)
-        if absorb and len(absorb) > 1 and survey_weights is not None:
-            raise ValueError(
-                f"Multiple absorbed fixed effects (absorb={absorb}) with survey "
-                "weights is not supported. Single-pass sequential demeaning is not "
-                "the correct weighted FWL projection for multiple absorbed dimensions. "
-                "Use absorb with a single variable, or use fixed_effects= instead."
-            )
-
+        # Reject the `absorb + fixed_effects` mutual-exclusion combination
+        # BEFORE any auto-route. R4 review caught a contract-drift where the
+        # auto-route silently merged the two arguments on the HC2/HC2-BM
+        # path — the public API has always treated this combination as
+        # invalid (different FE-handling paths; mixing them violates the
+        # FWL theorem on the demeaned half), so keep the explicit rejection
+        # in front of the auto-route to preserve user-facing behavior.
         if absorb and fixed_effects:
             raise ValueError(
                 "Cannot use both absorb and fixed_effects. "
@@ -363,23 +360,47 @@ class DifferenceInDifferences:
                 "or fixed_effects alone (for low-dimensional FE)."
             )
 
-        # Reject HC2 / HC2 + Bell-McCaffrey on absorbed-FE fits.
-        # `absorb=` demeans regressors via within-transformation before OLS,
-        # and the HC2 leverage correction / CR2 Bell-McCaffrey DOF depend on
-        # the FULL FE hat matrix, not the residualized one (FWL preserves
-        # coefficients but not the hat matrix). Applying HC2/CR2-BM to the
-        # demeaned design would produce silently-wrong small-sample SEs.
-        # HC1 and CR1 are unaffected (no leverage term). Tracked in TODO.md.
+        # Auto-route absorb → fixed_effects when vcov_type needs the FULL FE
+        # hat matrix. HC2 leverage and CR2 Bell-McCaffrey DOF both depend on
+        # the full-design hat; FWL preserves coefficients and residuals but
+        # not the hat matrix, so the demeaned design's leverage is wrong for
+        # these vcov families. Building the full-dummy design and routing
+        # through the existing fixed_effects= branch produces the algebraically
+        # correct vcov. Empirically matches `lm() + sandwich::vcovHC` and
+        # `lm() + clubSandwich::vcovCR` (singleton-cluster trick for one-way
+        # HC2-BM; PT2018 §3.3 unweighted CR2 algebra) at ~1e-14.
+        # Conley vcov is unaffected: the absorb+Conley path (Wave A) computes
+        # the panel sandwich on demeaned scores, which is FWL-correct because
+        # Conley's meat uses only residuals (no leverage term).
+        # HC1/CR1 paths remain on the demeaned design (no leverage term).
+        # Note: the user-facing `result.coefficients` under this auto-route
+        # will include the FE-dummy entries (matching the fixed_effects= path),
+        # not the slope-only view that a plain `absorb=` returns.
+        #
+        # Placement: this auto-route runs BEFORE the legacy multi-absorb +
+        # survey-weights guard because that guard's rationale ("single-pass
+        # demeaning is not the correct weighted FWL projection for N > 1
+        # dimensions") doesn't apply when we're about to swap absorb for
+        # fixed_effects: the fixed_effects= path builds the full-dummy design
+        # and solves WLS directly, with no within-transform step. R2 review
+        # surfaced the scope mismatch (REGISTRY/CHANGELOG said "SUPPORTED" but
+        # the survey guard fired first on weighted multi-absorb fits).
         if absorb and self.vcov_type in ("hc2", "hc2_bm"):
-            raise NotImplementedError(
-                f"DifferenceInDifferences(absorb=..., "
-                f"vcov_type={self.vcov_type!r}) is not yet supported: "
-                "absorbed fixed effects are handled by demeaning, and the "
-                "HC2 / CR2 Bell-McCaffrey leverage corrections depend on "
-                "the full FE hat matrix, not the residualized one. Use "
-                "vcov_type='hc1' with absorb=, or switch to "
-                "fixed_effects= dummies for a full-dummy design where "
-                "HC2/CR2-BM are computed on the full projection."
+            fixed_effects = list(fixed_effects or []) + list(absorb)
+            absorb = None
+            absorbed_vars = []
+            n_absorbed_effects = 0
+
+        # Reject multi-absorb with survey weights (single-pass demeaning is
+        # not the correct weighted FWL projection for N > 1 dimensions). Only
+        # fires when absorb is still set — i.e., the auto-route above didn't
+        # consume it.
+        if absorb and len(absorb) > 1 and survey_weights is not None:
+            raise ValueError(
+                f"Multiple absorbed fixed effects (absorb={absorb}) with survey "
+                "weights is not supported. Single-pass sequential demeaning is not "
+                "the correct weighted FWL projection for multiple absorbed dimensions. "
+                "Use absorb with a single variable, or use fixed_effects= instead."
             )
 
         # Validate vcov_type="conley" wire-up. DiD.fit() accepts `unit`

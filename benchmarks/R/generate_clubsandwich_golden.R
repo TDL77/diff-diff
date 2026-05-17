@@ -69,6 +69,59 @@ for (nm in names(datasets)) {
   )
 }
 
+# --- Absorbed-FE DiD scenario (PR for absorb + hc2/hc2_bm gate lift) ---------
+# Canonical DiD-with-FE: y ~ treat_post + factor(unit) + factor(period). The
+# Python side uses `DiD(vcov_type="hc2_bm").fit(absorb=["unit","period"])`
+# which auto-routes to fixed_effects= internally and builds the same full-
+# dummy design as R's `lm()`. R parity targets are computed via the
+# singleton-cluster CR2 trick (for HC2-BM one-way) and cluster=unit (for CR2).
+
+make_did_panel <- function(n_units, n_periods, treatment_period, seed) {
+  set.seed(seed)
+  unit <- rep(seq_len(n_units), each = n_periods)
+  period <- rep(seq_len(n_periods), times = n_units)
+  treated <- rep(rep(c(0L, 1L), each = n_units / 2L), each = n_periods)
+  post <- as.integer(period >= treatment_period)
+  treat_post <- treated * post
+  unit_fe <- rnorm(n_units, sd = 1.5)
+  time_fe <- rnorm(n_periods, sd = 0.5)
+  eps <- rnorm(length(unit), sd = 0.3)
+  y <- 2.0 * treat_post + unit_fe[unit] + time_fe[period] + eps
+  data.frame(unit = factor(unit), period = factor(period),
+             treated = treated, post = post, treat_post = treat_post,
+             y = y, unit_int = unit, period_int = period)
+}
+
+d_did <- make_did_panel(n_units = 8, n_periods = 4, treatment_period = 2, seed = 404)
+fit_did <- lm(y ~ treat_post + unit + period, data = d_did)
+# HC2 via sandwich::vcovHC(type = "HC2"). Pins the in-tree HC2-parity claim
+# the changelog/registry make for the absorb auto-route on the hc2 lane.
+vcov_did_hc2 <- sandwich::vcovHC(fit_did, type = "HC2")
+# HC2-BM unclustered via singleton-cluster CR2 (PT2018-blessed workaround,
+# since clubSandwich::vcovCR requires a cluster arg).
+vcov_did_hc2_bm <- vcovCR(fit_did, cluster = seq_len(nrow(d_did)), type = "CR2")
+ct_did_hc2_bm <- coef_test(fit_did, vcov = vcov_did_hc2_bm)
+# CR2-BM clustered by unit.
+vcov_did_cr2 <- vcovCR(fit_did, cluster = d_did$unit, type = "CR2")
+ct_did_cr2 <- coef_test(fit_did, vcov = vcov_did_cr2)
+output$absorbed_fe_did <- list(
+  unit = d_did$unit_int,
+  period = d_did$period_int,
+  treated = d_did$treated,
+  post = d_did$post,
+  y = d_did$y,
+  coef = as.numeric(coef(fit_did)),
+  coef_names = names(coef(fit_did)),
+  vcov_hc2 = as.numeric(vcov_did_hc2),
+  vcov_hc2_shape = dim(vcov_did_hc2),
+  vcov_hc2_bm = as.numeric(vcov_did_hc2_bm),
+  vcov_hc2_bm_shape = dim(vcov_did_hc2_bm),
+  dof_hc2_bm = as.numeric(ct_did_hc2_bm$df_Satt),
+  vcov_cr2 = as.numeric(vcov_did_cr2),
+  vcov_cr2_shape = dim(vcov_did_cr2),
+  dof_cr2 = as.numeric(ct_did_cr2$df_Satt)
+)
+
 output$meta <- list(
   source = "clubSandwich",
   clubSandwich_version = as.character(packageVersion("clubSandwich")),

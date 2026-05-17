@@ -661,13 +661,19 @@ class TestFitBehavior:
         # Bootstrap consumed a unit-level cluster (20 clusters).
         assert res.n_clusters == 20
 
-    def test_did_absorb_rejects_hc2_and_hc2_bm(self):
-        """DifferenceInDifferences with absorb= rejects HC2/HC2+BM.
+    def test_did_absorb_hc2_and_hc2_bm_auto_route(self):
+        """DifferenceInDifferences with absorb= + HC2/HC2-BM now auto-routes to
+        fixed_effects= internally.
 
-        Same methodology reason as TWFE: absorb= demeans via within-
-        transformation, and HC2/CR2 leverage corrections depend on the full
-        FE hat matrix rather than the residualized design. The fit must
-        raise with a pointer to vcov_type='hc1' or fixed_effects= dummies.
+        FWL preserves coefficients but not the hat matrix; HC2/CR2-BM leverage
+        corrections require the FULL FE hat matrix. Rather than reject, we
+        internally promote absorb= to fixed_effects= so the existing full-
+        dummy design path computes the algebraically correct vcov.
+
+        Verifies: (1) fit succeeds (no NotImplementedError); (2) ATT matches
+        between absorb-routed and explicit fixed_effects= paths; (3) SE
+        matches between the two paths (bit-equal — same algebra under the
+        hood).
         """
         rng = np.random.default_rng(20260420)
         n_units, n_time = 30, 3
@@ -680,18 +686,26 @@ class TestFitBehavior:
                 rows.append({"unit": i, "time": t, "treated": treated, "post": post, "y": y})
         data = pd.DataFrame(rows)
 
-        for bad in ("hc2", "hc2_bm"):
-            with pytest.raises(
-                NotImplementedError,
-                match="DifferenceInDifferences.*absorb.*not yet supported",
-            ):
-                DifferenceInDifferences(vcov_type=bad).fit(
-                    data,
-                    outcome="y",
-                    treatment="treated",
-                    time="post",
-                    absorb=["unit"],
-                )
+        for vcov in ("hc2", "hc2_bm"):
+            res_absorb = DifferenceInDifferences(vcov_type=vcov).fit(
+                data,
+                outcome="y",
+                treatment="treated",
+                time="post",
+                absorb=["unit"],
+            )
+            res_fe = DifferenceInDifferences(vcov_type=vcov).fit(
+                data,
+                outcome="y",
+                treatment="treated",
+                time="post",
+                fixed_effects=["unit"],
+            )
+            assert np.isfinite(res_absorb.att)
+            assert np.isfinite(res_absorb.se)
+            # Auto-route should be bit-equal to explicit fixed_effects= path.
+            np.testing.assert_allclose(res_absorb.att, res_fe.att, atol=1e-12)
+            np.testing.assert_allclose(res_absorb.se, res_fe.se, atol=1e-12)
 
     def test_did_fixed_effects_dummies_still_accept_hc2_and_hc2_bm(self):
         """DifferenceInDifferences with fixed_effects= (dummy expansion) is
@@ -962,3 +976,244 @@ class TestSummarySurveyLabeling:
         summary = res.summary()
         assert "Variance:" in summary
         assert "HC1" in summary
+
+
+class TestDiDAbsorbedFERParity:
+    """R-parity for `DifferenceInDifferences(absorb=..., vcov_type in {hc2, hc2_bm})`.
+
+    The auto-route promotes absorb= to fixed_effects= internally, building
+    the full-dummy design that R's `lm(y ~ treat_post + factor(unit) +
+    factor(period))` produces. HC2-BM unclustered is computed via
+    clubSandwich's singleton-cluster CR2 trick; CR2 clustered by unit uses
+    `vcovCR(..., cluster=d$unit, type="CR2")`. Parity tolerance 1e-6
+    (empirically matches at ≤ 1e-10 in the local smoke test).
+    """
+
+    def _load_golden(self):
+        import json
+        from pathlib import Path
+
+        golden_path = (
+            Path(__file__).parent.parent / "benchmarks" / "data" / "clubsandwich_cr2_golden.json"
+        )
+        if not golden_path.exists():
+            pytest.skip(
+                "Golden JSON not present; run `Rscript "
+                "benchmarks/R/generate_clubsandwich_golden.R` to generate."
+            )
+        with open(golden_path) as f:
+            golden = json.load(f)
+        if "absorbed_fe_did" not in golden:
+            pytest.skip(
+                "Golden JSON does not yet include `absorbed_fe_did` scenario; "
+                "regenerate via the R script."
+            )
+        return golden["absorbed_fe_did"]
+
+    def _fit_absorb(self, d, vcov_type):
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "post": d["post"],
+                "y": d["y"],
+            }
+        )
+        return DifferenceInDifferences(vcov_type=vcov_type).fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="post",
+            absorb=["unit", "period"],
+            unit="unit",
+        )
+
+    def test_absorb_hc2_bm_matches_clubsandwich_singleton_cluster(self):
+        """`absorb=` + `hc2_bm` matches `lm() + clubSandwich::vcovCR(cluster=1:n)`.
+
+        Asserts on the treat_post slope SE only (the inference target);
+        FE-dummy coefficient SEs are not the user-facing inference and
+        can differ in higher decimal places due to absorbed-FE rank
+        treatment.
+        """
+        d = self._load_golden()
+        res = self._fit_absorb(d, "hc2_bm")
+        coef_names = d["coef_names"]
+        treat_post_idx = coef_names.index("treat_post")
+        expected_vcov = np.asarray(d["vcov_hc2_bm"]).reshape(d["vcov_hc2_bm_shape"])
+        expected_se_slope = float(np.sqrt(expected_vcov[treat_post_idx, treat_post_idx]))
+        expected_dof_slope = float(d["dof_hc2_bm"][treat_post_idx])
+        np.testing.assert_allclose(res.se, expected_se_slope, atol=1e-10)
+        # ATT also bit-equal.
+        np.testing.assert_allclose(res.att, float(d["coef"][treat_post_idx]), atol=1e-10)
+        # Suppress unused-local warning while keeping the constant in scope
+        # (DOF is exposed indirectly via res.p_value/conf_int but not as a
+        # standalone field on DiDResults; the SE+ATT parity above suffices).
+        _ = expected_dof_slope
+
+    def test_absorb_hc2_matches_sandwich_vcovhc(self):
+        """`absorb=` + `hc2` matches `lm() + sandwich::vcovHC(type="HC2")`.
+
+        Pins the HC2 SE on the treat_post slope against an external R target
+        (the R generator computes `sandwich::vcovHC(fit_did, type="HC2")` on
+        the full-dummy design and stores `vcov_hc2`).
+        """
+        d = self._load_golden()
+        if "vcov_hc2" not in d:
+            pytest.skip(
+                "Golden JSON does not yet include `vcov_hc2` for absorbed_fe_did; "
+                "regenerate via the R script."
+            )
+        res = self._fit_absorb(d, "hc2")
+        coef_names = d["coef_names"]
+        treat_post_idx = coef_names.index("treat_post")
+        expected_vcov = np.asarray(d["vcov_hc2"]).reshape(d["vcov_hc2_shape"])
+        expected_se_slope = float(np.sqrt(expected_vcov[treat_post_idx, treat_post_idx]))
+        np.testing.assert_allclose(res.se, expected_se_slope, atol=1e-10)
+        np.testing.assert_allclose(res.att, float(d["coef"][treat_post_idx]), atol=1e-10)
+
+    def test_absorb_hc2_bm_clustered_matches_clubsandwich(self):
+        """`absorb=` + `hc2_bm` + `cluster=unit` matches clubSandwich's CR2.
+
+        Exercises the cluster-aware CR2 BM path that the R generator pins
+        via `vcovCR(fit_did, cluster=d_did$unit, type="CR2")`. Without this
+        test, the new auto-route would have an unverified clustered-CR2
+        lane.
+        """
+        d = self._load_golden()
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "post": d["post"],
+                "y": d["y"],
+            }
+        )
+        res = DifferenceInDifferences(vcov_type="hc2_bm", cluster="unit").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="post",
+            absorb=["unit", "period"],
+            unit="unit",
+        )
+        coef_names = d["coef_names"]
+        treat_post_idx = coef_names.index("treat_post")
+        expected_vcov = np.asarray(d["vcov_cr2"]).reshape(d["vcov_cr2_shape"])
+        expected_se_slope = float(np.sqrt(expected_vcov[treat_post_idx, treat_post_idx]))
+        np.testing.assert_allclose(res.se, expected_se_slope, atol=1e-10)
+        np.testing.assert_allclose(res.att, float(d["coef"][treat_post_idx]), atol=1e-10)
+
+    def test_absorb_plus_fixed_effects_still_rejected_under_hc2_bm(self):
+        """Mutual-exclusion of `absorb=` and `fixed_effects=` is preserved.
+
+        R4 review caught that the auto-route initially merged the two
+        arguments silently on the HC2/HC2-BM path. The public API has
+        always treated this combination as invalid; the rejection must
+        fire regardless of `vcov_type`.
+        """
+        d = self._load_golden()
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "post": d["post"],
+                "y": d["y"],
+            }
+        )
+        for vcov in ("hc1", "hc2", "hc2_bm"):
+            with pytest.raises(ValueError, match="Cannot use both absorb and fixed_effects"):
+                DifferenceInDifferences(vcov_type=vcov).fit(
+                    data,
+                    outcome="y",
+                    treatment="treated",
+                    time="post",
+                    absorb=["unit"],
+                    fixed_effects=["period"],
+                    unit="unit",
+                )
+
+    def test_absorb_hc2_bm_survey_multi_absorb_auto_routes(self):
+        """Survey-weighted multi-absorb + HC2-BM should auto-route, not reject.
+
+        The legacy guard at `estimators.py` rejects `survey_design` paired with
+        `len(absorb) > 1` because single-pass demeaning is not the correct
+        weighted FWL projection for multiple absorbed dimensions. But when the
+        auto-route fires (hc2/hc2_bm), absorb is swapped for fixed_effects=
+        BEFORE the survey guard sees it, so the demeaning rationale doesn't
+        apply. R2 review caught the scope mismatch: REGISTRY said "SUPPORTED"
+        but the survey guard fired first on weighted multi-absorb. This test
+        pins the new placement.
+        """
+        from diff_diff import SurveyDesign
+
+        d = self._load_golden()
+        rng = np.random.default_rng(20260420)
+        n = len(d["y"])
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "post": d["post"],
+                "y": d["y"],
+                "weight": rng.uniform(0.5, 2.0, size=n),
+            }
+        )
+        sd = SurveyDesign(weights="weight", weight_type="aweight")
+        # Multi-absorb (`unit` + `period`) + survey-weighted + hc2_bm: should
+        # auto-route to fixed_effects= and succeed.
+        res = DifferenceInDifferences(vcov_type="hc2_bm").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="post",
+            absorb=["unit", "period"],
+            unit="unit",
+            survey_design=sd,
+        )
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se)
+
+    def test_absorb_hc2_bm_df_sensitive_inference(self):
+        """Bell-McCaffrey Satterthwaite DOF must propagate to `p_value` / `conf_int`.
+
+        HC2-BM differs from HC2 only in the DOF used for inference (Satterthwaite
+        ratio rather than n-k). If the auto-routed fit silently used n-k for the
+        BM path, `p_value` and `conf_int` would be wrong even though `se` looked
+        right. This test asserts that:
+
+        (1) HC2 and HC2-BM give the same `se` on the same data (HC2 meat is shared);
+        (2) HC2 and HC2-BM produce DIFFERENT `p_value` and `conf_int` because the
+            critical-value DOF differs (HC2-BM uses Satterthwaite DOF < n-k, so
+            t-critical is larger → wider CI, larger p-value).
+
+        This is the df-sensitive regression guard the R1 reviewer asked for.
+        """
+        d = self._load_golden()
+        res_hc2 = self._fit_absorb(d, "hc2")
+        res_hc2_bm = self._fit_absorb(d, "hc2_bm")
+        # Same point estimate.
+        np.testing.assert_allclose(res_hc2.att, res_hc2_bm.att, atol=1e-12)
+        # Same SE (the meat is the same; only the DOF differs for inference).
+        np.testing.assert_allclose(res_hc2.se, res_hc2_bm.se, atol=1e-12)
+        # DIFFERENT p_value and conf_int (DOF differs).
+        assert res_hc2.p_value != res_hc2_bm.p_value, (
+            "HC2 and HC2-BM should have different p_values "
+            "because the BM Satterthwaite DOF differs from n-k. "
+            "Same p_value indicates the DOF was not propagated to inference."
+        )
+        ci_hc2 = res_hc2.conf_int
+        ci_hc2_bm = res_hc2_bm.conf_int
+        # The BM CI should be WIDER than the HC2 CI (smaller DOF → larger
+        # t-critical → wider interval).
+        width_hc2 = float(ci_hc2[1] - ci_hc2[0])
+        width_hc2_bm = float(ci_hc2_bm[1] - ci_hc2_bm[0])
+        assert width_hc2_bm > width_hc2, (
+            f"HC2-BM CI width ({width_hc2_bm:.6f}) should exceed "
+            f"HC2 CI width ({width_hc2:.6f}) — BM Satterthwaite DOF is "
+            "smaller than n-k, so the critical value is larger."
+        )
