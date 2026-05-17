@@ -10,9 +10,9 @@
 
 ## Methodology Registry Entry
 
-**Status: proposed replacement text for a future REGISTRY update.** This block has **not** been merged into `docs/methodology/REGISTRY.md` yet. The current `## PreTrendsPower` stub in `REGISTRY.md` remains the **sole authoritative methodology contract** until the follow-up audit PR for `diff_diff/pretrends.py` (PR-B in the 3-PR sequence) lands and replaces it. That audit PR will also assess which proposed parameters and capabilities below are already in the shipped surface (`diff_diff/pretrends.py:442-447` currently exposes `alpha`, `power`, `violation_type`, `violation_weights`) and which require API extension.
+**Status: proposed replacement text for a future REGISTRY update; this file is a non-authoritative source audit.** The current `## PreTrendsPower` entry in `docs/methodology/REGISTRY.md` (lines 2758-2808) is a populated 50-line block framed primarily around a joint-Wald pre-trends test; it remains the **sole authoritative methodology contract** until the follow-up audit PR for `diff_diff/pretrends.py` (PR-B in the 3-PR sequence) lands and revises it. The PR-B audit will also assess which proposed parameters and capabilities below are already in the shipped surface (`diff_diff/pretrends.py:442-447` currently exposes `alpha`, `power`, `violation_type`, `violation_weights`) and which require API extension.
 
-*Formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries — copy the `## PreTrendsPower` section into the registry (replacing the existing `## PreTrendsPower` stub) once PR-B is ready.*
+*Formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries — once PR-B is ready, the `## PreTrendsPower` section below can replace the existing registry entry.*
 
 ## PreTrendsPower
 
@@ -76,7 +76,7 @@ The third (pretest bias) term depends on:
 
     If B(Sigma) is a convex set, then Var[beta_hat_post | beta_hat_pre in B(Sigma)] <= Var[beta_hat_post].
 
-Implication: under parallel trends (delta = 0), conventional 95% CIs OVER-cover conditional on passing the pretest (CIs are based on the unconditional variance, which is too large). When parallel trends is violated, conventional 95% CIs UNDER-cover, because the bias dominates the variance reduction.
+Implication (Roth, Section II.C, paragraph after Proposition 4): under parallel trends (delta = 0) and a B(Sigma) symmetric about zero, conventional 95% CIs tend to OVER-cover conditional on passing the pretest (CIs are based on the unconditional variance, which is too large). When parallel trends is violated, conventional 95% CIs tend to UNDER-cover **if the bias is sufficiently large** (i.e., when the bias dominates the variance reduction). The under-coverage direction is therefore contingent on bias magnitude, not universal.
 
 *Target parameter (Section I.C):*
 
@@ -161,7 +161,7 @@ simulation fallback.
 - [ ] Analytical truncated multivariate normal path (tmvtnorm-equivalent) + simulation fallback
 - [ ] Unconditional and conditional bias for arbitrary linear contrast l in R^M (using Sigma_11 for the post-treatment variance)
 - [ ] Unconditional and conditional null rejection / coverage for the same linear contrast
-- [ ] **Note (deviation from paper):** non-linear trend hypotheses — Roth (2022) formally analyzes only LINEAR violations; "constant level shift", "last-period jump", and "custom delta vector" patterns are extensions from Roth's R `pretrends` package, applied via the same Proposition 1/3/4 framework
+- [ ] Non-linear trend hypotheses (paper-supported via Section III): paper Section I.C formally tabulates power only against linear violations, but paper Section III ("Practical Recommendations") explicitly endorses power analyses against hypothesized nonlinear trends through the `pretrends` package, applied via the same Proposition 1+3 conditional-moment machinery (Proposition 4 still requires convex B). The specific named shapes "constant level shift", "last-period jump", and "custom delta vector" are R-package API parameterizations of that paper-supported framework, not separately analyzed in the published paper.
 - [ ] Plot of bias against pretest power for visual reporting (Roth's Figure 1 style)
 - [ ] Composes with HonestDiD result objects (shared beta_hat, Sigma_hat input contract)
 
@@ -247,8 +247,8 @@ Quoting Roth's key empirical results (for cross-validation):
 
 - **Joint Wald acceptance region**: paper mentions joint tests only briefly (Section I.B notes 1 of 12 papers uses one). Power, bias, and coverage formulas all apply by replacing B_NIS with the joint Wald acceptance region B_W, but Roth does not work out a separate table. Library should implement both but test against R `pretrends` for the joint-Wald case (Roth's package supports it).
 - **"Slope-of-best-fit-line t-test" acceptance region**: Table 1 column shows the t-stat for the slope of the linear pre-trend. Paper does not analyze pretests based on this t-stat as a separate acceptance region; library should NOT extrapolate without further reading the `pretrends` package source.
-- **Nonlinear violations**: Section I.D acknowledges results extend to monotone violations under homoskedasticity (Proposition 2), but the linear-violation framework is the operational benchmark. Library's `violation_type in {"linear", "constant", "last_period", "custom"}` (per the existing REGISTRY entry) appears to predate the paper — the paper itself only formally analyzes linear violations. "Constant" and "last_period" are likely Roth-package extensions for practical reasoning; library should document this as an extension beyond Roth's published analysis.
-- **Custom delta**: paper does not propose a "custom delta vector" interface; this is an extension by Roth's R package. The library should preserve the convention.
+- **Nonlinear violations**: Section I.C formally tabulates power only against linear violations; Section I.D extends the sign-of-bias result (Proposition 2) to monotone violations under homoskedasticity. Section III ("Practical Recommendations") explicitly endorses power analyses against hypothesized nonlinear trends via the `pretrends` package, so the general nonlinear capability is paper-supported even though the paper does not separately tabulate it. The specific named shapes the library exposes ("constant", "last_period") are R-package API conventions, not separately analyzed in the paper.
+- **Custom delta vector interface**: paper Section III endorses "power analyses for the types of violations of parallel trends deemed to be most relevant in their context," which is the paper-level framing for a user-supplied delta vector; the specific `violation_weights`-style INTERFACE used in the library and the R `pretrends` package is a package-API convention layered on top of that paper-level framework.
 - **Choice of contrast l**: paper highlights l = uniform 1/M (average post-treatment) and l = e_1 (first period after treatment). No guidance on other contrasts (e.g., long-run effect l = e_M, dynamic-weighted contrast) — library should document defaults and warn that bias and coverage depend on l.
 - **K = 0 (no pre-periods)**: trivially no pretest possible; library should error.
 - **Heteroskedastic Sigma**: Proposition 2 requires Assumption 1. Library implements computations under arbitrary Sigma via Proposition 1; the sign of the bias-amplification effect is then NOT guaranteed. Library should NOT print "pretest amplifies bias under monotone trends" unless Assumption 1 is approximately satisfied (or just always issue the conditional warning).
