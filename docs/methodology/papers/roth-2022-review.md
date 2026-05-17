@@ -35,13 +35,13 @@
                   delta = bias               tau = causal effect
                   from trends
 
-where tau_pre = 0 by the no-anticipation assumption and delta is the bias from a difference in trends. The pretest acts on beta_hat_pre, which equals delta_pre under no anticipation.
+where tau_pre = 0 by the no-anticipation assumption and delta is the bias from a difference in trends. The pretest acts on the random vector beta_hat_pre, whose mean beta_pre equals delta_pre under no anticipation (i.e., the population-mean identity beta_pre = delta_pre follows from Equation 2 with tau_pre = 0; the random draw beta_hat_pre is not itself equal to delta_pre).
 
 *Acceptance region of the standard "no individually significant" (NIS) pretest:*
 
-    B_NIS(Sigma) = { b in R^K : |b_t| <= 1.96 * sigma_t, for all t in {-K, ..., -1} }
+    B_NIS(Sigma) = { b in R^K : |b_t| <= z_{1-alpha/2} * sigma_t, for all t in {-K, ..., -1} }
 
-This corresponds to checking individual 95% CIs of each pre-period coefficient (the dominant convention in applied work: 11 of 12 surveyed papers, per Section I.B).
+where z_{1-alpha/2} is the (1 - alpha/2)-quantile of the standard normal (= 1.96 at Roth's running default alpha = 0.05). This corresponds to checking individual (1 - alpha) CIs of each pre-period coefficient. Section I.B of Roth (2022) reports that all 12 surveyed papers plot pointwise CIs that allow individual-significance inspection, 5 of 12 explicitly discuss individual significance, 1 of 12 reports a joint-significance test, and several rely on visual inspection without specifying a formal criterion; the NIS form is therefore the implicit common denominator across the surveyed papers rather than a literal 11-of-12 explicit-rule count.
 
 Alternative acceptance regions:
 - **Joint Wald (chi-squared)**: B_W(Sigma) = { b in R^K : b' Sigma_22^{-1} b <= chi^2_{1-alpha, K} }. **Note:** mentioned in the paper as a less common applied convention (1 of 12 surveyed papers, Section I.B). Propositions 1, 3, 4 apply to this B since it is convex; Roth does NOT separately tabulate power/bias/coverage for the Wald form.
@@ -90,16 +90,16 @@ Defaults Roth uses:
 *Plug-in estimator and CI (Section I.C):*
 
     tau_hat = l' beta_hat_post
-    CI_{tau_*} = tau_hat +/- 1.96 * sigma_{tau_hat}, where sigma^2_{tau_hat} = l' Sigma_11 l
+    CI_{tau_*} = tau_hat +/- z_{1-alpha/2} * sigma_{tau_hat}, where sigma^2_{tau_hat} = l' Sigma_11 l
 
-(Note: Sigma_11 is the post-treatment covariance block per the convention above, not the full Sigma_hat.)
+(Notes: Sigma_11 is the post-treatment covariance block per the convention above, not the full Sigma_hat. z_{1-alpha/2} is the (1 - alpha/2)-quantile of the standard normal = 1.96 at alpha = 0.05.)
 
 *Power calculation against a linear violation (Section I.C "Power Calculations"):*
 
 For a linear violation with slope gamma (so delta_t = gamma * t with relative time t),
 the pretest "passes" probability is
 
-    P( beta_hat_pre in B_NIS(Sigma) ) = P( |beta_hat_pre,t| <= 1.96 * sigma_t, for all t )
+    P( beta_hat_pre in B_NIS(Sigma) ) = P( |beta_hat_pre,t| <= z_{1-alpha/2} * sigma_t, for all t )
 
 where beta_hat_pre ~ N(delta_pre, Sigma_22) with delta_pre,t = gamma * t. The library should
 solve for gamma at target power 1 - p in {0.5, 0.8}:
@@ -132,7 +132,7 @@ simulation fallback.
 *Edge cases (paper-stated):*
 - **Linear vs nonlinear violations**: paper formally analyzes linear trends; Caveats (Section I.D) note results extend to monotone nonlinear violations under homoskedasticity (Proposition 2); arbitrarily nonlinear violations addressed heuristically — bias is worse for exponentially-growing trends, better for log/shallow trends as pre-periods grow
 - **Adding more pretreatment periods**: helps power for linear/log trends, does NOT help (and can hurt) for trends concentrated near treatment (e.g., COVID-19-like shocks)
-- **K = 1 (single pre-period)**: explicit closed-form intuition via univariate truncated normal in proof of Proposition 2: E[beta_hat_pre | beta_hat_pre in B_NIS] - beta_pre proportional to phi(-1.96 - beta_pre/sigma) - phi(1.96 - beta_pre/sigma)
+- **K = 1 (single pre-period)**: explicit closed-form intuition via univariate truncated normal in proof of Proposition 2: E[beta_hat_pre | beta_hat_pre in B_NIS] - beta_pre proportional to phi(-z_{1-alpha/2} - beta_pre/sigma) - phi(z_{1-alpha/2} - beta_pre/sigma) (= phi(-1.96 - ...) - phi(1.96 - ...) at the paper's default alpha = 0.05)
 - **Symmetric two-sided pretests under parallel trends**: beta_hat_post remains UNBIASED for tau_post (E[beta_hat_pre | beta_hat_pre in B] = 0 if B is symmetric and beta_pre = 0)
 - **Heteroskedastic Sigma (off-diagonal not constant)**: Proposition 2 requires Assumption 1; under arbitrary Sigma, sign of pretest-bias term is ambiguous (worked out in Proposition 1's general form)
 - **Publication-bias trade-off (Equation 4, Section II.D)**: pretest-as-screen can REDUCE or INCREASE published bias depending on Bayes-factor of design type vs the bias-given-publication ratio; uninformative pretests are unambiguously harmful
@@ -147,8 +147,8 @@ simulation fallback.
    - Compute unconditional bias = l' delta_post where delta_post,m = gamma * m
    - Compute conditional bias via Proposition 1: requires E[beta_hat_pre | beta_hat_pre in B_NIS] from truncated MVN
 5. **Coverage**: for the same gamma values, compute unconditional and conditional null rejection probabilities P(tau_* not in CI):
-   - Unconditional: P(|tau_hat - tau_*|/sigma_{tau_hat} > 1.96) under beta_hat ~ N(beta, Sigma)
-   - Conditional: P(|tau_hat - tau_*|/sigma_{tau_hat} > 1.96 | beta_hat_pre in B_NIS) — joint truncated MVN
+   - Unconditional: P(|tau_hat - tau_*|/sigma_{tau_hat} > z_{1-alpha/2}) under beta_hat ~ N(beta, Sigma)
+   - Conditional: P(|tau_hat - tau_*|/sigma_{tau_hat} > z_{1-alpha/2} | beta_hat_pre in B_NIS) — joint truncated MVN
 6. Return a structured summary (Roth's Table 2/Table 3 layout)
 
 **Reference implementation(s):**
@@ -162,8 +162,8 @@ simulation fallback.
 - [ ] Unconditional and conditional bias for arbitrary linear contrast l in R^M (using Sigma_11 for the post-treatment variance)
 - [ ] Unconditional and conditional null rejection / coverage for the same linear contrast
 - [ ] Non-linear trend hypotheses (paper-supported via Section III): paper Section I.C formally tabulates power only against linear violations, but paper Section III ("Practical Recommendations") explicitly endorses power analyses against hypothesized nonlinear trends through the `pretrends` package, applied via the same Proposition 1+3 conditional-moment machinery (Proposition 4 still requires convex B). The specific named shapes "constant level shift", "last-period jump", and "custom delta vector" are R-package API parameterizations of that paper-supported framework, not separately analyzed in the published paper.
-- [ ] Plot of bias against pretest power for visual reporting (Roth's Figure 1 style)
-- [ ] Composes with HonestDiD result objects (shared beta_hat, Sigma_hat input contract)
+- [ ] Plot of bias against pretest power for visual reporting (Roth's Figure 1 layout). **Note (library extension):** the underlying numerical content is paper-derived (bias and CI by `gamma_p`), but the specific plotting interface is a library design choice.
+- [ ] Composes with HonestDiD result objects (shared beta_hat, Sigma_hat input contract). **Note (library extension):** Roth (2022) is methodology-agnostic about how `(beta_hat, Sigma_hat)` is produced; cross-estimator composition (with `HonestDiD`, `CallawaySantAnna`, etc.) is a diff-diff design choice.
 
 ---
 
@@ -172,7 +172,7 @@ simulation fallback.
 ### Data Structure Requirements
 - **Input**: beta_hat in R^{K+M} (concatenated pre + post event-study coefficients), Sigma_hat in R^{(K+M) x (K+M)} (variance-covariance matrix), integer K (# pre-period coefficients), integer M (# post-period coefficients)
 - **Optional input**: linear contrast l in R^M (defaults to uniform 1/M for average post-treatment effect, or e_1 for first-period-only)
-- **Optional input**: significance level alpha (default 0.05 → critical value 1.96)
+- **Optional input**: significance level alpha (default 0.05; critical value z_{1-alpha/2}, equal to 1.96 at the default)
 - **Optional input**: target power levels (default {0.5, 0.8} per Roth)
 - The pre-period coefficients are typically indexed by relative time t in {-K, -K+1, ..., -1}, with t = 0 omitted as the reference period
 - Compatible with the result classes of: MultiPeriodDiD (event study), CallawaySantAnna (staggered), SunAbraham (interaction-weighted), Freyaldenhoven-Hansen-Shapiro (covariate-based)
