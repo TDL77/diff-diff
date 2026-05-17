@@ -10,7 +10,7 @@
 
 ## Methodology Registry Entry
 
-**Status: proposed replacement text for a future REGISTRY update; this file is a non-authoritative source audit.** The current `## PreTrendsPower` entry in `docs/methodology/REGISTRY.md` is a populated block framed primarily around a joint-Wald pre-trends test; it remains the **sole authoritative methodology contract** until the follow-up audit PR for `compute_pretrends_power` (and its `PreTrendsPowerResults` class in `diff_diff/pretrends.py`) lands and revises it. The follow-up audit will also assess which proposed parameters and capabilities below are already in the shipped `compute_pretrends_power` signature (which currently exposes `alpha`, `power`, `violation_type`, `violation_weights`) and which require API extension.
+**Status: proposed replacement text for a future REGISTRY update; this file is a non-authoritative source audit.** The current `## PreTrendsPower` entry in `docs/methodology/REGISTRY.md` is a populated block framed primarily around a joint-Wald pre-trends test; it remains the **sole authoritative methodology contract** until the follow-up audit PR for `compute_pretrends_power` (the helper function), `PreTrendsPower` (the estimator class), and `PreTrendsPowerResults` (the results container) in `diff_diff/pretrends.py` lands and revises it. The follow-up audit will assess which proposed parameters and capabilities below are already in the shipped surfaces. Current signatures (for reference): the helper `compute_pretrends_power(results, M, alpha, target_power, violation_type, pre_periods)` exposes `alpha`, `target_power`, `violation_type`, `pre_periods` (plus the optional violation magnitude `M`); the class `PreTrendsPower(alpha, power, violation_type, violation_weights)` exposes `alpha`, `power`, `violation_type`, `violation_weights`. The audit will reconcile these two surfaces with each other and against this proposed contract.
 
 *Formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries — once the follow-up audit is ready, the `## PreTrendsPower` section below can replace the existing registry entry.*
 
@@ -157,25 +157,25 @@ simulation fallback.
 
 ### Paper-derived requirements
 
-*Required to remain faithful to Roth (2022). The follow-up audit PR must verify the library satisfies every item below.*
+*Required to remain faithful to Roth (2022). These are the mathematical quantities and conditioning formulas the paper specifies — they do not constrain the numerical backend or the API surface. The follow-up audit PR must verify the library can produce every item below.*
 
-- [ ] NIS acceptance region B_NIS(Sigma) with critical value z_{1-alpha/2} (paper-analyzed, Section I.B + Section II)
-- [ ] Joint Wald acceptance region B_W(Sigma) (paper-supported alternative; convex so Propositions 1+3+4 all apply; not separately tabulated by Roth)
+- [ ] NIS acceptance region B_NIS(Sigma) with critical value z_{1-alpha/2} (paper-analyzed in Section I.B + Section II, used for every empirical exercise)
 - [ ] Conditional-mean formula (Proposition 1) and conditional-variance formula (Proposition 3) for any measurable B(Sigma)
-- [ ] Variance-reduction / over-coverage guarantee (Proposition 4) gated on convex B(Sigma) only
+- [ ] Variance-reduction guarantee (Proposition 4) gated on convex B(Sigma) only
 - [ ] Sign-of-bias result under monotone trend (Proposition 2) gated on Assumption 1 (homoskedastic-equicorrelated Sigma)
 - [ ] Power calculation against a linear violation with slope gamma — solve for gamma_p at user-specified target power 1 - p (Roth uses gamma_{0.5} and gamma_{0.8})
 - [ ] Plug-in estimator tau_hat = l' beta_hat_post and CI tau_hat +/- z_{1-alpha/2} * sqrt(l' Sigma_11 l) for any linear contrast l in R^M
 - [ ] Unconditional and conditional bias for the linear contrast
 - [ ] Unconditional and conditional null rejection / coverage for the linear contrast
-- [ ] Truncated MVN moments and probabilities computed via Roth's analytical path (footnote 8, `tmvtnorm` / Cartinhour-1990 / Manjunath-Wilhelm-2012)
 
-### Library design choices (extensions beyond Roth 2022)
+### Library design choices (paper-supported alternatives and extensions beyond Roth 2022)
 
-*These items are diff-diff or R-package conventions, NOT required by the paper. The library may keep, drop, or extend each item via the follow-up audit — preserving these items is a library design call, not a methodology requirement.*
+*These items are diff-diff or R-package conventions, NOT required by the paper. They include both (i) acceptance regions and computations that the paper supports as alternatives without requiring or tabulating them, and (ii) genuine extensions beyond the paper's analysis. The library may keep, drop, or extend each item via the follow-up audit — preserving these items is a library design call, not a methodology requirement.*
 
-- **Simulation fallback path alongside the analytical TMVN computation** — Roth's footnote 8 reports simulation verification yields similar results, but neither the paper nor the R `pretrends` package requires a dual-path implementation. The simulation path is a library robustness choice for cases where the analytical computation is numerically unstable.
-- **`method` and `n_sim` API parameters** — proposed knobs to select between analytical and simulation; library design choice, not paper-required.
+- **Joint Wald acceptance region** B_W(Sigma) — paper-supported alternative (convex, so Propositions 1+3+4 all apply), but Roth's empirical exercise uses NIS only and the paper does not separately tabulate Wald-based power/bias/coverage. Library support is a paper-supported alternative, not a Roth-required item.
+- **Analytical computational backend** (`tmvtnorm` / Cartinhour-1990 / Manjunath-Wilhelm-2012) — Roth uses this analytical path in the paper, but the requirement is to produce the correct conditional moments and probabilities; any equivalent backend (`tmvtnorm`, a from-scratch port, Monte Carlo simulation, GHK simulator, etc.) is acceptable. The choice of backend is a library implementation decision, not a methodology requirement.
+- **Simulation fallback path alongside the analytical computation** — Roth's footnote 8 reports simulation verification yields similar results, but neither the paper nor the R `pretrends` package requires a dual-path implementation. The simulation path is a library robustness choice for cases where the analytical computation is numerically unstable.
+- **`method` and `n_sim` API parameters** — proposed knobs to select between analytical and simulation; library design choice.
 - **`pretest_form` and `acceptance_region` API surface** — Roth's propositions apply to any (measurable) B(Sigma), so exposing the choice via a typed enum + custom-callable interface is an engineering choice. The enum values mix paper-analyzed forms ("individual" / NIS), paper-supported alternatives ("joint_wald", "custom"), and a non-paper extension ("slope" — Roth tabulates the slope t-stat in Table 1 as an observed property of surveyed papers but does not analyze it as an acceptance region).
 - **Non-linear violation parameterizations** ("constant", "last_period", "custom") — Roth Section III endorses power analyses against hypothesized nonlinear trends via the `pretrends` package (applying the same Propositions 1+3, with Proposition 4 conditioned on convex B). The specific named shapes are R-package API conventions, not separately analyzed in the published paper.
 - **Figure-1-style plotting interface** — the underlying numerical content (bias and CI by `gamma_p`) is paper-derived; the plotting layout is a library presentation choice.
@@ -201,7 +201,7 @@ simulation fallback.
 
 ### Tuning Parameters
 
-**Note:** The parameters below span both paper-derived requirements (where the paper specifies a fixed default or a free parameter that affects the math) and proposed library extensions (engineering choices for the API surface). The `Source` column makes this distinction explicit. The follow-up audit for `compute_pretrends_power` (which currently exposes `alpha`, `power`, `violation_type`, `violation_weights`) will decide which proposed extensions to keep, rename, or defer.
+**Note:** The parameters below span both paper-derived requirements (where the paper specifies a fixed default or a free parameter that affects the math) and proposed library extensions (engineering choices for the API surface). The `Source` column makes this distinction explicit. The follow-up audit will reconcile this proposed table against the two current shipped surfaces — the helper `compute_pretrends_power` (exposes `alpha`, `target_power`, `violation_type`, `pre_periods`, plus the optional violation magnitude `M`) and the class `PreTrendsPower` (exposes `alpha`, `power`, `violation_type`, `violation_weights`) — and decide which proposed extensions to keep, rename, unify, or defer.
 
 | Parameter | Type | Default | Source | Selection Method |
 |-----------|------|---------|--------|-----------------|
@@ -214,7 +214,7 @@ simulation fallback.
 | `n_sim` | int | 10000 | **Library extension** (only meaningful when `method="simulation"`) | Monte Carlo iterations when method="simulation" |
 
 ### Relation to Existing diff-diff Estimators
-- **Pre-existing `diff_diff/pretrends.py`** (1133 lines) — implements a Roth-2022 framework; this paper review's main use is to audit the existing surface against the paper's exact equations
+- **Pre-existing `diff_diff/pretrends.py`** (1133 lines) — implements a Wald-test-based pre-trends MDV/power workflow framed around Roth (2022); the current code path computes Wald power/MDV from the pre-period variance-covariance block rather than the full arbitrary-Sigma Proposition 1 / Proposition 3 / Proposition 4 conditional-moment computations. This paper review's main use is to audit the existing surface against the paper's exact equations and identify which Roth-2022 quantities are missing.
 - **Composes with**: `MultiPeriodDiD`, `CallawaySantAnna`, `SunAbraham`, `TwoWayFixedEffects` — any estimator producing an event-study coefficient vector and a consistent variance estimator
 - **Complement to `HonestDiD` (Rambachan-Roth 2023)**: Roth 2022 asks "what bias survives a pretest under linear violations?"; Rambachan-Roth 2023 asks "what is the identified set of tau_post under bounded violations?" Both use the same (beta_hat, Sigma_hat) input contract — the library should expose a unified entry-point that can produce both Roth-2022 and HonestDiD reports from one event-study result object.
 - **Shares zero-anticipation convention with HonestDiD**: tau_pre = 0, so beta_pre = delta_pre. Cross-reference the existing `diff_diff/honest_did.py` for the contract.
@@ -228,7 +228,7 @@ simulation fallback.
 | **Proposition 1** | For any B(Sigma): E[beta_hat_post | beta_hat_pre in B] = tau_post + delta_post + Sigma_{12} Sigma_{22}^{-1} (E[beta_hat_pre | beta_hat_pre in B] - beta_pre) | The main bias decomposition formula. Drives the conditional-bias computation in step 4 of the algorithm. |
 | **Proposition 2** | Under Assumption 1 (homoskedastic-equicorrelated Sigma) and monotone trend (delta_pre < 0, delta_post > 0): E[beta_hat_post | beta_hat_pre in B_NIS] > beta_post > tau_post | Justifies a WARN that conditional bias is worse than unconditional bias under monotone trends — applicable in many but not all empirical settings. Assumption 1 is a condition on the *estimated covariance matrix* Sigma, not on design metadata; any sharper warning must therefore be triggered by a *direct numerical check* of Sigma (approximately-constant diagonal entries + approximately-constant positive off-diagonal entries below the diagonal). Without such a check, the library should issue only the generic caveat that the sign-of-bias result is ambiguous outside Assumption 1. |
 | **Proposition 3** | Var[beta_hat_post | beta_hat_pre in B] = Var[beta_hat_post] + (Sigma_{12} Sigma_{22}^{-1}) (Var[beta_hat_pre | beta_hat_pre in B] - Var[beta_hat_pre]) (Sigma_{12} Sigma_{22}^{-1})' | The conditional-variance formula; drives the over/under-coverage analysis. |
-| **Proposition 4** | If B(Sigma) is convex: Var[beta_hat_post | beta_hat_pre in B] <= Var[beta_hat_post]. CIs based on unconditional Sigma OVER-cover under parallel trends, UNDER-cover under violations. | Justifies the "do not interpret a wide CI as ample power" warning. |
+| **Proposition 4** | If B(Sigma) is convex: Var[beta_hat_post | beta_hat_pre in B] <= Var[beta_hat_post] (variance-reduction guarantee, conditional on convex B only). | Justifies the "do not interpret a wide CI as ample power" warning. Implication for CI coverage (Section II.C paragraph after Prop 4): CIs based on unconditional Sigma tend to OVER-cover under parallel trends with symmetric B; under violations they tend to UNDER-cover *only if the bias is sufficiently large* to outweigh the variance reduction — the under-coverage direction is contingent on bias magnitude, not universal. |
 
 No formal theorems are stated for the publication-rules analysis (Section II.D); Equation 4 is the operational result.
 
@@ -267,7 +267,7 @@ Quoting Roth's key empirical results (for cross-validation):
 - **Custom delta vector interface**: paper Section III endorses "power analyses for the types of violations of parallel trends deemed to be most relevant in their context," which is the paper-level framing for a user-supplied delta vector; the specific `violation_weights`-style INTERFACE used in the library and the R `pretrends` package is a package-API convention layered on top of that paper-level framework.
 - **Choice of contrast l**: paper highlights l = uniform 1/M (average post-treatment) and l = e_1 (first period after treatment). No guidance on other contrasts (e.g., long-run effect l = e_M, dynamic-weighted contrast) — library should document defaults and warn that bias and coverage depend on l.
 - **K = 0 (no pre-periods)**: trivially no pretest possible; library should error.
-- **Heteroskedastic Sigma**: Proposition 2 requires Assumption 1. Library implements computations under arbitrary Sigma via Proposition 1; the sign of the bias-amplification effect is then NOT guaranteed. Library should NOT print "pretest amplifies bias under monotone trends" unless Assumption 1 is approximately satisfied (or just always issue the conditional warning).
+- **Heteroskedastic Sigma**: Proposition 2 requires Assumption 1. Once Proposition 1 / Proposition 3 / Proposition 4 computations are added (current `diff_diff/pretrends.py` does Wald-test power/MDV only, not the full conditional-moment path), the library will be able to operate under arbitrary Sigma — but at that point the sign of the bias-amplification effect is NOT guaranteed without Assumption 1. The library should NOT print "pretest amplifies bias under monotone trends" unless Assumption 1 is approximately satisfied (or just always issue the conditional warning).
 - **Equation 4 publication-rules analysis**: not standardly implemented in PreTrendsPower-style tools. Roth notes it as part of the discussion (Section II.D) but does not provide a numerical workflow for users. Library should NOT attempt to implement Equation 4 unless requested.
 - **Connection to `compute_pretrends_power` library helper**: the paper review confirms that "minimum slope detectable at 80% power" is exactly Roth's gamma_{0.8}, and the library helper should compute and surface this. Need to verify the existing helper's calling convention against the paper's framework when auditing `diff_diff/pretrends.py`.
 - **R `pretrends` package version**: paper cites the package at https://github.com/jonathandroth/pretrends; no specific version cited. R-parity work should pin to a specific commit and document.
