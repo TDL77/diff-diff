@@ -1533,7 +1533,23 @@ def _build_butts_fe_design_csr(
     Omega_0 rows) is detected downstream by ``_compute_gmm_corrected_meat``
     via ``sparse_factorized`` failure → ``np.linalg.lstsq`` fallback with
     a documented ``UserWarning``.
+
+    **Re-factorization on entry:** when callers pass pre-mask integer
+    codes that have had interior values dropped via ``finite_mask`` (a
+    supported warn-and-drop fit), the input code arrays can be sparse —
+    e.g. ``unit_codes = [0, 1, 3, 4]`` with code 2 dropped. Building
+    ``X_10`` on the raw codes would materialize an all-zero FE column at
+    index 2, forcing ``sparse_factorized`` onto the dense
+    ``lstsq``/``XtX_10.toarray()`` fallback unnecessarily (large-memory
+    path on big panels). To avoid this, re-factorize via
+    :func:`pd.factorize` on entry to compact the code space to
+    ``0..n_unique-1`` (no-op when codes are already contiguous; mirrors
+    the column-space convention of ``TwoStageDiD._build_fe_design``).
     """
+    # Compact the code space before column construction — see Notes.
+    unit_codes = pd.factorize(unit_codes)[0]
+    time_codes = pd.factorize(time_codes)[0]
+
     n = unit_codes.shape[0]
     n_units = int(unit_codes.max()) + 1 if n > 0 else 0
     n_times = int(time_codes.max()) + 1 if n > 0 else 0
