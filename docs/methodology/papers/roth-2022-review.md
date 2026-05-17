@@ -12,7 +12,7 @@
 
 **Status: proposed replacement text for a future REGISTRY update; this file is a non-authoritative source audit.** The current `## PreTrendsPower` entry in `docs/methodology/REGISTRY.md` is a populated block framed primarily around a joint-Wald pre-trends test; it remains the **sole authoritative methodology contract** until the follow-up audit PR for `compute_pretrends_power` (the helper function), `PreTrendsPower` (the estimator class), and `PreTrendsPowerResults` (the results container) in `diff_diff/pretrends.py` lands and revises it. The follow-up audit will assess which proposed parameters and capabilities below are already in the shipped surfaces. Current signatures (for reference): the helper `compute_pretrends_power(results, M, alpha, target_power, violation_type, pre_periods)` exposes `alpha`, `target_power`, `violation_type`, `pre_periods` (plus the optional violation magnitude `M`); the class `PreTrendsPower(alpha, power, violation_type, violation_weights)` exposes `alpha`, `power`, `violation_type`, `violation_weights`. The audit will reconcile these two surfaces with each other and against this proposed contract.
 
-*Formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries — once the follow-up audit is ready, the `## PreTrendsPower` section below can replace the existing registry entry.*
+*Formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries — once the follow-up audit is ready, the `## PreTrendsPower` section below can replace the existing registry entry. The registry-candidate text ends just before `## Implementation Notes`; everything below that boundary is **audit notes / implementation ideas** and is NOT part of the proposed registry replacement (it includes tentative heuristics, provisional R-package surface claims, and library design notes that should NOT be copied into REGISTRY.md as normative requirements).*
 
 ## PreTrendsPower
 
@@ -133,11 +133,11 @@ see "Library design choices" above for the proposed `method` / `n_sim` knobs.
 
 *Edge cases (paper-stated):*
 - **Linear vs nonlinear violations**: paper formally analyzes linear trends; Caveats (Section I.D) note results extend to monotone nonlinear violations under homoskedasticity (Proposition 2); arbitrarily nonlinear violations addressed heuristically — bias is worse for exponentially-growing trends, better for log/shallow trends as pre-periods grow
-- **Adding more pretreatment periods**: helps power for linear/log trends, does NOT help (and can hurt) for trends concentrated near treatment (e.g., COVID-19-like shocks)
+- **Adding more pretreatment periods**: helps power for linear/log trends; for trends concentrated near treatment (e.g., COVID-19-like shocks), Section I.D notes additional distant pre-periods may not help / may be uninformative — the paper does not assert that they actively *hurt*.
 - **K = 1 (single pre-period)**: explicit closed-form intuition via univariate truncated normal in proof of Proposition 2: E[beta_hat_pre | beta_hat_pre in B_NIS] - beta_pre proportional to phi(-z_{1-alpha/2} - beta_pre/sigma) - phi(z_{1-alpha/2} - beta_pre/sigma) (= phi(-1.96 - ...) - phi(1.96 - ...) at the paper's default alpha = 0.05)
 - **Symmetric two-sided pretests under parallel trends**: beta_hat_post remains UNBIASED for tau_post (E[beta_hat_pre | beta_hat_pre in B] = 0 if B is symmetric and beta_pre = 0)
 - **Heteroskedastic Sigma (off-diagonal not constant)**: Proposition 2 requires Assumption 1; under arbitrary Sigma, sign of pretest-bias term is ambiguous (worked out in Proposition 1's general form)
-- **Publication-bias trade-off (Equation 4, Section II.D)**: pretest-as-screen can REDUCE or INCREASE published bias depending on Bayes-factor of design type vs the bias-given-publication ratio; uninformative pretests are unambiguously harmful
+- **Publication-bias trade-off (Equation 4, Section II.D)**: pretest-as-screen can REDUCE or INCREASE published bias depending on the Bayes-factor of design type vs the bias-given-publication ratio; the net effect is ambiguous (Equation 4). The paper says underpowered pretests are "least effective and potentially harmful" — i.e., they are the worst-case regime, not unambiguously harmful in every parameterization.
 
 *Algorithm (no numbered algorithm in paper; implementation distilled from Section I.C):*
 
@@ -185,7 +185,13 @@ see "Library design choices" above for the proposed `method` / `n_sim` knobs.
 
 ---
 
-## Implementation Notes
+<!-- ============================================================
+     END of registry-candidate block. Everything BELOW this
+     marker is audit notes / implementation ideas and is NOT
+     part of the proposed REGISTRY.md replacement text.
+     ============================================================ -->
+
+## Implementation Notes (audit notes — NOT registry-candidate)
 
 ### Data Structure Requirements
 - **Input**: beta_hat in R^{K+M} (concatenated pre + post event-study coefficients), Sigma_hat in R^{(K+M) x (K+M)} (variance-covariance matrix), integer K (# pre-period coefficients), integer M (# post-period coefficients)
@@ -198,7 +204,7 @@ see "Library design choices" above for the proposed `method` / `n_sim` knobs.
 ### Computational Considerations
 - **Truncated MVN moments and probabilities**: scipy.stats has only the univariate case; library options for K > 1 are (a) port `tmvtnorm` (Manjunath-Wilhelm closed-form for orthant moments + Cartinhour 1990 for the rectangular box), (b) Monte Carlo simulation with rejection sampling. Recommend implementing both paths and validating equivalence at alpha-tol = 1e-3 for small K.
 - **Cost**: dominated by the multivariate normal box probability evaluations. As a *tentative heuristic* (not benchmarked in this review and not specified by the paper), analytical methods are typically fast for small K (e.g., K <= 5) and simulation may become preferable for larger K (e.g., K > 10); the follow-up audit should either benchmark these cutoffs locally or replace them with empirically-derived thresholds.
-- **Root-finding for gamma_p**: monotone function of gamma; use bisection over [0, gamma_max] with gamma_max derived from a univariate upper bound (largest |gamma| at which power = 1).
+- **Root-finding for gamma_p**: P(reject pretest | gamma) is monotone in |gamma|. Under the normal model power approaches 1 only asymptotically, so there is no finite gamma_max at which power equals 1 exactly. Use a doubling expansion (start with a univariate-derived gamma_high; double until P(reject pretest | gamma_high) >= target_power + tolerance), then bisect over [0, gamma_high] to find gamma_p.
 - **Memoization**: power and bias share intermediate quantities (truncated MVN moments); cache by gamma.
 
 ### Tuning Parameters
