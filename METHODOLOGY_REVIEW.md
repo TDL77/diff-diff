@@ -1053,9 +1053,9 @@ and covariate-adjusted specifications.)
 **Documentation in place:**
 - REGISTRY.md section: `## PreTrendsPower` (MDV at target power, four violation types — linear/constant/last_period/custom, power curve plotting, HonestDiD integration)
 - Implementation: `tests/test_pretrends.py` (point-estimator, MDV, power curve, sensitivity) plus event-study coverage in `tests/test_pretrends_event_study.py`
+- Paper review on file: `docs/methodology/papers/roth-2022-review.md` (added 2026-05-17; non-authoritative source audit — registry entry remains authoritative until the follow-up audit PR)
 
 **Outstanding for promotion:**
-- Paper review under `docs/methodology/papers/roth-2022-review.md`
 - Dedicated `tests/test_methodology_pretrends.py` with paper-equation-numbered Verified Components walk-through
 - R parity fixture against the `pretrends` R package (the four power calculations: linear, constant, last-period, custom)
 - Verify the REGISTRY Implementation Checklist (all four items currently unchecked)

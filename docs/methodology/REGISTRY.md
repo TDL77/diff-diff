@@ -2761,7 +2761,7 @@ CRITICAL: δ_pre = β_pre pins pre-treatment violations to observed coefficients
 
 ## PreTrendsPower
 
-**Primary source:** [Roth, J. (2022). Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends. *American Economic Review: Insights*, 4(3), 305-322.](https://doi.org/10.1257/aeri.20210236)
+**Primary source:** [Roth, J. (2022). Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends. *American Economic Review: Insights*, 4(3), 305-322.](https://doi.org/10.1257/aeri.20210236). Paper review on file: `docs/methodology/papers/roth-2022-review.md` (non-authoritative source audit; this REGISTRY entry remains the authoritative methodology contract).
 
 **Key implementation requirements:**
 
