@@ -1067,12 +1067,16 @@ def compute_pretrends_power(
     target_power : float, default=0.80
         Target power for MDV calculation.
     violation_type : str, default='linear'
-        Type of violation pattern. Note: this convenience helper does NOT
+        Type of violation pattern. This convenience helper supports
+        ``linear`` / ``constant`` / ``last_period`` only and does NOT
         accept ``violation_weights``, so ``violation_type='custom'`` is
-        unusable from the helper (only ``linear`` / ``constant`` /
-        ``last_period`` are supported here). For custom weights, instantiate
-        ``PreTrendsPower(..., violation_weights=...)`` directly. Tracked in
-        TODO.md as a planned helper extension.
+        unusable from the helper. The custom path on
+        ``PreTrendsPower(..., violation_weights=...)`` accepts custom
+        weights at fit time but has known issues with
+        ``PreTrendsPowerResults.power_at()`` (fitted weights are not
+        persisted on the result object; ``power_at()`` silently falls
+        back to equal weights). Both gaps are tracked in TODO.md until
+        a follow-up audit lands.
     pre_periods : list of int, optional
         Explicit list of pre-treatment periods. If None, attempts to infer
         from results. Use when you've estimated all periods as post_periods.
@@ -1119,12 +1123,16 @@ def compute_mdv(
     target_power : float, default=0.80
         Target power for MDV calculation.
     violation_type : str, default='linear'
-        Type of violation pattern. Note: this convenience helper does NOT
+        Type of violation pattern. This convenience helper supports
+        ``linear`` / ``constant`` / ``last_period`` only and does NOT
         accept ``violation_weights``, so ``violation_type='custom'`` is
-        unusable from the helper (only ``linear`` / ``constant`` /
-        ``last_period`` are supported here). For custom weights, instantiate
-        ``PreTrendsPower(..., violation_weights=...)`` directly. Tracked in
-        TODO.md as a planned helper extension.
+        unusable from the helper. The custom path on
+        ``PreTrendsPower(..., violation_weights=...)`` accepts custom
+        weights at fit time but has known issues with
+        ``PreTrendsPowerResults.power_at()`` (fitted weights are not
+        persisted on the result object; ``power_at()`` silently falls
+        back to equal weights). Both gaps are tracked in TODO.md until
+        a follow-up audit lands.
     pre_periods : list of int, optional
         Explicit list of pre-treatment periods. If None, attempts to infer
         from results. Use when you've estimated all periods as post_periods.
