@@ -1449,16 +1449,9 @@ class MultiPeriodDiD(DifferenceInDifferences):
         n_treated_raw = int(np.sum(data[treatment].values.astype(float)))
         n_control_raw = len(data) - n_treated_raw
 
-        # Reject multi-absorb with survey weights (single-pass demeaning is
-        # not the correct weighted FWL projection for N > 1 dimensions)
-        if absorb and len(absorb) > 1 and survey_weights is not None:
-            raise ValueError(
-                f"Multiple absorbed fixed effects (absorb={absorb}) with survey "
-                "weights is not supported. Single-pass sequential demeaning is not "
-                "the correct weighted FWL projection for multiple absorbed dimensions. "
-                "Use absorb with a single variable, or use fixed_effects= instead."
-            )
-
+        # Mutual-exclusion check runs ABOVE the auto-route below so that the
+        # `absorb=..., fixed_effects=...` combination still rejects rather
+        # than being silently merged.
         if absorb and fixed_effects:
             raise ValueError(
                 "Cannot use both absorb and fixed_effects. "
@@ -1468,19 +1461,50 @@ class MultiPeriodDiD(DifferenceInDifferences):
                 "or fixed_effects alone (for low-dimensional FE)."
             )
 
-        # Reject HC2 / HC2 + Bell-McCaffrey on absorbed-FE fits (see the
-        # matching guard in DifferenceInDifferences.fit / twfe.py for the
-        # methodology reasoning: HC2/CR2 leverage corrections depend on the
-        # full FE hat matrix, not the residualized design from within-
-        # transformation). Tracked in TODO.md.
+        # Auto-route absorb → fixed_effects when vcov_type needs the FULL FE
+        # hat matrix. Mirrors the identical pattern in
+        # DifferenceInDifferences.fit (PR #458). HC2 leverage and CR2
+        # Bell-McCaffrey DOF both depend on the full-design hat; FWL
+        # preserves coefficients and residuals but not the hat matrix, so
+        # the demeaned design's leverage is wrong for these vcov families.
+        # Building the full-dummy design and routing through the existing
+        # fixed_effects= branch produces the algebraically correct vcov.
+        # Empirically matches `lm() + sandwich::vcovHC` and
+        # `lm() + clubSandwich::vcovCR` (singleton-cluster trick for one-way
+        # HC2-BM; PT2018 §3.3 unweighted CR2 algebra) at ~1e-15.
+        # Conley vcov is unaffected: the absorb+Conley path computes the
+        # panel sandwich on demeaned scores, which is FWL-correct because
+        # Conley's meat uses only residuals (no leverage term).
+        # HC1/CR1 paths remain on the demeaned design (no leverage term).
+        #
+        # Survey-replicate scope: this also short-circuits the absorb-refit
+        # replicate-variance branch below (search "compute_replicate_refit_variance").
+        # Correct: with a fixed full-dummy design, replicate variance doesn't
+        # need per-replicate refit — the standard compute_replicate_vcov
+        # path applies directly because the design matrix does not depend
+        # on the replicate weights.
+        #
+        # Placement: this auto-route runs BEFORE the multi-absorb +
+        # survey-weights guard because that guard's rationale ("single-pass
+        # demeaning is not the correct weighted FWL projection for N > 1
+        # dimensions") doesn't apply when we're about to swap absorb for
+        # fixed_effects: the fixed_effects= path builds the full-dummy
+        # design and solves WLS directly, with no within-transform step.
         if absorb and self.vcov_type in ("hc2", "hc2_bm"):
-            raise NotImplementedError(
-                f"MultiPeriodDiD(absorb=..., vcov_type={self.vcov_type!r}) "
-                "is not yet supported: absorbed fixed effects are handled "
-                "by demeaning, and the HC2 / CR2 Bell-McCaffrey leverage "
-                "corrections depend on the full FE hat matrix, not the "
-                "residualized one. Use vcov_type='hc1' with absorb=, or "
-                "switch to fixed_effects= dummies for a full-dummy design."
+            fixed_effects = list(fixed_effects or []) + list(absorb)
+            absorb = None
+            n_absorbed_effects = 0
+
+        # Reject multi-absorb with survey weights (single-pass demeaning is
+        # not the correct weighted FWL projection for N > 1 dimensions).
+        # Only fires when absorb is still set — i.e., the auto-route above
+        # didn't consume it.
+        if absorb and len(absorb) > 1 and survey_weights is not None:
+            raise ValueError(
+                f"Multiple absorbed fixed effects (absorb={absorb}) with survey "
+                "weights is not supported. Single-pass sequential demeaning is not "
+                "the correct weighted FWL projection for multiple absorbed dimensions. "
+                "Use absorb with a single variable, or use fixed_effects= instead."
             )
 
         # MultiPeriodDiD is intrinsically a multi-period panel estimator;

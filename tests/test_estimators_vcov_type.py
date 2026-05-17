@@ -744,33 +744,6 @@ class TestFitBehavior:
             assert np.isfinite(res.att)
             assert np.isfinite(res.se)
 
-    def test_multi_period_absorb_rejects_hc2_and_hc2_bm(self):
-        """MultiPeriodDiD with absorb= rejects HC2/HC2+BM for the same
-        methodology reason as the base class."""
-        rng = np.random.default_rng(20260420)
-        n_units, n_time = 30, 4
-        rows = []
-        for i in range(n_units):
-            treated = int(i >= n_units // 2)
-            for t in range(n_time):
-                y = rng.normal(0.0, 1.0) + 0.3 * treated + 0.5 * treated * (t >= 2)
-                rows.append({"unit": i, "time": t, "treated": treated, "y": y})
-        data = pd.DataFrame(rows)
-
-        for bad in ("hc2", "hc2_bm"):
-            with pytest.raises(
-                NotImplementedError,
-                match="MultiPeriodDiD.*absorb.*not yet supported",
-            ):
-                MultiPeriodDiD(vcov_type=bad).fit(
-                    data,
-                    outcome="y",
-                    treatment="treated",
-                    time="time",
-                    absorb=["unit"],
-                    unit="unit",
-                )
-
     def test_summary_suppresses_variance_line_under_wild_bootstrap(self):
         """When inference_method='wild_bootstrap', the Variance label is omitted.
 
@@ -1212,6 +1185,209 @@ class TestDiDAbsorbedFERParity:
         # t-critical → wider interval).
         width_hc2 = float(ci_hc2[1] - ci_hc2[0])
         width_hc2_bm = float(ci_hc2_bm[1] - ci_hc2_bm[0])
+        assert width_hc2_bm > width_hc2, (
+            f"HC2-BM CI width ({width_hc2_bm:.6f}) should exceed "
+            f"HC2 CI width ({width_hc2:.6f}) — BM Satterthwaite DOF is "
+            "smaller than n-k, so the critical value is larger."
+        )
+
+
+class TestMPDAbsorbedFERParity:
+    """R-parity for `MultiPeriodDiD(absorb=..., vcov_type in {hc2, hc2_bm})`.
+
+    Mirrors `TestDiDAbsorbedFERParity`. The auto-route promotes `absorb=` to
+    `fixed_effects=` internally; MPD's existing `fixed_effects=` code path
+    builds the full-dummy design that R's `lm()` produces.
+
+    Collinearity note: MPD's `treated` is a time-invariant ever-treated
+    indicator, so it is perfectly collinear with the sum of treated-cohort
+    unit dummies post-auto-route. `solve_ols` resolves this by dropping
+    one column (typically a unit dummy from the never-treated cohort); the
+    `treated` main-effect coefficient absorbs the dropped column's effect.
+    Tests pin parity on a per-period interaction (`treated:period_4`) where
+    no collinearity exists, exposed as `result.period_effects[4]`.
+    """
+
+    def _load_golden(self):
+        import json
+        from pathlib import Path
+
+        golden_path = (
+            Path(__file__).parent.parent / "benchmarks" / "data" / "clubsandwich_cr2_golden.json"
+        )
+        if not golden_path.exists():
+            pytest.skip(
+                "Golden JSON not present; run `Rscript "
+                "benchmarks/R/generate_clubsandwich_golden.R` to generate."
+            )
+        with open(golden_path) as f:
+            golden = json.load(f)
+        if "mpd_absorbed_fe_did" not in golden:
+            pytest.skip(
+                "Golden JSON does not yet include `mpd_absorbed_fe_did` scenario; "
+                "regenerate via the R script."
+            )
+        return golden["mpd_absorbed_fe_did"]
+
+    def _make_data(self, d):
+        return pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "y": d["y"],
+            }
+        )
+
+    def _fit_absorb(self, d, vcov_type, absorb_cols=("unit",)):
+        return MultiPeriodDiD(vcov_type=vcov_type).fit(
+            self._make_data(d),
+            outcome="y",
+            treatment="treated",
+            time="period",
+            absorb=list(absorb_cols),
+            reference_period=int(d["reference_period"]),
+            unit="unit",
+        )
+
+    def _fit_fixed_effects(self, d, vcov_type, fe_cols=("unit",)):
+        return MultiPeriodDiD(vcov_type=vcov_type).fit(
+            self._make_data(d),
+            outcome="y",
+            treatment="treated",
+            time="period",
+            fixed_effects=list(fe_cols),
+            reference_period=int(d["reference_period"]),
+            unit="unit",
+        )
+
+    def test_absorb_hc2_matches_fixed_effects_dummies_single_absorb(self):
+        """`absorb=["unit"]` + hc2 produces the same per-period SE as
+        `fixed_effects=["unit"]` + hc2 (auto-route invariant)."""
+        d = self._load_golden()
+        target_period = int(d["target_period"])
+        res_a = self._fit_absorb(d, "hc2", absorb_cols=("unit",))
+        res_f = self._fit_fixed_effects(d, "hc2", fe_cols=("unit",))
+        pe_a = res_a.period_effects[target_period]
+        pe_f = res_f.period_effects[target_period]
+        np.testing.assert_allclose(pe_a.effect, pe_f.effect, atol=1e-12)
+        np.testing.assert_allclose(pe_a.se, pe_f.se, atol=1e-12)
+
+    def test_absorb_hc2_matches_fixed_effects_dummies_multi_absorb(self):
+        """`absorb=["unit","time"]` invariant: with both unit and time
+        FE auto-routed, the period dummies collide with time-FE dummies;
+        `solve_ols` handles rank deficiency, slope SE on the
+        target per-period interaction stays well-defined and matches the
+        explicit `fixed_effects=` path."""
+        d = self._load_golden()
+        target_period = int(d["target_period"])
+        # Use "period" as the time/FE column name to match the data column.
+        res_a = MultiPeriodDiD(vcov_type="hc2").fit(
+            self._make_data(d),
+            outcome="y",
+            treatment="treated",
+            time="period",
+            absorb=["unit", "period"],
+            reference_period=int(d["reference_period"]),
+            unit="unit",
+        )
+        res_f = MultiPeriodDiD(vcov_type="hc2").fit(
+            self._make_data(d),
+            outcome="y",
+            treatment="treated",
+            time="period",
+            fixed_effects=["unit", "period"],
+            reference_period=int(d["reference_period"]),
+            unit="unit",
+        )
+        pe_a = res_a.period_effects[target_period]
+        pe_f = res_f.period_effects[target_period]
+        assert np.isfinite(pe_a.se)
+        np.testing.assert_allclose(pe_a.effect, pe_f.effect, atol=1e-12)
+        np.testing.assert_allclose(pe_a.se, pe_f.se, atol=1e-12)
+
+    def test_absorb_hc2_bm_matches_fixed_effects_dummies(self):
+        """`absorb=` + hc2_bm equals `fixed_effects=` + hc2_bm bit-for-bit
+        on both per-period SE and inference (DOF transfers identically)."""
+        d = self._load_golden()
+        target_period = int(d["target_period"])
+        res_a = self._fit_absorb(d, "hc2_bm", absorb_cols=("unit",))
+        res_f = self._fit_fixed_effects(d, "hc2_bm", fe_cols=("unit",))
+        pe_a = res_a.period_effects[target_period]
+        pe_f = res_f.period_effects[target_period]
+        np.testing.assert_allclose(pe_a.effect, pe_f.effect, atol=1e-12)
+        np.testing.assert_allclose(pe_a.se, pe_f.se, atol=1e-12)
+        np.testing.assert_allclose(pe_a.p_value, pe_f.p_value, atol=1e-12)
+
+    def test_absorb_hc2_matches_sandwich_vcovhc(self):
+        """`absorb=` + hc2 matches `lm() + sandwich::vcovHC(type="HC2")`
+        at 1e-10 on the target per-period interaction."""
+        d = self._load_golden()
+        target_period = int(d["target_period"])
+        target_coef = f"treated_period_{target_period}"
+        coef_names = d["coef_names"]
+        idx = coef_names.index(target_coef)
+        expected_vcov = np.asarray(d["vcov_hc2"]).reshape(d["vcov_hc2_shape"])
+        expected_se = float(np.sqrt(expected_vcov[idx, idx]))
+        expected_coef = float(d["coef"][idx])
+
+        res = self._fit_absorb(d, "hc2", absorb_cols=("unit",))
+        pe = res.period_effects[target_period]
+        np.testing.assert_allclose(pe.effect, expected_coef, atol=1e-10)
+        np.testing.assert_allclose(pe.se, expected_se, atol=1e-10)
+
+    def test_absorb_hc2_bm_matches_clubsandwich_singleton_cluster(self):
+        """`absorb=` + hc2_bm matches `clubSandwich::vcovCR(cluster=1:n, type="CR2")`
+        at 1e-10 on the target per-period interaction (singleton-cluster
+        CR2 = one-way HC2-BM by PT2018 §3.3)."""
+        d = self._load_golden()
+        target_period = int(d["target_period"])
+        target_coef = f"treated_period_{target_period}"
+        coef_names = d["coef_names"]
+        idx = coef_names.index(target_coef)
+        expected_vcov = np.asarray(d["vcov_hc2_bm"]).reshape(d["vcov_hc2_bm_shape"])
+        expected_se = float(np.sqrt(expected_vcov[idx, idx]))
+
+        res = self._fit_absorb(d, "hc2_bm", absorb_cols=("unit",))
+        pe = res.period_effects[target_period]
+        np.testing.assert_allclose(pe.se, expected_se, atol=1e-10)
+
+    def test_absorb_plus_fixed_effects_still_rejected_under_hc2_bm(self):
+        """Mutual-exclusion of `absorb=` and `fixed_effects=` is preserved
+        on MPD across all vcov_types (the auto-route does NOT silently merge)."""
+        d = self._load_golden()
+        for vcov in ("hc1", "hc2", "hc2_bm"):
+            with pytest.raises(ValueError, match="Cannot use both absorb and fixed_effects"):
+                MultiPeriodDiD(vcov_type=vcov).fit(
+                    self._make_data(d),
+                    outcome="y",
+                    treatment="treated",
+                    time="period",
+                    absorb=["unit"],
+                    fixed_effects=["period"],
+                    reference_period=int(d["reference_period"]),
+                    unit="unit",
+                )
+
+    def test_absorb_hc2_bm_df_sensitive_inference(self):
+        """HC2 vs HC2-BM produce the same SE on the target per-period
+        interaction but different `p_value` / `conf_int` because the BM
+        Satterthwaite DOF differs from n-k. Guards against an unwired DOF
+        path (R1 review on PR #458 caught the analogous gap on DiD)."""
+        d = self._load_golden()
+        target_period = int(d["target_period"])
+        res_hc2 = self._fit_absorb(d, "hc2", absorb_cols=("unit",))
+        res_hc2_bm = self._fit_absorb(d, "hc2_bm", absorb_cols=("unit",))
+        pe_hc2 = res_hc2.period_effects[target_period]
+        pe_hc2_bm = res_hc2_bm.period_effects[target_period]
+        np.testing.assert_allclose(pe_hc2.effect, pe_hc2_bm.effect, atol=1e-12)
+        np.testing.assert_allclose(pe_hc2.se, pe_hc2_bm.se, atol=1e-12)
+        assert pe_hc2.p_value != pe_hc2_bm.p_value, (
+            "HC2 and HC2-BM should have different p_values "
+            "because the BM Satterthwaite DOF differs from n-k."
+        )
+        width_hc2 = float(pe_hc2.conf_int[1] - pe_hc2.conf_int[0])
+        width_hc2_bm = float(pe_hc2_bm.conf_int[1] - pe_hc2_bm.conf_int[0])
         assert width_hc2_bm > width_hc2, (
             f"HC2-BM CI width ({width_hc2_bm:.6f}) should exceed "
             f"HC2 CI width ({width_hc2:.6f}) — BM Satterthwaite DOF is "
