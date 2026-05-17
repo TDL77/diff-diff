@@ -1202,10 +1202,14 @@ class TestMPDAbsorbedFERParity:
     Collinearity note: MPD's `treated` is a time-invariant ever-treated
     indicator, so it is perfectly collinear with the sum of treated-cohort
     unit dummies post-auto-route. `solve_ols` resolves this by dropping
-    one column (typically a unit dummy from the never-treated cohort); the
-    `treated` main-effect coefficient absorbs the dropped column's effect.
-    Tests pin parity on a per-period interaction (`treated:period_4`) where
-    no collinearity exists, exposed as `result.period_effects[4]`.
+    one column from that collinear set under R-style rank-deficiency
+    handling. In the shipped parity fixture the dropped column is a unit
+    dummy from the never-treated cohort (`unit_25`) — the `treated` main
+    effect remains finite there — but the specific column dropped is
+    pivot-order dependent and not guaranteed across fixtures. Tests
+    therefore pin parity on a per-period interaction (`treated:period_4`)
+    which is identified independent of that choice, exposed as
+    `result.period_effects[4]`.
     """
 
     def _load_golden(self):
@@ -1393,3 +1397,89 @@ class TestMPDAbsorbedFERParity:
             f"HC2 CI width ({width_hc2:.6f}) — BM Satterthwaite DOF is "
             "smaller than n-k, so the critical value is larger."
         )
+
+    def test_absorb_hc2_bm_avg_att_df_sensitive_inference(self):
+        """The post-period-average ATT (`avg_att`, the MPD-specific
+        contrast that does NOT have a DiD analogue) must also reflect
+        the Satterthwaite DOF under HC2-BM: HC2 and HC2-BM share
+        `avg_se` but differ in `avg_p_value` and `avg_conf_int`. This is
+        the MPD-specific inference pin that the DiD test class cannot
+        cover."""
+        d = self._load_golden()
+        res_hc2 = self._fit_absorb(d, "hc2", absorb_cols=("unit",))
+        res_hc2_bm = self._fit_absorb(d, "hc2_bm", absorb_cols=("unit",))
+        np.testing.assert_allclose(res_hc2.avg_att, res_hc2_bm.avg_att, atol=1e-12)
+        np.testing.assert_allclose(res_hc2.avg_se, res_hc2_bm.avg_se, atol=1e-12)
+        assert res_hc2.avg_p_value != res_hc2_bm.avg_p_value, (
+            "HC2 and HC2-BM should produce different `avg_p_value` because "
+            "the BM Satterthwaite DOF on the post-period-average contrast "
+            "differs from n-k. Same p_value indicates the DOF was not "
+            "propagated to the avg_att inference path."
+        )
+        width_hc2 = float(res_hc2.avg_conf_int[1] - res_hc2.avg_conf_int[0])
+        width_hc2_bm = float(res_hc2_bm.avg_conf_int[1] - res_hc2_bm.avg_conf_int[0])
+        assert width_hc2_bm > width_hc2, (
+            f"HC2-BM avg_att CI width ({width_hc2_bm:.6f}) should exceed "
+            f"HC2 avg_att CI width ({width_hc2:.6f}) — BM Satterthwaite "
+            "DOF is smaller than n-k, so the critical value is larger."
+        )
+
+    def test_absorb_hc2_bm_survey_multi_absorb_auto_routes(self):
+        """Survey-weighted multi-absorb + HC2-BM should auto-route, not reject.
+
+        Mirrors the DiD-class test of the same name: the legacy guard at
+        `estimators.py:1505-1512` rejects `survey_design + len(absorb) > 1`
+        because single-pass demeaning is not the correct weighted FWL
+        projection for multiple absorbed dimensions. But when the auto-route
+        fires (hc2/hc2_bm), absorb is swapped for fixed_effects= BEFORE the
+        survey guard sees it, so the demeaning rationale doesn't apply. The
+        auto-route placement is precisely tuned for this case; this test
+        pins it on the MPD path."""
+        from diff_diff import SurveyDesign
+
+        d = self._load_golden()
+        rng = np.random.default_rng(20260420)
+        n = len(d["y"])
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "y": d["y"],
+                "weight": rng.uniform(0.5, 2.0, size=n),
+            }
+        )
+        sd = SurveyDesign(weights="weight", weight_type="aweight")
+        # Multi-absorb (unit + period) + survey + hc2_bm: auto-route fires
+        # and the multi-absorb-survey guard is bypassed cleanly.
+        res = MultiPeriodDiD(vcov_type="hc2_bm").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="period",
+            absorb=["unit", "period"],
+            reference_period=int(d["reference_period"]),
+            unit="unit",
+            survey_design=sd,
+        )
+        # Parity invariant: the explicit fixed_effects= path on the same
+        # data must produce the same per-period SE.
+        res_fe = MultiPeriodDiD(vcov_type="hc2_bm").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="period",
+            fixed_effects=["unit", "period"],
+            reference_period=int(d["reference_period"]),
+            unit="unit",
+            survey_design=sd,
+        )
+        target_period = int(d["target_period"])
+        pe_a = res.period_effects[target_period]
+        pe_f = res_fe.period_effects[target_period]
+        assert np.isfinite(pe_a.effect)
+        assert np.isfinite(pe_a.se)
+        np.testing.assert_allclose(pe_a.effect, pe_f.effect, atol=1e-12)
+        np.testing.assert_allclose(pe_a.se, pe_f.se, atol=1e-12)
+        np.testing.assert_allclose(res.avg_att, res_fe.avg_att, atol=1e-12)
+        np.testing.assert_allclose(res.avg_se, res_fe.avg_se, atol=1e-12)
