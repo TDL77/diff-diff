@@ -524,6 +524,28 @@ class TestPreTrendsPowerResults:
 
         assert isinstance(results.power_adequate, bool)
 
+    def test_power_at_raises_on_custom_violation_type(self, mock_multiperiod_results):
+        """power_at(M) must raise NotImplementedError for violation_type='custom'.
+
+        The PreTrendsPowerResults dataclass does not currently persist the
+        fitted violation_weights, so power_at() cannot reconstruct the
+        custom direction. To prevent silent wrong output (equal-weights
+        fallback), the method raises NotImplementedError and points users
+        to refit with the new M. See REGISTRY.md PreTrendsPower section's
+        silent-failure-guard Note, the audit at
+        docs/methodology/papers/roth-2022-review.md, and the TODO.md row
+        tracking the planned weight-persistence follow-up.
+        """
+        # mock_multiperiod_results has 4 pre-periods but period 3 is the
+        # reference, so n_pre_periods after fit is 3 (matches
+        # test_results_n_pre_periods expectation in this class).
+        weights = np.array([0.1, 0.3, 0.6])
+        pt = PreTrendsPower(violation_type="custom", violation_weights=weights)
+        results = pt.fit(mock_multiperiod_results)
+
+        with pytest.raises(NotImplementedError, match="violation_type='custom'"):
+            results.power_at(0.5)
+
 
 # =============================================================================
 # Tests for convenience functions

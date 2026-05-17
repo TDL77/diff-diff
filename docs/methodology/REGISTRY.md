@@ -2793,6 +2793,10 @@ Violation types:
 - **Last period**: δ_{-1} = c, others zero
 - **Custom**: user-specified pattern
 
+- **Note (deviation from paper — `linear` violation pattern):** the shipped `PreTrendsPower._get_violation_weights("linear")` constructs `[n_pre-1, ..., 1, 0]` from `n_pre` alone and `PreTrendsPower.fit()` never threads the actual relative-time labels into that construction (`pretrends.py:488-531`, `pretrends.py:862-866`). For irregular or anticipation-shifted pre-period grids (e.g., `t ∈ {-5, -3, -1}`), this means the slope reported as MDV is NOT in Roth's `γ` units — the shifted/normalized direction effectively assumes contiguous relative times `{-(n_pre-1), ..., -1}`. The follow-up audit (tracked in TODO.md) will either rebuild `linear` weights from the sorted actual relative-time values and expose the parameter in Roth's `γ` units, or formally retain the current shifted/normalized contract with this Note as the deviation record.
+
+- **Note (silent-failure guard — `power_at()` with `violation_type="custom"`):** `PreTrendsPowerResults` does not currently persist the fitted `violation_weights`, so `power_at(M)` cannot reconstruct the custom direction. As of this commit, `PreTrendsPowerResults.power_at()` raises `NotImplementedError` for `violation_type="custom"` rather than silently returning equal-weights output. To compute power at a new `M` for a custom fit, refit `PreTrendsPower(violation_type="custom", violation_weights=...)` with the new `M`. Tracked in TODO.md as a planned follow-up to persist the fitted weights and lift the guard.
+
 *Standard errors:*
 - Power calculations are exact (no sampling variability)
 - Uncertainty comes from estimated Σ

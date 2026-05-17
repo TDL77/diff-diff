@@ -209,8 +209,30 @@ class PreTrendsPowerResults:
         -------
         float
             Power to detect violation of magnitude M.
+
+        Raises
+        ------
+        NotImplementedError
+            If the fit was made with ``violation_type="custom"``. The
+            ``PreTrendsPowerResults`` dataclass does not currently persist
+            the fitted ``violation_weights``, so this method cannot
+            reconstruct the custom weights. Refit
+            ``PreTrendsPower(violation_type="custom", violation_weights=...)``
+            with the new ``M`` instead. Tracked in TODO.md as a planned
+            follow-up to persist the fitted weights.
         """
         from scipy import stats
+
+        if self.violation_type == "custom":
+            raise NotImplementedError(
+                "PreTrendsPowerResults.power_at() does not support "
+                "violation_type='custom': fitted violation_weights are "
+                "not persisted on the result object, so the custom weights "
+                "cannot be reconstructed. Refit "
+                "PreTrendsPower(violation_type='custom', "
+                "violation_weights=...) with the new M instead. "
+                "See TODO.md (PreTrendsPower power_at custom path)."
+            )
 
         n_pre = self.n_pre_periods
 
@@ -227,7 +249,8 @@ class PreTrendsPowerResults:
             weights = np.zeros(n_pre)
             weights[-1] = 1.0
         else:
-            # For custom, we can't reconstruct - use equal weights as fallback
+            # Defensive fallback for unknown violation_type values added
+            # in the future; equal weights at least produce a valid number.
             weights = np.ones(n_pre)
 
         # Normalize weights to unit L2 norm
