@@ -184,9 +184,28 @@ planned as follow-up enhancements:
   fixed effects. Confidence intervals are correspondingly too narrow
   and p-values too small. Users should treat reported significance
   conservatively until the GMM correction lands.
-- **Event-study mode** — ``event_study=True`` raises
-  ``NotImplementedError``. The per-event-time × ring decomposition
-  (Butts Table 2 staggered specification) is queued for a follow-up PR.
+- **Event-study mode** — ``event_study=True`` is SHIPPED in Wave C.
+  The per-event-time × ring decomposition (Butts Section 5 / Table 2)
+  emits per-event-time direct effects ``tau_k`` and per-(ring,
+  event-time) spillover effects ``delta_jk`` as a ``att_dynamic``
+  DataFrame plus MultiIndex ``spillover_effects``. The
+  ``event_study_effects: Dict[int, Dict]`` alias mirrors
+  ``TwoStageDiD``'s schema for ``plot_event_study`` consumption (the
+  plotter prefers the new ``reference_period`` attribute over the
+  legacy ``n_obs==0`` heuristic). ``DiagnosticReport`` routing for
+  ``SpilloverDiDResults`` is queued as a follow-up. Reference
+  period ``-1 - anticipation`` (TwoStageDiD parity). ``horizon_max``
+  bins event-times into endpoint pools (no row drop — divergence
+  from TwoStageDiD's filtering semantic, intentional per
+  ``feedback_no_silent_failures``). ``horizon_max`` must be ``>=1`` or
+  ``None`` under ``event_study=True``; ``horizon_max=0`` is rejected
+  (the single bin ``k=0`` leaves no event-time pair to anchor the
+  reference period — for a single aggregate effect, use
+  ``event_study=False`` instead). Scalar ``att`` becomes a
+  sample-share-weighted average of post-treatment ``tau_k`` with SE
+  from linear-combination inference on the post-treatment vcov block.
+  Per-event-time SEs share the same Wave B Gardner-GMM caveat
+  (biased downward by a few percent; Wave D follow-up will close).
 - **Survey-design integration** — ``survey_design=`` raises
   ``NotImplementedError``.
 - **Count-of-treated-in-ring** — only the "nearest-treated ring"

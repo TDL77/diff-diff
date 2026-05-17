@@ -26,6 +26,7 @@
 
       ~SpilloverDiDResults.alpha
       ~SpilloverDiDResults.anticipation
+      ~SpilloverDiDResults.att_dynamic
       ~SpilloverDiDResults.bootstrap_distribution
       ~SpilloverDiDResults.cluster_name
       ~SpilloverDiDResults.coef_var
@@ -33,7 +34,9 @@
       ~SpilloverDiDResults.conley_lag_cutoff
       ~SpilloverDiDResults.d_bar
       ~SpilloverDiDResults.event_study
+      ~SpilloverDiDResults.event_study_effects
       ~SpilloverDiDResults.fitted_values
+      ~SpilloverDiDResults.horizon_max
       ~SpilloverDiDResults.inference_method
       ~SpilloverDiDResults.is_significant
       ~SpilloverDiDResults.is_staggered
@@ -42,6 +45,7 @@
       ~SpilloverDiDResults.n_far_away_obs
       ~SpilloverDiDResults.n_units_ever_in_ring
       ~SpilloverDiDResults.r_squared
+      ~SpilloverDiDResults.reference_period
       ~SpilloverDiDResults.residuals
       ~SpilloverDiDResults.ring_breakpoints
       ~SpilloverDiDResults.significance_stars

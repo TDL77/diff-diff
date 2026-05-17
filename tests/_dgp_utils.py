@@ -5,7 +5,7 @@ and 7 by construction. Used by ``tests/test_spillover.py`` to anchor
 identification claims (Wave B MVP correctness anchors).
 """
 
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import pandas as pd
@@ -144,6 +144,8 @@ def generate_butts_staggered_dgp(
     cohort_onsets: Optional[list] = None,
     tau_total: float = -0.07,
     delta_1: float = -0.04,
+    tau_per_event_time: Optional[Callable[[int], float]] = None,
+    delta_per_ring_per_event_time: Optional[Callable[[int, int], float]] = None,
     d_bar: float = 100.0,
     error_sd: float = 0.05,
     seed: int = 42,
@@ -154,6 +156,27 @@ def generate_butts_staggered_dgp(
     Each cohort is clustered at a distinct geographic center so spillover
     is well-defined per cohort (units near cohort C1 receive spillover
     starting at C1's onset, etc.).
+
+    Parameters
+    ----------
+    tau_per_event_time : callable, optional
+        If supplied, overrides scalar ``tau_total`` for treated rows. Called
+        as ``tau_per_event_time(k)`` where ``k = t - first_treat[unit]`` is the
+        event-time relative to own onset (``k >= 0`` for treated rows). Used
+        by Wave C event-study identification regression tests to verify
+        recovery of per-event-time direct effects.
+    delta_per_ring_per_event_time : callable, optional
+        If supplied, overrides scalar ``delta_1`` for spillover rows. Called
+        as ``delta_per_ring_per_event_time(ring_idx, k)`` where ``ring_idx``
+        is the spillover ring (0-indexed; this DGP places all near-controls
+        in ring 0 by construction — one-cohort-one-cluster) and ``k`` is the
+        spillover-exposure event-time (``t - spillover_onset_by_unit[unit]``,
+        ``k >= 0`` for exposed rows).
+
+    Notes
+    -----
+    When both callable kwargs default to ``None``, output is bit-identical to
+    the pre-Wave-C baseline (asserted by ``tests/test_dgp_utils.py``).
 
     Returns the same column schema as :func:`generate_butts_nonstaggered_dgp`.
     """
@@ -229,10 +252,22 @@ def generate_butts_staggered_dgp(
             y_clean = mu[u] + lambda_t[t]
             # Direct effect for own treated unit
             if is_treat and t >= ft:
-                y = y_clean + tau_total
+                if tau_per_event_time is not None:
+                    k_direct = int(t - ft)
+                    effect = tau_per_event_time(k_direct)
+                else:
+                    effect = tau_total
+                y = y_clean + effect
             # Spillover on near-control once its cohort activates
             elif (not is_treat) and t >= spillover_onset:
-                y = y_clean + delta_1
+                if delta_per_ring_per_event_time is not None:
+                    k_spill = int(t - spillover_onset)
+                    # ring_idx=0: this DGP places all near-controls in ring 0
+                    # by construction (one cohort = one cluster center).
+                    effect = delta_per_ring_per_event_time(0, k_spill)
+                else:
+                    effect = delta_1
+                y = y_clean + effect
             else:
                 y = y_clean
             y += rng.normal(0, error_sd)
