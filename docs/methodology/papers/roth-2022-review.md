@@ -10,7 +10,7 @@
 
 ## Methodology Registry Entry
 
-*Formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries — copy the `## PreTrendsPower` section into the registry (replacing the existing stub at line 2758).*
+*Formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries — copy the `## PreTrendsPower` section into the registry (replacing the existing `## PreTrendsPower` stub).*
 
 ## PreTrendsPower
 
@@ -21,6 +21,7 @@
 *Assumption checks / warnings:*
 - Input: event-study coefficient vector beta_hat = (beta_hat_pre, beta_hat_post)' that is asymptotically normal under the underlying estimator (Equation 1; Remark 1 lists TWFE, GMM, Freyaldenhoven-Hansen-Shapiro, regression-adjustment/IPW/DR DiD per Sant'Anna-Zhao, Callaway-Sant'Anna, Sun-Abraham)
 - Input: estimated variance-covariance matrix Sigma_hat in R^{(K+M) x (K+M)} where K = # pre-period coefficients, M = # post-period coefficients
+- **Block decomposition convention (per Roth, Section II.A-B)**: throughout this entry, the variance partition uses Roth's *post-first* ordering for the proofs, i.e., Var[(beta_hat_post, beta_hat_pre)'] = [[Sigma_11, Sigma_12], [Sigma_21, Sigma_22]] where Sigma_11 = Var[beta_hat_post] in R^{M x M} (the post-treatment block), Sigma_22 = Var[beta_hat_pre] in R^{K x K} (the pre-treatment block), Sigma_12 = Cov(beta_hat_post, beta_hat_pre) in R^{M x K}, Sigma_21 = Sigma_12'. The stacked input vector beta_hat is (pre, post)' as stated above; the (post, pre) block ordering is internal to the propositions and matches Roth's paper notation. Implementations must use the post-treatment block Sigma_11 (not the full Sigma_hat) wherever they need Var[beta_hat_post].
 - Pre-trend zero-anticipation assumption: tau_pre = 0 (Equation 2) — same identifying convention as Rambachan-Roth (2023)
 - Warn if pretest has low power: e.g., if the slope at 80% power (gamma_{0.8}) produces a |bias| > |estimated treatment effect|, the pretest is uninformative for the magnitudes that matter
 - Warn that pretest-conditioning distortions are NOT removed by larger samples — they persist as long as the pretest can fail with non-vanishing probability (footnote 12)
@@ -40,10 +41,10 @@ where tau_pre = 0 by the no-anticipation assumption and delta is the bias from a
 
 This corresponds to checking individual 95% CIs of each pre-period coefficient (the dominant convention in applied work: 11 of 12 surveyed papers, per Section I.B).
 
-Alternative acceptance regions supported by the framework:
-- **Joint Wald (chi-squared)**: B_W(Sigma) = { b : b' Sigma_22^{-1} b <= chi^2_{1-alpha, K} } (1 of 12 surveyed papers, plus Roth's discussion of joint tests)
-- **Slope-of-best-fit-line t-test**: discussed in Section I and tabulated in Table 1 column "|t| for slope"
-- **Custom user-supplied B(Sigma)**: any (measurable) acceptance set; Propositions 1, 3, 4 apply for any B; Proposition 2 requires the specific NIS form
+Alternative acceptance regions:
+- **Joint Wald (chi-squared)**: B_W(Sigma) = { b in R^K : b' Sigma_22^{-1} b <= chi^2_{1-alpha, K} }. **Note:** mentioned in the paper as a less common applied convention (1 of 12 surveyed papers, Section I.B). Propositions 1, 3, 4 apply to this B since it is convex; Roth does NOT separately tabulate power/bias/coverage for the Wald form.
+- **Slope-of-best-fit-line t-test**: the paper's Table 1 reports the t-statistic for the slope as an observed property of surveyed papers, but **Note (deviation from paper):** Roth does NOT analyze a slope-t-statistic acceptance region as a pretest framework. Library support for this acceptance form is an extension beyond Roth (2022).
+- **Custom user-supplied B(Sigma)**: any (measurable) acceptance set; Propositions 1, 3, 4 apply for any B (paper-supported framework). Proposition 2 (sign of bias under monotone trend) requires the specific NIS form plus Assumption 1.
 
 *Conditional bias after pretesting (Proposition 1):*
 
@@ -87,7 +88,9 @@ Defaults Roth uses:
 *Plug-in estimator and CI (Section I.C):*
 
     tau_hat = l' beta_hat_post
-    CI_{tau_*} = tau_hat +/- 1.96 * sigma_{tau_hat}, where sigma^2_{tau_hat} = l' Sigma l
+    CI_{tau_*} = tau_hat +/- 1.96 * sigma_{tau_hat}, where sigma^2_{tau_hat} = l' Sigma_11 l
+
+(Note: Sigma_11 is the post-treatment covariance block per the convention above, not the full Sigma_hat.)
 
 *Power calculation against a linear violation (Section I.C "Power Calculations"):*
 
@@ -135,7 +138,7 @@ simulation fallback.
 *Algorithm (no numbered algorithm in paper; implementation distilled from Section I.C):*
 
 1. Take user-supplied (beta_hat, Sigma, K, M) and a target estimand l in R^M (default: l = uniform 1/M)
-2. Compute B_NIS(Sigma) acceptance region using diagonal sigma_t = sqrt(Sigma_{tt}) for t in pre periods
+2. Compute B_NIS(Sigma) acceptance region using diagonal sigma_t = sqrt(Sigma_22[t, t]) for t in pre periods (Sigma_22 = Var[beta_hat_pre] per the block convention above)
 3. **Power**: solve gamma_{1-p} = root of P(reject pretest | gamma) = 1 - p
    - For each candidate gamma, compute P(beta_hat_pre in B_NIS) under beta_hat_pre ~ N(gamma * t_pre, Sigma_22) using `tmvtnorm`-style multivariate normal CDF; or via simulation
 4. **Bias**: for gamma in {0, gamma_{0.5}, gamma_{0.8}, user-custom}:
@@ -151,12 +154,12 @@ simulation fallback.
 - R dependency: [`tmvtnorm`](https://cran.r-project.org/package=tmvtnorm) (Manjunath & Wilhelm 2012) for truncated multivariate normal moments and CDF
 
 **Requirements checklist:**
-- [ ] Acceptance regions: NIS (individual t), joint Wald, slope-of-best-fit, custom B
+- [ ] Acceptance regions: NIS (individual t, paper-analyzed); joint Wald and custom B (paper-supported via Propositions 1, 3, 4, not separately tabulated by Roth); **Note (deviation from paper):** slope-of-best-fit-line is an extension beyond Roth (2022) — paper tabulates the slope t-stat but does not analyze a slope-t pretest framework
 - [ ] Power calculation against linear violation with slope gamma — solve for gamma_{0.5} and gamma_{0.8}
 - [ ] Analytical truncated multivariate normal path (tmvtnorm-equivalent) + simulation fallback
-- [ ] Unconditional and conditional bias for arbitrary linear contrast l in R^M
+- [ ] Unconditional and conditional bias for arbitrary linear contrast l in R^M (using Sigma_11 for the post-treatment variance)
 - [ ] Unconditional and conditional null rejection / coverage for the same linear contrast
-- [ ] Custom slope / nonlinear trend hypotheses (linear, constant level shift, last-period jump, custom delta vector)
+- [ ] **Note (deviation from paper):** non-linear trend hypotheses — Roth (2022) formally analyzes only LINEAR violations; "constant level shift", "last-period jump", and "custom delta vector" patterns are extensions from Roth's R `pretrends` package, applied via the same Proposition 1/3/4 framework
 - [ ] Plot of bias against pretest power for visual reporting (Roth's Figure 1 style)
 - [ ] Composes with HonestDiD result objects (shared beta_hat, Sigma_hat input contract)
 
@@ -185,8 +188,8 @@ simulation fallback.
 | `alpha` | float in (0, 1) | 0.05 | Standard significance level for pretest and reporting CI |
 | `target_power` | list[float] in (0, 1) | [0.5, 0.8] | Roth's reported benchmarks (Cohen 1988 conventional 0.8; 0.5 for "even-odds detection") |
 | `l` (contrast) | array in R^M | uniform 1/M | User-specified linear functional of tau_post |
-| `pretest_form` | enum | "individual" (NIS) | "individual", "joint_wald", "slope", "custom" |
-| `acceptance_region` | callable or set | B_NIS | Custom B(Sigma) for "custom" pretest_form |
+| `pretest_form` | enum | "individual" (NIS) | "individual" (paper-analyzed); "joint_wald" / "custom" (paper-supported via Propositions 1/3/4); "slope" — **deviation from paper**, R-package extension |
+| `acceptance_region` | callable or set | B_NIS | Custom B(Sigma) for "custom" pretest_form (paper-supported: Propositions 1, 3, 4 apply to any B) |
 | `method` | enum | "analytical" | "analytical" (tmvtnorm-equivalent) or "simulation" |
 | `n_sim` | int | 10000 | Monte Carlo iterations when method="simulation" |
 
