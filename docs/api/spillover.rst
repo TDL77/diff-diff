@@ -174,16 +174,19 @@ Wave B MVP limitations
 The current implementation has the following documented limitations,
 planned as follow-up enhancements:
 
-- **Gardner GMM first-stage correction at stage 2** — stage-2 variance
-  is the standard ``solve_ols`` HC1 / Conley / cluster estimator without
-  the influence-function adjustment for stage-1 FE estimation
-  uncertainty. The full GMM sandwich (Butts & Gardner 2022) is planned
-  as a follow-up; until then, reported SEs are biased downward
-  (underestimated by a few percent in typical settings) because they
-  omit the additional variance contribution from estimating the stage-1
-  fixed effects. Confidence intervals are correspondingly too narrow
-  and p-values too small. Users should treat reported significance
-  conservatively until the GMM correction lands.
+- **Gardner GMM first-stage correction at stage 2** — SHIPPED in Wave D.
+  Stage-2 variance now applies the influence-function-based correction
+  for stage-1 FE estimation uncertainty across all three ``vcov_type``
+  paths (HC1, Conley, cluster) on both ``event_study=False`` AND
+  ``event_study=True``. The IF formula is
+  ``psi_i = gamma_hat' * X_{10,i} * eps_{10,i} - X_{2,i} * eps_{2,i}``
+  with ``gamma_hat = (X_10' X_10)^{-1} (X_1' X_2)``; the meat is
+  ``Psi' K Psi`` where ``K`` is the path-dependent kernel matrix
+  (identity for HC1, block-indicator for cluster, spatial kernel for
+  Conley). Documented synthesis of Butts (2021) Section 3.1 + Gardner
+  (2022) Section 4 + Conley (1999); no reference software combines all
+  three ingredients. Point estimates unchanged; SE values shift upward
+  by 1-few percent depending on first-stage residual variance.
 - **Event-study mode** — ``event_study=True`` is SHIPPED in Wave C.
   The per-event-time × ring decomposition (Butts Section 5 / Table 2)
   emits per-event-time direct effects ``tau_k`` and per-(ring,
@@ -204,8 +207,9 @@ planned as follow-up enhancements:
   ``event_study=False`` instead). Scalar ``att`` becomes a
   sample-share-weighted average of post-treatment ``tau_k`` with SE
   from linear-combination inference on the post-treatment vcov block.
-  Per-event-time SEs share the same Wave B Gardner-GMM caveat
-  (biased downward by a few percent; Wave D follow-up will close).
+  Per-event-time SEs apply the Wave D Gardner GMM first-stage
+  uncertainty correction (see the "Gardner GMM first-stage correction"
+  entry above).
 - **Survey-design integration** — ``survey_design=`` raises
   ``NotImplementedError``.
 - **Count-of-treated-in-ring** — only the "nearest-treated ring"

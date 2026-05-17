@@ -765,14 +765,12 @@ def _validate_conley_kwargs(
             )
 
 
-def _compute_conley_vcov(
-    X: np.ndarray,
-    residuals: np.ndarray,
+def _compute_conley_meat(
+    scores: np.ndarray,
     coords: np.ndarray,
     cutoff: float,
     metric: ConleyMetric,
     kernel: str,
-    bread_matrix: np.ndarray,
     *,
     time: Optional[np.ndarray] = None,
     unit: Optional[np.ndarray] = None,
@@ -780,21 +778,27 @@ def _compute_conley_vcov(
     cluster_ids: Optional[np.ndarray] = None,
     _conley_sparse: Optional[bool] = None,
 ) -> np.ndarray:
-    """Conley (1999) spatial HAC sandwich variance.
+    """Conley (1999) spatial HAC meat — ``scores' K scores`` for the product kernel.
+
+    Factors the kernel-construction-and-application step out of
+    :func:`_compute_conley_vcov` so a second caller (SpilloverDiD's Wave D
+    Gardner GMM first-stage correction) can reuse the cross-sectional /
+    panel-block / sparse k-d-tree / cluster-product code path with an
+    arbitrary score matrix substituted for the canonical ``X * residuals``.
 
     Two operating modes:
 
     **Cross-sectional** (``time`` / ``unit`` / ``lag_cutoff`` all None):
 
-        Var̂(β) = bread_inv · (Σ_{i,j} K(d_ij/h) · X_i ε_i ε_j X_j') · bread_inv
+        meat = Σ_{i,j} K(d_ij/h) · scores_i scores_j'
 
-    Implemented via ``meat = S' K S`` where ``S = X * residuals[:, None]``.
+    Implemented via ``meat = scores' K scores``.
 
     **Panel block-decomposed** (all three keyword-only args set):
 
-        XeeX_spatial = Σ_t  S_t' · K_space_t · S_t                    (within-period sum)
-        XeeX_serial  = Σ_u  S_u' · K_time_u · S_u   if lag_cutoff > 0  (within-unit sum)
-        Var̂(β) = bread_inv · (XeeX_spatial + XeeX_serial) · bread_inv
+        meat_spatial = Σ_t  scores_t' · K_space_t · scores_t   (within-period sum)
+        meat_serial  = Σ_u  scores_u' · K_time_u · scores_u    if lag_cutoff > 0
+        meat = meat_spatial + meat_serial
 
     The serial Bartlett kernel ``K_time_u[i, j] = 1{|t_i-t_j| <= L, i != j} ·
     (1 - |t_i-t_j|/(L+1))`` is hardcoded regardless of the user-supplied
@@ -815,23 +819,17 @@ def _compute_conley_vcov(
     Inputs are assumed already validated by :func:`_validate_conley_kwargs`;
     the helper only does the math. Caller is responsible for the validator.
 
+    Emits a ``UserWarning`` if the smallest meat eigenvalue is materially
+    negative (< -1e-12) — radial 1-D Bartlett and uniform kernels are
+    practitioner specializations of Conley 1999 and are not formally
+    PSD-guaranteed.
+
     Returns
     -------
-    vcov : ndarray of shape (k, k)
-
-    Notes
-    -----
-    Neither the uniform kernel (negative spectral regions, Conley 1999
-    footnote 11) nor the **radial 1-D Bartlett** specialization implemented
-    here is PSD-guaranteed. Conley's explicit PSD formula (Eq 3.14) is the
-    2-D separable product window on a lattice; the radial pairwise form is
-    a practitioner specialization (R ``conleyreg``, Stata ``acreg``, Hsiang
-    2010) that is not formally PSD. We emit a ``UserWarning`` if the smallest
-    meat eigenvalue is materially negative (< -1e-12) regardless of kernel.
+    meat : ndarray of shape (p, p)
     """
     coords_arr = np.asarray(coords, dtype=np.float64)
-    S = X * residuals[:, np.newaxis]
-    n = X.shape[0]
+    n = scores.shape[0]
 
     # Factorize cluster_ids once if supplied, so per-slice mask construction
     # below can use integer comparisons rather than re-factorizing per call.
@@ -877,7 +875,7 @@ def _compute_conley_vcov(
         )
 
     def _spatial_meat_for_mask(mask: Optional[np.ndarray] = None) -> np.ndarray:
-        """Compute the spatial meat ``S' K S`` for the given subset of rows.
+        """Compute the spatial meat ``scores' K scores`` for the given subset.
 
         ``mask`` may be ``None`` (use all rows) or a boolean array of length n.
         Dispatches to the sparse helper when ``use_sparse`` is True, otherwise
@@ -886,11 +884,11 @@ def _compute_conley_vcov(
         (per-slice mask, NOT full n×n — saves memory for panel paths).
         """
         if mask is None:
-            S_sub = S
+            scores_sub = scores
             coords_sub = coords_arr
             cluster_sub = cluster_codes
         else:
-            S_sub = S[mask]
+            scores_sub = scores[mask]
             coords_sub = coords_arr[mask]
             cluster_sub = cluster_codes[mask] if cluster_codes is not None else None
         if use_sparse:
@@ -902,7 +900,7 @@ def _compute_conley_vcov(
             # would use more memory than dense); fall through to dense in
             # that case (the warning is already emitted by the helper).
             sparse_meat = _compute_spatial_bartlett_meat_sparse(
-                S_sub, coords_sub, cutoff, cast(str, metric), cluster_codes=cluster_sub
+                scores_sub, coords_sub, cutoff, cast(str, metric), cluster_codes=cluster_sub
             )
             if sparse_meat is not None:
                 return sparse_meat
@@ -912,7 +910,7 @@ def _compute_conley_vcov(
         if cluster_sub is not None:
             cluster_mask = cluster_sub[:, None] == cluster_sub[None, :]
             K = K * cluster_mask
-        return S_sub.T @ K @ S_sub
+        return scores_sub.T @ K @ scores_sub
 
     # Suppress spurious BLAS-level "divide by zero / overflow" warnings on
     # macOS Accelerate when K is sparse-ish (most off-diagonals are exactly
@@ -920,11 +918,11 @@ def _compute_conley_vcov(
     # the warning is a subnormal-handling false-positive in the AVX path.
     # We verify finiteness immediately after.
     if time is None:
-        # Phase 1 cross-sectional path: full n×n spatial sandwich.
+        # Cross-sectional path: full n×n spatial sandwich.
         with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
             meat = _spatial_meat_for_mask(None)
     else:
-        # Phase 2 panel block-decomposed path (matches R conleyreg).
+        # Panel block-decomposed path (matches R conleyreg).
         time_arr = np.asarray(time)
         unit_arr = np.asarray(unit)
         # Normalize time labels to dense panel-period codes (0..T-1) so that
@@ -940,8 +938,8 @@ def _compute_conley_vcov(
         # `conley_lag_cutoff` is meaningfully a "number of observed panel
         # periods" regardless of label scale.
         _, time_codes = np.unique(time_arr, return_inverse=True)
-        k = X.shape[1]
-        meat = np.zeros((k, k))
+        p = scores.shape[1]
+        meat = np.zeros((p, p))
         # Spatial component: within-period sandwich, summed across periods.
         # _spatial_meat_for_mask dispatches to sparse or dense per the toggle.
         with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
@@ -957,14 +955,14 @@ def _compute_conley_vcov(
             if L > 0:
                 for u_val in np.unique(unit_arr):
                     mask_u = unit_arr == u_val
-                    S_u = S[mask_u]
+                    scores_u = scores[mask_u]
                     # Use dense panel-period codes (NOT raw labels) for lag math.
                     t_u = time_codes[mask_u].astype(np.float64)
                     lag_mat = np.abs(t_u[:, None] - t_u[None, :])
                     K_u = ((lag_mat <= L) & (lag_mat != 0)).astype(np.float64) * (
                         1.0 - lag_mat / (L + 1.0)
                     )
-                    meat += S_u.T @ K_u @ S_u
+                    meat += scores_u.T @ K_u @ scores_u
     if not np.all(np.isfinite(meat)):
         raise ValueError(
             "Conley meat contains non-finite values; check residuals and "
@@ -990,6 +988,66 @@ def _compute_conley_vcov(
             UserWarning,
             stacklevel=3,
         )
+
+    return meat
+
+
+def _compute_conley_vcov(
+    X: np.ndarray,
+    residuals: np.ndarray,
+    coords: np.ndarray,
+    cutoff: float,
+    metric: ConleyMetric,
+    kernel: str,
+    bread_matrix: np.ndarray,
+    *,
+    time: Optional[np.ndarray] = None,
+    unit: Optional[np.ndarray] = None,
+    lag_cutoff: Optional[int] = None,
+    cluster_ids: Optional[np.ndarray] = None,
+    _conley_sparse: Optional[bool] = None,
+) -> np.ndarray:
+    """Conley (1999) spatial HAC sandwich variance.
+
+    Thin wrapper around :func:`_compute_conley_meat`: builds
+    ``scores = X * residuals[:, None]``, delegates the meat construction,
+    then wraps with the supplied bread inverse.
+
+    Two operating modes (both delegated to :func:`_compute_conley_meat`):
+
+    **Cross-sectional** (``time`` / ``unit`` / ``lag_cutoff`` all None):
+
+        Var̂(β) = bread_inv · (Σ_{i,j} K(d_ij/h) · X_i ε_i ε_j X_j') · bread_inv
+
+    **Panel block-decomposed** (all three keyword-only args set):
+
+        XeeX_spatial = Σ_t  S_t' · K_space_t · S_t                    (within-period sum)
+        XeeX_serial  = Σ_u  S_u' · K_time_u · S_u   if lag_cutoff > 0  (within-unit sum)
+        Var̂(β) = bread_inv · (XeeX_spatial + XeeX_serial) · bread_inv
+
+    See :func:`_compute_conley_meat` for the kernel choice, sparse
+    k-d-tree fallback, cluster-product kernel, and PSD-warning details.
+
+    Inputs are assumed already validated by :func:`_validate_conley_kwargs`;
+    this wrapper only does the math. Caller is responsible for the validator.
+
+    Returns
+    -------
+    vcov : ndarray of shape (k, k)
+    """
+    scores = X * residuals[:, np.newaxis]
+    meat = _compute_conley_meat(
+        scores,
+        coords,
+        cutoff,
+        metric,
+        kernel,
+        time=time,
+        unit=unit,
+        lag_cutoff=lag_cutoff,
+        cluster_ids=cluster_ids,
+        _conley_sparse=_conley_sparse,
+    )
 
     # Sandwich via two solves (mirrors _compute_cr2_bm pattern in linalg.py)
     try:
