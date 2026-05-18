@@ -34,6 +34,66 @@ from scipy import optimize, stats
 
 from diff_diff.results import MultiPeriodDiDResults
 
+
+def _extract_event_study_vcov_subblock(
+    results: Any,
+    pre_periods: List[int],
+    ses: np.ndarray,
+) -> np.ndarray:
+    """
+    Extract the pre-period sub-block of ``results.event_study_vcov`` when
+    available; otherwise fall back to ``diag(ses**2)``.
+
+    This is the canonical Σ_22 routing path for ``compute_pretrends_power``
+    when the event-study result type exposes a full event-study covariance
+    matrix (CallawaySantAnnaResults non-bootstrap fits at
+    ``staggered_results.py:126-128`` and SunAbrahamResults non-bootstrap
+    fits via the W-matrix construction added in PR-B Step 3). Bootstrap
+    fits and replicate-weight survey fits clear ``event_study_vcov`` so
+    the analytical VCV is not mixed with bootstrap / replicate SE
+    overrides — those cases naturally fall through to the diag fallback.
+
+    Parameters
+    ----------
+    results : event-study results object
+        Must have ``event_study_vcov`` and ``event_study_vcov_index``
+        attributes (CallawaySantAnnaResults and SunAbrahamResults both
+        expose them; either may be None for the bootstrap / replicate
+        paths).
+    pre_periods : list of int
+        Sorted relative-time labels of the pre-period coefficients to
+        extract.
+    ses : np.ndarray
+        Per-period standard errors (used for the ``diag(ses**2)`` fallback
+        path; must be in the same order as ``pre_periods``).
+
+    Returns
+    -------
+    np.ndarray
+        The (n_pre, n_pre) covariance sub-block. Full event_study_vcov
+        sub-block when available; diag(ses**2) otherwise.
+    """
+    es_vcov = getattr(results, "event_study_vcov", None)
+    es_vcov_index = getattr(results, "event_study_vcov_index", None)
+    if es_vcov is None or es_vcov_index is None:
+        return np.diag(ses**2)
+
+    try:
+        indices = [list(es_vcov_index).index(t) for t in pre_periods]
+    except ValueError as e:
+        # event_study_vcov_index out of sync with the filtered pre_periods.
+        # This is a defensive guard — should not happen on the canonical
+        # construction paths, but if it does we fail loud rather than
+        # silently substituting diag.
+        raise ValueError(
+            f"event_study_vcov_index is missing one of the pre-period labels "
+            f"{pre_periods}; cannot extract sub-block. Available index: "
+            f"{list(es_vcov_index)}. Original error: {e}"
+        ) from e
+
+    return np.asarray(es_vcov)[np.ix_(indices, indices)]
+
+
 # =============================================================================
 # Results Classes
 # =============================================================================
@@ -754,7 +814,12 @@ class PreTrendsPower:
 
                 effects = np.array([pre_effects[t]["effect"] for t in pre_periods])
                 ses = np.array([pre_effects[t]["se"] for t in pre_periods])
-                vcov = np.diag(ses**2)
+
+                # Route through full event_study_vcov when available
+                # (non-bootstrap CS fits at staggered_results.py:126-128).
+                # Bootstrap CS fits clear event_study_vcov at
+                # staggered.py:2032-2036, falling through to diag.
+                vcov = _extract_event_study_vcov_subblock(results, pre_periods, ses)
 
                 return effects, ses, vcov, n_pre
         except ImportError:
@@ -791,7 +856,13 @@ class PreTrendsPower:
 
                 effects = np.array([pre_effects[t]["effect"] for t in pre_periods])
                 ses = np.array([pre_effects[t]["se"] for t in pre_periods])
-                vcov = np.diag(ses**2)
+
+                # Route through full event_study_vcov when available
+                # (non-bootstrap SA fits — sun_abraham.py builds the matrix
+                # via W @ vcov_cohort @ W.T after _compute_iw_effects).
+                # Bootstrap SA fits and replicate-weight survey fits clear
+                # event_study_vcov, falling through to diag.
+                vcov = _extract_event_study_vcov_subblock(results, pre_periods, ses)
 
                 return effects, ses, vcov, n_pre
         except ImportError:
