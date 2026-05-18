@@ -61,17 +61,34 @@ class PreTrendsPowerResults:
     n_pre_periods : int
         Number of pre-treatment periods in the event study.
     test_statistic : float
-        Expected test statistic under the specified violation.
+        Expected test statistic under the specified violation (Wald only;
+        NaN for NIS fits).
     critical_value : float
         Critical value for the pre-trends test.
     noncentrality : float
-        Non-centrality parameter under the alternative hypothesis.
+        Non-centrality parameter under the alternative hypothesis (Wald only;
+        NaN for NIS fits).
     pre_period_effects : np.ndarray
         Estimated pre-period effects from the event study.
     pre_period_ses : np.ndarray
         Standard errors of pre-period effects.
     vcov : np.ndarray
         Variance-covariance matrix of pre-period effects.
+    pretest_form : str
+        Pretest acceptance-region form used: ``'nis'`` (no-individually-
+        significant box probability — Roth 2022 Section II.A-B, default for new
+        fits) or ``'wald'`` (noncentral-chi-squared on the quadratic form
+        ``delta' Sigma_22^{-1} delta`` — paper-supported alternative, retained
+        for backwards compatibility with shipped numerical baselines).
+    nis_box_probability : float
+        Acceptance probability ``P(beta_hat_pre in B_NIS(Sigma))`` under the
+        alternative ``M * weights``. NIS-only; NaN for Wald fits.
+    violation_weights : np.ndarray, optional
+        The normalized violation-direction vector used at fit time. Populated
+        for all violation types on fresh fits. Old serialized results may have
+        ``None`` here; ``power_at()`` falls back to reconstruction in that
+        case (with the PR-A NotImplementedError guard retained only for
+        ``violation_type='custom'`` with ``violation_weights=None``).
     """
 
     power: float
@@ -88,6 +105,9 @@ class PreTrendsPowerResults:
     pre_period_ses: np.ndarray = field(repr=False)
     vcov: np.ndarray = field(repr=False)
     original_results: Optional[Any] = field(default=None, repr=False)
+    pretest_form: Literal["nis", "wald"] = "wald"
+    nis_box_probability: float = np.nan
+    violation_weights: Optional[np.ndarray] = field(default=None, repr=False)
 
     def __repr__(self) -> str:
         return (
@@ -132,6 +152,7 @@ class PreTrendsPowerResults:
             f"{'Significance level (alpha):':<35} {self.alpha:.3f}",
             f"{'Target power:':<35} {self.target_power:.1%}",
             f"{'Violation type:':<35} {self.violation_type}",
+            f"{'Pretest form:':<35} {self.pretest_form}",
             "",
             "-" * 70,
             "Power Analysis".center(70),
@@ -140,14 +161,23 @@ class PreTrendsPowerResults:
             f"{'Power to detect this violation:':<35} {self.power:.1%}",
             f"{'Minimum detectable violation:':<35} {self.mdv:.4f}",
             "",
-            f"{'Test statistic (expected):':<35} {self.test_statistic:.4f}",
             f"{'Critical value:':<35} {self.critical_value:.4f}",
-            f"{'Non-centrality parameter:':<35} {self.noncentrality:.4f}",
-            "",
-            "-" * 70,
-            "Interpretation".center(70),
-            "-" * 70,
         ]
+        # Dispatch on pretest_form: NIS reports the MVN box acceptance
+        # probability, Wald reports the noncentral-chi-squared noncentrality.
+        if self.pretest_form == "nis":
+            lines.append(f"{'NIS box probability (accept):':<35} {self.nis_box_probability:.4f}")
+        else:
+            lines.append(f"{'Test statistic (expected):':<35} {self.test_statistic:.4f}")
+            lines.append(f"{'Non-centrality parameter:':<35} {self.noncentrality:.4f}")
+        lines.extend(
+            [
+                "",
+                "-" * 70,
+                "Interpretation".center(70),
+                "-" * 70,
+            ]
+        )
 
         if self.power_adequate:
             lines.append(f"✓ Power ({self.power:.0%}) meets target ({self.target_power:.0%}).")
@@ -185,6 +215,8 @@ class PreTrendsPowerResults:
             "test_statistic": self.test_statistic,
             "critical_value": self.critical_value,
             "noncentrality": self.noncentrality,
+            "pretest_form": self.pretest_form,
+            "nis_box_probability": self.nis_box_probability,
             "is_informative": self.is_informative,
             "power_adequate": self.power_adequate,
         }
@@ -197,8 +229,9 @@ class PreTrendsPowerResults:
         """
         Compute power to detect a specific violation magnitude.
 
-        This method allows computing power at different M values without
-        re-fitting the model, using the stored variance-covariance matrix.
+        Uses the stored fitted ``violation_weights`` and the stored
+        ``pretest_form`` to dispatch to the NIS or Wald power computation
+        without re-fitting.
 
         Parameters
         ----------
@@ -213,69 +246,96 @@ class PreTrendsPowerResults:
         Raises
         ------
         NotImplementedError
-            If the fit was made with ``violation_type="custom"``. The
-            ``PreTrendsPowerResults`` dataclass does not currently persist
-            the fitted ``violation_weights``, so this method cannot
-            reconstruct the custom weights. Refit
-            ``PreTrendsPower(violation_type="custom", violation_weights=...)``
-            with the new ``M`` instead. Tracked in TODO.md as a planned
-            follow-up to persist the fitted weights.
+            If the result was produced by an older library version (before
+            the ``violation_weights`` field was added to ``PreTrendsPowerResults``)
+            AND ``violation_type='custom'``. The reconstruction fallback can
+            handle ``linear``/``constant``/``last_period`` from stored
+            metadata, but custom weights cannot be reconstructed; refit
+            ``PreTrendsPower(violation_type='custom', violation_weights=...)``
+            with the new ``M`` instead.
         """
         from scipy import stats
 
-        if self.violation_type == "custom":
-            raise NotImplementedError(
-                "PreTrendsPowerResults.power_at() does not support "
-                "violation_type='custom': fitted violation_weights are "
-                "not persisted on the result object, so the custom weights "
-                "cannot be reconstructed. Refit "
-                "PreTrendsPower(violation_type='custom', "
-                "violation_weights=...) with the new M instead. "
-                "See TODO.md (PreTrendsPower power_at custom path)."
-            )
-
         n_pre = self.n_pre_periods
 
-        # Reconstruct violation weights based on violation type
-        # Must match PreTrendsPower._get_violation_weights() exactly
-        if self.violation_type == "linear":
-            # Linear trend: weights decrease toward treatment
-            # [n-1, n-2, ..., 1, 0] for n pre-periods
-            weights = np.arange(-n_pre + 1, 1, dtype=float)
-            weights = -weights  # Now [n-1, n-2, ..., 1, 0]
-        elif self.violation_type == "constant":
-            weights = np.ones(n_pre)
-        elif self.violation_type == "last_period":
-            weights = np.zeros(n_pre)
-            weights[-1] = 1.0
+        # Prefer the persisted fitted weights (populated for all violation
+        # types on fresh fits after PR-B). Fall back to reconstruction only
+        # for old serialized results lacking the field.
+        if self.violation_weights is not None:
+            weights = np.asarray(self.violation_weights, dtype=float)
         else:
-            # Fail loud on unknown violation_type values. Mirrors the raise
-            # at the end of _get_violation_weights(); prevents silent
-            # equal-weights output if a future violation_type is added to
-            # fit() but not threaded through power_at().
-            raise ValueError(
-                f"Unknown violation_type: {self.violation_type!r}. "
-                f"Expected one of: 'linear', 'constant', 'last_period', 'custom'."
+            if self.violation_type == "custom":
+                raise NotImplementedError(
+                    "PreTrendsPowerResults.power_at() cannot reconstruct "
+                    "custom violation weights from an older serialized result "
+                    "(violation_weights field is None). Refit "
+                    "PreTrendsPower(violation_type='custom', "
+                    "violation_weights=...) with the new M instead. "
+                    "Fresh fits from the current library version persist "
+                    "violation_weights and do not hit this guard."
+                )
+            # Reconstruction fallback for legacy serialized results.
+            # Matches the pre-PR-B count-based linear behavior (no
+            # relative_times available on an old result). Only used when
+            # violation_weights is None.
+            if self.violation_type == "linear":
+                weights = np.arange(-n_pre + 1, 1, dtype=float)
+                weights = -weights  # [n-1, n-2, ..., 1, 0]
+            elif self.violation_type == "constant":
+                weights = np.ones(n_pre)
+            elif self.violation_type == "last_period":
+                weights = np.zeros(n_pre)
+                weights[-1] = 1.0
+            else:
+                raise ValueError(
+                    f"Unknown violation_type: {self.violation_type!r}. "
+                    f"Expected one of: 'linear', 'constant', 'last_period', 'custom'."
+                )
+            # Normalize to unit L2 norm — matches the legacy normalize-at-end
+            # path in _get_violation_weights for non-relative_times callers.
+            norm = np.linalg.norm(weights)
+            if norm > 0:
+                weights = weights / norm
+
+        # Dispatch on the stored pretest_form. Old serialized results default
+        # to pretest_form='wald' (the dataclass default) which preserves the
+        # previous power_at numerical output for backwards compat.
+        if self.pretest_form == "nis":
+            z_alpha = (
+                self.critical_value
+                if np.isfinite(self.critical_value)
+                else stats.norm.ppf(1 - self.alpha / 2)
             )
+            sigma = np.sqrt(np.maximum(np.diag(self.vcov), 0))
+            delta = M * weights
+            upper = z_alpha * sigma - delta
+            lower = -z_alpha * sigma - delta
+            try:
+                accept_prob = float(
+                    stats.multivariate_normal.cdf(
+                        upper,
+                        lower_limit=lower,
+                        mean=np.zeros(n_pre),
+                        cov=self.vcov,
+                        allow_singular=True,
+                    )
+                )
+            except (ValueError, np.linalg.LinAlgError):
+                rng = np.random.default_rng(0)
+                samples = rng.multivariate_normal(mean=np.zeros(n_pre), cov=self.vcov, size=20000)
+                in_box = np.all((samples >= lower[None, :]) & (samples <= upper[None, :]), axis=1)
+                accept_prob = float(in_box.mean())
+            accept_prob = float(np.clip(accept_prob, 0.0, 1.0))
+            return float(1.0 - accept_prob)
 
-        # Normalize weights to unit L2 norm
-        norm = np.linalg.norm(weights)
-        if norm > 0:
-            weights = weights / norm
-
-        # Compute non-centrality parameter
+        # Wald path (legacy default, also opt-in for new fits with
+        # pretest_form='wald'). Matches the pre-PR-B numerical output.
         try:
             vcov_inv = np.linalg.inv(self.vcov)
         except np.linalg.LinAlgError:
             vcov_inv = np.linalg.pinv(self.vcov)
-
-        # delta = M * weights
-        # nc = delta' * V^{-1} * delta
         noncentrality = M**2 * (weights @ vcov_inv @ weights)
-
-        # Compute power using non-central chi-squared
         power = 1 - stats.ncx2.cdf(self.critical_value, df=n_pre, nc=noncentrality)
-
         return float(power)
 
 
@@ -425,6 +485,20 @@ class PreTrendsPower:
     violation_weights : array-like, optional
         Custom weights for violation pattern. Length must equal number of
         pre-periods. Only used when violation_type='custom'.
+    pretest_form : {'nis', 'wald'}, default='nis'
+        Pre-trends test acceptance-region form:
+
+        - ``'nis'``: Roth (2022) no-individually-significant pretest (Section
+          II.A-B). Acceptance region is ``B_NIS(Σ) = { b : |b_t| <= z_{1-α/2}
+          σ_t for all t }``. Power computed via multivariate normal box
+          probability. This is the new default (PR-B 2026-05-17), matching
+          both the paper's primary analysis and the R ``pretrends`` package.
+        - ``'wald'``: Noncentral chi-squared on the quadratic form
+          ``δ' Σ_22^{-1} δ`` (the shipped behavior prior to PR-B 2026-05-17).
+          Retained as a paper-supported alternative under Propositions 1+3+4
+          (Wald acceptance region is a convex ellipsoid, so all four
+          propositions apply). Use this for backwards-compat with shipped
+          numerical baselines.
 
     Examples
     --------
@@ -473,6 +547,7 @@ class PreTrendsPower:
         power: float = 0.80,
         violation_type: Literal["linear", "constant", "last_period", "custom"] = "linear",
         violation_weights: Optional[np.ndarray] = None,
+        pretest_form: Literal["nis", "wald"] = "nis",
     ):
         if not 0 < alpha < 1:
             raise ValueError(f"alpha must be between 0 and 1, got {alpha}")
@@ -485,6 +560,8 @@ class PreTrendsPower:
             )
         if violation_type == "custom" and violation_weights is None:
             raise ValueError("violation_weights must be provided when violation_type='custom'")
+        if pretest_form not in ("nis", "wald"):
+            raise ValueError(f"pretest_form must be 'nis' or 'wald', got '{pretest_form}'")
 
         self.alpha = alpha
         self.target_power = power
@@ -492,6 +569,7 @@ class PreTrendsPower:
         self.violation_weights = (
             np.asarray(violation_weights) if violation_weights is not None else None
         )
+        self.pretest_form = pretest_form
 
     def get_params(self) -> Dict[str, Any]:
         """Get parameters for this estimator."""
@@ -500,6 +578,7 @@ class PreTrendsPower:
             "power": self.target_power,
             "violation_type": self.violation_type,
             "violation_weights": self.violation_weights,
+            "pretest_form": self.pretest_form,
         }
 
     def set_params(self, **params) -> "PreTrendsPower":
@@ -729,12 +808,25 @@ class PreTrendsPower:
         weights: np.ndarray,
         vcov: np.ndarray,
     ) -> Tuple[float, float, float, float]:
-        """
-        Compute power to detect violation of magnitude M.
+        """Dispatch to the configured pretest form (NIS by default)."""
+        if self.pretest_form == "nis":
+            return self._compute_power_nis(M, weights, vcov)
+        return self._compute_power_wald(M, weights, vcov)
 
-        The pre-trends test is a Wald test: H0: delta = 0 vs H1: delta != 0
-        Under H1 with violation delta = M * weights, the test statistic follows
-        a non-central chi-squared distribution.
+    def _compute_power_wald(
+        self,
+        M: float,
+        weights: np.ndarray,
+        vcov: np.ndarray,
+    ) -> Tuple[float, float, float, float]:
+        """
+        Compute power to detect violation of magnitude M under the Wald form.
+
+        Wald pre-trends test: H0: delta = 0 vs H1: delta != 0. Under H1 with
+        violation delta = M * weights, the test statistic ``delta' V^{-1} delta``
+        follows a non-central chi-squared distribution with df=K and
+        noncentrality lambda = M^2 * (w' V^{-1} w). Convex (ellipsoid)
+        acceptance region, so Propositions 1+3+4 of Roth (2022) all apply.
 
         Parameters
         ----------
@@ -785,15 +877,116 @@ class PreTrendsPower:
 
         return power, noncentrality, test_stat, critical_value
 
+    def _compute_power_nis(
+        self,
+        M: float,
+        weights: np.ndarray,
+        vcov: np.ndarray,
+    ) -> Tuple[float, float, float, float]:
+        """
+        Compute power to detect violation of magnitude M under the NIS form.
+
+        NIS (no-individually-significant) pre-trends test: passes iff every
+        pre-period coefficient lies within its own ``+/- z_{1-alpha/2} * sigma_t``
+        confidence interval. Roth (2022) Section II.A-B; matches the empirical
+        convention used in 12 of 12 surveyed papers (Section I.B).
+
+        Under H1 with violation ``delta_pre = M * weights``, the rejection
+        probability is computed via the centered change-of-variable
+        ``Y = beta_hat_pre - delta_pre ~ N(0, Sigma_22)``:
+
+        .. math::
+            \\text{Power} = 1 - P\\bigl(Y_t \\in [-z\\sigma_t - \\delta_t,
+                                                 z\\sigma_t - \\delta_t]
+                                       \\text{ for all } t\\bigr)
+
+        Implemented via ``scipy.stats.multivariate_normal.cdf`` with
+        rectangular bounds (Genz method; supports K up to ~20 cleanly).
+
+        Parameters
+        ----------
+        M : float
+            Violation magnitude.
+        weights : np.ndarray
+            Violation pattern (Linear: ``|t|`` directly when fit() threads
+            ``relative_times``; constant / last_period / custom: unit-normalized).
+        vcov : np.ndarray
+            Variance-covariance matrix Sigma_22 of the pre-period coefficients.
+
+        Returns
+        -------
+        power : float
+            Probability the NIS test rejects under the alternative.
+        noncentrality : float
+            ``np.nan``. NIS does not have a noncentrality scalar; the
+            equivalent NIS-specific output is ``nis_box_probability`` (the
+            acceptance probability ``1 - power``) stored on
+            ``PreTrendsPowerResults``.
+        test_stat : float
+            ``np.nan``. NIS rejects via a rectangular acceptance event,
+            not a scalar test statistic.
+        critical_value : float
+            ``z_{1-alpha/2}``, the per-period normal critical value used
+            to define ``B_NIS(Sigma)``.
+        """
+        z_alpha = stats.norm.ppf(1 - self.alpha / 2)
+
+        sigma = np.sqrt(np.maximum(np.diag(vcov), 0))
+        delta = M * weights
+
+        upper = z_alpha * sigma - delta
+        lower = -z_alpha * sigma - delta
+
+        # P(Y_t in [lower_t, upper_t] for all t) where Y ~ N(0, Sigma_22).
+        # scipy multivariate_normal.cdf accepts rectangular bounds via
+        # `lower_limit=`.
+        try:
+            accept_prob = float(
+                stats.multivariate_normal.cdf(
+                    upper,
+                    lower_limit=lower,
+                    mean=np.zeros(len(weights)),
+                    cov=vcov,
+                    allow_singular=True,
+                )
+            )
+        except (ValueError, np.linalg.LinAlgError):
+            # Fallback to MC simulation if the analytical CDF fails (very
+            # degenerate Sigma). 20k draws yields ~0.003 SE on power around
+            # 0.5, which is plenty for the gamma_p root-finding loop.
+            rng = np.random.default_rng(0)
+            samples = rng.multivariate_normal(mean=np.zeros(len(weights)), cov=vcov, size=20000)
+            in_box = np.all((samples >= lower[None, :]) & (samples <= upper[None, :]), axis=1)
+            accept_prob = float(in_box.mean())
+
+        # Clip for floating-point safety; the box probability is naturally in
+        # [0, 1] but scipy can return slightly outside due to Genz tolerances.
+        accept_prob = float(np.clip(accept_prob, 0.0, 1.0))
+        power = 1.0 - accept_prob
+
+        return power, np.nan, np.nan, z_alpha
+
     def _compute_mdv(
         self,
         weights: np.ndarray,
         vcov: np.ndarray,
     ) -> float:
-        """
-        Compute minimum detectable violation.
+        """Dispatch to the configured pretest form (NIS by default)."""
+        if self.pretest_form == "nis":
+            return self._compute_mdv_nis(weights, vcov)
+        return self._compute_mdv_wald(weights, vcov)
 
-        Find the smallest M such that power >= target_power.
+    def _compute_mdv_wald(
+        self,
+        weights: np.ndarray,
+        vcov: np.ndarray,
+    ) -> float:
+        """
+        Compute minimum detectable violation under the Wald form.
+
+        Find the smallest M such that ``_compute_power_wald(M, weights, vcov)
+        >= target_power``. Uses binary search on the noncentrality parameter,
+        then converts back to M via ``nc = M^2 * (w' V^{-1} w)``.
 
         Parameters
         ----------
@@ -805,7 +998,10 @@ class PreTrendsPower:
         Returns
         -------
         mdv : float
-            Minimum detectable violation.
+            Minimum detectable violation in units of M (interpreted relative
+            to the ``weights`` direction; for linear weights threaded with
+            ``relative_times``, this is Roth's gamma in MDV units — see
+            ``_get_violation_weights``).
         """
         n_pre = len(weights)
 
@@ -860,6 +1056,57 @@ class PreTrendsPower:
 
         return mdv
 
+    def _compute_mdv_nis(
+        self,
+        weights: np.ndarray,
+        vcov: np.ndarray,
+    ) -> float:
+        """
+        Compute minimum detectable violation under the NIS form.
+
+        Solves ``_compute_power_nis(M, weights, vcov) = target_power`` for M
+        via a doubling expansion to bracket the root, then ``brentq`` bisect.
+        Non-convergence cap at ``M_high = 1000`` returns ``np.inf`` (matches
+        the Wald path's existing 1000-cap fallback).
+
+        Parameters
+        ----------
+        weights : np.ndarray
+            Violation pattern.
+        vcov : np.ndarray
+            Variance-covariance matrix Sigma_22.
+
+        Returns
+        -------
+        mdv : float
+            Minimum detectable violation. For linear weights threaded with
+            ``relative_times``, this is Roth's gamma at the target power.
+        """
+
+        def power_minus_target(M: float) -> float:
+            return self._compute_power_nis(M, weights, vcov)[0] - self.target_power
+
+        # Doubling expansion to find an upper bound where power >= target.
+        M_high = 1.0
+        while power_minus_target(M_high) < 0 and M_high < 1000:
+            M_high *= 2
+
+        if M_high >= 1000:
+            # Target power not achievable in the practical range.
+            return np.inf
+
+        # Bisect on [0, M_high]. power_minus_target(0) = alpha - target < 0
+        # (since target > alpha by typical convention) and
+        # power_minus_target(M_high) >= 0 by construction.
+        try:
+            mdv = float(optimize.brentq(power_minus_target, 0.0, M_high))
+        except ValueError:
+            # Degenerate (e.g., target = alpha exactly); fall back to M_high
+            # as the smallest upper bound where we confirmed the target.
+            mdv = float(M_high)
+
+        return mdv
+
     def fit(
         self,
         results: Union[MultiPeriodDiDResults, Any],
@@ -893,15 +1140,19 @@ class PreTrendsPower:
         # Get violation weights
         weights = self._get_violation_weights(n_pre)
 
-        # Compute MDV
+        # Compute MDV (dispatches on self.pretest_form)
         mdv = self._compute_mdv(weights, vcov)
 
         # Default M: use MDV if not specified
         if M is None:
             M = mdv if np.isfinite(mdv) else np.max(ses)
 
-        # Compute power at specified M
+        # Compute power at specified M (dispatches on self.pretest_form)
         power, noncentrality, test_stat, critical_value = self._compute_power(M, weights, vcov)
+
+        # NIS-specific output: the box acceptance probability. Wald fits leave
+        # this as NaN; the meaningful Wald-specific scalar is `noncentrality`.
+        nis_box_probability = 1.0 - power if self.pretest_form == "nis" else float("nan")
 
         return PreTrendsPowerResults(
             power=power,
@@ -918,6 +1169,9 @@ class PreTrendsPower:
             pre_period_ses=ses,
             vcov=vcov,
             original_results=results,
+            pretest_form=self.pretest_form,
+            nis_box_probability=nis_box_probability,
+            violation_weights=weights,
         )
 
     def power_at(
@@ -1080,6 +1334,8 @@ def compute_pretrends_power(
     target_power: float = 0.80,
     violation_type: str = "linear",
     pre_periods: Optional[List[int]] = None,
+    violation_weights: Optional[np.ndarray] = None,
+    pretest_form: Literal["nis", "wald"] = "nis",
 ) -> PreTrendsPowerResults:
     """
     Convenience function for pre-trends power analysis.
@@ -1095,21 +1351,21 @@ def compute_pretrends_power(
     target_power : float, default=0.80
         Target power for MDV calculation.
     violation_type : str, default='linear'
-        Type of violation pattern. This convenience helper supports
-        ``linear`` / ``constant`` / ``last_period`` only and does NOT
-        accept ``violation_weights``, so passing
-        ``violation_type='custom'`` will raise ``ValueError`` from the
-        underlying ``PreTrendsPower`` constructor (which requires
-        ``violation_weights`` when ``violation_type='custom'``). To use a
-        custom violation pattern, instantiate ``PreTrendsPower(...,
-        violation_weights=...)`` directly. Note that
-        ``PreTrendsPowerResults.power_at()`` on such a fit raises
-        ``NotImplementedError`` because fitted weights are not yet
-        persisted on the result object; refit with the new ``M`` instead.
-        Both gaps are tracked in TODO.md until the follow-up audit lands.
+        Type of violation pattern: ``linear`` / ``constant`` / ``last_period``
+        / ``custom``. For ``custom``, also pass ``violation_weights``.
     pre_periods : list of int, optional
         Explicit list of pre-treatment periods. If None, attempts to infer
         from results. Use when you've estimated all periods as post_periods.
+    violation_weights : np.ndarray, optional
+        Custom violation pattern weights. Required when
+        ``violation_type='custom'``; ignored for other violation types.
+    pretest_form : {'nis', 'wald'}, default='nis'
+        Pretest acceptance-region form. ``'nis'`` (default) implements Roth
+        (2022) Section II.A-B no-individually-significant box probability via
+        ``scipy.stats.multivariate_normal.cdf``; ``'wald'`` is the
+        noncentral-chi-squared form retained for backwards compatibility with
+        the pre-PR-B shipped numerical output (also a paper-supported
+        alternative under Propositions 1+3+4).
 
     Returns
     -------
@@ -1130,6 +1386,8 @@ def compute_pretrends_power(
         alpha=alpha,
         power=target_power,
         violation_type=violation_type,
+        violation_weights=violation_weights,
+        pretest_form=pretest_form,
     )
     return pt.fit(results, M=M, pre_periods=pre_periods)
 
@@ -1140,6 +1398,8 @@ def compute_mdv(
     target_power: float = 0.80,
     violation_type: str = "linear",
     pre_periods: Optional[List[int]] = None,
+    violation_weights: Optional[np.ndarray] = None,
+    pretest_form: Literal["nis", "wald"] = "nis",
 ) -> float:
     """
     Compute minimum detectable violation.
@@ -1153,21 +1413,17 @@ def compute_mdv(
     target_power : float, default=0.80
         Target power for MDV calculation.
     violation_type : str, default='linear'
-        Type of violation pattern. This convenience helper supports
-        ``linear`` / ``constant`` / ``last_period`` only and does NOT
-        accept ``violation_weights``, so passing
-        ``violation_type='custom'`` will raise ``ValueError`` from the
-        underlying ``PreTrendsPower`` constructor (which requires
-        ``violation_weights`` when ``violation_type='custom'``). To use a
-        custom violation pattern, instantiate ``PreTrendsPower(...,
-        violation_weights=...)`` directly. Note that
-        ``PreTrendsPowerResults.power_at()`` on such a fit raises
-        ``NotImplementedError`` because fitted weights are not yet
-        persisted on the result object; refit with the new ``M`` instead.
-        Both gaps are tracked in TODO.md until the follow-up audit lands.
+        Type of violation pattern: ``linear`` / ``constant`` / ``last_period``
+        / ``custom``. For ``custom``, also pass ``violation_weights``.
     pre_periods : list of int, optional
         Explicit list of pre-treatment periods. If None, attempts to infer
         from results. Use when you've estimated all periods as post_periods.
+    violation_weights : np.ndarray, optional
+        Custom violation pattern weights. Required when
+        ``violation_type='custom'``; ignored for other violation types.
+    pretest_form : {'nis', 'wald'}, default='nis'
+        Pretest acceptance-region form. See ``compute_pretrends_power`` and
+        ``PreTrendsPower`` for the NIS-vs-Wald discussion.
 
     Returns
     -------
@@ -1178,6 +1434,8 @@ def compute_mdv(
         alpha=alpha,
         power=target_power,
         violation_type=violation_type,
+        violation_weights=violation_weights,
+        pretest_form=pretest_form,
     )
     result = pt.fit(results, pre_periods=pre_periods)
     return result.mdv
