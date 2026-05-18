@@ -18,6 +18,7 @@ import pytest
 from diff_diff.linalg import (
     _compute_bm_dof_oneway,
     _compute_cr2_bm,
+    _compute_cr2_bm_contrast_dof,
     _compute_hat_diagonals,
     _cr2_adjustment_matrix,
     compute_robust_vcov,
@@ -616,3 +617,129 @@ class TestHC2Weighted:
 
         got = compute_robust_vcov(X, resid, vcov_type="hc2", weights=w, weight_type="pweight")
         np.testing.assert_allclose(got, expected, atol=1e-10)
+
+
+# =============================================================================
+# Cluster-aware CR2 BM contrast-DOF helper (Gate 6 lift)
+# =============================================================================
+
+
+class TestCR2BMContrastDOF:
+    """Tests for `_compute_cr2_bm_contrast_dof`.
+
+    The helper generalizes the per-coefficient Satterthwaite DOF in
+    `_compute_cr2_bm` to arbitrary linear combinations of coefficients
+    (used by `MultiPeriodDiD` to compute the cluster-aware DOF for the
+    post-period-average ATT contrast).
+    """
+
+    def _load_golden_scenario(self):
+        """Load `mpd_clustered_avg_att_dof` scenario from R generator."""
+        import json
+        from pathlib import Path
+
+        golden_path = (
+            Path(__file__).parent.parent / "benchmarks" / "data" / "clubsandwich_cr2_golden.json"
+        )
+        if not golden_path.exists():
+            pytest.skip(
+                "Golden JSON not present; run "
+                "`Rscript benchmarks/R/generate_clubsandwich_golden.R` first."
+            )
+        with open(golden_path) as f:
+            golden = json.load(f)
+        if "mpd_clustered_avg_att_dof" not in golden:
+            pytest.skip(
+                "Golden JSON does not include `mpd_clustered_avg_att_dof` "
+                "scenario; regenerate via the R script."
+            )
+        return golden["mpd_clustered_avg_att_dof"]
+
+    def _build_mpd_design(self, d):
+        """Construct the MPD-style design matrix that mirrors R's lm()
+        formula `treated + period_f + treated_period_X (non-ref) + factor(unit)`."""
+        unit = np.array(d["unit"])
+        period = np.array(d["period"])
+        treated = np.array(d["treated"], dtype=float)
+        n = len(period)
+        n_periods = int(period.max())
+        non_ref = list(range(2, n_periods + 1))
+        const = np.ones(n)
+        period_dummies = np.column_stack([(period == p).astype(float) for p in non_ref])
+        interaction_dummies = np.column_stack(
+            [(treated * (period == p)).astype(float) for p in non_ref]
+        )
+        n_units = int(unit.max())
+        unit_dummies = np.column_stack([(unit == u).astype(float) for u in range(2, n_units + 1)])
+        X_full = np.column_stack(
+            [const, treated, period_dummies, interaction_dummies, unit_dummies]
+        )
+        # Drop the last unit dummy to match R's rank-deficient drop on this
+        # parameterization (never-treated cohort's last unit is collinear with
+        # the intercept + treated + remaining unit dummies).
+        return X_full[:, :-1]
+
+    def test_unit_contrasts_match_compute_cr2_bm(self):
+        """Refactor anchor: calling the helper with `contrasts=eye(k)`
+        produces the same per-coefficient DOFs as `_compute_cr2_bm`.
+
+        Matmul ordering differs (helper applies eye separately, library
+        slices precomputed columns), so use atol=1e-10 not bit-identity.
+        """
+        d = self._load_golden_scenario()
+        X = self._build_mpd_design(d)
+        k = X.shape[1]
+        y = np.array(d["y"], dtype=float)
+        cluster = np.array(d["cluster"])
+        bread = X.T @ X
+        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+        residuals = y - X @ coef
+
+        _, dof_lib = _compute_cr2_bm(X, residuals, cluster, bread)
+        dof_helper = _compute_cr2_bm_contrast_dof(X, cluster, bread, np.eye(k))
+
+        finite_both = np.isfinite(dof_lib) & np.isfinite(dof_helper)
+        assert finite_both.any(), "expected at least one finite DOF"
+        np.testing.assert_allclose(dof_helper[finite_both], dof_lib[finite_both], atol=1e-10)
+
+    def test_compound_contrast_matches_clubsandwich(self):
+        """R-parity anchor: compound post-period-average contrast DOF
+        matches clubSandwich's `Wald_test(test="HTZ")$df_denom` at 1e-10.
+        """
+        d = self._load_golden_scenario()
+        X = self._build_mpd_design(d)
+        k = X.shape[1]
+        cluster = np.array(d["cluster"])
+        bread = X.T @ X
+
+        # The R golden stores c_avg as a (k_finite,) vector aligned with
+        # finite_coef_names. Our X already has the rank-deficient column
+        # dropped, so c_avg aligns directly.
+        c_avg = np.array(d["c_avg"])
+        assert c_avg.shape == (k,), f"c_avg shape {c_avg.shape} does not match X.shape[1] {k}"
+
+        dof_avg_py = float(_compute_cr2_bm_contrast_dof(X, cluster, bread, c_avg[:, np.newaxis])[0])
+        dof_avg_r = float(d["dof_avg"])
+        np.testing.assert_allclose(dof_avg_py, dof_avg_r, atol=1e-10)
+
+    def test_invalid_contrast_shape_raises(self):
+        """Helper validates that the contrast matrix's row count matches `k`."""
+        rng = np.random.default_rng(20260517)
+        n, k = 30, 3
+        X = rng.standard_normal((n, k))
+        cluster = np.repeat(np.arange(5), 6)
+        bread = X.T @ X
+        bad_contrasts = np.zeros((k + 1, 1))
+        with pytest.raises(ValueError, match=r"rows"):
+            _compute_cr2_bm_contrast_dof(X, cluster, bread, bad_contrasts)
+
+    def test_too_few_clusters_raises(self):
+        """Helper requires at least 2 clusters (matching `_compute_cr2_bm`)."""
+        rng = np.random.default_rng(20260517)
+        n, k = 30, 3
+        X = rng.standard_normal((n, k))
+        # Everyone in cluster 1 -> only 1 unique cluster.
+        cluster = np.ones(n, dtype=int)
+        bread = X.T @ X
+        with pytest.raises(ValueError, match=r"[Nn]eed at least 2 clusters"):
+            _compute_cr2_bm_contrast_dof(X, cluster, bread, np.eye(k))

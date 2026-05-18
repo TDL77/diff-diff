@@ -1647,27 +1647,6 @@ class MultiPeriodDiD(DifferenceInDifferences):
         # Determine if survey vcov should be used
         _use_survey_vcov = resolved_survey is not None and resolved_survey.needs_survey_vcov
 
-        # Reject cluster + vcov_type="hc2_bm": `_compute_cr2_bm` produces CR2
-        # per-coefficient DOF, but the post-period-average contrast needs a
-        # cluster-aware contrast-BM DOF that isn't implemented yet. Pairing
-        # CR2 SEs with one-way BM DOF would be a broken hybrid — reject with
-        # a clear error until the cluster-aware contrast DOF is in place.
-        # Tracked in TODO.md. Users can drop cluster for one-way HC2+BM, or
-        # drop vcov_type for CR1 cluster-robust.
-        if (
-            self.vcov_type == "hc2_bm"
-            and effective_cluster_ids is not None
-            and not _use_survey_vcov
-        ):
-            raise NotImplementedError(
-                "MultiPeriodDiD(cluster=..., vcov_type='hc2_bm') is not yet "
-                "supported: the cluster-aware CR2 Bell-McCaffrey contrast DOF "
-                "for the post-period average has not been implemented. "
-                "Workarounds: use vcov_type='hc2_bm' without cluster (one-way "
-                "HC2 + BM DOF), or use vcov_type='hc1' with cluster (CR1 "
-                "Liang-Zeger cluster-robust)."
-            )
-
         # Remap implicit "classical" + cluster to CR1 (legacy backward compat).
         _fit_vcov_type = self._resolve_effective_vcov_type(effective_cluster_ids)
 
@@ -1870,6 +1849,7 @@ class MultiPeriodDiD(DifferenceInDifferences):
         ):
             from diff_diff.linalg import (
                 _compute_bm_dof_from_contrasts,
+                _compute_cr2_bm_contrast_dof,
                 _compute_hat_diagonals,
             )
 
@@ -1880,7 +1860,6 @@ class MultiPeriodDiD(DifferenceInDifferences):
                 bread_kept = X_kept.T @ (
                     X_kept * survey_weights[:, np.newaxis] if survey_weights is not None else X_kept
                 )
-                h_diag_kept = _compute_hat_diagonals(X_kept, bread_kept, weights=survey_weights)
                 # Build the contrast matrix: one column per identified coefficient
                 # plus one column for the post-period average contrast (1/n_post
                 # on each post-period interaction column, 0 elsewhere).
@@ -1893,13 +1872,30 @@ class MultiPeriodDiD(DifferenceInDifferences):
                         post_contrast_full[interaction_indices[_p]] = 1.0 / _n_post
                 post_contrast_kept = post_contrast_full[_kept]
                 contrasts = np.column_stack([np.eye(n_kept), post_contrast_kept[:, np.newaxis]])
-                _dof_all = _compute_bm_dof_from_contrasts(
-                    X_kept,
-                    bread_kept,
-                    h_diag_kept,
-                    contrasts,
-                    weights=survey_weights,
-                )
+                # Branch on cluster: one-way HC2-BM vs cluster-aware CR2-BM.
+                # Cluster IDs are per-observation length n and are unchanged
+                # by the column-drop applied to X (`_kept` indexes columns
+                # only); pass `effective_cluster_ids` unmodified.
+                if effective_cluster_ids is None:
+                    h_diag_kept = _compute_hat_diagonals(X_kept, bread_kept, weights=survey_weights)
+                    _dof_all = _compute_bm_dof_from_contrasts(
+                        X_kept,
+                        bread_kept,
+                        h_diag_kept,
+                        contrasts,
+                        weights=survey_weights,
+                    )
+                else:
+                    # Cluster-aware CR2 BM Satterthwaite DOF for per-coefficient
+                    # AND post-period-average compound contrast (Gate 6 lift).
+                    # Weighted CR2-BM is a separate gate; survey paths never
+                    # reach this block (outer `not _use_survey_vcov` guard).
+                    _dof_all = _compute_cr2_bm_contrast_dof(
+                        X_kept,
+                        effective_cluster_ids,
+                        bread_kept,
+                        contrasts,
+                    )
                 # Expand per-coefficient DOF back to full width (NaN for dropped).
                 _bm_dof_per_coef = np.full(X.shape[1], np.nan)
                 _bm_dof_per_coef[_kept] = _dof_all[:n_kept]

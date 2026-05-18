@@ -507,13 +507,15 @@ class TestFitBehavior:
         # SEs must differ — vcov_type actually changed the variance family.
         assert r_hc1.avg_se != pytest.approx(r_classical.avg_se, abs=1e-10)
 
-    def test_multi_period_cluster_plus_hc2_bm_rejected(self):
-        """MultiPeriodDiD rejects cluster + hc2_bm until contrast-aware cluster BM lands.
+    def test_multi_period_cluster_plus_hc2_bm_produces_finite_inference(self):
+        """MultiPeriodDiD(cluster=..., vcov_type='hc2_bm') is now supported.
 
-        The CR2 per-coefficient DOF is available, but the post-period-average
-        contrast DOF under cluster-robust Bell-McCaffrey is not yet
-        implemented. Pairing CR2 SEs with one-way BM DOF would be a broken
-        hybrid. Fail fast with a clear workaround.
+        The cluster-aware CR2 Bell-McCaffrey contrast DOF for the
+        post-period-average ATT is implemented via the new
+        `_compute_cr2_bm_contrast_dof` helper that generalizes the
+        per-coefficient loop in `_compute_cr2_bm` to arbitrary linear
+        combinations of coefficients. End-to-end smoke test: assert
+        finite avg_att inference (was `NotImplementedError` pre-PR).
         """
         rng = np.random.default_rng(2)
         rows = []
@@ -524,9 +526,21 @@ class TestFitBehavior:
                 rows.append({"unit": i, "time": t, "treated": treated, "y": y})
         data = pd.DataFrame(rows)
 
-        est = MultiPeriodDiD(vcov_type="hc2_bm", cluster="unit")
-        with pytest.raises(NotImplementedError, match="cluster"):
-            est.fit(data, outcome="y", treatment="treated", time="time")
+        res = MultiPeriodDiD(vcov_type="hc2_bm", cluster="unit").fit(
+            data, outcome="y", treatment="treated", time="time"
+        )
+        # Headline contract: finite avg_att inference under cluster+hc2_bm.
+        assert np.isfinite(res.avg_att)
+        assert np.isfinite(res.avg_se)
+        assert np.isfinite(res.avg_t_stat)
+        assert np.isfinite(res.avg_p_value)
+        assert np.isfinite(res.avg_conf_int[0])
+        assert np.isfinite(res.avg_conf_int[1])
+        # Per-period inference should also be finite for the post period.
+        post_pe = res.period_effects[2]
+        assert np.isfinite(post_pe.effect)
+        assert np.isfinite(post_pe.se)
+        assert np.isfinite(post_pe.p_value)
 
     def test_multi_period_fit_honors_hc2_bm(self):
         """MultiPeriodDiD.fit with vcov_type='hc2_bm' uses Bell-McCaffrey DOF.
