@@ -166,14 +166,23 @@ where V is the VCV sub-matrix for post-treatment δ_e coefficients.
 - Alternative: Cluster-robust at unit level via `cluster` parameter (recommended for panel data)
 - `vcov_type="hc2_bm"` (one-way) computes HC2 + Imbens-Kolesar (2016) Satterthwaite DOF
   per coefficient and a contrast-aware DOF for the post-period-average ATT.
-- **Note:** `cluster` + `vcov_type="hc2_bm"` is **not supported** and raises
-  `NotImplementedError`. The cluster-aware CR2 Bell-McCaffrey contrast DOF for the
-  post-period-average ATT (Pustejovsky-Tipton 2018 per-cluster adjustment matrices
-  applied to an arbitrary aggregation contrast) is not yet implemented. Pairing CR2
-  cluster-robust SEs with the one-way Imbens-Kolesar contrast DOF would be a broken
-  hybrid, so the combination fails fast. Workarounds: drop `cluster` for one-way
-  HC2+BM, or keep `cluster` with the default `vcov_type="hc1"` for CR1 (Liang-Zeger).
-  Tracked in `TODO.md` under Methodology/Correctness.
+- `cluster` + `vcov_type="hc2_bm"` is now supported (PR for Gate 6 lift). Both per-period
+  effects and the post-period-average ATT use a cluster-aware Bell-McCaffrey
+  Satterthwaite DOF: the per-coefficient case continues via `_compute_cr2_bm`, and
+  the compound `avg_att` contrast DOF goes through the new
+  `_compute_cr2_bm_contrast_dof` helper in `diff_diff/linalg.py` (Pustejovsky-Tipton
+  2018 §4 algebra generalized to arbitrary `(k, m)` contrast matrices). R parity
+  verified at atol=1e-10 vs clubSandwich's
+  `Wald_test(constraints=matrix(c, 1), test="HTZ")$df_denom`. Weighted CR2-BM
+  (`survey_design=` paths) is still gated separately; see the rows in `TODO.md`
+  under Methodology/Correctness.
+- **Note:** the cluster-aware contrast-DOF path currently recomputes the CR2 hat
+  matrix and per-cluster adjustment matrices that `solve_ols` already built for the
+  vcov dispatch — clustered `hc2_bm` MPD fits pay the O(n²) CR2 setup twice in
+  exchange for a clean call-site contract. Acceptable for typical cluster-robust
+  DiD panel sizes (n ≤ few thousand); tracked in `TODO.md` under Performance for
+  a follow-up that plumbs the contrast DOF through the existing CR2 vcov path or
+  shares precomputes.
 - Optional: Wild cluster bootstrap (complex for multi-coefficient testing;
   requires joint bootstrap distribution)
 - Degrees of freedom adjusted for absorbed fixed effects

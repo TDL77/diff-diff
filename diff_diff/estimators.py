@@ -1108,16 +1108,13 @@ class MultiPeriodDiD(DifferenceInDifferences):
         contradictory (e.g. ``robust=False, vcov_type="hc2"`` raises).
     cluster : str, optional
         Column name for cluster-robust standard errors. With ``vcov_type="hc1"``
-        dispatches to CR1 (Liang-Zeger).
-
-        **Not supported with** ``vcov_type="hc2_bm"``: the cluster-aware CR2
-        Bell-McCaffrey contrast DOF for the post-period-average ATT is not
-        yet implemented, and pairing CR2 SEs with one-way Imbens-Kolesar DOF
-        would be a broken hybrid, so the combination raises
-        ``NotImplementedError`` with a pointer to workarounds. Tracked in
-        ``TODO.md``; also documented as a Note in
-        ``docs/methodology/REGISTRY.md`` under the HeterogeneousAdoptionDiD
-        requirements-checklist block.
+        dispatches to CR1 (Liang-Zeger). With ``vcov_type="hc2_bm"`` dispatches
+        to CR2 cluster-robust SEs with Bell-McCaffrey Satterthwaite DOF on both
+        per-period coefficients and the post-period-average ATT contrast (the
+        latter via the new ``_compute_cr2_bm_contrast_dof`` helper in
+        ``linalg.py``; matches clubSandwich's
+        ``Wald_test(test="HTZ")$df_denom`` at atol=1e-10). Weighted CR2-BM
+        (``survey_design=``) is a separate, still-gated path.
     vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, optional
         Variance-covariance family. Defaults to the ``robust`` alias.
 
@@ -1128,7 +1125,10 @@ class MultiPeriodDiD(DifferenceInDifferences):
           ``cluster=``; use ``"hc2_bm"`` without cluster for Bell-McCaffrey.
         - ``"hc2_bm"``: one-way HC2 + Imbens-Kolesar (2016) Satterthwaite DOF
           per coefficient plus a contrast-aware DOF for the post-period-average
-          ATT. **Unsupported with** ``cluster=`` — see ``cluster`` above.
+          ATT. With ``cluster=``, dispatches to Pustejovsky-Tipton (2018)
+          CR2 cluster-robust with a Bell-McCaffrey Satterthwaite contrast DOF
+          on the post-period average (see ``cluster`` above for parity
+          details). Weighted CR2-BM (``survey_design=``) is still gated.
         - ``"conley"``: Conley 1999 spatial-HAC sandwich via the panel
           block-decomposed form (matches R ``conleyreg`` with
           ``lag_cutoff > 0``). Pass ``conley_coords=(lat_col, lon_col)``,
