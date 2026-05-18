@@ -652,7 +652,11 @@ class PreTrendsPower:
                 raise ValueError(f"Invalid parameter: {key}")
         return self
 
-    def _get_violation_weights(self, n_pre: int) -> np.ndarray:
+    def _get_violation_weights(
+        self,
+        n_pre: int,
+        relative_times: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """
         Get violation weights based on violation type.
 
@@ -660,11 +664,27 @@ class PreTrendsPower:
         ----------
         n_pre : int
             Number of pre-treatment periods.
+        relative_times : np.ndarray, optional
+            Sorted relative-time labels for the pre-period coefficients
+            (e.g., ``[-3, -2, -1]`` for a regular grid, ``[-5, -3, -1]``
+            for an irregular grid, ``[-3, -2]`` for an anticipation-shifted
+            grid with ``anticipation=1``). When provided AND
+            ``violation_type='linear'``, weights are set to ``|t|`` directly
+            with NO L2 normalization, so ``δ_t = M * |t|`` and the reported
+            MDV is in Roth's γ units (δ_t = γ·t convention). When None,
+            falls back to the legacy count-based ``[n_pre-1, ..., 1, 0] /
+            ||·||_2`` direction (preserves the pre-PR-B shipped behavior
+            for callers that bypass ``fit()`` and call this helper
+            directly without relative-time labels).
 
         Returns
         -------
         np.ndarray
-            Violation weights, normalized to have L2 norm of 1.
+            Violation weights. For ``violation_type='linear'`` with
+            ``relative_times`` provided: ``|t|`` directly, NOT L2-normalized
+            (so ``M=γ`` directly under Roth's slope convention). For all
+            other paths (constant, last_period, custom, or
+            linear-without-relative_times): L2-normalized to unit norm.
         """
         if self.violation_type == "custom":
             assert self.violation_weights is not None
@@ -675,10 +695,29 @@ class PreTrendsPower:
                 )
             weights = self.violation_weights.copy()
         elif self.violation_type == "linear":
-            # Linear trend: weights = [-n+1, -n+2, ..., -1, 0] for periods ending at -1
-            # Normalized so that violation at period -1 = 0 and grows linearly backward
+            if relative_times is not None:
+                # Roth (2022) δ_t = γ · t convention. Use |t| because
+                # pre-period labels are negative; the resulting violation
+                # vector δ_pre = M * |t| satisfies M = γ exactly.
+                # NO L2 normalization — keep the γ-unit scale so the
+                # reported MDV is in Roth's γ units on irregular and
+                # anticipation-shifted grids. Early return; skip the
+                # normalize-at-end block below. See PR-A REGISTRY ##
+                # PreTrendsPower "Note (deviation — linear violation
+                # pattern)" — PR-B Step 4 resolves the deviation when
+                # relative_times is threaded through.
+                if len(relative_times) != n_pre:
+                    raise ValueError(
+                        f"relative_times has length {len(relative_times)}, "
+                        f"but there are {n_pre} pre-periods"
+                    )
+                return np.abs(np.asarray(relative_times)).astype(float)
+            # Backwards-compatible fallback (no relative_times threaded):
+            # legacy count-based [n_pre-1, ..., 1, 0] / ||·||_2 direction.
+            # Used by callers that bypass fit() (e.g., direct
+            # _get_violation_weights() unit tests) or by code paths that
+            # don't have access to the actual pre-period labels.
             weights = np.arange(-n_pre + 1, 1, dtype=float)
-            # Shift so that weights are positive and represent deviation from PT
             weights = -weights  # Now [n-1, n-2, ..., 1, 0]
         elif self.violation_type == "constant":
             # Same violation in all periods
@@ -690,7 +729,9 @@ class PreTrendsPower:
         else:
             raise ValueError(f"Unknown violation_type: {self.violation_type}")
 
-        # Normalize to unit norm (if not all zeros)
+        # Normalize to unit norm (if not all zeros). The early-return
+        # branch above for linear-with-relative_times intentionally skips
+        # this normalization to preserve the γ-unit scale.
         norm = np.linalg.norm(weights)
         if norm > 0:
             weights = weights / norm
@@ -701,7 +742,7 @@ class PreTrendsPower:
         self,
         results: Union[MultiPeriodDiDResults, Any],
         pre_periods: Optional[List[int]] = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]:
         """
         Extract pre-period parameters from results.
 
@@ -767,7 +808,8 @@ class PreTrendsPower:
             else:
                 vcov = np.diag(ses**2)
 
-            return effects, ses, vcov, n_pre
+            relative_times = np.asarray(estimated_pre_periods, dtype=float)
+            return effects, ses, vcov, n_pre, relative_times
 
         # Try CallawaySantAnnaResults
         try:
@@ -821,7 +863,8 @@ class PreTrendsPower:
                 # staggered.py:2032-2036, falling through to diag.
                 vcov = _extract_event_study_vcov_subblock(results, pre_periods, ses)
 
-                return effects, ses, vcov, n_pre
+                relative_times = np.asarray(pre_periods, dtype=float)
+                return effects, ses, vcov, n_pre, relative_times
         except ImportError:
             pass
 
@@ -864,7 +907,8 @@ class PreTrendsPower:
                 # event_study_vcov, falling through to diag.
                 vcov = _extract_event_study_vcov_subblock(results, pre_periods, ses)
 
-                return effects, ses, vcov, n_pre
+                relative_times = np.asarray(pre_periods, dtype=float)
+                return effects, ses, vcov, n_pre, relative_times
         except ImportError:
             pass
 
@@ -1205,11 +1249,16 @@ class PreTrendsPower:
         PreTrendsPowerResults
             Power analysis results including power and MDV.
         """
-        # Extract pre-period parameters
-        effects, ses, vcov, n_pre = self._extract_pre_period_params(results, pre_periods)
+        # Extract pre-period parameters (now includes relative_times for
+        # γ-unit MDV under linear violation_type).
+        effects, ses, vcov, n_pre, relative_times = self._extract_pre_period_params(
+            results, pre_periods
+        )
 
-        # Get violation weights
-        weights = self._get_violation_weights(n_pre)
+        # Get violation weights. relative_times threaded through so the
+        # linear-violation path produces γ-unit MDV per Roth's δ_t = γ·t
+        # convention (skip L2 normalization for linear-with-relative_times).
+        weights = self._get_violation_weights(n_pre, relative_times=relative_times)
 
         # Compute MDV (dispatches on self.pretest_form)
         mdv = self._compute_mdv(weights, vcov)
@@ -1298,9 +1347,9 @@ class PreTrendsPower:
         PreTrendsPowerCurve
             Power curve data with plot method.
         """
-        # Extract parameters
-        _, ses, vcov, n_pre = self._extract_pre_period_params(results, pre_periods)
-        weights = self._get_violation_weights(n_pre)
+        # Extract parameters (5-tuple now includes relative_times)
+        _, ses, vcov, n_pre, relative_times = self._extract_pre_period_params(results, pre_periods)
+        weights = self._get_violation_weights(n_pre, relative_times=relative_times)
 
         # Compute MDV
         mdv = self._compute_mdv(weights, vcov)
