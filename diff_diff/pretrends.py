@@ -63,7 +63,7 @@ def _compute_nis_acceptance_prob(
     accept_prob: float
     try:
         accept_prob = float(
-            stats.multivariate_normal.cdf(
+            stats.multivariate_normal.cdf(  # type: ignore[arg-type]
                 upper,
                 lower_limit=lower,
                 mean=np.zeros(len(weights)),
@@ -414,7 +414,7 @@ class PreTrendsPowerResults:
         # to pretest_form='wald' (the dataclass default) which preserves the
         # previous power_at numerical output for backwards compat.
         if self.pretest_form == "nis":
-            z_alpha = (
+            z_alpha = float(
                 self.critical_value
                 if np.isfinite(self.critical_value)
                 else stats.norm.ppf(1 - self.alpha / 2)
@@ -453,6 +453,11 @@ class PreTrendsPowerCurve:
         Target power level.
     violation_type : str
         Type of violation pattern.
+    pretest_form : str
+        Pretest acceptance-region form (``'nis'`` or ``'wald'``) used to
+        compute the curve. NIS and Wald curves can differ materially under
+        correlated Σ_22; persisting the form prevents callers from
+        misinterpreting a serialized/plotted curve.
     """
 
     M_values: np.ndarray
@@ -461,16 +466,18 @@ class PreTrendsPowerCurve:
     alpha: float
     target_power: float
     violation_type: str
+    pretest_form: Literal["nis", "wald"] = "wald"
 
     def __repr__(self) -> str:
         return f"PreTrendsPowerCurve(n_points={len(self.M_values)}, " f"mdv={self.mdv:.4f})"
 
     def to_dataframe(self) -> pd.DataFrame:
-        """Convert to DataFrame with M and power columns."""
+        """Convert to DataFrame with M, power, and pretest_form columns."""
         return pd.DataFrame(
             {
                 "M": self.M_values,
                 "power": self.powers,
+                "pretest_form": self.pretest_form,
             }
         )
 
@@ -1102,12 +1109,12 @@ class PreTrendsPower:
             ``z_{1-alpha/2}``, the per-period normal critical value used
             to define ``B_NIS(Sigma)``.
         """
-        z_alpha = stats.norm.ppf(1 - self.alpha / 2)
+        z_alpha = float(stats.norm.ppf(1 - self.alpha / 2))
         # Centralized analytical-or-MC fallback (module-level helper);
         # handles both exception and non-finite-CDF cases.
         accept_prob = _compute_nis_acceptance_prob(M, weights, vcov, z_alpha)
-        power = 1.0 - accept_prob
-        return power, np.nan, np.nan, z_alpha
+        power = float(1.0 - accept_prob)
+        return power, float("nan"), float("nan"), z_alpha
 
     def _compute_mdv(
         self,
@@ -1239,23 +1246,30 @@ class PreTrendsPower:
             return 0.0
 
         # Doubling expansion to find an upper bound where power >= target.
+        # Cap M_high at 1000 to avoid pathological infinite doubling on
+        # numerically extreme Σ_22, but the cap itself does NOT mean
+        # "unreachable" — explicitly check power at the capped endpoint
+        # before returning inf (codex R2 P0 fix: previously the cap
+        # short-circuited to inf even when power(M_high) >= target,
+        # producing silently wrong MDV=inf for finite-root cases like
+        # vcov=[[50000]] where MDV lies between 512 and 1024).
         M_high = 1.0
         while power_minus_target(M_high) < 0 and M_high < 1000:
             M_high *= 2
 
-        if M_high >= 1000:
-            # Target power not achievable in the practical range.
+        # Defensive: if the doubling exited because M_high*2 would exceed 1000,
+        # the LAST value M_high actually reached might be either above or below
+        # target. Evaluate explicitly at the final M_high to decide.
+        if power_minus_target(M_high) < 0:
+            # Power at the cap still fails to reach target_power.
+            # Genuinely unreachable in the practical range.
             return np.inf
 
-        # Bisect on [0, M_high]. By the boundary short-circuit above,
-        # power_minus_target(0) < 0; by construction
-        # power_minus_target(M_high) >= 0 — bracket is valid.
+        # Bisect on [0, M_high]. Both sign-change endpoints verified above.
         try:
             mdv = float(optimize.brentq(power_minus_target, 0.0, M_high))
         except ValueError:
-            # Defensive fallback. Should be unreachable post-short-circuit
-            # because the bracket is now guaranteed (sign change between
-            # M=0 and M=M_high).
+            # Defensive fallback. Should be unreachable.
             mdv = float(M_high)
 
         return mdv
@@ -1410,6 +1424,7 @@ class PreTrendsPower:
             alpha=self.alpha,
             target_power=self.target_power,
             violation_type=self.violation_type,
+            pretest_form=self.pretest_form,
         )
 
     def sensitivity_to_honest_did(

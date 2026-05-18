@@ -287,6 +287,28 @@ class TestPretrendsHandCalculation:
         mdv = pt._compute_mdv_nis(weights, vcov)
         assert np.isinf(mdv), f"NIS MDV cap should return ∞, got {mdv}"
 
+    def test_mdv_nis_finite_root_at_doubling_endpoint(self):
+        """NIS MDV returns a finite root even when M_high lands at the 1024 cap.
+
+        Concrete counter-example from R2 codex review: with σ ≈ 224
+        (vcov=[[50000]]) and target_power=0.8, the doubling expansion
+        sweeps M_high = 1, 2, 4, ..., 512, 1024. Power(M=512) ≈ 0.36 < 0.8
+        and power(M=1024) ≈ 0.997 > 0.8, so the root sits in [512, 1024].
+        Pre-fix the cap-check fired on the >=1000 condition and returned
+        inf even though brentq could have bracketed the finite root.
+        Post-fix the cap-check only triggers when power(M_high) is still
+        below target — finite-root cases pass through to brentq.
+        """
+        pt = PreTrendsPower(alpha=0.05, power=0.8, pretest_form="nis")
+        weights = np.array([1.0])
+        vcov = np.array([[50000.0]])  # σ ≈ 223.6, root in [512, 1024]
+        mdv = pt._compute_mdv_nis(weights, vcov)
+        assert np.isfinite(mdv), f"finite-root case should NOT return ∞, got {mdv}"
+        assert 512.0 < mdv < 1024.0, f"root expected in (512, 1024), got {mdv}"
+        # Spot-check: the brentq result actually achieves target power.
+        achieved, _, _, _ = pt._compute_power_nis(mdv, weights, vcov)
+        assert abs(achieved - 0.8) < 1e-3, f"brentq root power={achieved}, expected ≈ 0.8"
+
 
 # =============================================================================
 # TestPretrendsPropositions — Roth Props 1-4 numerical verification (MC)
@@ -448,70 +470,89 @@ class TestPretrendsLinearGrid:
         `[4, 3, 2, 1]`. Post-fix: derive
         `relative_times = estimated_pre_periods - reference_period`.
 
-        Lightweight mock avoids the full MPD fit machinery.
+        Constructs a real ``MultiPeriodDiDResults`` and calls
+        ``_extract_pre_period_params`` directly so the MPD branch is
+        actually exercised (R2 P2 fix — prior version did manual
+        arithmetic and never hit the production code path).
         """
-        from dataclasses import dataclass
+        from diff_diff.results import MultiPeriodDiDResults, PeriodEffect
 
-        from diff_diff.results import PeriodEffect
+        period_ids = [0, 1, 2, 3]
+        reference_period = 4
 
-        @dataclass
-        class _MockMPDResults:
-            period_effects: dict
-            pre_periods: list
-            reference_period: int
-            vcov: object = None
-            interaction_indices: object = None
-
-        # Build a calendar-period MPD-shaped result: pre_periods=[0,1,2,3],
-        # reference_period=4. After PR-B fix, relative_times should be
-        # [0-4, 1-4, 2-4, 3-4] = [-4, -3, -2, -1].
         period_effects = {
             p: PeriodEffect(
-                period=p, effect=0.1 * p, se=0.2, t_stat=0.0, p_value=0.5, conf_int=(0, 0)
+                period=p, effect=0.1 * p, se=0.2, t_stat=0.0, p_value=0.5, conf_int=(0.0, 0.0)
             )
-            for p in [0, 1, 2, 3]
+            for p in period_ids
         }
-        mpd_results = _MockMPDResults(
+        mpd_results = MultiPeriodDiDResults(
             period_effects=period_effects,
-            pre_periods=[0, 1, 2, 3],
-            reference_period=4,
+            avg_att=0.0,
+            avg_se=0.2,
+            avg_t_stat=0.0,
+            avg_p_value=0.5,
+            avg_conf_int=(0.0, 0.0),
+            n_obs=100,
+            n_treated=50,
+            n_control=50,
+            pre_periods=period_ids,
+            post_periods=[5, 6, 7],
+            reference_period=reference_period,
         )
 
         pt = PreTrendsPower(pretest_form="nis", violation_type="linear")
-        # _extract_pre_period_params expects a true MultiPeriodDiDResults
-        # isinstance — patch to bypass for the unit test. Alternative: use
-        # a MultiPeriodDiDResults subclass. Just call the helper directly
-        # by inspecting the MPD branch logic on a minimal isinstance hit.
-        from diff_diff.results import MultiPeriodDiDResults
+        _, ses, vcov, n_pre, relative_times = pt._extract_pre_period_params(mpd_results)
 
-        # Monkey-patch isinstance: use a real MultiPeriodDiDResults instance
-        # via direct construction. The dataclass requires many fields, so
-        # build only what _extract_pre_period_params reads.
-        from unittest.mock import patch
+        # End-to-end assertion: the MPD branch produced Roth-style relative
+        # times derived from `reference_period`, not the raw period IDs.
+        assert relative_times is not None, "MPD branch should produce relative_times"
+        np.testing.assert_allclose(relative_times, [-4.0, -3.0, -2.0, -1.0])
+        assert n_pre == 4
+        # vcov falls through to diag(ses**2) because the mock has no
+        # interaction_indices and no full vcov.
+        np.testing.assert_allclose(np.diag(vcov), np.array(ses) ** 2)
 
-        with patch.object(MultiPeriodDiDResults, "__instancecheck__", lambda self, instance: True):
-            pass  # MultiPeriodDiDResults isn't ABCMeta; can't override that way.
-
-        # Simpler: directly exercise the relative_times derivation logic
-        # via a manual check on what `_extract_pre_period_params` produces.
-        # The post-fix MPD branch computes:
-        #   relative_times = [p - reference_period for p in estimated_pre_periods]
-        # We verify that explicit math is correct for the mock setup.
-        estimated_pre_periods = [0, 1, 2, 3]
-        reference_period = 4
-        expected_relative_times = np.array(
-            [float(p) - float(reference_period) for p in estimated_pre_periods],
-            dtype=float,
-        )
-        assert_expected = np.array([-4.0, -3.0, -2.0, -1.0])
-        np.testing.assert_allclose(expected_relative_times, assert_expected)
-
-        # The derived weights are then |t| = [4, 3, 2, 1], NOT the raw IDs
-        # [0, 1, 2, 3]. This is the contract that codex R1 P1 flagged.
-        weights = pt._get_violation_weights(
-            len(estimated_pre_periods), relative_times=expected_relative_times
-        )
+        # Plumbed through to _get_violation_weights: weights = |t| = [4, 3, 2, 1].
+        weights = pt._get_violation_weights(n_pre, relative_times=relative_times)
         np.testing.assert_allclose(weights, [4.0, 3.0, 2.0, 1.0])
+
+    def test_mpd_non_numeric_reference_falls_back_to_legacy_weights(self):
+        """MPD with non-numeric reference_period falls back to legacy direction.
+
+        When ``reference_period`` is a string / categorical (e.g., "2019Q4"),
+        the MPD branch returns ``relative_times=None`` so
+        ``_get_violation_weights('linear')`` uses the legacy count-based
+        direction. Preserves backwards-compat for MPD callers that don't
+        expose a numeric reference period.
+        """
+        from diff_diff.results import MultiPeriodDiDResults, PeriodEffect
+
+        period_ids = ["A", "B", "C"]
+        period_effects = {
+            p: PeriodEffect(
+                period=p, effect=0.1, se=0.2, t_stat=0.0, p_value=0.5, conf_int=(0.0, 0.0)
+            )
+            for p in period_ids
+        }
+        mpd_results = MultiPeriodDiDResults(
+            period_effects=period_effects,
+            avg_att=0.0,
+            avg_se=0.2,
+            avg_t_stat=0.0,
+            avg_p_value=0.5,
+            avg_conf_int=(0.0, 0.0),
+            n_obs=100,
+            n_treated=50,
+            n_control=50,
+            pre_periods=period_ids,
+            post_periods=["D", "E"],
+            reference_period="REF_STRING",  # non-numeric
+        )
+
+        pt = PreTrendsPower(pretest_form="nis", violation_type="linear")
+        _, _, _, _, relative_times = pt._extract_pre_period_params(mpd_results)
+        assert relative_times is None, "Non-numeric reference should yield None"
 
     def test_backwards_compat_no_relative_times_uses_legacy_normalized(self):
         """Without relative_times: legacy [n-1, ..., 0]/||·||_2 direction.
@@ -676,6 +717,7 @@ class TestPretrendsHelperAPI:
         )
         assert isinstance(result, PreTrendsPowerResults)
         assert result.violation_type == "custom"
+        assert result.violation_weights is not None
         np.testing.assert_allclose(result.violation_weights, custom_w)
 
     def test_compute_mdv_accepts_violation_weights_custom(self, sa_results):
