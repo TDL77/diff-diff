@@ -278,8 +278,15 @@ class TestPowerComputation:
     """Tests for power computation."""
 
     def test_power_at_zero_equals_alpha(self):
-        """Test that power at M=0 equals alpha (size of test)."""
-        pt = PreTrendsPower(alpha=0.05)
+        """Test that power at M=0 equals alpha (size of test).
+
+        This is a Wald-form property: under H0, the noncentrality is 0 and
+        the rejection probability equals alpha exactly. Under NIS the joint
+        rejection probability at H0 is 1 - (1 - alpha)^K ≈ K*alpha for
+        small alpha (~0.14 for K=3 at alpha=0.05). Pin Wald to test the
+        Wald-specific size property.
+        """
+        pt = PreTrendsPower(alpha=0.05, pretest_form="wald")
 
         # Create simple vcov
         n_pre = 3
@@ -524,26 +531,45 @@ class TestPreTrendsPowerResults:
 
         assert isinstance(results.power_adequate, bool)
 
-    def test_power_at_raises_on_custom_violation_type(self, mock_multiperiod_results):
-        """power_at(M) must raise NotImplementedError for violation_type='custom'.
+    def test_power_at_works_for_custom_violation_type(self, mock_multiperiod_results):
+        """power_at(M) now works for custom violation type (PR-B Step 5).
 
-        The PreTrendsPowerResults dataclass does not currently persist the
-        fitted violation_weights, so power_at() cannot reconstruct the
-        custom direction. To prevent silent wrong output (equal-weights
-        fallback), the method raises NotImplementedError and points users
-        to refit with the new M. See REGISTRY.md PreTrendsPower section's
-        silent-failure-guard Note, the audit at
-        docs/methodology/papers/roth-2022-review.md, and the TODO.md row
-        tracking the planned weight-persistence follow-up.
+        PR-A R18 added a NotImplementedError guard because
+        PreTrendsPowerResults did not persist fitted violation_weights.
+        PR-B persisted them on the result dataclass and refactored
+        power_at() to read them directly. This test confirms the guard
+        is lifted for fresh fits: a custom-weights PreTrendsPower fit
+        produces a result whose power_at(M) returns a finite, in-[0,1]
+        power value.
         """
-        # mock_multiperiod_results has 4 pre-periods but period 3 is the
-        # reference, so n_pre_periods after fit is 3 (matches
-        # test_results_n_pre_periods expectation in this class).
         weights = np.array([0.1, 0.3, 0.6])
         pt = PreTrendsPower(violation_type="custom", violation_weights=weights)
         results = pt.fit(mock_multiperiod_results)
 
-        with pytest.raises(NotImplementedError, match="violation_type='custom'"):
+        # No longer raises; returns a finite power value in [0, 1].
+        power = results.power_at(0.5)
+        assert np.isfinite(power)
+        assert 0.0 <= power <= 1.0
+
+    def test_power_at_raises_on_legacy_custom_result_without_weights(
+        self, mock_multiperiod_results
+    ):
+        """power_at(M) still raises for old serialized results lacking
+        violation_weights (backwards-compat guard).
+
+        The dataclass default for violation_weights is None; old serialized
+        PreTrendsPowerResults objects from before PR-B's field addition will
+        have None there. For custom fits, power_at() cannot reconstruct
+        custom weights from violation_type + n_pre_periods alone, so the
+        PR-A R18 guard is retained for that specific backwards-compat path.
+        """
+        weights = np.array([0.1, 0.3, 0.6])
+        pt = PreTrendsPower(violation_type="custom", violation_weights=weights)
+        results = pt.fit(mock_multiperiod_results)
+        # Simulate a legacy-result scenario by clearing the persisted weights.
+        results.violation_weights = None
+
+        with pytest.raises(NotImplementedError, match="custom violation weights"):
             results.power_at(0.5)
 
 
@@ -921,13 +947,17 @@ class TestPreTrendsPowerResultsPowerAt:
         assert 0 <= power_5 <= 1
 
     def test_power_at_zero(self, mock_multiperiod_results):
-        """Test power_at with M=0 (should equal alpha)."""
-        pt = PreTrendsPower(alpha=0.05)
+        """Test power_at with M=0 (should equal alpha under Wald form).
+
+        See note on TestPowerComputation.test_power_at_zero_equals_alpha:
+        the exact-equals-alpha property is Wald-specific. Pin Wald.
+        """
+        pt = PreTrendsPower(alpha=0.05, pretest_form="wald")
         results = pt.fit(mock_multiperiod_results)
 
         power_0 = results.power_at(0.0)
 
-        # At M=0, power should equal size (alpha)
+        # At M=0, power should equal size (alpha) under Wald.
         assert np.isclose(power_0, 0.05, atol=0.01)
 
     def test_power_at_matches_fit(self, mock_multiperiod_results):
