@@ -10,6 +10,12 @@ It is a reference, not a decision tree. Multiple estimators usually fit a
 given panel; choosing between them involves trade-offs the cited literature
 discusses and that this guide does not pretend to resolve.
 
+**Recommended starting call:**
+- `agent_workflow(df, unit=..., time=..., treatment=..., outcome=...)` -
+  prints the canonical 5-step workflow with your column names wired in:
+  `profile_panel` → this guide → `<Estimator>.fit` → `practitioner_next_steps`
+  → `BusinessReport`. Stateless; calls nothing internally.
+
 **Pair this guide with:**
 - `get_llm_guide("practitioner")` - the Baker et al. (2025) 8-step validation
   workflow in workflow-prose form.

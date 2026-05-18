@@ -1,23 +1,23 @@
-"""
-diff-diff: A library for Difference-in-Differences analysis.
+"""diff-diff: Difference-in-Differences causal inference with sklearn-like API.
+Recommended starting call for LLM agents:
+``diff_diff.agent_workflow(df, unit=..., time=..., treatment=..., outcome=...)``
+prints a copy-pasteable workflow with your column names wired in.
 
-This library provides sklearn-like estimators for causal inference
-using the difference-in-differences methodology.
+The orchestrator names the full sequence:
 
-For AI agents:
-
-    1. Describe your data:    ``diff_diff.profile_panel(df, unit=..., time=...,
-                              treatment=..., outcome=...)``
-    2. Consult the reference: ``diff_diff.get_llm_guide("autonomous")``
+    1. Describe the panel:    diff_diff.profile_panel(df, ...)
+    2. Choose an estimator:   diff_diff.get_llm_guide("autonomous")
                               (estimator-support matrix + reasoning)
-    3. Follow the workflow:   ``diff_diff.get_llm_guide("practitioner")``
-                              (Baker et al. (2025) 8-step recipe)
-    4. Report results:        ``diff_diff.BusinessReport(results)``
-                              (structured agent-legible output)
+    3. Fit:                   <Estimator>(...).fit(df, ...)
+    4. Validate:              diff_diff.practitioner_next_steps(result)
+    5. Report:                diff_diff.BusinessReport(result)
 
-For a comprehensive API reference call ``diff_diff.get_llm_guide("full")``;
-``practitioner_next_steps(results)`` returns context-aware guidance after
-any estimator's ``fit()``.
+For a comprehensive API reference call ``diff_diff.get_llm_guide("full")``.
+For the Baker et al. (2025) 8-step practitioner recipe call
+``diff_diff.get_llm_guide("practitioner")``.
+
+This library provides sklearn-like estimators for causal inference using
+the difference-in-differences methodology.
 """
 
 # Import backend detection from dedicated module (avoids circular imports)
@@ -256,6 +256,7 @@ from diff_diff.diagnostic_report import (
     DiagnosticReportResults,
 )
 from diff_diff._guides_api import get_llm_guide
+from diff_diff.agent_workflow import agent_workflow
 from diff_diff.profile import (
     Alert,
     OutcomeShape,
@@ -503,6 +504,7 @@ __all__ = [
     "list_datasets",
     "clear_cache",
     # Practitioner guidance
+    "agent_workflow",
     "practitioner_next_steps",
     "BusinessReport",
     "BusinessContext",
@@ -519,3 +521,64 @@ __all__ = [
     # LLM guide accessor
     "get_llm_guide",
 ]
+
+# Agent-facing entrypoints surface first in dir(diff_diff). LLM agents
+# follow a `dir -> help -> docstring -> use` discovery loop; surfacing
+# these names first measurably improves discoverability vs the default
+# alphabetic ordering. Internal — read by tests/test_agent_discoverability.py.
+_AGENT_FACING_ORDER = (
+    "agent_workflow",
+    "profile_panel",
+    "get_llm_guide",
+    "practitioner_next_steps",
+    "BusinessReport",
+    "DiagnosticReport",
+)
+
+
+class _OrderedName(str):
+    """str subclass that sorts by _AGENT_FACING_ORDER priority.
+
+    Python's built-in dir() always sorts the result of __dir__()
+    alphabetically (CPython Objects/object.c::_dir_object unconditionally
+    calls PyList_Sort), so returning a list in our preferred order is
+    not enough. But PyList_Sort uses __lt__ for comparisons, so a str
+    subclass with a custom __lt__ can subvert the alphabetic default
+    while remaining a fully usable str for every other operation.
+
+    ALL names returned by __dir__() must be _OrderedName, not just the
+    priority head: when Python compares an _OrderedName against a plain
+    str, the reflected-method protocol prefers str's inherited __gt__
+    (because _OrderedName is a subclass of str), which sorts purely
+    alphabetically and breaks the ordering. With every element wrapped,
+    all comparisons go through this __lt__: priority head sorts to
+    front, tail (default priority 1<<30) falls through to alphabetic
+    via str.__lt__.
+    """
+
+    _ORDER = {n: i for i, n in enumerate(_AGENT_FACING_ORDER)}
+
+    def __lt__(self, other):
+        sp = self._ORDER.get(str(self), 1 << 30)
+        op = self._ORDER.get(str(other), 1 << 30)
+        if sp != op:
+            return sp < op
+        return str.__lt__(self, other)
+
+
+def __dir__():
+    """Surface agent-facing entrypoints first; remainder alphabetic.
+
+    `__all__` order does not affect `dir(module)`. CPython sorts the
+    result of `__dir__()` alphabetically, so we return `_OrderedName`
+    instances (str subclass with custom `__lt__`) for every name; the
+    custom comparison routes head names to the top and falls back to
+    alphabetic for everyone else. See `_OrderedName` docstring for
+    why ALL names must be wrapped (mixing plain `str` with the
+    subclass triggers Python's reflected-method comparison protocol
+    and breaks the ordering).
+
+    `from diff_diff import *` semantics are unaffected (driven by
+    `__all__`, not by `dir()`).
+    """
+    return [_OrderedName(n) for n in __all__]
