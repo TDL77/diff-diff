@@ -145,23 +145,43 @@ def agent_workflow(
     )
     guide_call = 'diff_diff.get_llm_guide("autonomous")'
 
-    # Step 3 example: branch on first_treat presence. Staggered estimators
-    # (CallawaySantAnna et al.) take `first_treat=` and do NOT accept
-    # `treatment=` on fit(); simple 2x2 `DifferenceInDifferences.fit()`
-    # takes `treatment=` and does not accept `first_treat=`. Emitting the
-    # wrong shape produces a TypeError when the agent copy-pastes.
+    # Step 3 example: branch on first_treat presence.
+    # - With first_treat: a staggered structure is strongly implied;
+    #   show CallawaySantAnna with the matching `first_treat=` signature
+    #   (NB: staggered estimators reject `treatment=` on fit()).
+    # - Without first_treat: the orchestrator does not inspect df, so it
+    #   CANNOT infer whether the panel is 2x2 binary vs continuous-dose
+    #   vs heterogeneous-adoption. Show a DifferenceInDifferences call
+    #   as the "simple 2x2" example and label it explicitly conditional
+    #   on that shape. The agent is expected to substitute the right
+    #   estimator class from Step 2's routing patterns when the data
+    #   is continuous / heterogeneous / non-binary-time
+    #   (DifferenceInDifferences.fit() rejects non-binary treatment/
+    #   time per diff_diff/estimators.py).
     if first_treat is not None:
         fit_example_class = "CallawaySantAnna"
         fit_example_kwargs = _join_kwargs(
             outcome=outcome, unit=unit, time=time, first_treat=first_treat
         )
         fit_example_call = f"diff_diff.CallawaySantAnna().fit(df, {fit_example_kwargs})"
+        step3_label = (
+            f"Step 3 - Fit. Your data has `first_treat` -> staggered structure; "
+            f"{fit_example_class} is the canonical starting point:"
+        )
     else:
         fit_example_class = "DifferenceInDifferences"
         fit_example_kwargs = _join_kwargs(
             outcome=outcome, unit=unit, time=time, treatment=treatment
         )
         fit_example_call = f"diff_diff.DifferenceInDifferences().fit(df, {fit_example_kwargs})"
+        step3_label = (
+            "Step 3 - Fit. Pick a candidate from Step 2's patterns based on your "
+            "treatment/time shape. The example below shows the simple 2x2 case "
+            "(binary treatment + binary time); substitute ContinuousDiD / "
+            "HeterogeneousAdoptionDiD / etc. when your design is not 2x2 "
+            "(DifferenceInDifferences.fit() validates and rejects non-binary "
+            "treatment or time):"
+        )
 
     validation_calls = [
         "diff_diff.practitioner_next_steps(result)",
@@ -200,7 +220,7 @@ Step 2 - Choose an estimator. Consult the routing matrix:
 
 {diagnostics_block}
 
-Step 3 - Fit (matched to your data shape; {fit_example_class} shown):
+{step3_label}
     result = {fit_example_call}
 
 Step 4 - Validate:

@@ -142,6 +142,35 @@ def test_first_treat_switches_step3_estimator(df):
     assert "treatment=" not in step3_lines[0]
 
 
+def test_no_first_treat_step3_does_not_overclaim_match(df):
+    """Without `first_treat`, the orchestrator cannot infer panel shape.
+
+    The Step 3 label must NOT claim the emitted DiD example is "matched to
+    your data shape" — for continuous-dose or heterogeneous-adoption
+    designs without first_treat, DifferenceInDifferences would reject at
+    fit time. The label must instead frame the example as conditional on
+    the simple 2x2 case and tell the agent to substitute the matching
+    candidate from Step 2 for other shapes.
+    """
+    out = diff_diff.agent_workflow(
+        df,
+        unit="firm_id",
+        time="year",
+        treatment="treated",
+        outcome="logwage",
+        verbose=False,
+    )
+    script = out["script"]
+    # Negative: should not claim universal match.
+    assert "matched to your data shape" not in script
+    # Positive: must qualify with the 2x2 conditionality + substitution hint.
+    assert "2x2" in script
+    assert "substitute" in script.lower()
+    # Other workflow patterns must remain enumerated so the agent can substitute.
+    for name in ("ContinuousDiD", "HeterogeneousAdoptionDiD"):
+        assert name in script, f"{name} routing pattern missing from Step 2 hints"
+
+
 def test_does_not_inspect_df():
     # Pure orchestrator: a structurally-empty DataFrame must still produce
     # the templated script (no df inspection happens).
