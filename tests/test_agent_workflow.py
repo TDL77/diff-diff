@@ -101,7 +101,45 @@ def test_first_treat_appears_when_provided(df):
         first_treat="cohort_year",
         verbose=False,
     )
-    assert 'first_treat="cohort_year"' in out["script"]
+    # repr() produces single-quoted string literals for simple labels.
+    assert "first_treat='cohort_year'" in out["script"]
+
+
+def test_first_treat_switches_step3_estimator(df):
+    """Step 3 must showcase a fit signature compatible with the data shape.
+
+    - first_treat=None  -> DifferenceInDifferences (takes `treatment=`,
+      does NOT take `first_treat=`)
+    - first_treat=<col> -> CallawaySantAnna (takes `first_treat=`,
+      does NOT take `treatment=`)
+    """
+    no_ft = diff_diff.agent_workflow(
+        df,
+        unit="firm_id",
+        time="year",
+        treatment="treated",
+        outcome="logwage",
+        verbose=False,
+    )
+    assert "DifferenceInDifferences" in no_ft["script"]
+    assert "diff_diff.CallawaySantAnna().fit" not in no_ft["script"]
+
+    with_ft = diff_diff.agent_workflow(
+        df,
+        unit="firm_id",
+        time="year",
+        treatment="treated",
+        outcome="logwage",
+        first_treat="cohort",
+        verbose=False,
+    )
+    assert "diff_diff.CallawaySantAnna().fit" in with_ft["script"]
+    # Staggered fit must not pass `treatment=` (would TypeError).
+    step3_lines = [
+        line for line in with_ft["script"].split("\n") if "CallawaySantAnna().fit" in line
+    ]
+    assert step3_lines, "Step 3 line missing"
+    assert "treatment=" not in step3_lines[0]
 
 
 def test_does_not_inspect_df():
@@ -116,7 +154,75 @@ def test_does_not_inspect_df():
         verbose=False,
     )
     assert "profile_panel" in out["script"]
-    assert 'unit="a"' in out["script"]
+    # repr() produces single-quoted literals.
+    assert "unit='a'" in out["script"]
+
+
+def test_emitted_calls_are_valid_python():
+    """The advertised "copy-pasteable" script must actually parse as Python.
+
+    Walks each line starting with `profile =` or `result =` and asserts the
+    RHS parses with ast.parse(..., mode='eval'). Guards against future
+    template drift that would silently emit invalid syntax.
+    """
+    import ast
+
+    base = pd.DataFrame({"u": [1], "t": [0], "tr": [0], "y": [0.0]})
+    for ft in (None, "cohort_col"):
+        out = diff_diff.agent_workflow(
+            base,
+            unit="u",
+            time="t",
+            treatment="tr",
+            outcome="y",
+            first_treat=ft,
+            verbose=False,
+        )
+        rhs_lines = []
+        for line in out["script"].split("\n"):
+            s = line.strip()
+            if s.startswith("profile =") or s.startswith("result ="):
+                rhs_lines.append(s[s.index("=") + 1 :].strip())
+        assert rhs_lines, f"no parseable call lines emitted (first_treat={ft})"
+        for rhs in rhs_lines:
+            ast.parse(rhs, mode="eval")
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        'firm"id',  # embedded double quote
+        "year'col",  # embedded single quote
+        "name\\with\\slash",  # backslashes
+        "x\\nname",  # backslash-n (not a real newline)
+        'unit"); evil()  #',  # injection attempt
+        "with space",  # whitespace
+    ],
+)
+def test_adversarial_column_labels_produce_valid_python(label):
+    """Any str column label must produce a script that parses as Python.
+
+    Uses repr() under the hood, so any input str becomes a valid Python
+    string literal in the templated output. Locks the P0 contract that
+    column names can never inject statements into the "copy-pasteable"
+    script.
+    """
+    import ast
+
+    df_local = pd.DataFrame({label: [1]} if " " not in label else {"u": [1]})
+    out = diff_diff.agent_workflow(
+        df_local,
+        unit=label,
+        time="t",
+        treatment="tr",
+        outcome="y",
+        verbose=False,
+    )
+    for line in out["script"].split("\n"):
+        s = line.strip()
+        if s.startswith("profile =") or s.startswith("result ="):
+            rhs = s[s.index("=") + 1 :].strip()
+            ast.parse(rhs, mode="eval")
 
 
 def test_fit_candidates_all_importable(df):

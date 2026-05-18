@@ -569,6 +569,11 @@ class _OrderedName(str):
 def __dir__():
     """Surface agent-facing entrypoints first; remainder alphabetic.
 
+    Returns the full module namespace (matching default `dir(module)`
+    membership — keeps `__doc__`, `__name__`, etc. accessible via
+    `inspect.getmembers`) with priority names re-ordered to the head
+    via `_OrderedName`'s custom `__lt__`.
+
     `__all__` order does not affect `dir(module)`. CPython sorts the
     result of `__dir__()` alphabetically, so we return `_OrderedName`
     instances (str subclass with custom `__lt__`) for every name; the
@@ -581,4 +586,4 @@ def __dir__():
     `from diff_diff import *` semantics are unaffected (driven by
     `__all__`, not by `dir()`).
     """
-    return [_OrderedName(n) for n in __all__]
+    return [_OrderedName(n) for n in globals()]

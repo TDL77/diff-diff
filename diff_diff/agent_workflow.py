@@ -12,10 +12,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-# Pattern → candidate estimator names. Flat union below is the
+# Pattern → df-callable estimator class names. Flat union below is the
 # `fit_candidates` field of the returned dict; each name must remain a
 # valid `hasattr(diff_diff, name)` (locked by the contract test in
 # tests/test_agent_discoverability.py and tests/test_agent_workflow.py).
+# Patterns intentionally exclude post-fit and pre-fit diagnostics
+# (PreTrendsPower takes pre-treatment coefficients, HonestDiD takes a
+# fitted results object); those are mentioned separately in the
+# templated Step 4 of the script.
 _WORKFLOW_PATTERNS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (
         "Staggered adoption + binary treatment + has_never_treated control",
@@ -33,16 +37,28 @@ _WORKFLOW_PATTERNS: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
         "Simple 2x2 DiD (binary treatment, two periods, no staggering)",
         ("DifferenceInDifferences",),
     ),
-    (
-        "Parallel trends in doubt — diagnose before fitting",
-        ("PreTrendsPower", "HonestDiD"),
-    ),
 )
 
 
-def _format_kwargs(**kwargs: Optional[str]) -> str:
-    parts = [f'{k}="{v}"' for k, v in kwargs.items() if v is not None]
-    return ", ".join(parts)
+def _safe_kwarg(name: str, value: Optional[str]) -> Optional[str]:
+    """Render ``name=<python-literal>`` using repr() for source-safety.
+
+    Column labels containing quotes, backslashes, or other special
+    characters must not break the emitted "copy-pasteable" script.
+    Python's built-in ``repr()`` produces a valid string literal for
+    any str input (including embedded quotes / backslashes /
+    newlines), so ``f"{name}={value!r}"`` is injection-safe by
+    construction. ``None`` returns ``None`` so the caller can drop
+    the kwarg.
+    """
+    if value is None:
+        return None
+    return f"{name}={value!r}"
+
+
+def _join_kwargs(**kwargs: Optional[str]) -> str:
+    parts = [_safe_kwarg(k, v) for k, v in kwargs.items()]
+    return ", ".join(p for p in parts if p is not None)
 
 
 def agent_workflow(
@@ -77,10 +93,12 @@ def agent_workflow(
         Column holding the outcome variable.
     first_treat : str, optional
         Column with each unit's first-treatment period (or NaN for
-        never-treated controls). When supplied, the templated fit
-        snippet adds ``first_treat="<colname>"`` to the call so the
-        agent doesn't have to remember which staggered estimators
-        accept it.
+        never-treated controls). When supplied, the templated Step 3
+        switches from a ``DifferenceInDifferences.fit(treatment=...)``
+        example to a ``CallawaySantAnna().fit(first_treat=...)``
+        example, matching the actual fit signatures (passing
+        ``treatment=`` to CallawaySantAnna's ``.fit()`` would raise
+        TypeError).
     verbose : bool, default True
         If True, print the script to stdout. The dict is always
         returned regardless.
@@ -120,18 +138,30 @@ def agent_workflow(
     True
     """
     del df  # intentionally unused: orchestrator templates from column names only
-    profile_kwargs = _format_kwargs(unit=unit, time=time, treatment=treatment, outcome=outcome)
-    profile_call = f"diff_diff.profile_panel(df, {profile_kwargs})"
+
+    profile_call = (
+        f"diff_diff.profile_panel(df, "
+        f"{_join_kwargs(unit=unit, time=time, treatment=treatment, outcome=outcome)})"
+    )
     guide_call = 'diff_diff.get_llm_guide("autonomous")'
 
-    fit_kwargs = _format_kwargs(
-        unit=unit,
-        time=time,
-        treatment=treatment,
-        outcome=outcome,
-        first_treat=first_treat,
-    )
-    fit_example_call = f"diff_diff.CallawaySantAnna(...).fit(df, {fit_kwargs})"
+    # Step 3 example: branch on first_treat presence. Staggered estimators
+    # (CallawaySantAnna et al.) take `first_treat=` and do NOT accept
+    # `treatment=` on fit(); simple 2x2 `DifferenceInDifferences.fit()`
+    # takes `treatment=` and does not accept `first_treat=`. Emitting the
+    # wrong shape produces a TypeError when the agent copy-pastes.
+    if first_treat is not None:
+        fit_example_class = "CallawaySantAnna"
+        fit_example_kwargs = _join_kwargs(
+            outcome=outcome, unit=unit, time=time, first_treat=first_treat
+        )
+        fit_example_call = f"diff_diff.CallawaySantAnna().fit(df, {fit_example_kwargs})"
+    else:
+        fit_example_class = "DifferenceInDifferences"
+        fit_example_kwargs = _join_kwargs(
+            outcome=outcome, unit=unit, time=time, treatment=treatment
+        )
+        fit_example_call = f"diff_diff.DifferenceInDifferences().fit(df, {fit_example_kwargs})"
 
     validation_calls = [
         "diff_diff.practitioner_next_steps(result)",
@@ -149,6 +179,12 @@ def agent_workflow(
 
     pattern_block = "\n".join(pattern_lines)
 
+    diagnostics_block = (
+        "    Parallel-trends sensitivity / power (take a fitted result or "
+        "pre-trend coefficients, NOT df+columns):\n"
+        "        diff_diff.PreTrendsPower / diff_diff.HonestDiD"
+    )
+
     script = f"""diff_diff workflow for your data
 =================================
 
@@ -159,10 +195,12 @@ Step 1 - Describe the panel:
 Step 2 - Choose an estimator. Consult the routing matrix:
     print({guide_call})
 
-    Routing patterns to look up in the matrix:
+    Routing patterns (df-callable estimators):
 {pattern_block}
 
-Step 3 - Fit (CallawaySantAnna shown; substitute the matching candidate):
+{diagnostics_block}
+
+Step 3 - Fit (matched to your data shape; {fit_example_class} shown):
     result = {fit_example_call}
 
 Step 4 - Validate:
