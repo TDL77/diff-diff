@@ -1710,10 +1710,8 @@ def _compute_cr2_bm_contrast_dof(
         raise ValueError(
             f"Need at least 2 clusters for cluster-robust SEs, got " f"{len(unique_clusters)}"
         )
-    if contrasts.shape[0] != k:
-        raise ValueError(
-            f"contrasts must have {k} rows (one per coefficient), got " f"{contrasts.shape[0]}"
-        )
+    if contrasts.ndim != 2 or contrasts.shape[0] != k:
+        raise ValueError(f"contrasts must have shape (k={k}, m); got {contrasts.shape}")
 
     try:
         bread_inv = np.linalg.solve(bread_matrix, np.eye(k))

@@ -67,8 +67,11 @@ class DifferenceInDifferences:
           ``cluster=``; use ``"hc2_bm"`` for clustered Bell-McCaffrey.
         - ``"hc2_bm"``: one-way HC2 + Imbens-Kolesar (2016) Satterthwaite DOF;
           with ``cluster=``, Pustejovsky-Tipton (2018) CR2 cluster-robust.
-          (Note: ``MultiPeriodDiD`` does NOT yet support ``cluster=`` with
-          ``"hc2_bm"`` — see ``MultiPeriodDiD`` docstring and REGISTRY.md.)
+          ``MultiPeriodDiD(cluster=..., vcov_type="hc2_bm")`` is supported and
+          uses a cluster-aware Bell-McCaffrey contrast DOF for the
+          post-period-average ATT (see ``_compute_cr2_bm_contrast_dof`` in
+          ``linalg.py`` and the REGISTRY.md note). Weighted CR2-BM
+          (``survey_design=`` paths) is a separate gate.
         - ``"conley"``: Conley 1999 spatial-HAC sandwich. Pass
           ``conley_coords=(lat_col, lon_col)``, ``conley_cutoff_km=<float>``,
           and ``conley_lag_cutoff=<int>`` on the constructor; pass

@@ -542,6 +542,81 @@ class TestFitBehavior:
         assert np.isfinite(post_pe.se)
         assert np.isfinite(post_pe.p_value)
 
+    def test_multi_period_cluster_hc2_bm_avg_att_uses_clubsandwich_dof(self):
+        """MPD(cluster=..., hc2_bm) `avg_att` inference uses the new
+        cluster-aware contrast Satterthwaite DOF, not the shared n-k fallback.
+
+        Pins the implied DOF from `avg_p_value` against the R `dof_avg` target
+        on the `mpd_clustered_avg_att_dof` fixture. The R-side compound contrast
+        DOF (from `Wald_test(test="HTZ")$df_denom` on a 1-row constraint matrix
+        — equivalent to the Satterthwaite t-test DOF) is the parity target.
+        Recovers the DOF by inverting `avg_p_value = 2 * (1 - t.cdf(|t|, df))`.
+        """
+        import json
+        from pathlib import Path
+
+        from scipy import stats
+
+        golden_path = (
+            Path(__file__).parent.parent / "benchmarks" / "data" / "clubsandwich_cr2_golden.json"
+        )
+        if not golden_path.exists():
+            pytest.skip(
+                "Golden JSON not present; run "
+                "`Rscript benchmarks/R/generate_clubsandwich_golden.R` first."
+            )
+        with open(golden_path) as f:
+            golden = json.load(f)
+        if "mpd_clustered_avg_att_dof" not in golden:
+            pytest.skip("Golden JSON missing `mpd_clustered_avg_att_dof` scenario.")
+        d = golden["mpd_clustered_avg_att_dof"]
+        dof_avg_r = float(d["dof_avg"])
+
+        data = pd.DataFrame(
+            {
+                "unit": d["unit"],
+                "period": d["period"],
+                "treated": d["treated"],
+                "y": d["y"],
+            }
+        )
+        # MPD parameterization with `fixed_effects=["unit"]` matches the R
+        # generator's `factor(unit)` term (the cluster column is the unit).
+        res = MultiPeriodDiD(vcov_type="hc2_bm", cluster="unit").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="period",
+            fixed_effects=["unit"],
+            reference_period=int(d["reference_period"]),
+            unit="unit",
+        )
+        assert np.isfinite(res.avg_att) and np.isfinite(res.avg_se)
+        # Recover the implied DOF from the reported p_value:
+        # avg_p_value = 2 * (1 - t.cdf(|t|, df))  ->  df = root of
+        # `t.sf(|t|, df) * 2 - p` (Satterthwaite-bounded scalar bisection
+        # via scipy's brentq on a sane interval).
+        t_stat = abs(res.avg_t_stat)
+        p_target = res.avg_p_value
+        # Sanity: BM Satterthwaite DOF is bounded in [1, n-k]. With 60 obs and
+        # ~21 coefficients (per the fixture), DOF is in [1, 39].
+        from scipy.optimize import brentq
+
+        def _residual(df):
+            return 2.0 * stats.t.sf(t_stat, df) - p_target
+
+        implied_dof = brentq(_residual, 1.0, 100.0, xtol=1e-8)
+        # The implied DOF should match the R golden at 1e-6 (small tolerance
+        # accounts for the t.cdf evaluation roundoff, not the DOF computation).
+        np.testing.assert_allclose(implied_dof, dof_avg_r, atol=1e-6)
+        # Pin that the new path is in use, not the n-k fallback: dof_avg_r
+        # is well below n-k for this fixture (60 obs - 21 coefs = 39 > 8.1).
+        assert implied_dof < 30, (
+            f"Implied DOF {implied_dof:.2f} is suspiciously large; expected "
+            f"~{dof_avg_r:.2f} (Satterthwaite-corrected) and the n-k fallback "
+            "would be ~39, so the contrast-DOF helper may not be wired."
+        )
+
     def test_multi_period_fit_honors_hc2_bm(self):
         """MultiPeriodDiD.fit with vcov_type='hc2_bm' uses Bell-McCaffrey DOF.
 

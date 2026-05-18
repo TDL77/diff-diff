@@ -6,8 +6,15 @@ Phase 1a of the HeterogeneousAdoptionDiD implementation. Ships:
   ``robust=False`` on ``DifferenceInDifferences``).
 - ``vcov_type="hc2"``: leverage-corrected HC2 one-way.
 - ``vcov_type="hc2_bm"``: HC2 plus Imbens-Kolesar (2016) Satterthwaite DOF.
+- ``vcov_type="hc2_bm"`` + ``cluster=``: Pustejovsky-Tipton (2018) CR2 cluster-
+  robust with per-coefficient and (via ``_compute_cr2_bm_contrast_dof``) compound
+  contrast Bell-McCaffrey Satterthwaite DOF. The contrast-DOF helper is the
+  backend for ``MultiPeriodDiD``'s post-period-average ATT inference under the
+  cluster+hc2_bm combination.
 
-Cluster-robust CR2 Bell-McCaffrey is deferred to a follow-up Phase 1a commit.
+Weighted CR2 Bell-McCaffrey (``hc2_bm`` + ``cluster=`` + ``weights=``) remains
+deferred to a follow-up; the corresponding ``NotImplementedError`` gate in
+``_validate_vcov_args`` is exercised by ``TestInvalidInputs``.
 """
 
 from __future__ import annotations
@@ -730,7 +737,7 @@ class TestCR2BMContrastDOF:
         cluster = np.repeat(np.arange(5), 6)
         bread = X.T @ X
         bad_contrasts = np.zeros((k + 1, 1))
-        with pytest.raises(ValueError, match=r"rows"):
+        with pytest.raises(ValueError, match=r"shape \(k="):
             _compute_cr2_bm_contrast_dof(X, cluster, bread, bad_contrasts)
 
     def test_too_few_clusters_raises(self):
