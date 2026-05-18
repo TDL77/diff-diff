@@ -146,42 +146,48 @@ def agent_workflow(
     guide_call = 'diff_diff.get_llm_guide("autonomous")'
 
     # Step 3 example: branch on first_treat presence.
-    # - With first_treat: a staggered structure is strongly implied;
-    #   show CallawaySantAnna with the matching `first_treat=` signature
-    #   (NB: staggered estimators reject `treatment=` on fit()).
+    # - With first_treat: a staggered structure is strongly implied, BUT
+    #   `first_treat` does not by itself identify which estimator to use:
+    #   CallawaySantAnna (binary staggered), ContinuousDiD (continuous-
+    #   dose with first_treat), and HeterogeneousAdoptionDiD event-study
+    #   (heterogeneous intensity with first_treat_col) all accept it.
+    #   Show CallawaySantAnna as the binary-staggered canonical example
+    #   and list the alternatives for continuous / heterogeneous designs
+    #   so an agent isn't steered to the wrong estimator.
     # - Without first_treat: the orchestrator does not inspect df, so it
     #   CANNOT infer whether the panel is 2x2 binary vs continuous-dose
     #   vs heterogeneous-adoption. Show a DifferenceInDifferences call
     #   as the "simple 2x2" example and label it explicitly conditional
-    #   on that shape. The agent is expected to substitute the right
-    #   estimator class from Step 2's routing patterns when the data
-    #   is continuous / heterogeneous / non-binary-time
-    #   (DifferenceInDifferences.fit() rejects non-binary treatment/
-    #   time per diff_diff/estimators.py).
+    #   on that shape.
     if first_treat is not None:
-        fit_example_class = "CallawaySantAnna"
         fit_example_kwargs = _join_kwargs(
             outcome=outcome, unit=unit, time=time, first_treat=first_treat
         )
         fit_example_call = f"diff_diff.CallawaySantAnna().fit(df, {fit_example_kwargs})"
-        step3_label = (
-            f"Step 3 - Fit. Your data has `first_treat` -> staggered structure; "
-            f"{fit_example_class} is the canonical starting point:"
-        )
+        step3_label_lines = [
+            "Step 3 - Fit. Your data has `first_treat` -> staggered structure.",
+            "`first_treat` alone does NOT identify a single estimator; pick by",
+            "treatment shape:",
+            "  - Binary staggered  : CallawaySantAnna (shown) / SunAbraham / ImputationDiD",
+            "  - Continuous dose   : ContinuousDiD (also takes first_treat=)",
+            "  - Heterogeneous adoption intensity:",
+            "                        HeterogeneousAdoptionDiD (event study,",
+            "                        takes first_treat_col=, NOT first_treat=)",
+        ]
     else:
-        fit_example_class = "DifferenceInDifferences"
         fit_example_kwargs = _join_kwargs(
             outcome=outcome, unit=unit, time=time, treatment=treatment
         )
         fit_example_call = f"diff_diff.DifferenceInDifferences().fit(df, {fit_example_kwargs})"
-        step3_label = (
-            "Step 3 - Fit. Pick a candidate from Step 2's patterns based on your "
-            "treatment/time shape. The example below shows the simple 2x2 case "
-            "(binary treatment + binary time); substitute ContinuousDiD / "
-            "HeterogeneousAdoptionDiD / etc. when your design is not 2x2 "
-            "(DifferenceInDifferences.fit() validates and rejects non-binary "
-            "treatment or time):"
-        )
+        step3_label_lines = [
+            "Step 3 - Fit. Pick a candidate from Step 2's patterns based on your",
+            "treatment/time shape. The example below shows the simple 2x2 case",
+            "(binary treatment + binary time); substitute ContinuousDiD /",
+            "HeterogeneousAdoptionDiD / etc. when your design is not 2x2",
+            "(DifferenceInDifferences.fit() validates and rejects non-binary",
+            "treatment or time).",
+        ]
+    step3_comment_block = "\n".join(f"# {line}" for line in step3_label_lines)
 
     validation_calls = [
         "diff_diff.practitioner_next_steps(result)",
@@ -191,46 +197,49 @@ def agent_workflow(
     fit_candidates: List[str] = []
     pattern_lines: List[str] = []
     for label, names in _WORKFLOW_PATTERNS:
-        pattern_lines.append(f"    - {label}")
-        pattern_lines.append(f"        candidates: {', '.join(names)}")
+        pattern_lines.append(f"#   - {label}")
+        pattern_lines.append(f"#       candidates: {', '.join(names)}")
         for n in names:
             if n not in fit_candidates:
                 fit_candidates.append(n)
-
     pattern_block = "\n".join(pattern_lines)
 
     diagnostics_block = (
-        "    Parallel-trends sensitivity / power (take a fitted result or "
-        "pre-trend coefficients, NOT df+columns):\n"
-        "        diff_diff.PreTrendsPower / diff_diff.HonestDiD"
+        "# Parallel-trends sensitivity / power (take a fitted result or\n"
+        "# pre-trend coefficients, NOT df+columns):\n"
+        "#     diff_diff.PreTrendsPower / diff_diff.HonestDiD"
     )
 
-    script = f"""diff_diff workflow for your data
-=================================
+    # Templated output is a valid Python script: every prose line is a
+    # `#` comment, every code line stands at column 0 and runs as-is.
+    # Step 5 wraps full_report() in print() so end-to-end execution
+    # actually produces the stakeholder narrative.
+    script = f"""# diff_diff workflow for your data
+# =================================
+#
+# Step 1 - Describe the panel:
+profile = {profile_call}
+print(profile)
 
-Step 1 - Describe the panel:
-    profile = {profile_call}
-    print(profile)
+# Step 2 - Choose an estimator. Consult the routing matrix:
+print({guide_call})
 
-Step 2 - Choose an estimator. Consult the routing matrix:
-    print({guide_call})
-
-    Routing patterns (df-callable estimators):
+# Routing patterns (df-callable estimators):
 {pattern_block}
-
+#
 {diagnostics_block}
 
-{step3_label}
-    result = {fit_example_call}
+{step3_comment_block}
+result = {fit_example_call}
 
-Step 4 - Validate:
-    {validation_calls[0]}
+# Step 4 - Validate:
+{validation_calls[0]}
 
-Step 5 - Report:
-    {reporting_call}
+# Step 5 - Report:
+print({reporting_call})
 
-Full reference: diff_diff.get_llm_guide("full")
-Practitioner recipe: diff_diff.get_llm_guide("practitioner")
+# Full reference: diff_diff.get_llm_guide("full")
+# Practitioner recipe: diff_diff.get_llm_guide("practitioner")
 """
 
     if verbose:

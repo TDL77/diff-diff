@@ -171,6 +171,77 @@ def test_no_first_treat_step3_does_not_overclaim_match(df):
         assert name in script, f"{name} routing pattern missing from Step 2 hints"
 
 
+def test_first_treat_step3_names_non_binary_alternatives(df):
+    """first_treat alone doesn't pick the estimator.
+
+    ContinuousDiD.fit and HeterogeneousAdoptionDiD (event-study) BOTH take
+    `first_treat` (via `first_treat=` and `first_treat_col=`). The Step 3
+    label must name those alternatives so an agent on a continuous-dose or
+    heterogeneous-intensity panel isn't silently steered to CS21.
+    """
+    out = diff_diff.agent_workflow(
+        df,
+        unit="firm_id",
+        time="year",
+        treatment="treated",
+        outcome="logwage",
+        first_treat="cohort",
+        verbose=False,
+    )
+    script = out["script"]
+    # The CS21 example remains the canonical binary-staggered demo.
+    assert "diff_diff.CallawaySantAnna().fit" in script
+    # The Step 3 commentary must name the non-binary alternatives so the
+    # agent knows when to switch.
+    assert "ContinuousDiD" in script
+    assert "HeterogeneousAdoptionDiD" in script
+    # The HAD distinction (first_treat_col vs first_treat) must be named
+    # so the agent doesn't try to pass first_treat= to HAD's event study.
+    assert "first_treat_col" in script
+
+
+def test_emitted_script_parses_as_python_module(df):
+    """The "script" output must parse as a complete Python module.
+
+    Prior contract was "copy-pasteable" but the script had bare prose
+    lines (`Step 1 - ...`) that would SyntaxError on execution. This
+    locks the full-script parseability so the contract stays honest.
+    """
+    import ast
+
+    for ft in (None, "cohort"):
+        out = diff_diff.agent_workflow(
+            df,
+            unit="firm_id",
+            time="year",
+            treatment="treated",
+            outcome="logwage",
+            first_treat=ft,
+            verbose=False,
+        )
+        # ast.parse with default mode='exec' verifies the WHOLE script
+        # parses as a Python module, not just individual call expressions.
+        ast.parse(out["script"])
+
+
+def test_emitted_script_prints_report(df):
+    """Step 5 must wrap BusinessReport in print() so end-to-end script
+    execution actually produces the stakeholder narrative. full_report()
+    returns a str; the previous template discarded it.
+    """
+    out = diff_diff.agent_workflow(
+        df,
+        unit="firm_id",
+        time="year",
+        treatment="treated",
+        outcome="logwage",
+        verbose=False,
+    )
+    script = out["script"]
+    assert "print(diff_diff.BusinessReport" in script
+    assert ".full_report())" in script
+
+
 def test_does_not_inspect_df():
     # Pure orchestrator: a structurally-empty DataFrame must still produce
     # the templated script (no df inspection happens).
