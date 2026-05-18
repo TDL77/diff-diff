@@ -1591,21 +1591,66 @@ def _compute_cr2_bm(
     vcov = np.linalg.solve(bread_matrix, temp.T).T
 
     # --- Per-coefficient Bell-McCaffrey cluster DOF ---
-    # omega_g(c) = A_g @ X_g @ bread_inv @ c  (length n_g)
-    # trace(B) = sum_i (X_i' bread_inv c)^2
-    # trace(B^2) = sum_{g, h} (omega_g' M_{g, h} omega_h)^2
-    dof_vec = np.empty(k)
-    # Precompute X bread_inv (n x k) so contrast-specific q = X_bi[:, j].
-    X_bi = X @ bread_inv
-    # Precompute A_g @ X_g @ bread_inv per cluster (A_g_X_bi shape n_g x k)
-    A_g_Xbi = {g: A_g_matrices[g] @ X[cluster_idx[g]] @ bread_inv for g in unique_clusters}
-    for j in range(k):
-        q = X_bi[:, j]  # length n
+    # Delegate to the contrast-aware helper with `contrasts=I_k` so the
+    # per-coefficient case is `c = e_j` (the j-th basis vector). Bit-identity
+    # vs the prior inline loop holds at machine precision because the same
+    # X_bi / A_g_Xbi precomputes are reused under the same matmul ordering.
+    dof_vec = _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, bread_inv, np.eye(k))
+
+    return vcov, dof_vec
+
+
+def _cr2_bm_dof_inner(
+    X: np.ndarray,
+    M: np.ndarray,
+    A_g_matrices: Dict[Any, np.ndarray],
+    cluster_idx: Dict[Any, np.ndarray],
+    bread_inv: np.ndarray,
+    contrasts: np.ndarray,
+) -> np.ndarray:
+    """Inner DOF loop, parameterized by an arbitrary contrast matrix.
+
+    Computes the CR2 Bell-McCaffrey Satterthwaite DOF for each column of
+    ``contrasts`` (shape ``(k, m)``), using the precomputed residual-maker
+    ``M``, per-cluster adjustment matrices ``A_g_matrices``, cluster index
+    map ``cluster_idx``, and ``bread_inv``. The per-coefficient case is
+    recovered with ``contrasts=np.eye(k)``; compound contrasts (e.g., a
+    post-period-average ATT) are handled by the same algebra without
+    duplication.
+
+    Per-contrast formula (Pustejovsky-Tipton 2018 Section 4 / Appendix A):
+
+      q       = X @ bread_inv @ c                       (length n)
+      omega_g = A_g @ X_g @ bread_inv @ c               (length n_g)
+      trace_B = sum_i q_i**2
+      trace_B2 = sum_{g, h} (omega_g' M_{g, h} omega_h)**2
+      DOF(c)  = trace_B**2 / trace_B2
+
+    Returns
+    -------
+    dof_vec : ndarray of shape (m,)
+        DOF per contrast column. NaN entries indicate degenerate contrasts
+        (trace_B2 ≈ 0 — typically high-collinearity nuisance columns).
+    """
+    m = contrasts.shape[1]
+    unique_clusters = list(cluster_idx.keys())
+    # Precompute once: q-matrix (n, m) and A_g_Xbi (n_g, k) per cluster.
+    # For unit-contrast inputs (contrasts=I_k), this matches the prior
+    # inline implementation exactly: q[:, j] == X_bi[:, j] == X @ bread_inv @ e_j.
+    X_bi = X @ bread_inv  # (n, k)
+    Q = X_bi @ contrasts  # (n, m) — q vectors as columns
+    A_g_Xbi = {
+        g: A_g_matrices[g] @ X[cluster_idx[g]] @ bread_inv for g in unique_clusters
+    }  # each (n_g, k)
+    # Omega per cluster per contrast: (n_g, m) = A_g_Xbi[g] @ contrasts
+    omega_all = {g: A_g_Xbi[g] @ contrasts for g in unique_clusters}
+
+    dof_vec = np.empty(m)
+    for j in range(m):
+        q = Q[:, j]
         trace_B = float(np.sum(q * q))
-        # trace(B^2) = sum_{g, h} (omega_g' M_{g, h} omega_h)^2
         trace_B2 = 0.0
-        # Cache omega_g for this contrast
-        omega_cache = {g: A_g_Xbi[g][:, j] for g in unique_clusters}
+        omega_cache = {g: omega_all[g][:, j] for g in unique_clusters}
         for g in unique_clusters:
             idx_g = cluster_idx[g]
             omega_g = omega_cache[g]
@@ -1617,7 +1662,78 @@ def _compute_cr2_bm(
                 trace_B2 += val * val
         dof_vec[j] = (trace_B * trace_B) / trace_B2 if trace_B2 > 0 else np.nan
 
-    return vcov, dof_vec
+    return dof_vec
+
+
+def _compute_cr2_bm_contrast_dof(
+    X: np.ndarray,
+    cluster_ids: np.ndarray,
+    bread_matrix: np.ndarray,
+    contrasts: np.ndarray,
+) -> np.ndarray:
+    """Per-contrast CR2 Bell-McCaffrey Satterthwaite DOF.
+
+    Generalizes the per-coefficient DOF from :func:`_compute_cr2_bm` to
+    arbitrary linear combinations ``c = sum_j a_j * beta_j``. Used by
+    :class:`MultiPeriodDiD` to compute the Satterthwaite DOF for the
+    post-period-average ATT contrast under cluster-robust CR2 inference.
+
+    Parameters
+    ----------
+    X : ndarray of shape (n, k)
+        Design matrix (post-rank-deficient-column-drop if applicable).
+    cluster_ids : ndarray of shape (n,)
+        Per-observation cluster identifiers. NOT subscripted by any
+        column mask — cluster IDs are unchanged by column drops.
+    bread_matrix : ndarray of shape (k, k)
+        ``X.T @ X`` (or ``X.T @ W @ X`` for survey-weighted — though the
+        weighted CR2 path is deferred to a follow-up PR).
+    contrasts : ndarray of shape (k, m)
+        Each column is a contrast vector ``c`` for the linear combination
+        ``c' beta``. The per-coefficient case is recovered with
+        ``contrasts=np.eye(k)``.
+
+    Returns
+    -------
+    dof_vec : ndarray of shape (m,)
+        Satterthwaite DOF per contrast.
+
+    See Also
+    --------
+    _compute_cr2_bm : per-coefficient DOF (calls this helper internally
+        with ``contrasts=np.eye(k)``).
+    """
+    n, k = X.shape
+    cluster_ids_arr = np.asarray(cluster_ids)
+    unique_clusters = np.unique(cluster_ids_arr)
+    if len(unique_clusters) < 2:
+        raise ValueError(
+            f"Need at least 2 clusters for cluster-robust SEs, got " f"{len(unique_clusters)}"
+        )
+    if contrasts.ndim != 2 or contrasts.shape[0] != k:
+        raise ValueError(f"contrasts must have shape (k={k}, m); got {contrasts.shape}")
+
+    try:
+        bread_inv = np.linalg.solve(bread_matrix, np.eye(k))
+    except np.linalg.LinAlgError as e:
+        if "Singular" in str(e):
+            raise ValueError(
+                "Design matrix is rank-deficient (singular X'X matrix). "
+                "Cannot compute CR2 Bell-McCaffrey variance."
+            ) from e
+        raise
+
+    H = X @ bread_inv @ X.T
+    M = np.eye(n) - H
+    cluster_idx = {g: np.where(cluster_ids_arr == g)[0] for g in unique_clusters}
+    A_g_matrices: Dict[Any, np.ndarray] = {}
+    for g in unique_clusters:
+        idx_g = cluster_idx[g]
+        H_gg = H[np.ix_(idx_g, idx_g)]
+        I_g = np.eye(len(idx_g))
+        A_g_matrices[g] = _cr2_adjustment_matrix(I_g - H_gg)
+
+    return _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, bread_inv, contrasts)
 
 
 def _compute_bm_dof_from_contrasts(

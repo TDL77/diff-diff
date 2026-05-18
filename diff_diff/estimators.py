@@ -67,8 +67,11 @@ class DifferenceInDifferences:
           ``cluster=``; use ``"hc2_bm"`` for clustered Bell-McCaffrey.
         - ``"hc2_bm"``: one-way HC2 + Imbens-Kolesar (2016) Satterthwaite DOF;
           with ``cluster=``, Pustejovsky-Tipton (2018) CR2 cluster-robust.
-          (Note: ``MultiPeriodDiD`` does NOT yet support ``cluster=`` with
-          ``"hc2_bm"`` — see ``MultiPeriodDiD`` docstring and REGISTRY.md.)
+          ``MultiPeriodDiD(cluster=..., vcov_type="hc2_bm")`` is supported and
+          uses a cluster-aware Bell-McCaffrey contrast DOF for the
+          post-period-average ATT (see ``_compute_cr2_bm_contrast_dof`` in
+          ``linalg.py`` and the REGISTRY.md note). Weighted CR2-BM
+          (``survey_design=`` paths) is a separate gate.
         - ``"conley"``: Conley 1999 spatial-HAC sandwich. Pass
           ``conley_coords=(lat_col, lon_col)``, ``conley_cutoff_km=<float>``,
           and ``conley_lag_cutoff=<int>`` on the constructor; pass
@@ -1105,16 +1108,13 @@ class MultiPeriodDiD(DifferenceInDifferences):
         contradictory (e.g. ``robust=False, vcov_type="hc2"`` raises).
     cluster : str, optional
         Column name for cluster-robust standard errors. With ``vcov_type="hc1"``
-        dispatches to CR1 (Liang-Zeger).
-
-        **Not supported with** ``vcov_type="hc2_bm"``: the cluster-aware CR2
-        Bell-McCaffrey contrast DOF for the post-period-average ATT is not
-        yet implemented, and pairing CR2 SEs with one-way Imbens-Kolesar DOF
-        would be a broken hybrid, so the combination raises
-        ``NotImplementedError`` with a pointer to workarounds. Tracked in
-        ``TODO.md``; also documented as a Note in
-        ``docs/methodology/REGISTRY.md`` under the HeterogeneousAdoptionDiD
-        requirements-checklist block.
+        dispatches to CR1 (Liang-Zeger). With ``vcov_type="hc2_bm"`` dispatches
+        to CR2 cluster-robust SEs with Bell-McCaffrey Satterthwaite DOF on both
+        per-period coefficients and the post-period-average ATT contrast (the
+        latter via the new ``_compute_cr2_bm_contrast_dof`` helper in
+        ``linalg.py``; matches clubSandwich's
+        ``Wald_test(test="HTZ")$df_denom`` at atol=1e-10). Weighted CR2-BM
+        (``survey_design=``) is a separate, still-gated path.
     vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, optional
         Variance-covariance family. Defaults to the ``robust`` alias.
 
@@ -1125,7 +1125,10 @@ class MultiPeriodDiD(DifferenceInDifferences):
           ``cluster=``; use ``"hc2_bm"`` without cluster for Bell-McCaffrey.
         - ``"hc2_bm"``: one-way HC2 + Imbens-Kolesar (2016) Satterthwaite DOF
           per coefficient plus a contrast-aware DOF for the post-period-average
-          ATT. **Unsupported with** ``cluster=`` — see ``cluster`` above.
+          ATT. With ``cluster=``, dispatches to Pustejovsky-Tipton (2018)
+          CR2 cluster-robust with a Bell-McCaffrey Satterthwaite contrast DOF
+          on the post-period average (see ``cluster`` above for parity
+          details). Weighted CR2-BM (``survey_design=``) is still gated.
         - ``"conley"``: Conley 1999 spatial-HAC sandwich via the panel
           block-decomposed form (matches R ``conleyreg`` with
           ``lag_cutoff > 0``). Pass ``conley_coords=(lat_col, lon_col)``,
@@ -1647,27 +1650,6 @@ class MultiPeriodDiD(DifferenceInDifferences):
         # Determine if survey vcov should be used
         _use_survey_vcov = resolved_survey is not None and resolved_survey.needs_survey_vcov
 
-        # Reject cluster + vcov_type="hc2_bm": `_compute_cr2_bm` produces CR2
-        # per-coefficient DOF, but the post-period-average contrast needs a
-        # cluster-aware contrast-BM DOF that isn't implemented yet. Pairing
-        # CR2 SEs with one-way BM DOF would be a broken hybrid — reject with
-        # a clear error until the cluster-aware contrast DOF is in place.
-        # Tracked in TODO.md. Users can drop cluster for one-way HC2+BM, or
-        # drop vcov_type for CR1 cluster-robust.
-        if (
-            self.vcov_type == "hc2_bm"
-            and effective_cluster_ids is not None
-            and not _use_survey_vcov
-        ):
-            raise NotImplementedError(
-                "MultiPeriodDiD(cluster=..., vcov_type='hc2_bm') is not yet "
-                "supported: the cluster-aware CR2 Bell-McCaffrey contrast DOF "
-                "for the post-period average has not been implemented. "
-                "Workarounds: use vcov_type='hc2_bm' without cluster (one-way "
-                "HC2 + BM DOF), or use vcov_type='hc1' with cluster (CR1 "
-                "Liang-Zeger cluster-robust)."
-            )
-
         # Remap implicit "classical" + cluster to CR1 (legacy backward compat).
         _fit_vcov_type = self._resolve_effective_vcov_type(effective_cluster_ids)
 
@@ -1870,6 +1852,7 @@ class MultiPeriodDiD(DifferenceInDifferences):
         ):
             from diff_diff.linalg import (
                 _compute_bm_dof_from_contrasts,
+                _compute_cr2_bm_contrast_dof,
                 _compute_hat_diagonals,
             )
 
@@ -1880,7 +1863,6 @@ class MultiPeriodDiD(DifferenceInDifferences):
                 bread_kept = X_kept.T @ (
                     X_kept * survey_weights[:, np.newaxis] if survey_weights is not None else X_kept
                 )
-                h_diag_kept = _compute_hat_diagonals(X_kept, bread_kept, weights=survey_weights)
                 # Build the contrast matrix: one column per identified coefficient
                 # plus one column for the post-period average contrast (1/n_post
                 # on each post-period interaction column, 0 elsewhere).
@@ -1893,13 +1875,30 @@ class MultiPeriodDiD(DifferenceInDifferences):
                         post_contrast_full[interaction_indices[_p]] = 1.0 / _n_post
                 post_contrast_kept = post_contrast_full[_kept]
                 contrasts = np.column_stack([np.eye(n_kept), post_contrast_kept[:, np.newaxis]])
-                _dof_all = _compute_bm_dof_from_contrasts(
-                    X_kept,
-                    bread_kept,
-                    h_diag_kept,
-                    contrasts,
-                    weights=survey_weights,
-                )
+                # Branch on cluster: one-way HC2-BM vs cluster-aware CR2-BM.
+                # Cluster IDs are per-observation length n and are unchanged
+                # by the column-drop applied to X (`_kept` indexes columns
+                # only); pass `effective_cluster_ids` unmodified.
+                if effective_cluster_ids is None:
+                    h_diag_kept = _compute_hat_diagonals(X_kept, bread_kept, weights=survey_weights)
+                    _dof_all = _compute_bm_dof_from_contrasts(
+                        X_kept,
+                        bread_kept,
+                        h_diag_kept,
+                        contrasts,
+                        weights=survey_weights,
+                    )
+                else:
+                    # Cluster-aware CR2 BM Satterthwaite DOF for per-coefficient
+                    # AND post-period-average compound contrast (Gate 6 lift).
+                    # Weighted CR2-BM is a separate gate; survey paths never
+                    # reach this block (outer `not _use_survey_vcov` guard).
+                    _dof_all = _compute_cr2_bm_contrast_dof(
+                        X_kept,
+                        effective_cluster_ids,
+                        bread_kept,
+                        contrasts,
+                    )
                 # Expand per-coefficient DOF back to full width (NaN for dropped).
                 _bm_dof_per_coef = np.full(X.shape[1], np.nan)
                 _bm_dof_per_coef[_kept] = _dof_all[:n_kept]

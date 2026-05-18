@@ -172,6 +172,66 @@ output$mpd_absorbed_fe_did <- list(
   target_period = 4L
 )
 
+# --- MPD clustered avg_att DOF scenario (Gate 6 lift PR) ---------------------
+# Pins clubSandwich's compound-contrast Satterthwaite DOF for the post-period-
+# average ATT under cluster-robust CR2. Mirrors MultiPeriodDiD(cluster=unit,
+# vcov_type='hc2_bm', fixed_effects=['unit']) parameterization. Per-coefficient
+# DOFs use coef_test()$df_Satt (the canonical Satterthwaite per-coef API);
+# the compound contrast DOF uses Wald_test(constraints=matrix(c_avg, 1),
+# test='HTZ')$df_denom — on a 1-row constraint matrix HTZ reduces to a
+# Satterthwaite t-test and its df_denom IS the BM Satterthwaite DOF.
+
+d_mpd_cl <- make_mpd_panel(n_total = 15, units_per_cohort = 5, n_periods = 4,
+                           seed = 20260517)
+d_mpd_cl$period_f <- relevel(factor(d_mpd_cl$period), ref = "1")
+for (p in 2:4) {
+  d_mpd_cl[[paste0("treated_period_", p)]] <-
+    d_mpd_cl$treated * (d_mpd_cl$period == p)
+}
+fit_mpd_cl <- lm(y ~ treated + period_f +
+                     treated_period_2 + treated_period_3 + treated_period_4 +
+                     factor(unit),
+                 data = d_mpd_cl)
+vcov_mpd_cr2 <- vcovCR(fit_mpd_cl, cluster = d_mpd_cl$unit, type = "CR2")
+# Per-coefficient DOF via coef_test (canonical Satterthwaite API).
+ct_mpd_cr2 <- coef_test(fit_mpd_cl, vcov = vcov_mpd_cr2)
+# Compound post-period-average contrast: (1/3) * (e_treated_period_2
+# + e_treated_period_3 + e_treated_period_4). Build full-width vector
+# matching coef(fit) order, with zeros on the NA-dropped column.
+all_coef_names <- names(coef(fit_mpd_cl))
+n_coef <- length(all_coef_names)
+c_avg_vec <- setNames(rep(0, n_coef), all_coef_names)
+post_names <- c("treated_period_2", "treated_period_3", "treated_period_4")
+c_avg_vec[post_names] <- 1 / length(post_names)
+# Wald_test ignores NA-dropped coefficients; subset the constraint vector
+# to the non-NA coefficients (clubSandwich's coef_test convention).
+finite_mask <- !is.na(coef(fit_mpd_cl))
+c_avg_kept <- c_avg_vec[finite_mask]
+dof_avg_compound <- Wald_test(
+  fit_mpd_cl,
+  constraints = matrix(c_avg_kept, 1),
+  vcov = vcov_mpd_cr2,
+  test = "HTZ"
+)$df_denom
+output$mpd_clustered_avg_att_dof <- list(
+  unit = d_mpd_cl$unit,
+  period = d_mpd_cl$period,
+  treated = d_mpd_cl$treated,
+  y = d_mpd_cl$y,
+  cluster = d_mpd_cl$unit,
+  coef = as.numeric(coef(fit_mpd_cl)),
+  coef_names = all_coef_names,
+  finite_coef_names = all_coef_names[finite_mask],
+  vcov_cr2 = as.numeric(vcov_mpd_cr2),
+  vcov_cr2_shape = dim(vcov_mpd_cr2),
+  dof_per_coef = as.numeric(ct_mpd_cr2$df_Satt),
+  c_avg = as.numeric(c_avg_kept),
+  dof_avg = unname(dof_avg_compound),
+  post_interaction_names = post_names,
+  reference_period = 1L,
+  n_post_periods = length(post_names)
+)
+
 output$meta <- list(
   source = "clubSandwich",
   clubSandwich_version = as.character(packageVersion("clubSandwich")),
