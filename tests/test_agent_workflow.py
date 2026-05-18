@@ -242,6 +242,75 @@ def test_emitted_script_prints_report(df):
     assert ".full_report())" in script
 
 
+def test_df_name_templates_into_script(df):
+    """Caller can rename the dataframe symbol in the emitted script.
+
+    Default (df_name="df"): script references `df`.
+    Custom (df_name="panel"): every emitted call uses `panel` and no
+    bare `df` identifier appears in the runnable code paths.
+    """
+    import ast
+
+    out_default = diff_diff.agent_workflow(
+        df,
+        unit="firm_id",
+        time="year",
+        treatment="treated",
+        outcome="logwage",
+        verbose=False,
+    )
+    out_panel = diff_diff.agent_workflow(
+        df,
+        unit="firm_id",
+        time="year",
+        treatment="treated",
+        outcome="logwage",
+        df_name="panel",
+        verbose=False,
+    )
+    # Default behavior preserved.
+    assert "profile_panel(df," in out_default["script"]
+    # Custom name flows through profile_call AND fit_example_call.
+    assert "profile_panel(panel," in out_panel["script"]
+    assert ".fit(panel," in out_panel["script"]
+    # Static reference scan: parse the panel-script and confirm no `df`
+    # Name node exists — catches template drift where a `df` reference
+    # slips in outside the templated points.
+    tree = ast.parse(out_panel["script"])
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert "df" not in names, (
+        f"emitted script with df_name='panel' still references `df`: "
+        f"identifier names found = {sorted(names)}"
+    )
+    assert "panel" in names
+
+
+def test_df_name_panel_script_executes_in_panel_namespace(df):
+    """The emitted script must resolve all names in a namespace where
+    `panel` exists and `df` does not. We stub out `diff_diff` with a
+    MagicMock so calls don't actually fit; the test is purely about
+    symbol resolution, not numerical correctness — if the script still
+    referenced `df` anywhere in runnable code, exec() would NameError.
+    """
+    import unittest.mock
+
+    out = diff_diff.agent_workflow(
+        df,
+        unit="firm_id",
+        time="year",
+        treatment="treated",
+        outcome="logwage",
+        df_name="panel",
+        verbose=False,
+    )
+    ns = {
+        "diff_diff": unittest.mock.MagicMock(),
+        "panel": "sentinel_df_object",
+        # Deliberately no `df` key — script must not reference it.
+    }
+    exec(compile(out["script"], "<test_df_name>", "exec"), ns)
+
+
 def test_does_not_inspect_df():
     # Pure orchestrator: a structurally-empty DataFrame must still produce
     # the templated script (no df inspection happens).

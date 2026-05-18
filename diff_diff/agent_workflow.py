@@ -69,6 +69,7 @@ def agent_workflow(
     treatment: str,
     outcome: str,
     first_treat: Optional[str] = None,
+    df_name: str = "df",
     verbose: bool = True,
 ) -> Dict[str, Any]:
     """Print the recommended diff-diff workflow with your column names wired in.
@@ -99,6 +100,18 @@ def agent_workflow(
         example, matching the actual fit signatures (passing
         ``treatment=`` to CallawaySantAnna's ``.fit()`` would raise
         TypeError).
+    df_name : str, default ``"df"``
+        Identifier under which the caller's dataframe is bound in
+        their namespace. Templated verbatim into the emitted script
+        as the first positional argument of every call
+        (``profile_panel({df_name}, ...)``,
+        ``<Estimator>().fit({df_name}, ...)``) so the script is
+        directly executable when the caller's local variable matches.
+        If the caller has ``panel = pd.read_parquet(...)``, passing
+        ``df_name="panel"`` produces a script that references
+        ``panel`` instead of ``df``. Must be a valid Python identifier
+        (not enforced; non-identifier values produce a script that
+        won't parse).
     verbose : bool, default True
         If True, print the script to stdout. The dict is always
         returned regardless.
@@ -140,7 +153,7 @@ def agent_workflow(
     del df  # intentionally unused: orchestrator templates from column names only
 
     profile_call = (
-        f"diff_diff.profile_panel(df, "
+        f"diff_diff.profile_panel({df_name}, "
         f"{_join_kwargs(unit=unit, time=time, treatment=treatment, outcome=outcome)})"
     )
     guide_call = 'diff_diff.get_llm_guide("autonomous")'
@@ -163,7 +176,7 @@ def agent_workflow(
         fit_example_kwargs = _join_kwargs(
             outcome=outcome, unit=unit, time=time, first_treat=first_treat
         )
-        fit_example_call = f"diff_diff.CallawaySantAnna().fit(df, {fit_example_kwargs})"
+        fit_example_call = f"diff_diff.CallawaySantAnna().fit({df_name}, {fit_example_kwargs})"
         step3_label_lines = [
             "Step 3 - Fit. Your data has `first_treat` -> staggered structure.",
             "`first_treat` alone does NOT identify a single estimator; pick by",
@@ -178,7 +191,9 @@ def agent_workflow(
         fit_example_kwargs = _join_kwargs(
             outcome=outcome, unit=unit, time=time, treatment=treatment
         )
-        fit_example_call = f"diff_diff.DifferenceInDifferences().fit(df, {fit_example_kwargs})"
+        fit_example_call = (
+            f"diff_diff.DifferenceInDifferences().fit({df_name}, {fit_example_kwargs})"
+        )
         step3_label_lines = [
             "Step 3 - Fit. Pick a candidate from Step 2's patterns based on your",
             "treatment/time shape. The example below shows the simple 2x2 case",
