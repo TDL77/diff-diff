@@ -35,6 +35,59 @@ from scipy import optimize, stats
 from diff_diff.results import MultiPeriodDiDResults
 
 
+def _compute_nis_acceptance_prob(
+    M: float,
+    weights: np.ndarray,
+    vcov: np.ndarray,
+    z_alpha: float,
+) -> float:
+    """
+    Compute the NIS box acceptance probability ``P(β̂_pre ∈ B_NIS(Σ))``.
+
+    Used by both ``PreTrendsPower._compute_power_nis`` and
+    ``PreTrendsPowerResults.power_at()`` to avoid code duplication and
+    centralize the analytical-or-MC fallback path.
+
+    Returns
+    -------
+    accept_prob : float
+        Acceptance probability in [0, 1]. Always finite — falls back to
+        Monte Carlo (N=20000) if the analytical scipy MVN CDF raises OR
+        returns a non-finite value (e.g., on numerically degenerate Σ).
+    """
+    sigma = np.sqrt(np.maximum(np.diag(vcov), 0))
+    delta = M * weights
+    upper = z_alpha * sigma - delta
+    lower = -z_alpha * sigma - delta
+
+    accept_prob: float
+    try:
+        accept_prob = float(
+            stats.multivariate_normal.cdf(
+                upper,
+                lower_limit=lower,
+                mean=np.zeros(len(weights)),
+                cov=vcov,
+                allow_singular=True,
+            )
+        )
+    except (ValueError, np.linalg.LinAlgError):
+        accept_prob = float("nan")
+
+    # MC fallback on non-finite analytical output. The scipy CDF can return
+    # nan on numerically degenerate Σ even when no exception is raised
+    # (Genz algorithm internal cancellation); detecting nan and falling
+    # back to simulation keeps the downstream MDV solver from silently
+    # propagating nan and returning a wrong-but-finite MDV.
+    if not np.isfinite(accept_prob):
+        rng = np.random.default_rng(0)
+        samples = rng.multivariate_normal(mean=np.zeros(len(weights)), cov=vcov, size=20000)
+        in_box = np.all((samples >= lower[None, :]) & (samples <= upper[None, :]), axis=1)
+        accept_prob = float(in_box.mean())
+
+    return float(np.clip(accept_prob, 0.0, 1.0))
+
+
 def _extract_event_study_vcov_subblock(
     results: Any,
     pre_periods: List[int],
@@ -366,26 +419,8 @@ class PreTrendsPowerResults:
                 if np.isfinite(self.critical_value)
                 else stats.norm.ppf(1 - self.alpha / 2)
             )
-            sigma = np.sqrt(np.maximum(np.diag(self.vcov), 0))
-            delta = M * weights
-            upper = z_alpha * sigma - delta
-            lower = -z_alpha * sigma - delta
-            try:
-                accept_prob = float(
-                    stats.multivariate_normal.cdf(
-                        upper,
-                        lower_limit=lower,
-                        mean=np.zeros(n_pre),
-                        cov=self.vcov,
-                        allow_singular=True,
-                    )
-                )
-            except (ValueError, np.linalg.LinAlgError):
-                rng = np.random.default_rng(0)
-                samples = rng.multivariate_normal(mean=np.zeros(n_pre), cov=self.vcov, size=20000)
-                in_box = np.all((samples >= lower[None, :]) & (samples <= upper[None, :]), axis=1)
-                accept_prob = float(in_box.mean())
-            accept_prob = float(np.clip(accept_prob, 0.0, 1.0))
+            # Centralized analytical-or-MC fallback (module-level helper).
+            accept_prob = _compute_nis_acceptance_prob(M, weights, self.vcov, z_alpha)
             return float(1.0 - accept_prob)
 
         # Wald path (legacy default, also opt-in for new fits with
@@ -742,7 +777,7 @@ class PreTrendsPower:
         self,
         results: Union[MultiPeriodDiDResults, Any],
         pre_periods: Optional[List[int]] = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, Optional[np.ndarray]]:
         """
         Extract pre-period parameters from results.
 
@@ -808,7 +843,30 @@ class PreTrendsPower:
             else:
                 vcov = np.diag(ses**2)
 
-            relative_times = np.asarray(estimated_pre_periods, dtype=float)
+            # For MultiPeriodDiDResults, period identifiers are generic
+            # (often calendar years, sometimes pre-shifted relative times).
+            # Roth's δ_t = γ·t convention needs RELATIVE offsets from the
+            # treatment / reference period. Derive them from
+            # `results.reference_period` when numeric:
+            #   relative_times = estimated_pre_periods - reference_period
+            # If `reference_period` is None or non-numeric (string, categorical),
+            # return None so `_get_violation_weights('linear')` falls back to
+            # the legacy count-based [n_pre-1, ..., 0] / ||·||_2 direction
+            # (the pre-PR-B shipped behavior; preserves backwards-compat for
+            # MPD callers that don't expose a numeric reference period).
+            ref = getattr(results, "reference_period", None)
+            relative_times: Optional[np.ndarray] = None
+            if ref is not None:
+                try:
+                    ref_float = float(ref)
+                    relative_times = np.asarray(
+                        [float(p) - ref_float for p in estimated_pre_periods],
+                        dtype=float,
+                    )
+                except (TypeError, ValueError):
+                    # Non-numeric labels (string period IDs, etc.) — fall
+                    # back to legacy normalized linear direction.
+                    relative_times = None
             return effects, ses, vcov, n_pre, relative_times
 
         # Try CallawaySantAnnaResults
@@ -1045,40 +1103,10 @@ class PreTrendsPower:
             to define ``B_NIS(Sigma)``.
         """
         z_alpha = stats.norm.ppf(1 - self.alpha / 2)
-
-        sigma = np.sqrt(np.maximum(np.diag(vcov), 0))
-        delta = M * weights
-
-        upper = z_alpha * sigma - delta
-        lower = -z_alpha * sigma - delta
-
-        # P(Y_t in [lower_t, upper_t] for all t) where Y ~ N(0, Sigma_22).
-        # scipy multivariate_normal.cdf accepts rectangular bounds via
-        # `lower_limit=`.
-        try:
-            accept_prob = float(
-                stats.multivariate_normal.cdf(
-                    upper,
-                    lower_limit=lower,
-                    mean=np.zeros(len(weights)),
-                    cov=vcov,
-                    allow_singular=True,
-                )
-            )
-        except (ValueError, np.linalg.LinAlgError):
-            # Fallback to MC simulation if the analytical CDF fails (very
-            # degenerate Sigma). 20k draws yields ~0.003 SE on power around
-            # 0.5, which is plenty for the gamma_p root-finding loop.
-            rng = np.random.default_rng(0)
-            samples = rng.multivariate_normal(mean=np.zeros(len(weights)), cov=vcov, size=20000)
-            in_box = np.all((samples >= lower[None, :]) & (samples <= upper[None, :]), axis=1)
-            accept_prob = float(in_box.mean())
-
-        # Clip for floating-point safety; the box probability is naturally in
-        # [0, 1] but scipy can return slightly outside due to Genz tolerances.
-        accept_prob = float(np.clip(accept_prob, 0.0, 1.0))
+        # Centralized analytical-or-MC fallback (module-level helper);
+        # handles both exception and non-finite-CDF cases.
+        accept_prob = _compute_nis_acceptance_prob(M, weights, vcov, z_alpha)
         power = 1.0 - accept_prob
-
         return power, np.nan, np.nan, z_alpha
 
     def _compute_mdv(
@@ -1201,6 +1229,15 @@ class PreTrendsPower:
         def power_minus_target(M: float) -> float:
             return self._compute_power_nis(M, weights, vcov)[0] - self.target_power
 
+        # Boundary short-circuit: if the NIS size under the null
+        # (≈ 1 - (1-α)^K under independence) already meets target_power,
+        # the MDV is zero — no violation needed to reject at target rate.
+        # NIS size is generally LARGER than α (chi² size), so this case
+        # is reachable for small target_power (e.g., target=0.10, α=0.05,
+        # K=3 → null size ≈ 0.143 > 0.10).
+        if power_minus_target(0.0) >= 0:
+            return 0.0
+
         # Doubling expansion to find an upper bound where power >= target.
         M_high = 1.0
         while power_minus_target(M_high) < 0 and M_high < 1000:
@@ -1210,14 +1247,15 @@ class PreTrendsPower:
             # Target power not achievable in the practical range.
             return np.inf
 
-        # Bisect on [0, M_high]. power_minus_target(0) = alpha - target < 0
-        # (since target > alpha by typical convention) and
-        # power_minus_target(M_high) >= 0 by construction.
+        # Bisect on [0, M_high]. By the boundary short-circuit above,
+        # power_minus_target(0) < 0; by construction
+        # power_minus_target(M_high) >= 0 — bracket is valid.
         try:
             mdv = float(optimize.brentq(power_minus_target, 0.0, M_high))
         except ValueError:
-            # Degenerate (e.g., target = alpha exactly); fall back to M_high
-            # as the smallest upper bound where we confirmed the target.
+            # Defensive fallback. Should be unreachable post-short-circuit
+            # because the bracket is now guaranteed (sign change between
+            # M=0 and M=M_high).
             mdv = float(M_high)
 
         return mdv
