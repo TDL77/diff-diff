@@ -582,6 +582,15 @@ class TestFitBehavior:
         )
         # MPD parameterization with `fixed_effects=["unit"]` matches the R
         # generator's `factor(unit)` term (the cluster column is the unit).
+        # Derive `post_periods` from the R `post_interaction_names` so the
+        # contrast we compare to is the SAME `c_avg = (1/n_post) Σ e_p` that
+        # the R generator builds. Without this, MPD defaults to the
+        # last-half-of-periods rule and computes avg_att over [3, 4] on this
+        # 4-period panel, but the R fixture's `c_avg` is over [2, 3, 4] —
+        # the DOFs happen to coincide here but the avg_att estimands differ.
+        post_periods = [
+            int(name.rsplit("_", 1)[1]) for name in d["post_interaction_names"]
+        ]
         res = MultiPeriodDiD(vcov_type="hc2_bm", cluster="unit").fit(
             data,
             outcome="y",
@@ -589,6 +598,7 @@ class TestFitBehavior:
             time="period",
             fixed_effects=["unit"],
             reference_period=int(d["reference_period"]),
+            post_periods=post_periods,
             unit="unit",
         )
         assert np.isfinite(res.avg_att) and np.isfinite(res.avg_se)
