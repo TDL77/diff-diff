@@ -80,7 +80,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 |------|--------|-------------|--------|-------------|
 | BaconDecomposition | `bacon.py` | `bacondecomp::bacon()` | **Complete** | 2026-05-16 |
 | HonestDiD | `honest_did.py` | `HonestDiD` package | **Complete** | 2026-04-01 |
-| PreTrendsPower | `pretrends.py` | `pretrends` package | **In Progress** | — |
+| PreTrendsPower | `pretrends.py` | `pretrends` package | **Complete** (R parity pending) | 2026-05-18 |
 | PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | **In Progress** | — |
 | PlaceboTests | `diagnostics.py` | (no canonical reference) | **In Progress** | — |
 
@@ -1047,18 +1047,29 @@ and covariate-adjusted specifications.)
 | Module | `pretrends.py` |
 | Primary Reference | Roth (2022), *Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends*, AER:I 4(3), 305-322 |
 | R Reference | `pretrends` package |
-| Status | **In Progress** |
-| Last Review | — |
+| Status | **Complete** (R parity pending) |
+| Last Review | 2026-05-18 |
 
 **Documentation in place:**
-- REGISTRY.md section: `## PreTrendsPower` (MDV at target power, four violation types — linear/constant/last_period/custom, power curve plotting, HonestDiD integration)
-- Implementation: `tests/test_pretrends.py` (point-estimator, MDV, power curve, sensitivity) plus event-study coverage in `tests/test_pretrends_event_study.py`
-- Paper review on file: `docs/methodology/papers/roth-2022-review.md` (added 2026-05-17; non-authoritative source audit — registry entry remains authoritative until the follow-up audit PR)
+- REGISTRY.md section: `## PreTrendsPower` — NIS-framed audit per Roth (2022) Section II.A-B with full equation blocks for both NIS and Wald forms; paper-supported alternative + γ-unit MDV + full-Σ_22 routing all locked.
+- Paper review on file: `docs/methodology/papers/roth-2022-review.md` (added 2026-05-17 via PR #463).
+- Implementation: `tests/test_pretrends.py` (67 tests — point-estimator, MDV, power curve, sensitivity, plus the PR-A R18 silent-failure regression and the PR-B custom-weight persistence regression) + event-study coverage in `tests/test_pretrends_event_study.py` (27 tests).
+- Dedicated `tests/test_methodology_pretrends.py` (added 2026-05-18 in PR-B Step 7) — Roth (2022) Section II.A-B paper-equation-numbered Verified Components walk-through (8 classes, 30-40 tests covering NIS box probability, Wald-vs-NIS, Propositions 1-4 simulation parity, linear-units γ-scale, custom-weight persistence, CS/SA full-VCV, helper API).
 
-**Outstanding for promotion:**
-- Dedicated `tests/test_methodology_pretrends.py` with paper-equation-numbered Verified Components walk-through
-- R parity fixture against the `pretrends` R package at a **pinned revision** (TODO.md tracks the revision-pin follow-up; until that lands, the R-package surface claims in `docs/methodology/papers/roth-2022-review.md` are provisional). Covers the four power calculations: linear, constant, last-period, custom. Note that `compute_pretrends_power` does not accept `violation_weights` today, so `"custom"` parity has to run through `PreTrendsPower(..., violation_weights=...)` directly until the helper is extended (TODO.md tracks the helper-extension follow-up); helper-only parity is limited to `linear` / `constant` / `last_period`.
-- Verify the REGISTRY Implementation Checklist (all four items currently unchecked)
+**Verified Components:**
+- [x] NIS box probability implemented via `scipy.stats.multivariate_normal.cdf` (Roth Section II.A-B primary form)
+- [x] Wald noncentral-χ² form retained as paper-supported alternative (Propositions 1+3+4 all apply — convex ellipsoid acceptance region)
+- [x] Both forms produce form-consistent MDV via doubling + brentq bisection with 1000-cap non-convergence fallback
+- [x] Non-bootstrap CS adapter consumes full `event_study_vcov` sub-block (not diag)
+- [x] Non-bootstrap SA adapter consumes full `event_study_vcov` sub-block (W-matrix construction `event_study_vcov = W @ vcov_cohort @ W.T` added to `SunAbrahamResults`)
+- [x] Bootstrap CS/SA and replicate-weight survey paths fall through to `diag(ses^2)` (analytical VCV cleared to prevent mixing with bootstrap/replicate SE overrides)
+- [x] `_get_violation_weights('linear')` honors actual pre-period relative-time labels via `fit()` threading → reported MDV is in Roth's γ units on irregular and anticipation-shifted grids
+- [x] `PreTrendsPowerResults` persists fitted `violation_weights` + `pretest_form` + `nis_box_probability`; `power_at(M)` works for all four violation types on fresh fits
+- [x] Helper API (`compute_pretrends_power`, `compute_mdv`) accepts `violation_weights` and `pretest_form`; closes the PR-A R18 helper/class API gap
+- [x] Summary, `to_dict`, `to_dataframe` dispatch on `pretest_form` (NIS prints box probability; Wald prints noncentrality)
+
+**Outstanding for promotion to fully Complete:**
+- R parity fixture against the `pretrends` R package at a **pinned revision** (deferred to PR-C). The generator script `benchmarks/R/generate_pretrends_golden.R` is committed in PR-B with a placeholder commit reference; PR-C will install the package, generate the JSON goldens at `benchmarks/data/r_pretrends_golden.json`, activate `TestPretrendsParityR` (currently skips when goldens missing), and record the audited R-package revision. Until that lands, the R-package surface claims in `docs/methodology/papers/roth-2022-review.md` Gaps section remain provisional.
 
 ---
 
