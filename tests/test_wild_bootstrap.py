@@ -4,7 +4,6 @@ Tests for Wild Cluster Bootstrap functionality.
 Tests the wild_bootstrap_se() function and its integration with DiD estimators.
 """
 
-
 import numpy as np
 import pandas as pd
 import pytest
@@ -49,14 +48,16 @@ def clustered_did_data():
                     y += 3.0  # True ATT = 3.0
                 y += np.random.normal(0, 1)  # Idiosyncratic error
 
-                data.append({
-                    "cluster": cluster,
-                    "unit": cluster * obs_per_cluster + obs,
-                    "period": period,
-                    "treated": int(is_treated),
-                    "post": period,
-                    "outcome": y,
-                })
+                data.append(
+                    {
+                        "cluster": cluster,
+                        "unit": cluster * obs_per_cluster + obs,
+                        "period": period,
+                        "treated": int(is_treated),
+                        "post": period,
+                        "outcome": y,
+                    }
+                )
 
     return pd.DataFrame(data)
 
@@ -84,14 +85,16 @@ def few_cluster_data():
                     y += 4.0  # True ATT = 4.0
                 y += np.random.normal(0, 1)
 
-                data.append({
-                    "cluster": cluster,
-                    "unit": cluster * obs_per_cluster + obs,
-                    "period": period,
-                    "treated": int(is_treated),
-                    "post": period,
-                    "outcome": y,
-                })
+                data.append(
+                    {
+                        "cluster": cluster,
+                        "unit": cluster * obs_per_cluster + obs,
+                        "period": period,
+                        "treated": int(is_treated),
+                        "post": period,
+                        "outcome": y,
+                    }
+                )
 
     return pd.DataFrame(data)
 
@@ -144,10 +147,16 @@ class TestWeightGeneration:
         rng = np.random.default_rng(42)
         weights = _generate_webb_weights(10000, rng)
 
-        expected_values = np.array([
-            -np.sqrt(3/2), -np.sqrt(2/2), -np.sqrt(1/2),
-            np.sqrt(1/2), np.sqrt(2/2), np.sqrt(3/2)
-        ])
+        expected_values = np.array(
+            [
+                -np.sqrt(3 / 2),
+                -np.sqrt(2 / 2),
+                -np.sqrt(1 / 2),
+                np.sqrt(1 / 2),
+                np.sqrt(2 / 2),
+                np.sqrt(3 / 2),
+            ]
+        )
 
         # Check all observed values are in expected set
         for w in weights:
@@ -200,10 +209,7 @@ class TestWildBootstrapSE:
         n_boot = ci_params.bootstrap(99)
 
         results = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         assert isinstance(results, WildBootstrapResults)
@@ -214,10 +220,7 @@ class TestWildBootstrapSE:
         n_boot = ci_params.bootstrap(99)
 
         results = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         assert results.se > 0
@@ -228,10 +231,7 @@ class TestWildBootstrapSE:
         n_boot = ci_params.bootstrap(99)
 
         results = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         assert 0 <= results.p_value <= 1
@@ -242,10 +242,7 @@ class TestWildBootstrapSE:
         n_boot = ci_params.bootstrap(199)
 
         results = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         assert results.ci_lower < results.ci_upper
@@ -256,17 +253,11 @@ class TestWildBootstrapSE:
         n_boot = ci_params.bootstrap(99)
 
         results1 = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         results2 = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         assert results1.se == results2.se
@@ -279,17 +270,11 @@ class TestWildBootstrapSE:
         n_boot = ci_params.bootstrap(99)
 
         results1 = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         results2 = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=123
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=123
         )
 
         # Should be different (not exactly equal)
@@ -302,11 +287,14 @@ class TestWildBootstrapSE:
 
         for weight_type in ["rademacher", "webb", "mammen"]:
             results = wild_bootstrap_se(
-                X, y, residuals, cluster_ids,
+                X,
+                y,
+                residuals,
+                cluster_ids,
                 coefficient_index=3,
                 n_bootstrap=n_boot,
                 weight_type=weight_type,
-                seed=42
+                seed=42,
             )
 
             assert results.se > 0
@@ -319,9 +307,7 @@ class TestWildBootstrapSE:
 
         with pytest.raises(ValueError, match="weight_type must be one of"):
             wild_bootstrap_se(
-                X, y, residuals, cluster_ids,
-                coefficient_index=3,
-                weight_type="invalid"
+                X, y, residuals, cluster_ids, coefficient_index=3, weight_type="invalid"
             )
 
     def test_few_clusters_warning(self, few_cluster_data, ci_params):
@@ -341,10 +327,7 @@ class TestWildBootstrapSE:
 
         with pytest.warns(UserWarning, match="Only 4 clusters detected"):
             wild_bootstrap_se(
-                X, y, residuals, cluster_ids,
-                coefficient_index=3,
-                n_bootstrap=n_boot,
-                seed=42
+                X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
             )
 
     def test_too_few_clusters_raises(self, ols_components):
@@ -355,10 +338,7 @@ class TestWildBootstrapSE:
         single_cluster = np.zeros(len(y))
 
         with pytest.raises(ValueError, match="at least 2 clusters"):
-            wild_bootstrap_se(
-                X, y, residuals, single_cluster,
-                coefficient_index=3
-            )
+            wild_bootstrap_se(X, y, residuals, single_cluster, coefficient_index=3)
 
     def test_n_clusters_reported_correctly(self, ols_components, ci_params):
         """Test n_clusters is reported correctly."""
@@ -366,10 +346,7 @@ class TestWildBootstrapSE:
         n_boot = ci_params.bootstrap(99)
 
         results = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         assert results.n_clusters == 10
@@ -380,10 +357,7 @@ class TestWildBootstrapSE:
         n_boot = ci_params.bootstrap(199)
 
         results = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         assert results.n_bootstrap == n_boot
@@ -401,18 +375,10 @@ class TestEstimatorIntegration:
         """Test DifferenceInDifferences with wild bootstrap."""
         n_boot = ci_params.bootstrap(99)
         did = DifferenceInDifferences(
-            cluster="cluster",
-            inference="wild_bootstrap",
-            n_bootstrap=n_boot,
-            seed=42
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=42
         )
 
-        results = did.fit(
-            clustered_did_data,
-            outcome="outcome",
-            treatment="treated",
-            time="post"
-        )
+        results = did.fit(clustered_did_data, outcome="outcome", treatment="treated", time="post")
 
         assert results.inference_method == "wild_bootstrap"
         assert results.n_bootstrap == n_boot
@@ -423,32 +389,16 @@ class TestEstimatorIntegration:
         """Test wild bootstrap results are reproducible with seed."""
         n_boot = ci_params.bootstrap(99)
         did1 = DifferenceInDifferences(
-            cluster="cluster",
-            inference="wild_bootstrap",
-            n_bootstrap=n_boot,
-            seed=42
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=42
         )
 
         did2 = DifferenceInDifferences(
-            cluster="cluster",
-            inference="wild_bootstrap",
-            n_bootstrap=n_boot,
-            seed=42
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=42
         )
 
-        results1 = did1.fit(
-            clustered_did_data,
-            outcome="outcome",
-            treatment="treated",
-            time="post"
-        )
+        results1 = did1.fit(clustered_did_data, outcome="outcome", treatment="treated", time="post")
 
-        results2 = did2.fit(
-            clustered_did_data,
-            outcome="outcome",
-            treatment="treated",
-            time="post"
-        )
+        results2 = did2.fit(clustered_did_data, outcome="outcome", treatment="treated", time="post")
 
         assert results1.se == results2.se
         assert results1.p_value == results2.p_value
@@ -458,24 +408,15 @@ class TestEstimatorIntegration:
         n_boot = ci_params.bootstrap(99)
         did_analytical = DifferenceInDifferences(cluster="cluster")
         did_bootstrap = DifferenceInDifferences(
-            cluster="cluster",
-            inference="wild_bootstrap",
-            n_bootstrap=n_boot,
-            seed=42
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=42
         )
 
         results_analytical = did_analytical.fit(
-            clustered_did_data,
-            outcome="outcome",
-            treatment="treated",
-            time="post"
+            clustered_did_data, outcome="outcome", treatment="treated", time="post"
         )
 
         results_bootstrap = did_bootstrap.fit(
-            clustered_did_data,
-            outcome="outcome",
-            treatment="treated",
-            time="post"
+            clustered_did_data, outcome="outcome", treatment="treated", time="post"
         )
 
         # ATT should be identical
@@ -489,15 +430,10 @@ class TestEstimatorIntegration:
             inference="wild_bootstrap",
             n_bootstrap=n_boot,
             bootstrap_weights="webb",
-            seed=42
+            seed=42,
         )
 
-        results = did.fit(
-            clustered_did_data,
-            outcome="outcome",
-            treatment="treated",
-            time="post"
-        )
+        results = did.fit(clustered_did_data, outcome="outcome", treatment="treated", time="post")
 
         assert results.inference_method == "wild_bootstrap"
         assert results.se > 0
@@ -506,17 +442,10 @@ class TestEstimatorIntegration:
         """Test that wild bootstrap is only used when cluster is specified."""
         n_boot = ci_params.bootstrap(99)
         did = DifferenceInDifferences(
-            inference="wild_bootstrap",  # No cluster specified
-            n_bootstrap=n_boot,
-            seed=42
+            inference="wild_bootstrap", n_bootstrap=n_boot, seed=42  # No cluster specified
         )
 
-        results = did.fit(
-            clustered_did_data,
-            outcome="outcome",
-            treatment="treated",
-            time="post"
-        )
+        results = did.fit(clustered_did_data, outcome="outcome", treatment="treated", time="post")
 
         # Should fall back to analytical since no cluster specified
         assert results.inference_method == "analytical"
@@ -525,18 +454,11 @@ class TestEstimatorIntegration:
         """Test TwoWayFixedEffects with wild bootstrap."""
         n_boot = ci_params.bootstrap(99)
         twfe = TwoWayFixedEffects(
-            cluster="cluster",
-            inference="wild_bootstrap",
-            n_bootstrap=n_boot,
-            seed=42
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=42
         )
 
         results = twfe.fit(
-            clustered_did_data,
-            outcome="outcome",
-            treatment="treated",
-            time="period",
-            unit="unit"
+            clustered_did_data, outcome="outcome", treatment="treated", time="period", unit="unit"
         )
 
         assert results.inference_method == "wild_bootstrap"
@@ -547,18 +469,10 @@ class TestEstimatorIntegration:
         """Test that summary shows bootstrap info."""
         n_boot = ci_params.bootstrap(99)
         did = DifferenceInDifferences(
-            cluster="cluster",
-            inference="wild_bootstrap",
-            n_bootstrap=n_boot,
-            seed=42
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=42
         )
 
-        results = did.fit(
-            clustered_did_data,
-            outcome="outcome",
-            treatment="treated",
-            time="post"
-        )
+        results = did.fit(clustered_did_data, outcome="outcome", treatment="treated", time="post")
 
         summary = results.summary()
 
@@ -569,10 +483,7 @@ class TestEstimatorIntegration:
     def test_get_params_includes_bootstrap_params(self):
         """Test get_params includes bootstrap parameters."""
         did = DifferenceInDifferences(
-            inference="wild_bootstrap",
-            n_bootstrap=499,
-            bootstrap_weights="webb",
-            seed=123
+            inference="wild_bootstrap", n_bootstrap=499, bootstrap_weights="webb", seed=123
         )
 
         params = did.get_params()
@@ -586,11 +497,7 @@ class TestEstimatorIntegration:
         """Test set_params works for bootstrap parameters."""
         did = DifferenceInDifferences()
 
-        did.set_params(
-            inference="wild_bootstrap",
-            n_bootstrap=499,
-            bootstrap_weights="mammen"
-        )
+        did.set_params(inference="wild_bootstrap", n_bootstrap=499, bootstrap_weights="mammen")
 
         assert did.inference == "wild_bootstrap"
         assert did.n_bootstrap == 499
@@ -611,10 +518,7 @@ class TestWildBootstrapResults:
         n_boot = ci_params.bootstrap(99)
 
         results = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         summary = results.summary()
@@ -630,10 +534,7 @@ class TestWildBootstrapResults:
         n_boot = ci_params.bootstrap(99)
 
         results = wild_bootstrap_se(
-            X, y, residuals, cluster_ids,
-            coefficient_index=3,
-            n_bootstrap=n_boot,
-            seed=42
+            X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
         results.print_summary()
@@ -672,14 +573,16 @@ class TestFewClustersEdgeCases:
                         y += 3.0
                     y += np.random.normal(0, 1)
 
-                    data.append({
-                        "cluster": cluster,
-                        "unit": cluster * obs_per_cluster + obs,
-                        "period": period,
-                        "treated": int(is_treated),
-                        "post": period,
-                        "outcome": y,
-                    })
+                    data.append(
+                        {
+                            "cluster": cluster,
+                            "unit": cluster * obs_per_cluster + obs,
+                            "period": period,
+                            "treated": int(is_treated),
+                            "post": period,
+                            "outcome": y,
+                        }
+                    )
 
         df = pd.DataFrame(data)
 
@@ -688,17 +591,12 @@ class TestFewClustersEdgeCases:
             inference="wild_bootstrap",
             n_bootstrap=n_boot,
             bootstrap_weights="webb",  # Webb recommended for few clusters
-            seed=42
+            seed=42,
         )
 
         # Should warn about few clusters but still produce valid results
         with pytest.warns(UserWarning, match="Only 3 clusters"):
-            results = did.fit(
-                df,
-                outcome="outcome",
-                treatment="treated",
-                time="post"
-            )
+            results = did.fit(df, outcome="outcome", treatment="treated", time="post")
 
         assert results.se > 0
         assert results.inference_method == "wild_bootstrap"
@@ -726,14 +624,16 @@ class TestFewClustersEdgeCases:
                         y += 3.0
                     y += np.random.normal(0, 1)
 
-                    data.append({
-                        "cluster": cluster,
-                        "unit": cluster * obs_per_cluster + obs,
-                        "period": period,
-                        "treated": int(is_treated),
-                        "post": period,
-                        "outcome": y,
-                    })
+                    data.append(
+                        {
+                            "cluster": cluster,
+                            "unit": cluster * obs_per_cluster + obs,
+                            "period": period,
+                            "treated": int(is_treated),
+                            "post": period,
+                            "outcome": y,
+                        }
+                    )
 
         df = pd.DataFrame(data)
 
@@ -742,17 +642,12 @@ class TestFewClustersEdgeCases:
             inference="wild_bootstrap",
             n_bootstrap=n_boot,
             bootstrap_weights="webb",
-            seed=42
+            seed=42,
         )
 
         # Should warn about few clusters
         with pytest.warns(UserWarning, match="Only 2 clusters"):
-            results = did.fit(
-                df,
-                outcome="outcome",
-                treatment="treated",
-                time="post"
-            )
+            results = did.fit(df, outcome="outcome", treatment="treated", time="post")
 
         # Results should still be valid (though may have high variance)
         assert results.se > 0
@@ -767,7 +662,7 @@ class TestFewClustersEdgeCases:
             inference="wild_bootstrap",
             n_bootstrap=n_boot,
             bootstrap_weights="webb",
-            seed=42
+            seed=42,
         )
 
         did_rademacher = DifferenceInDifferences(
@@ -775,23 +670,17 @@ class TestFewClustersEdgeCases:
             inference="wild_bootstrap",
             n_bootstrap=n_boot,
             bootstrap_weights="rademacher",
-            seed=42
+            seed=42,
         )
 
         with pytest.warns(UserWarning):
             results_webb = did_webb.fit(
-                few_cluster_data,
-                outcome="outcome",
-                treatment="treated",
-                time="post"
+                few_cluster_data, outcome="outcome", treatment="treated", time="post"
             )
 
         with pytest.warns(UserWarning):
             results_rademacher = did_rademacher.fit(
-                few_cluster_data,
-                outcome="outcome",
-                treatment="treated",
-                time="post"
+                few_cluster_data, outcome="outcome", treatment="treated", time="post"
             )
 
         # Both should produce valid results
@@ -810,18 +699,168 @@ class TestFewClustersEdgeCases:
             inference="wild_bootstrap",
             n_bootstrap=n_boot,
             bootstrap_weights="webb",
-            seed=42
+            seed=42,
         )
 
         with pytest.warns(UserWarning):
-            results = did.fit(
-                few_cluster_data,
-                outcome="outcome",
-                treatment="treated",
-                time="post"
-            )
+            results = did.fit(few_cluster_data, outcome="outcome", treatment="treated", time="post")
 
         lower, upper = results.conf_int
         assert lower < upper
         # CI should contain the point estimate
         assert lower < results.att < upper
+
+
+# =============================================================================
+# Degenerate bootstrap: all-or-nothing NaN inference contract
+# =============================================================================
+
+
+class TestWildBootstrapDegenerateAllNaN:
+    """Verify wild_bootstrap_se() returns the full NaN inference tuple when
+    the bootstrap is degenerate (fewer than 2 valid coefficient draws),
+    per feedback_bootstrap_nan_on_invalid_contract.md.
+
+    Mocks the internal solve_ols path so we can force `se_star <= 0` on
+    every draw (n_valid == 0) and exactly-one-valid (n_valid == 1) without
+    relying on a pathological numerical design. These two branches are not
+    exercised by the analytical-design tests above.
+    """
+
+    def _make_ols_components(self, n: int = 40):
+        rng = np.random.default_rng(0)
+        cluster_ids = np.repeat(np.arange(8), 5)
+        X = np.column_stack(
+            [
+                np.ones(n),
+                rng.normal(size=n),
+            ]
+        )
+        y = X @ np.array([1.0, 0.5]) + rng.normal(scale=0.1, size=n)
+        return X, y, cluster_ids
+
+    def test_degenerate_n_valid_zero_returns_all_nan(self, monkeypatch):
+        """When every bootstrap draw is singular, se / t_stat / p_value / CI
+        are all NaN (full inference quadruple moves together).
+        """
+        from diff_diff import utils as utils_mod
+
+        X, y, cluster_ids = self._make_ols_components()
+        orig_solve = utils_mod._solve_ols_linalg
+        call_count = {"n": 0}
+
+        def fake_solve(X_, y_, cluster_ids=None, return_vcov=True, return_fitted=False, **kw):
+            call_count["n"] += 1
+            # Calls 1 (original) and 2 (restricted) succeed normally.
+            if call_count["n"] <= 2:
+                return orig_solve(
+                    X_,
+                    y_,
+                    cluster_ids=cluster_ids,
+                    return_vcov=return_vcov,
+                    return_fitted=return_fitted,
+                    **kw,
+                )
+            # Bootstrap draws: force a singular vcov so se_star == 0.
+            coefs, residuals, _ = orig_solve(
+                X_,
+                y_,
+                cluster_ids=cluster_ids,
+                return_vcov=True,
+                **kw,
+            )
+            singular_vcov = np.zeros((X_.shape[1], X_.shape[1]))
+            if return_fitted:
+                return coefs, residuals, X_ @ coefs, singular_vcov
+            return coefs, residuals, singular_vcov
+
+        monkeypatch.setattr(utils_mod, "_solve_ols_linalg", fake_solve)
+        # Compute residuals on the original design (needed for the helper signature).
+        from diff_diff.linalg import solve_ols as _solve_orig
+
+        coefs0, residuals0, _ = _solve_orig(X, y, cluster_ids=cluster_ids)
+        results = utils_mod.wild_bootstrap_se(
+            X=X,
+            y=y,
+            residuals=residuals0,
+            cluster_ids=cluster_ids,
+            coefficient_index=1,
+            n_bootstrap=20,
+            seed=1,
+        )
+        # All five user-surface fields must be NaN together.
+        assert np.isnan(results.se), f"se should be NaN, got {results.se}"
+        assert np.isnan(results.t_stat_original), (
+            f"t_stat_original should be NaN under degenerate bootstrap "
+            f"(analytical t-stat must not surface alongside NaN se), "
+            f"got {results.t_stat_original}"
+        )
+        assert np.isnan(results.p_value), f"p_value should be NaN, got {results.p_value}"
+        assert np.isnan(results.ci_lower), f"ci_lower should be NaN, got {results.ci_lower}"
+        assert np.isnan(results.ci_upper), f"ci_upper should be NaN, got {results.ci_upper}"
+
+    def test_degenerate_single_valid_draw_returns_all_nan(self, monkeypatch):
+        """When exactly one bootstrap draw is finite (insufficient for
+        ddof=1 std), the full inference tuple is NaN — we don't return a
+        finite percentile CI on a single-point sample with NaN se.
+        """
+        from diff_diff import utils as utils_mod
+
+        X, y, cluster_ids = self._make_ols_components()
+        orig_solve = utils_mod._solve_ols_linalg
+        call_count = {"n": 0}
+
+        def fake_solve(X_, y_, cluster_ids=None, return_vcov=True, return_fitted=False, **kw):
+            call_count["n"] += 1
+            if call_count["n"] <= 2:
+                return orig_solve(
+                    X_,
+                    y_,
+                    cluster_ids=cluster_ids,
+                    return_vcov=return_vcov,
+                    return_fitted=return_fitted,
+                    **kw,
+                )
+            # Bootstrap calls start at index 3. Let the FIRST bootstrap draw
+            # (call_count == 3) succeed; force every subsequent draw to be
+            # singular. n_valid ends at exactly 1.
+            if call_count["n"] == 3:
+                return orig_solve(
+                    X_,
+                    y_,
+                    cluster_ids=cluster_ids,
+                    return_vcov=return_vcov,
+                    return_fitted=return_fitted,
+                    **kw,
+                )
+            coefs, residuals, _ = orig_solve(
+                X_,
+                y_,
+                cluster_ids=cluster_ids,
+                return_vcov=True,
+                **kw,
+            )
+            singular_vcov = np.zeros((X_.shape[1], X_.shape[1]))
+            if return_fitted:
+                return coefs, residuals, X_ @ coefs, singular_vcov
+            return coefs, residuals, singular_vcov
+
+        monkeypatch.setattr(utils_mod, "_solve_ols_linalg", fake_solve)
+        # Compute residuals on the original design (needed for the helper signature).
+        from diff_diff.linalg import solve_ols as _solve_orig
+
+        coefs0, residuals0, _ = _solve_orig(X, y, cluster_ids=cluster_ids)
+        results = utils_mod.wild_bootstrap_se(
+            X=X,
+            y=y,
+            residuals=residuals0,
+            cluster_ids=cluster_ids,
+            coefficient_index=1,
+            n_bootstrap=20,
+            seed=1,
+        )
+        assert np.isnan(results.se)
+        assert np.isnan(results.t_stat_original)
+        assert np.isnan(results.p_value)
+        assert np.isnan(results.ci_lower)
+        assert np.isnan(results.ci_upper)

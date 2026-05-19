@@ -624,40 +624,48 @@ def wild_bootstrap_se(
         if se_star > 0 and np.isfinite(beta_star[coefficient_index]):
             bootstrap_t_stats[b] = (beta_star[coefficient_index] - null_hypothesis) / se_star
 
-    # Step 4: Compute bootstrap p-value from VALID (finite) draws only
+    # Step 4: Compute bootstrap inference from VALID (finite) draws only.
+    #
+    # All-or-nothing NaN contract (per feedback_bootstrap_nan_on_invalid_contract):
+    # when bootstrap output is degenerate (fewer than 2 finite t-stats or
+    # 2 finite coefs), return NaN across the full inference surface (se,
+    # p_value, both CI endpoints, AND the surfaced t_stat_original). The
+    # original analytical t_stat is still computed in step 1 for diagnostic
+    # use but is NOT propagated to the user-facing result when bootstrap
+    # is degenerate — surfacing it alongside NaN se/p/CI would mix
+    # analytical and bootstrap inference families on the same coefficient.
     finite_mask = np.isfinite(bootstrap_t_stats)
     n_valid = int(finite_mask.sum())
-    if n_valid == 0:
-        # All bootstrap draws were singular; fall back to a conservative
-        # p-value of 1.0 rather than silently returning a misleading value.
-        p_value = 1.0
-    else:
+    valid_coefs = bootstrap_coefs[np.isfinite(bootstrap_coefs)]
+
+    lower_percentile = alpha / 2 * 100
+    upper_percentile = (1 - alpha / 2) * 100
+
+    if n_valid >= 2 and valid_coefs.size >= 2:
         p_value = float(np.mean(np.abs(bootstrap_t_stats[finite_mask]) >= np.abs(t_stat_original)))
         # Ensure p-value is at least 1/(n_valid+1) to avoid exact zero.
         p_value = float(max(p_value, 1 / (n_valid + 1)))
-
-    # Step 5: Compute bootstrap SE and confidence interval from valid draws
-    # only (use nan-safe reductions, mirroring the p-value filtering above).
-    valid_coefs = bootstrap_coefs[np.isfinite(bootstrap_coefs)]
-    if valid_coefs.size >= 2:
         se_bootstrap = float(np.std(valid_coefs, ddof=1))
-    else:
-        se_bootstrap = float("nan")
-
-    # Percentile confidence interval from bootstrap distribution
-    lower_percentile = alpha / 2 * 100
-    upper_percentile = (1 - alpha / 2) * 100
-    if valid_coefs.size >= 1:
         ci_lower = float(np.percentile(valid_coefs, lower_percentile))
         ci_upper = float(np.percentile(valid_coefs, upper_percentile))
+        surfaced_t_stat = t_stat_original
     else:
+        # Degenerate bootstrap (insufficient valid draws): NaN-out the
+        # entire inference tuple. Downstream consumers (estimator-level
+        # `_run_wild_bootstrap_inference`) map these fields directly onto
+        # the result object; this guarantees the (se, t_stat, p_value, ci)
+        # quadruple moves together rather than reporting analytical t_stat
+        # with NaN se.
+        p_value = float("nan")
+        se_bootstrap = float("nan")
         ci_lower = float("nan")
         ci_upper = float("nan")
+        surfaced_t_stat = float("nan")
 
     return WildBootstrapResults(
         se=se_bootstrap,
         p_value=p_value,
-        t_stat_original=t_stat_original,
+        t_stat_original=surfaced_t_stat,
         ci_lower=ci_lower,
         ci_upper=ci_upper,
         n_clusters=n_clusters,
