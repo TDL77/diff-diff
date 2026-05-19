@@ -2770,66 +2770,90 @@ CRITICAL: δ_pre = β_pre pins pre-treatment violations to observed coefficients
 
 ## PreTrendsPower
 
-**Primary source:** [Roth, J. (2022). Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends. *American Economic Review: Insights*, 4(3), 305-322.](https://doi.org/10.1257/aeri.20210236). Paper review on file: `docs/methodology/papers/roth-2022-review.md` (non-authoritative source audit; this REGISTRY entry remains the authoritative methodology contract).
+**Primary source:** [Roth, J. (2022). Pretest with Caution: Event-Study Estimates after Testing for Parallel Trends. *American Economic Review: Insights*, 4(3), 305-322.](https://doi.org/10.1257/aeri.20210236). Paper review on file: `docs/methodology/papers/roth-2022-review.md`.
 
 **Key implementation requirements:**
 
 *Assumption checks / warnings:*
-- Requires specification of variance-covariance matrix of pre-treatment estimates
-- Warns if pre-trends test has low power (uninformative)
-- Different violation types have different power properties
+- Requires specification of variance-covariance matrix Σ_22 of pre-period coefficients
+- Pre-trend zero-anticipation: τ_pre = 0 (so β̂_pre estimates δ_pre directly) — same convention as Rambachan-Roth (2023) HonestDiD
+- Warns if pre-trends test has low power (uninformative) relative to typical effect sizes
+- Different violation types and pretest forms have different power properties
 
-*Estimator equation (as implemented):*
+*Estimator equation (primary form — NIS box probability; Roth 2022 Section II.A-B):*
 
-Pre-trends test statistic (Wald):
-```
-W = δ̂_pre' V̂_pre^{-1} δ̂_pre ~ χ²(k)
-```
+The paper-analyzed pretest is the **no-individually-significant (NIS)** test: reject parallel trends if any pre-period coefficient lies outside its own (1 - α) CI. The acceptance region is
 
-Power function:
 ```
-Power(δ_true) = P(W > χ²_{α,k} | δ = δ_true)
+B_NIS(Σ) = { b ∈ R^K : |b_t| ≤ z_{1-α/2} · σ_t,  for all t ∈ pre-periods }
 ```
 
-Minimum detectable violation (MDV):
+Under H1 with violation `δ_pre = M · weights` and `β̂_pre ~ N(δ_pre, Σ_22)`, the rejection probability is computed via the centered change-of-variable `Y = β̂_pre - δ_pre ~ N(0, Σ_22)`:
+
 ```
-MDV(power=0.8) = min{|δ| : Power(δ) ≥ 0.8}
+Power(δ_pre) = 1 - P( Y_t ∈ [-z·σ_t - δ_t, z·σ_t - δ_t]  for all t )
+             = 1 - F_MVN(upper, lower; mean=0, cov=Σ_22)
 ```
+
+where `F_MVN` is the multivariate normal CDF over the rectangular box. Computed via `scipy.stats.multivariate_normal.cdf(upper, lower_limit=lower, mean=zeros, cov=Σ_22, allow_singular=True)` (Genz method; supports K up to ~20). Falls back to MC simulation (N=20000 draws) when the analytical CDF returns NaN on degenerate Σ.
+
+MDV: solve `Power(γ · weights) = target_power` for γ via doubling expansion + `optimize.brentq` bisection. Non-convergence cap at γ_high = 1000 returns `np.inf`.
+
+*Estimator equation (paper-supported alternative — Wald pretest form):*
+
+```
+W = δ̂_pre' Σ_22^{-1} δ̂_pre ~ χ²(K)
+Power(δ_pre) = 1 - F_ncχ²(c_α; K, λ),  where λ = δ_pre' Σ_22^{-1} δ_pre
+                                        (noncentrality parameter)
+```
+
+The Wald acceptance region is a convex ellipsoid, so Propositions 1+3+4 of Roth (2022) all apply. Retained for backwards compatibility with the pre-PR-B shipped numerical output (Wald was the implicit default before PR-B 2026-05-17). Activated via `pretest_form='wald'`.
 
 Violation types:
-- **Linear**: δ_t = c × t (linear pre-trend)
-- **Constant**: δ_t = c (level shift)
-- **Last period**: δ_{-1} = c, others zero
-- **Custom**: user-specified pattern
+- **Linear**: `δ_t = γ · t` (Roth's slope convention). When `relative_times` is threaded through `fit()`, weights = `|t|` directly with no L2 normalization, so the reported MDV is in Roth's γ units.
+- **Constant**: `δ_t = c` (level shift)
+- **Last period**: `δ_{-1} = c`, others zero
+- **Custom**: user-specified `violation_weights` pattern
 
-- **Note (deviation from paper — `linear` violation pattern):** the shipped `PreTrendsPower._get_violation_weights("linear")` constructs `[n_pre-1, ..., 1, 0]` from `n_pre` alone and `PreTrendsPower.fit()` never threads the actual relative-time labels into that construction (`pretrends.py:488-531`, `pretrends.py:862-866`). For irregular or anticipation-shifted pre-period grids (e.g., `t ∈ {-5, -3, -1}`), this means the slope reported as MDV is NOT in Roth's `γ` units — the shifted/normalized direction effectively assumes contiguous relative times `{-(n_pre-1), ..., -1}`. The follow-up audit (tracked in TODO.md) will either rebuild `linear` weights from the sorted actual relative-time values and expose the parameter in Roth's `γ` units, or formally retain the current shifted/normalized contract with this Note as the deviation record.
+- **Note (paper-supported alternative — Wald pretest form):** the library retains the Wald noncentral-χ² form as `pretest_form='wald'`. NIS is the paper's primary analysis convention (used for all 12 surveyed papers' empirical exercises in Section I), but the Wald form is also a paper-supported alternative: Roth's Propositions 1, 3, and 4 apply to any (measurable) acceptance region for the conditional moments (Props 1+3) and to any convex acceptance region for the variance-reduction guarantee (Prop 4). The Wald ellipsoid is convex, so all four propositions apply. Wald is faster (no MVN CDF call) and matches the pre-PR-B shipped numerical baseline. Use Wald for backwards-compat / speed; use NIS for canonical paper alignment and R `pretrends` parity.
 
-- **Note (silent-failure guard — `power_at()` with `violation_type="custom"`):** `PreTrendsPowerResults` does not currently persist the fitted `violation_weights`, so `power_at(M)` cannot reconstruct the custom direction. As of this commit, `PreTrendsPowerResults.power_at()` raises `NotImplementedError` for `violation_type="custom"` rather than silently returning equal-weights output. To compute power at a new `M` for a custom fit, refit `PreTrendsPower(violation_type="custom", violation_weights=...)` with the new `M`. Tracked in TODO.md as a planned follow-up to persist the fitted weights and lift the guard.
+- **Note (convention — `linear` violation pattern, γ-unit MDV):** `_get_violation_weights('linear')` consumes actual pre-period relative-time labels threaded through `fit()` (PR-B 2026-05-17 resolution of the PR-A linear-pattern deviation). When `relative_times` is provided (e.g., `[-3, -2, -1]` for a regular grid or `[-5, -3, -1]` for an irregular grid), weights = `|t|` directly with NO L2 normalization, so `δ_pre = M · |t|` reflects Roth's `δ_t = γ · t` convention and the reported MDV equals γ. Callers that bypass `fit()` and supply only `n_pre` retain the previous count-based, L2-normalized `[n_pre-1, ..., 0]` direction (preserves shipped Wald numerical baselines for unit tests). **MPD period-label coverage:** for `MultiPeriodDiDResults`, the relative-time derivation in `_extract_pre_period_params` supports numeric labels (`int` / `float` / `np.int64`) and `pandas.Period` / `pandas.Timestamp` / `np.datetime64` (via Period or Timedelta arithmetic with units of frequency / days respectively). For genuinely non-numeric or unordered labels (string period IDs, unranked categoricals), the helper emits an explicit `UserWarning` and falls back to the legacy count-based normalized direction — the reported MDV is then NOT in Roth's γ units. Users on string period IDs who need γ-unit MDV should re-fit with numeric labels.
 
 *Standard errors:*
-- Power calculations are exact (no sampling variability)
-- Uncertainty comes from estimated Σ
+- Power calculations are exact (no sampling variability — power is computed against a hypothesized population trend, not estimated)
+- Uncertainty comes from the user-supplied Σ_22
+- Footnote 7 equivariance: the distribution of `β̂_post` conditional on `β̂_pre` passing the pretest is equivariant w.r.t. `τ_post` (Roth 2022 Section I.C); MDV/power do not depend on the value of `τ_post`
 
 *Edge cases:*
-- Perfect collinearity in pre-periods: test not well-defined
-- Single pre-period: power calculation trivial
-- Very high power: MDV approaches zero
+- Perfect collinearity in pre-periods: test not well-defined; `multivariate_normal.cdf(allow_singular=True)` may return NaN — MC simulation fallback kicks in.
+- Single pre-period (K=1): NIS power reduces to a univariate normal-tail probability; closed-form match with Roth Section II.B Proposition 2 proof: `E[β̂_pre | β̂_pre ∈ B_NIS] - β_pre ∝ φ(-z - β_pre/σ) - φ(z - β_pre/σ)`.
+- Very high power: MDV approaches zero.
+- Symmetric two-sided pretests under parallel trends: `β̂_post` remains unbiased for `τ_post` (Roth Section II.B paragraph after Prop 1 — `E[β̂_pre | β̂_pre ∈ B] = 0` if B is symmetric and `β_pre = 0`).
 
-- **Note (deviation from paper — diagonal pre-period VCV fallback):** Roth (2022)'s power and bias objects (both the paper-analyzed NIS box probability and the library's Wald / noncentral-χ² form) operate on the full pre-period covariance block Σ_22. The shipped `compute_pretrends_power` adapter currently uses different sources for the pre-period covariance by result type:
-  - `MultiPeriodDiDResults` (`pretrends.py:592-601`): extracts the full pre-period sub-block from `results.vcov` when `interaction_indices` is populated; falls back to `diag(ses^2)` otherwise.
-  - `CallawaySantAnnaResults` (`pretrends.py:609-652`): hard-codes `vcov = diag(ses^2)`. Non-bootstrap CS fits persist a full `event_study_vcov` matrix (`staggered_results.py:126-128`), so the diag fallback is a deliberate choice in that path. Bootstrap CS fits clear `event_study_vcov` before storing results (`staggered.py:2032-2036`) to prevent mixing analytical VCV with bootstrap SEs, so the full-Σ22 route is not available for bootstrap fits at all.
-  - `SunAbrahamResults` (`pretrends.py:660-687`): hard-codes `vcov = diag(ses^2)`; the diag fallback is *forced* because `SunAbrahamResults` does not currently expose an event-study or cohort covariance matrix.
+- **Note (deviation from paper — diagonal pre-period VCV fallback, bootstrap-only after PR-B):** Roth (2022)'s power and bias objects operate on the full pre-period covariance block Σ_22. After PR-B 2026-05-17, the shipped `compute_pretrends_power` adapter consumes full Σ_22 on the non-bootstrap paths for ALL three result types:
+  - `MultiPeriodDiDResults`: full pre-period sub-block from `results.vcov` when `interaction_indices` is populated; diag fallback only when `interaction_indices` is None.
+  - `CallawaySantAnnaResults`: full `event_study_vcov` sub-block on non-bootstrap fits (the matrix is persisted at `staggered_results.py:126-128`). Bootstrap CS fits clear `event_study_vcov` at `staggered.py:2032-2036` to prevent mixing analytical VCV with bootstrap SEs, so they fall through to `diag(ses^2)`.
+  - `SunAbrahamResults`: full `event_study_vcov` sub-block on non-bootstrap fits, constructed in `sun_abraham.py` via `W @ vcov_cohort @ W.T` where W is the cohort-aggregation matrix (PR-B Step 3 SA extension). Bootstrap SA fits and replicate-weight survey fits clear `event_study_vcov` for the same reason as CS.
 
-  Dropping the off-diagonals is NOT a paper-supported numerical choice and is NOT guaranteed to be conservative for MDV/power (the direction of the discrepancy depends on the sign and magnitude of the dropped correlations). The PR-B follow-up audit (tracked in `TODO.md`) will either extend full-sub-VCV consumption to all three paths (with SA also requiring upstream surface work on `SunAbrahamResults`) or formally retain the diag fallback with explicit miscalibration framing. See `docs/methodology/papers/roth-2022-review.md` for the full derivation.
+  The diag-fallback path is therefore reserved for cases where the analytical VCV is genuinely unavailable (bootstrap fits, replicate-weight survey fits, MPD without `interaction_indices`). In those cases dropping off-diagonals is documented as a non-paper approximation — not provably conservative, since the direction of the discrepancy with the full-Σ_22 calc depends on the sign and magnitude of the dropped correlations. See `docs/methodology/papers/roth-2022-review.md` for the full derivation.
+
+- **Backwards-compat addendum (`power_at()` for `violation_type='custom'`):** `PreTrendsPowerResults` now persists `violation_weights` on fresh fits (PR-B Step 5), so `power_at(M)` works for all four violation types including custom. Old serialized results from before PR-B's field addition have `violation_weights=None`; for those legacy results, `power_at(M)` falls back to weight reconstruction from `violation_type + n_pre_periods`, but for `violation_type='custom'` the custom weights cannot be reconstructed and `power_at(M)` raises `NotImplementedError` with a "refit with current library version" message. Fresh fits do not hit this guard.
 
 **Reference implementation(s):**
-- R: `pretrends` package (Roth's official package)
+- R: [`pretrends`](https://github.com/jonathandroth/pretrends) (Roth's official package). NIS-based (`pretrends()`, `slope_for_power()`, `*_NIS` helpers). R-parity goldens deferred to PR-C; the generator script `benchmarks/R/generate_pretrends_golden.R` ships in PR-B with a placeholder commit reference pending an R-package revision pin.
+- R dependency: [`tmvtnorm`](https://cran.r-project.org/package=tmvtnorm) (Manjunath & Wilhelm 2012) — used by R `pretrends` for truncated multivariate normal moments. The Python library uses `scipy.stats.multivariate_normal.cdf` directly for the box probability (does not require a `tmvtnorm` port).
 
 **Requirements checklist:**
-- [ ] MDV = minimum detectable violation at target power level
-- [ ] Violation types: linear, constant, last_period, custom all implemented
-- [ ] Power curve plotting over violation magnitudes
-- [ ] Integrates with HonestDiD for combined sensitivity analysis
+- [x] NIS box probability implemented via scipy MVN CDF (PR-B)
+- [x] Wald form retained as paper-supported alternative under `pretest_form='wald'` (PR-B)
+- [x] Non-bootstrap CS/SA route through full `event_study_vcov` sub-block (PR-B Step 3)
+- [x] Linear-violation weights honor actual relative-time labels → γ-unit MDV (PR-B Step 4)
+- [x] Custom-violation weights persisted on `PreTrendsPowerResults`; `power_at(custom)` works on fresh fits (PR-B Step 5)
+- [x] Helper API (`compute_pretrends_power` / `compute_mdv`) supports `violation_weights` + `pretest_form` (PR-B Step 6)
+- [x] Methodology test file with paper-equation-numbered Verified Components walk-through (PR-B Step 7 — `tests/test_methodology_pretrends.py`)
+- [ ] R `pretrends` parity at pinned commit (deferred to PR-C; generator script committed in PR-B)
+- [x] Power curve plotting over violation magnitudes (preserved from pre-PR-B)
+- [x] Integrates with HonestDiD for combined sensitivity analysis (preserved from pre-PR-B)
 
 ---
 

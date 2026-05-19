@@ -91,6 +91,17 @@ class SunAbrahamResults:
     )
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None)
+    # Full event-study VCV matrix (PR-B 2026-05-17 for PreTrendsPower
+    # canonical Σ_22 fidelity). Built via W @ vcov_cohort @ W.T where W
+    # is the |event_times| × n_interactions cohort-aggregation matrix.
+    # Set to None for bootstrap fits (analytical VCV is invalidated by
+    # bootstrap SE overrides) and for replicate-weight survey fits
+    # (analytical vcov_cohort is overridden by replicate refit variance).
+    # Consumed by ``compute_pretrends_power`` to route SA through the full
+    # pre-period sub-Σ_22 block. Index keys mirror the relative-time labels
+    # in ``event_study_vcov_index``.
+    event_study_vcov: Optional["np.ndarray"] = field(default=None, repr=False)
+    event_study_vcov_index: Optional[list] = field(default=None, repr=False)
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property
@@ -768,6 +779,36 @@ class SunAbraham:
             survey_df=_sa_survey_df,
         )
 
+        # Build full event-study VCV via W-matrix aggregation (PR-B 2026-05-17).
+        # event_study_effects[e] = Σ_g w_{g,e} * cohort_effects[(g, e)] with
+        # w_{g,e} = cohort_weights[e][g]. The full event-study VCV is
+        #   event_study_vcov = W @ vcov_cohort @ W.T
+        # where W is the |event_times| × n_interactions sparse aggregation matrix
+        # whose row i has nonzero entries only at columns j = coef_index_map[(g, e_i)]
+        # for cohorts g appearing in cohort_weights[e_i]. The diagonal entry
+        # [i, i] of this product reproduces the existing per-event-time SE
+        # computation in _compute_iw_effects (weight_vec @ vcov_subset @ weight_vec);
+        # the off-diagonals give Cov(β̂_{e_i}, β̂_{e_k}) which is what
+        # ``compute_pretrends_power`` needs to consume full Σ_22 instead of
+        # falling back to diag(ses^2).
+        es_vcov_index: Optional[List[int]] = None
+        es_vcov: Optional[np.ndarray] = None
+        if cohort_weights:
+            es_vcov_index = sorted(cohort_weights.keys())
+            n_event_times = len(es_vcov_index)
+            n_interactions = vcov_cohort.shape[0]
+            W_mat = np.zeros((n_event_times, n_interactions))
+            for i, e in enumerate(es_vcov_index):
+                for g, w in cohort_weights[e].items():
+                    # Defensive: only populate when the (g, e) coefficient
+                    # actually exists (cohorts with zero observations at e
+                    # are filtered upstream by _compute_iw_effects but we
+                    # guard explicitly here for clarity).
+                    if (g, e) in coef_index_map:
+                        j = coef_index_map[(g, e)]
+                        W_mat[i, j] = w
+            es_vcov = W_mat @ vcov_cohort @ W_mat.T
+
         # Compute overall ATT (average of post-treatment effects)
         overall_att, overall_se = self._compute_overall_att(
             df,
@@ -904,6 +945,15 @@ class SunAbraham:
                 "weight": weight,
             }
 
+        # Clear analytical event_study_vcov when bootstrap or replicate-weight
+        # survey overrides the analytical SEs. Mirrors the CS pattern at
+        # staggered.py:2032-2036 — prevents mixing analytical VCV with
+        # bootstrap/replicate SEs downstream in PreTrendsPower (which would
+        # silently produce mis-scaled MDV/power output).
+        if bootstrap_results is not None or _uses_replicate_sa:
+            es_vcov = None
+            es_vcov_index = None
+
         # Store results
         self.results_ = SunAbrahamResults(
             event_study_effects=event_study_effects,
@@ -924,6 +974,8 @@ class SunAbraham:
             bootstrap_results=bootstrap_results,
             cohort_effects=cohort_effects_storage,
             survey_metadata=survey_metadata,
+            event_study_vcov=es_vcov,
+            event_study_vcov_index=es_vcov_index,
         )
 
         self.is_fitted_ = True

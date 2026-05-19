@@ -1425,21 +1425,37 @@ class DiagnosticReport:
                 "reason": f"compute_pretrends_power raised " f"{type(exc).__name__}: {exc}",
             }
 
-        # Build the schema section and compute the MDV/|ATT| ratio for BR.
+        # Build the schema section and compute the level-scale max-pre-
+        # violation / |ATT| ratio for BR tier classification. Post-PR-B
+        # Step 4 the linear `mdv` is in Roth's γ units (a slope on
+        # relative time), so the level-scale comparable quantity is
+        # `max_abs_pre_violation = mdv * max(|violation_weights|)` —
+        # the largest pre-period level deviation under the MDV. Using
+        # raw `mdv` here would mix slope and level scales on irregular
+        # grids and mis-tier well_powered / moderately_powered /
+        # underpowered.
         headline_metric = self._extract_headline_metric()
         att = headline_metric.get("value") if headline_metric else None
         mdv = _to_python_float(getattr(pp, "mdv", None))
+        max_abs_pre_violation = _to_python_float(getattr(pp, "max_abs_pre_violation", mdv))
         ratio: Optional[float] = None
         if (
-            mdv is not None
+            max_abs_pre_violation is not None
             and att is not None
             and np.isfinite(att)
             and abs(att) > 0
-            and np.isfinite(mdv)
+            and np.isfinite(max_abs_pre_violation)
         ):
-            ratio = mdv / abs(att)
+            ratio = max_abs_pre_violation / abs(att)
 
-        cov_source = self._infer_cov_source(self._results)
+        # Prefer the provenance label `pretrends.py` records on the result
+        # itself (PR-B: `PreTrendsPowerResults.covariance_source` captures
+        # which extraction path was actually taken — full Σ_22 sub-block
+        # vs diag fallback). Fall back to type-based inference for legacy
+        # serialized results pre-PR-B that lack the field.
+        cov_source = getattr(pp, "covariance_source", "unknown")
+        if cov_source == "unknown":
+            cov_source = self._infer_cov_source(self._results)
         tier = _apply_diag_fallback_downgrade(_power_tier(ratio), cov_source)
         return {
             "status": "ran",
@@ -1448,6 +1464,7 @@ class DiagnosticReport:
             "alpha": _to_python_float(getattr(pp, "alpha", self._alpha)),
             "target_power": _to_python_float(getattr(pp, "target_power", 0.80)),
             "mdv": mdv,
+            "max_abs_pre_violation": max_abs_pre_violation,
             "mdv_share_of_att": ratio,
             # Power is reported at ``violation_magnitude`` — the M that
             # the helper actually evaluated (defaults to the MDV when
@@ -1475,13 +1492,29 @@ class DiagnosticReport:
         populates at construction time), falling back to ``self._results``.
         """
         mdv = _to_python_float(getattr(obj, "mdv", None))
+        # PR-B Step 4: use level-scale max_abs_pre_violation rather than
+        # raw γ-unit mdv to tier (see ``_check_pretrends_power`` for the
+        # rationale). Legacy precomputed PreTrendsPowerResults objects
+        # without the property fall back to raw ``mdv``.
+        max_abs_pre_violation = _to_python_float(getattr(obj, "max_abs_pre_violation", mdv))
         hm = self._extract_headline_metric()
         att = hm.get("value") if hm else None
         ratio: Optional[float] = None
-        if mdv is not None and att is not None and np.isfinite(att) and abs(att) > 0:
-            ratio = mdv / abs(att)
+        if (
+            max_abs_pre_violation is not None
+            and att is not None
+            and np.isfinite(att)
+            and abs(att) > 0
+            and np.isfinite(max_abs_pre_violation)
+        ):
+            ratio = max_abs_pre_violation / abs(att)
         source_fit = getattr(obj, "original_results", None) or self._results
-        cov_source = self._infer_cov_source(source_fit)
+        # PR-B: prefer the provenance label `pretrends.py` records on the
+        # precomputed result; fall back to type-based inference only for
+        # legacy serialized results that lack the field.
+        cov_source = getattr(obj, "covariance_source", "unknown")
+        if cov_source == "unknown":
+            cov_source = self._infer_cov_source(source_fit)
         tier = _apply_diag_fallback_downgrade(_power_tier(ratio), cov_source)
         return {
             "status": "ran",
@@ -1490,6 +1523,7 @@ class DiagnosticReport:
             "alpha": _to_python_float(getattr(obj, "alpha", self._alpha)),
             "target_power": _to_python_float(getattr(obj, "target_power", 0.80)),
             "mdv": mdv,
+            "max_abs_pre_violation": max_abs_pre_violation,
             "mdv_share_of_att": ratio,
             "violation_magnitude": _to_python_float(getattr(obj, "violation_magnitude", None)),
             "power_at_violation_magnitude": _to_python_float(getattr(obj, "power", None)),
@@ -1504,12 +1538,39 @@ class DiagnosticReport:
         """Classify whether ``compute_pretrends_power`` had access to the
         full pre-period covariance on ``source_fit``.
 
-        CS / SA / ImputationDiD / EfficientDiD / Stacked / etc. currently
-        fall back to ``np.diag(ses**2)`` inside ``pretrends.py``, even when
-        ``event_study_vcov`` is populated on the result; the returned
-        ``PreTrendsPowerResults.vcov`` therefore ignores off-diagonal pre-
-        period correlations. Annotating the source explicitly lets BR
-        downgrade the tier conservatively.
+        Backwards-compatibility helper for legacy ``PreTrendsPowerResults``
+        objects produced before PR-B (which records the actual extraction
+        path on ``PreTrendsPowerResults.covariance_source`` at fit time).
+        New fits read provenance directly off the result object; this
+        fallback is only invoked when that field is missing or set to
+        ``"unknown"`` (legacy-ambiguous).
+
+        Classification rules:
+
+        - ``"full_pre_period_vcov"`` — basic ``DiDResults`` and other
+          non-event-study, non-MPD result types that historically expose
+          the full pre-period covariance. ``MultiPeriodDiDResults`` is
+          handled by an explicit branch below because its
+          ``pretrends.py`` MPD branch only takes the full sub-block path
+          when ``interaction_indices`` is populated, otherwise falling
+          through to ``diag(ses**2)``.
+        - ``"diag_fallback_available_full_vcov_unused"`` — event-study
+          result types with populated ``event_study_vcov``. Under PR-B,
+          new fits route through the full sub-block, but a legacy
+          ``PreTrendsPowerResults`` lacking ``covariance_source`` may
+          have been computed from ``diag(ses**2)`` even though the full
+          matrix was attached on the source fit (PR-A behavior). Without
+          the persisted provenance label we cannot distinguish the two,
+          and the conservative default is to apply the PR-A downgrade.
+          New PR-B fits set ``covariance_source`` directly and bypass
+          this fallback entirely.
+        - ``"diag_fallback"`` — event-study result types with
+          ``event_study_vcov is None`` (bootstrap or replicate-weight
+          CS / SA fits, plus ImputationDiD / Stacked / EfficientDiD /
+          TwoStageDiD / etc. which don't yet expose ``event_study_vcov``);
+          OR ``MultiPeriodDiDResults`` without ``interaction_indices``
+          (genuine diag-only path inside ``pretrends.py:_extract_pre_period_params``,
+          no "available but unused" concern, so no downgrade applies).
         """
         is_event_study_type = type(source_fit).__name__ in {
             "CallawaySantAnnaResults",
@@ -1527,9 +1588,29 @@ class DiagnosticReport:
             and getattr(source_fit, "event_study_vcov_index", None) is not None
         )
         if is_event_study_type and has_full_es_vcov:
+            # Legacy-ambiguous: we don't know whether this serialized
+            # result was computed pre- or post-PR-B; conservatively
+            # downgrade. New PR-B fits will set covariance_source
+            # explicitly on the result and never reach this branch.
             return "diag_fallback_available_full_vcov_unused"
         if is_event_study_type:
             return "diag_fallback"
+        # Non-event-study path. MultiPeriodDiDResults takes the full
+        # ``vcov[ix_]`` sub-block only when ``interaction_indices`` is
+        # populated (pretrends.py MPD branch); otherwise it falls
+        # through to ``diag(ses**2)`` and ships the diag-fallback path
+        # — which is a normal (not "available but unused") fallback,
+        # so no conservative downgrade applies. Legacy MPD result
+        # objects without ``interaction_indices`` should be reported as
+        # ``diag_fallback`` rather than overclaiming full-Σ_22.
+        if type(source_fit).__name__ == "MultiPeriodDiDResults":
+            mpd_has_full_vcov = (
+                getattr(source_fit, "vcov", None) is not None
+                and getattr(source_fit, "interaction_indices", None) is not None
+            )
+            return "full_pre_period_vcov" if mpd_has_full_vcov else "diag_fallback"
+        # Other non-event-study types (basic DiDResults, TWFE, etc.)
+        # historically expose the full covariance.
         return "full_pre_period_vcov"
 
     def _check_sensitivity(self) -> Dict[str, Any]:
@@ -2711,6 +2792,16 @@ def _apply_diag_fallback_downgrade(tier: str, cov_source: str) -> str:
     ``summary()`` all read the same adjusted tier. Round-14 CI review
     flagged per-surface divergence; round-20 flagged that the precomputed
     adapter bypassed the downgrade entirely.
+
+    PR-B (Roth 2022 audit) note: new fits set
+    ``PreTrendsPowerResults.covariance_source`` directly at fit time
+    based on the actual extraction path, so the report-layer adapters
+    bypass ``_infer_cov_source`` whenever the persisted field is set.
+    The "available but unused" sentinel is still produced for legacy
+    ``PreTrendsPowerResults`` objects that lack the field — there we
+    cannot distinguish a pre-PR-B fit (which DID drop to diag despite
+    the populated source-fit matrix) from a post-PR-B fit, so the
+    conservative downgrade still applies to legacy-ambiguous results.
     """
     if tier == "well_powered" and cov_source == "diag_fallback_available_full_vcov_unused":
         return "moderately_powered"
@@ -3190,9 +3281,10 @@ def _render_overall_interpretation(schema: Dict[str, Any], labels: Dict[str, str
             if tier == "well_powered":
                 sentences.append(
                     f"{subject} are consistent with parallel trends"
-                    f"{jp_str} and the test is well-powered (MDV is a small "
-                    "share of the estimated effect), so a material pre-trend "
-                    "would likely have been detected."
+                    f"{jp_str} and the test is well-powered (the max pre-period "
+                    "level deviation at the MDV is a small share of the estimated "
+                    "effect), so a material pre-trend would likely have been "
+                    "detected."
                 )
             elif tier == "moderately_powered":
                 sentences.append(

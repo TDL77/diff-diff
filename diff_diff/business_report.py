@@ -924,6 +924,13 @@ def _lift_pre_trends(dr: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "power_reason": pp.get("reason"),
         "power_tier": pp.get("tier"),
         "mdv": pp.get("mdv"),
+        # Level-scale max pre-period violation under the MDV
+        # (PR-B R12: `mdv * max(|violation_weights|)`). Carried alongside
+        # the raw `mdv` so BR schema consumers and the full-report
+        # renderer can show both quantities. Pre-R14 this was silently
+        # dropped at the BR lift boundary so the new renderer line never
+        # fired even though DR emitted the value.
+        "max_abs_pre_violation": pp.get("max_abs_pre_violation"),
         "mdv_share_of_att": pp.get("mdv_share_of_att"),
         # Carry the covariance-source annotation through so BR can hedge the
         # power-tier phrasing when compute_pretrends_power silently used a
@@ -2158,8 +2165,9 @@ def _render_summary(schema: Dict[str, Any]) -> str:
             if tier == "well_powered":
                 sentences.append(
                     f"{subject} are consistent with parallel trends, and "
-                    "the test is well-powered (the minimum-detectable "
-                    "violation is small relative to the estimated effect)."
+                    "the test is well-powered (the max pre-period level "
+                    "deviation at the MDV is small relative to the "
+                    "estimated effect)."
                 )
             elif tier == "moderately_powered":
                 sentences.append(
@@ -2467,11 +2475,18 @@ def _render_full_report(schema: Dict[str, Any]) -> str:
         if tier:
             lines.append(f"- Power tier: `{tier}`")
         mdv = pt.get("mdv")
+        max_abs_pre = pt.get("max_abs_pre_violation")
         ratio = pt.get("mdv_share_of_att")
         if isinstance(mdv, (int, float)):
             lines.append(f"- Minimum detectable violation (MDV): {mdv:.3g}")
+        if isinstance(max_abs_pre, (int, float)):
+            lines.append(f"- Max pre-period level deviation at MDV: {max_abs_pre:.3g}")
         if isinstance(ratio, (int, float)):
-            lines.append(f"- MDV / |ATT|: {ratio:.2g}")
+            # PR-B R12: ratio is now max_abs_pre_violation / |ATT|, the
+            # level-scale comparable to ATT (not raw γ-unit mdv on linear
+            # fits). Label updated to match the numerator definition in
+            # REPORTING.md "Power-aware phrasing" Note.
+            lines.append(f"- Max pre-period level deviation / |ATT|: {ratio:.2g}")
     else:
         lines.append(f"- Pre-trends not computed: {pt.get('reason', 'unavailable')}")
     lines.append("")

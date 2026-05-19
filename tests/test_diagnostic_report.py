@@ -375,17 +375,15 @@ class TestPrecomputed:
         assert default_block["tier"] == precomp_block["tier"]
         assert default_block["covariance_source"] == precomp_block["covariance_source"]
 
-    def test_precomputed_pretrends_power_downgrades_when_full_vcov_unused(self):
-        """Stub-based regression: when the source fit has both
-        ``event_study_vcov`` and ``event_study_vcov_index`` populated but
-        the diagonal fallback was used, the precomputed adapter must emit
-        ``covariance_source='diag_fallback_available_full_vcov_unused'`` and
-        downgrade a ``well_powered`` tier to ``moderately_powered`` — just
-        like the default compute path. Complements the live-fit parity test
-        by exercising the tier-bumping edge explicitly.
+    def test_precomputed_pretrends_power_persisted_full_vcov_no_downgrade(self):
+        """PR-B R3+R4 regression: a precomputed ``PreTrendsPowerResults``
+        carrying ``covariance_source='full_pre_period_vcov'`` (the value
+        ``compute_pretrends_power`` records post-PR-B) must NOT be
+        downgraded by ``DiagnosticReport``. Locks the new contract that
+        full-VCV CS / SA fits keep their ``well_powered`` tier.
         """
+        from diff_diff.pretrends import PreTrendsPowerResults
 
-        # Minimal CS-shaped stub with full vcov flagged.
         class _CSStub:
             overall_att = 1.0
             overall_se = 0.25
@@ -404,8 +402,66 @@ class TestPrecomputed:
         stub = _CSStub()
         stub.__class__.__name__ = "CallawaySantAnnaResults"
 
-        class _PPStub:
-            mdv = 0.1  # |ATT| = 1.0 -> ratio = 0.1 -> well_powered before downgrade
+        pp = PreTrendsPowerResults(
+            power=0.80,
+            mdv=0.1,
+            violation_magnitude=0.1,
+            violation_type="linear",
+            alpha=0.05,
+            target_power=0.80,
+            n_pre_periods=2,
+            test_statistic=np.nan,
+            critical_value=1.96,
+            noncentrality=np.nan,
+            pre_period_effects=np.zeros(2),
+            pre_period_ses=np.ones(2),
+            vcov=np.eye(2),
+            original_results=stub,
+            covariance_source="full_pre_period_vcov",
+        )
+
+        dr = DiagnosticReport(stub, precomputed={"pretrends_power": pp})
+        block = dr.to_dict()["pretrends_power"]
+        assert block["status"] == "ran"
+        assert block["covariance_source"] == "full_pre_period_vcov"
+        assert block["tier"] == "well_powered"
+
+    def test_precomputed_pretrends_power_legacy_missing_field_still_downgraded(self):
+        """R4 regression: legacy ``PreTrendsPowerResults`` pre-PR-B has no
+        ``covariance_source`` field. We cannot tell from the source-fit
+        object whether the stored power was computed from full Σ_22 or
+        from the diag fallback (PR-A behavior was diag even when
+        ``event_study_vcov`` was attached). The adapter MUST treat the
+        missing-field case as legacy-ambiguous and apply the conservative
+        downgrade — otherwise an old serialized CS result silently
+        upgrades to ``well_powered``.
+
+        Pairs with the
+        ``test_precomputed_pretrends_power_persisted_full_vcov_no_downgrade``
+        positive case to lock both legs of the legacy-fallback contract.
+        """
+
+        # Minimal CS-shaped stub with full vcov populated.
+        class _CSStub:
+            overall_att = 1.0
+            overall_se = 0.25
+            overall_t_stat = 4.0
+            overall_p_value = 0.001
+            overall_conf_int = (0.5, 1.5)
+            alpha = 0.05
+            n_obs = 400
+            n_treated = 80
+            n_control = 320
+            survey_metadata = None
+            event_study_effects = None
+            event_study_vcov = np.eye(3)
+            event_study_vcov_index = {-2: 0, -1: 1, 0: 2}
+
+        stub = _CSStub()
+        stub.__class__.__name__ = "CallawaySantAnnaResults"
+
+        class _LegacyPPStub:
+            mdv = 0.1
             violation_type = "linear"
             alpha = 0.05
             target_power = 0.80
@@ -413,13 +469,126 @@ class TestPrecomputed:
             power = 0.80
             n_pre_periods = 2
             original_results = stub
+            # No covariance_source attribute — simulates an old serialized
+            # PreTrendsPowerResults from a pre-PR-B fit.
 
-        dr = DiagnosticReport(stub, precomputed={"pretrends_power": _PPStub()})
+        dr = DiagnosticReport(stub, precomputed={"pretrends_power": _LegacyPPStub()})
         block = dr.to_dict()["pretrends_power"]
         assert block["status"] == "ran"
+        # Legacy-ambiguous → conservative sentinel + downgrade applies.
         assert block["covariance_source"] == "diag_fallback_available_full_vcov_unused"
-        # Downgrade must apply: pre-tier is well_powered, post-tier is moderately_powered.
         assert block["tier"] == "moderately_powered"
+
+    def test_precomputed_pretrends_power_legacy_mpd_without_interaction_indices_reports_diag(
+        self,
+    ):
+        """PR-B R5 regression: ``MultiPeriodDiDResults`` legacy fits without
+        ``interaction_indices`` truly take the ``np.diag(ses**2)`` fallback
+        inside ``pretrends.py:_extract_pre_period_params`` MPD branch. The
+        report-layer's ``_infer_cov_source`` fallback must surface that
+        accurately as ``"diag_fallback"`` rather than overclaiming
+        ``"full_pre_period_vcov"`` (MPD is not in the event-study type set,
+        so the previous non-event-study branch unconditionally returned
+        ``"full_pre_period_vcov"`` — wrong for MPD without interaction
+        indices).
+        """
+
+        class _LegacyMPDStub:
+            avg_att = 1.0
+            avg_se = 0.25
+            avg_t_stat = 4.0
+            avg_p_value = 0.001
+            avg_conf_int = (0.5, 1.5)
+            alpha = 0.05
+            n_obs = 400
+            n_treated = 80
+            n_control = 320
+            survey_metadata = None
+            # No interaction_indices, no full vcov — pretrends.py MPD
+            # branch falls through to diag(ses**2).
+            vcov = None
+            interaction_indices = None
+
+        stub = _LegacyMPDStub()
+        stub.__class__.__name__ = "MultiPeriodDiDResults"
+
+        class _LegacyPPStub:
+            mdv = 0.1
+            violation_type = "linear"
+            alpha = 0.05
+            target_power = 0.80
+            violation_magnitude = 0.1
+            power = 0.80
+            n_pre_periods = 2
+            original_results = stub
+            # Legacy — no covariance_source field set.
+
+        dr = DiagnosticReport(stub, precomputed={"pretrends_power": _LegacyPPStub()})
+        block = dr.to_dict()["pretrends_power"]
+        assert block["status"] == "ran"
+        # Legacy MPD without interaction_indices reports diag_fallback —
+        # the conservative downgrade does NOT fire (this isn't an
+        # "available but unused" case, just a normal fallback).
+        assert block["covariance_source"] == "diag_fallback"
+        # No downgrade applies on "diag_fallback" (vs the sentinel label).
+        assert block["tier"] == "well_powered"
+
+    def test_precomputed_pretrends_power_consumes_persisted_cov_source(self):
+        """PR-B R3 regression: the precomputed adapter must prefer the
+        ``covariance_source`` recorded on ``PreTrendsPowerResults`` over
+        the legacy type-based inference. Demonstrates the architectural
+        fix the R3 codex review called out (provenance should be recorded
+        on the result, not re-inferred from result type each time).
+
+        Constructs a stub fit whose source-side type-based inference would
+        produce the LEGACY conservative downgrade label
+        ``diag_fallback_available_full_vcov_unused`` — and verifies that
+        the explicit persisted ``full_pre_period_vcov`` label wins,
+        keeping the ``well_powered`` tier. The legacy fallback only
+        activates when the persisted field is missing or ``"unknown"``.
+        """
+        from diff_diff.pretrends import PreTrendsPowerResults
+
+        class _CSStub:
+            overall_att = 1.0
+            overall_se = 0.25
+            overall_t_stat = 4.0
+            overall_p_value = 0.001
+            overall_conf_int = (0.5, 1.5)
+            alpha = 0.05
+            n_obs = 400
+            n_treated = 80
+            n_control = 320
+            survey_metadata = None
+            event_study_effects = None
+            event_study_vcov = np.eye(3)
+            event_study_vcov_index = {-2: 0, -1: 1, 0: 2}
+
+        stub = _CSStub()
+        stub.__class__.__name__ = "CallawaySantAnnaResults"
+
+        pp = PreTrendsPowerResults(
+            power=0.80,
+            mdv=0.1,
+            violation_magnitude=0.1,
+            violation_type="linear",
+            alpha=0.05,
+            target_power=0.80,
+            n_pre_periods=2,
+            test_statistic=np.nan,
+            critical_value=1.96,
+            noncentrality=np.nan,
+            pre_period_effects=np.zeros(2),
+            pre_period_ses=np.ones(2),
+            vcov=np.eye(2),
+            original_results=stub,
+            covariance_source="full_pre_period_vcov",
+        )
+
+        dr = DiagnosticReport(stub, precomputed={"pretrends_power": pp})
+        block = dr.to_dict()["pretrends_power"]
+        assert block["covariance_source"] == "full_pre_period_vcov"
+        assert block["tier"] == "well_powered"
 
     def test_precomputed_parallel_trends_bypasses_applicability_gate(self, cs_fit):
         """Round-22 P1 regression: ``precomputed["parallel_trends"]`` was

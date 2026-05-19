@@ -47,7 +47,12 @@ classifiers = [
 dependencies = [
     "numpy>=1.20.0",
     "pandas>=1.3.0",
-    "scipy>=1.7.0",
+    # scipy>=1.10 required for scipy.stats.multivariate_normal.cdf(..., lower_limit=...)
+    # — used by diff_diff.pretrends._compute_nis_acceptance_prob for the
+    # rectangular box probability in Roth (2022) NIS pretest power. The
+    # lower_limit parameter was added in scipy 1.10 (release notes
+    # https://docs.scipy.org/doc/scipy/release/1.10.0-notes.html).
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]

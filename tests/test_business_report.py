@@ -2420,6 +2420,113 @@ class TestDiagFallbackDowngradeAppliedCentrally:
         # ``well_powered`` — centralized downgrade guarantees this.
         assert pp["tier"] != "well_powered"
 
+    def test_full_vcov_path_no_downgrade_on_real_cs_fit(self, cs_fit):
+        """PR-B R4 regression: when ``compute_pretrends_power`` actually
+        consumes the full ``event_study_vcov`` sub-block (PR-B Step 3),
+        the DR / BR layer must NOT downgrade ``well_powered``.
+
+        Exercises the live PR-B path on the deterministic ``cs_fit``
+        fixture (analytical non-bootstrap CS, ``seed=7``,
+        ``treatment_effect=1.5``). On this fixture the raw
+        ``mdv / |att|`` ratio is well under the ``0.25`` well_powered
+        threshold, so the expected tier is unconditionally
+        ``well_powered`` — no skip-on-different-tier branch (R6 codex:
+        previous version would silently bypass the key assertion if a
+        regression reintroduced the downgrade).
+
+        ``pretrends.py`` records
+        ``covariance_source='full_pre_period_vcov'`` on the result, which
+        the DR adapter consumes directly. The BR ``summary()`` prose
+        (the actual surface the well-powered phrasing is rendered on)
+        must contain the well-powered text and lack the conservative
+        moderately-informative text.
+        """
+        from diff_diff import BusinessReport, DiagnosticReport
+        from diff_diff.pretrends import compute_pretrends_power
+
+        fit, sdf = cs_fit
+        dr = DiagnosticReport(
+            fit,
+            data=sdf,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+        )
+        block = dr.to_dict()["pretrends_power"]
+        assert block.get("status") == "ran", "pretrends_power should run on cs_fit"
+
+        # Deterministic fixture pins (cs_fit at seed=7, treatment_effect=1.5):
+        # cov_source = full_pre_period_vcov; max_abs_pre_violation ≈ 0.375
+        # (γ * max(|t|) where pre-periods are [-4, -3, -2]); |att| ≈ 1.779;
+        # mdv_share_of_att ≈ 0.211, well under 0.25 → tier = well_powered.
+        # Codex R12 P1: this ratio is now `max_abs_pre_violation / |att|`,
+        # the level-scale max pre-period violation under the MDV (post-PR-B
+        # Step 4 linear MDV is in Roth's γ units, a slope; the level-scale
+        # comparable is mdv * max(|violation_weights|)).
+        assert block["covariance_source"] == "full_pre_period_vcov", (
+            "cs_fit is analytical CS with event_study_vcov populated — "
+            "PR-B routing must report full_pre_period_vcov"
+        )
+        # max_abs_pre_violation = mdv * max(|t|) = 0.0937 * 4 ≈ 0.375
+        assert block.get("max_abs_pre_violation") is not None
+        assert 0.35 < block["max_abs_pre_violation"] < 0.40, (
+            f"cs_fit max_abs_pre_violation={block['max_abs_pre_violation']} "
+            "should be ≈ 0.375 (γ ≈ 0.094 × max|t|=4)"
+        )
+        ratio = block["mdv_share_of_att"]
+        assert ratio is not None and ratio < 0.25, (
+            f"cs_fit mdv_share_of_att={ratio} (level-scale max_abs_pre_violation / "
+            "|att|) must be in the well_powered range (<0.25) for this assertion "
+            "to pin the no-downgrade contract"
+        )
+        assert (
+            block["tier"] == "well_powered"
+        ), "well-powered ratio must NOT be downgraded under the PR-B full-VCV path"
+
+        # Architectural fix: the same provenance label appears on the
+        # compute_pretrends_power output's persisted field, locking that
+        # provenance is recorded at fit time and consumed at the report
+        # layer (not re-inferred from the source-fit type).
+        pp = compute_pretrends_power(fit, alpha=0.05, target_power=0.80)
+        assert pp.covariance_source == "full_pre_period_vcov"
+
+        # Positive prose contract on the rendered surfaces.
+        br = BusinessReport(fit, data=sdf)
+        summary = br.summary()
+        full = br.full_report()
+        # Primary surface: summary() renders the tier prose.
+        assert "well-powered" in summary, (
+            "BR.summary() should surface well-powered phrasing under the "
+            "PR-B full-VCV no-downgrade path"
+        )
+        assert "moderately informative" not in summary
+        assert "moderately-informative" not in summary
+        # Secondary defensive check on full_report().
+        assert "moderately informative" not in full.lower()
+        assert "moderately-informative" not in full.lower()
+
+        # PR-B R14 P2: max_abs_pre_violation must round-trip through the
+        # BR schema lift AND render in full_report(). Pre-R14 the field
+        # was emitted by DR, the renderer printed it, but the BR lift
+        # boundary at `_lift_pre_trends` silently dropped it — so the
+        # rendered line never fired even though the renderer had the
+        # branch.
+        br_schema = br.to_dict()
+        pt_block = br_schema.get("pre_trends", {})
+        assert "max_abs_pre_violation" in pt_block, (
+            "BR.to_dict()['pre_trends'] must surface max_abs_pre_violation "
+            "post-PR-B R14 — _lift_pre_trends regression"
+        )
+        assert pt_block["max_abs_pre_violation"] is not None
+        assert np.isclose(pt_block["max_abs_pre_violation"], 0.375, atol=0.05)
+        # full_report() must render the new "Max pre-period level
+        # deviation at MDV" line.
+        assert "Max pre-period level deviation at MDV:" in full, (
+            "BR.full_report() must render the max_abs_pre_violation line "
+            "(renderer wired in R12; lift boundary fixed in R14)"
+        )
+
 
 class TestCSNotYetTreatedControlGroupSemantics:
     """Round-13 P1 regression: ``BusinessReport`` must not relabel

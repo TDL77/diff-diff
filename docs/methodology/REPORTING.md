@@ -298,7 +298,16 @@ a library setting.
   while `schema["pre_trends"]["power_status"]` carries the
   machine-readable enum (`"ran"` / `"skipped"` / `"error"` /
   `"not_applicable"`). BusinessReport then reads
-  `mdv_share_of_att = mdv / abs(att)` and selects a tier:
+  `mdv_share_of_att = max_abs_pre_violation / abs(att)` and selects a tier.
+  The numerator is the **level-scale max pre-period violation under the
+  MDV**, computed as `mdv * max(|violation_weights|)` — NOT the raw `mdv`
+  scalar. Post PR-B Step 4, raw `mdv` for `violation_type='linear'` is in
+  Roth's γ units (a slope on relative time), so comparing it directly to
+  a level-scale `|att|` would mix units on irregular pre-period grids and
+  mis-tier the result. The level-scale quantity is exposed via the new
+  `PreTrendsPowerResults.max_abs_pre_violation` property and the
+  `DiagnosticReport.pretrends_power` block schema field of the same name.
+  Tier thresholds:
 
   - `< 0.25` &rarr; `well_powered` &mdash; "the test has 80% power to
     detect a violation of magnitude M, which is only X% of the
@@ -321,27 +330,44 @@ a library setting.
   The library already ships `compute_pretrends_power()`, so using it
   is the honest default rather than hedging every non-violation.
 
-- **Note:** Diagonal-covariance fallback for staggered-estimator power.
-  `compute_pretrends_power()` currently drops to `np.diag(ses**2)` for
-  CS / SA / ImputationDiD / Stacked / etc. even when the full
-  `event_study_vcov` is attached on the result. The
-  `DiagnosticReport.pretrends_power` block records
-  `covariance_source: "diag_fallback_available_full_vcov_unused"` in
-  that case, and `BusinessReport` downgrades a `well_powered` tier to
-  `moderately_powered` before rendering prose. This is a documented
-  deviation from the paper-derived "use the full pre-period covariance"
-  position. **Not provably conservative**: under Roth (2022)'s NIS
-  framework and the library's Wald form, the MDV/power objects depend
-  on the off-diagonals of Σ_22, and the direction of the discrepancy
-  between full-Σ_22 and diag(ses^2) depends on the sign and magnitude
-  of the dropped correlations — see the `**Note (deviation from paper
-  — diagonal pre-period VCV fallback):**` block under `## PreTrendsPower`
-  in `docs/methodology/REGISTRY.md`. The `well_powered → moderately_powered`
-  downgrade in BusinessReport reduces the chance of an overly optimistic
-  claim in practice, but it is not a proof of conservatism. The right
-  long-term fix is to teach `compute_pretrends_power()` to consume
-  `event_study_vcov` and `event_study_vcov_index`; until that lands the
-  downgrade stays.
+- **Note:** Pre-period covariance routing for staggered-estimator power.
+  As of the PR-B PreTrendsPower implementation audit (Roth 2022),
+  `compute_pretrends_power()` consumes the full `event_study_vcov`
+  sub-block when it is available — non-bootstrap CS fits
+  (`staggered_results.py` populates the matrix) and non-bootstrap SA
+  fits (`sun_abraham.py` builds it via `W @ vcov_cohort @ W.T`). The
+  `PreTrendsPowerResults.covariance_source` field records the actual
+  extraction path (`"full_pre_period_vcov"` vs `"diag_fallback"`), and
+  the `DiagnosticReport.pretrends_power` block surfaces that label
+  unchanged. There are two paths through the report layer with
+  different downgrade semantics:
+
+  - **New fits** (post-PR-B, `PreTrendsPowerResults.covariance_source`
+    is populated): `DiagnosticReport` reads the persisted label
+    directly. Non-bootstrap CS / SA fits report
+    `"full_pre_period_vcov"` and are NOT downgraded; bootstrap /
+    replicate-weight paths report `"diag_fallback"` and also pass
+    through unchanged (no "available but unused" concern — the
+    estimator did its best with what was available).
+  - **Legacy serialized results** (pre-PR-B, no
+    `covariance_source` field on the object): the report layer falls
+    back to type-based inference in
+    `_infer_cov_source(source_fit)`. For event-study result types
+    (CS / SA / etc.) with populated `event_study_vcov`, the legacy-
+    ambiguous case still emits the conservative
+    `"diag_fallback_available_full_vcov_unused"` sentinel and the
+    `well_powered → moderately_powered` downgrade still applies —
+    because without the persisted provenance we cannot rule out that
+    the stored power was computed from `diag(ses^2)` under PR-A
+    semantics. For `MultiPeriodDiDResults` without
+    `interaction_indices`, the legacy fallback reports
+    `"diag_fallback"` (a genuine fallback, not the "available but
+    unused" case, so no downgrade applies).
+
+  Remaining `"diag_fallback"` cases on new fits — bootstrap /
+  replicate-weight CS and SA, plus ImputationDiD / Stacked /
+  EfficientDiD / TwoStageDiD — pass through unchanged because
+  nothing better is available on those result types yet.
 
 - **Note:** Unit-translation policy. BusinessReport does not
   arithmetically translate log-points to percents or level effects to
