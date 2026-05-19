@@ -256,7 +256,7 @@ out <- list(
       "Three-tier parity contract, both numeric tiers at atol=1e-4:",
       "(1) NIS box probability at fixed gamma values on all 4 fixtures",
       "(atol=1e-4; R hardcodes thresholdTstat=1.96 while Python uses",
-      "qnorm(0.975) = 1.959963984540054, and mvtnorm::pmvnorm vs",
+      "scipy.stats.norm.ppf(0.975) = 1.959963984540054, and mvtnorm::pmvnorm vs",
       "scipy MVN CDF Genz-Bretz randomized-lattice differences bound the",
       "K=4 NIS power gap at ~5e-5);",
       "(2) gamma_p MDV (slope at target power 0.5 and 0.8) on regular,",
