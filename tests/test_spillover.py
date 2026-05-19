@@ -4,6 +4,9 @@ Step 1 surface: ring-construction helpers and the public class scaffold.
 Step 2+ surfaces are added incrementally as the implementation lands.
 """
 
+import warnings
+from typing import Dict, Optional
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -574,9 +577,21 @@ class TestSpilloverDiDInitGetParamsSetParams:
         with pytest.raises(ValueError, match="Unknown parameter"):
             est.set_params(nonexistent_kwarg=42)
 
-    def test_fit_survey_design_not_implemented(self):
-        """survey_design= is a deferred enhancement (Wave B MVP)."""
-        est = SpilloverDiD(rings=[0.0, 50.0], conley_coords=("lat", "lon"))
+    def test_fit_conley_plus_survey_design_not_implemented(self):
+        """Wave E.1 ships HC1 / CR1 + survey_design; Conley × survey is
+        deferred to Wave E.2 (the novel within-stratum Conley sandwich on
+        PSU totals). Confirm the upfront rejection points at the planned
+        follow-up PR.
+        """
+        from diff_diff import SurveyDesign
+
+        est = SpilloverDiD(
+            rings=[0.0, 50.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="euclidean",
+            conley_cutoff_km=100.0,
+            vcov_type="conley",
+        )
         df = pd.DataFrame(
             {
                 "unit": ["A", "A"],
@@ -585,16 +600,18 @@ class TestSpilloverDiDInitGetParamsSetParams:
                 "D": [0, 1],
                 "lat": [0.0, 0.0],
                 "lon": [0.0, 0.0],
+                "w": [1.0, 1.0],
+                "psu": [0, 0],
             }
         )
-        with pytest.raises(NotImplementedError, match="survey_design"):
+        with pytest.raises(NotImplementedError, match="Wave E.2"):
             est.fit(
                 df,
                 outcome="y",
                 unit="unit",
                 time="time",
                 treatment="D",
-                survey_design=object(),
+                survey_design=SurveyDesign(weights="w", psu="psu"),
             )
 
 
@@ -4524,3 +4541,1146 @@ class TestSpilloverDiDWaveDPublicVarianceContract:
             _w.simplefilter("ignore", UserWarning)
             with pytest.raises(NotImplementedError, match="classical"):
                 est.fit(df, outcome="y", unit="unit", time="time", treatment="D")
+
+
+# =============================================================================
+# Wave E.1 — survey_design integration (HC1 / CR1 via Binder TSL)
+# =============================================================================
+#
+# Composes Gerber (2026, arXiv:2605.04124) Proposition 1 Binder Taylor
+# Series Linearization with the Wave D Gardner GMM first-stage correction.
+# Conley × survey is deferred to Wave E.2.
+#
+# Test invariants (per plan §Chunk 6):
+#   (a)  Uniform-weight degenerate bit-identity with Wave D HC1
+#   (c)  Binder TSL hand-check (PSU-aggregated, uniform weights)
+#   (c2) Binder TSL hand-check (PSU-aggregated, NON-uniform weights)
+#   (d)  lonely_psu sensitivity ({remove, certainty, adjust} → different SE)
+#   (e1) FPC=np.inf matches no-FPC path (bit-identical)
+#   (e2) FPC=n_h zeros that stratum's contribution
+#   (e3) FPC intermediate shrinks SE monotonically
+#   (f)  Saturated NaN-fail + pytest.warns(match="df_survey")
+#   (h)  cluster=<col> + survey.psu warns and uses PSU
+#   (i)  Replicate-weight variance rejection
+#   (j)  Non-pweight rejection
+#   (k)  Fit-idempotency on the survey path
+#   (l)  Event-study + survey, is_staggered=True
+#   (m)  Event-study + survey, is_staggered=False
+#   (n)  Aggregate-vs-event-study parity on the survey path
+#   (o)  Drift goldens
+#   (p)  finite_mask survey-array subsetting
+
+
+def _augment_with_survey(
+    df: pd.DataFrame,
+    *,
+    n_strata: int = 2,
+    psus_per_stratum: int = 4,
+    fpc: float = 20.0,
+    weights: Optional[np.ndarray] = None,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Augment a Butts DGP with stratum / PSU / FPC / weight columns.
+
+    Assigns units to strata deterministically (units 0 to n_units / n_strata
+    in stratum 0, etc.) and partitions each stratum's units into PSUs of
+    roughly equal size. The same unit always gets the same PSU/stratum
+    across periods (panel survey constancy).
+    """
+    df = df.copy()
+    units = df["unit"].unique()
+    n_units = len(units)
+    # Sort for deterministic assignment
+    units_sorted = sorted(units)
+    unit_to_stratum: Dict[str, int] = {}
+    unit_to_psu: Dict[str, int] = {}
+    for idx, u in enumerate(units_sorted):
+        stratum = min(idx * n_strata // n_units, n_strata - 1)
+        psu_within = (idx // max(1, n_units // (n_strata * psus_per_stratum))) % psus_per_stratum
+        psu_label = stratum * psus_per_stratum + psu_within
+        unit_to_stratum[u] = stratum
+        unit_to_psu[u] = psu_label
+    df["stratum"] = df["unit"].map(unit_to_stratum)
+    df["psu"] = df["unit"].map(unit_to_psu)
+    df["N_h"] = fpc  # per-stratum FPC population size
+    if weights is None:
+        df["w"] = 1.0
+    else:
+        # weights aligned with sorted(units); broadcast to rows
+        w_by_unit = dict(zip(units_sorted, weights))
+        df["w"] = df["unit"].map(w_by_unit)
+    # Avoid unused-import lint
+    _ = seed
+    return df
+
+
+class TestSpilloverDiDWaveE1SurveyDesignHc1:
+    """Wave E.1 HC1 / CR1 via Binder TSL on PSU-aggregated Psi.
+
+    Methodology anchor: Gerber (2026, arXiv:2605.04124) Proposition 1
+    composed with the Wave D Gardner GMM correction. Hand-checks against
+    the audited `_compute_stratified_meat_from_psu_scores` helper.
+    """
+
+    def _fit(self, df, **kwargs):
+
+        design = kwargs.pop("design", None)
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            event_study=False,
+            **kwargs,
+        )
+        return est.fit(
+            df,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+
+    def test_a_uniform_weight_degenerate_matches_wave_d(self):
+        """Uniform-weight, single-PSU-per-row, no-FPC degenerates to Wave D.
+
+        Load-bearing test of the `weights is None` bit-identical fallback in
+        `_iterative_fe_subset`. ATT should bit-match (uniform weights have
+        no estimand effect); the SE shifts because Binder TSL replaces the
+        HC1 multiplier.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=0)
+        # Wave D baseline
+        res_baseline = self._fit(df)
+        # Survey with PSU == unit (one PSU per unit; required for panel
+        # survey unit-constancy validator), uniform weights, no FPC, no strata
+        df_s = df.copy()
+        df_s["w"] = 1.0
+        units_sorted = sorted(df_s["unit"].unique())
+        unit_to_psu = {u: idx for idx, u in enumerate(units_sorted)}
+        df_s["psu"] = df_s["unit"].map(unit_to_psu)
+        design = SurveyDesign(weights="w", psu="psu")
+        res_survey = self._fit(df_s, design=design)
+        # ATT essentially identical: uniform weights have no estimand
+        # effect (OLS == WLS at the algebra level), but tolerance is
+        # 1-ULP per `feedback_assert_allclose_numerical_parity` — the
+        # Rust backend's `solve_ols` takes a different BLAS code path
+        # than the Python backend on ubuntu-latest / windows, producing
+        # ~2.77e-17 reduction-order differences that `assert_array_equal`
+        # catches as failures even on degenerate uniform weights.
+        np.testing.assert_allclose(res_baseline.att, res_survey.att, rtol=1e-14, atol=1e-14)
+        # SE differs (Binder TSL meat vs HC1 meat with multiplier)
+        assert np.isfinite(res_survey.se) and res_survey.se > 0
+
+    def test_c_binder_helper_math_and_survey_metadata_on_fitted_result(self):
+        """Two-part helper-level + fitted-metadata coverage.
+
+        Part 1 (fitted metadata): runs an actual survey-enabled
+        `SpilloverDiD.fit()` and verifies the result-class survey fields
+        (`n_psu`, `n_strata`, `survey_metadata.df_survey`, finite SE) are
+        wired correctly through the Wave E.1 plumbing.
+
+        Part 2 (helper math): independently sanity-checks
+        `_compute_stratified_meat_from_psu_scores` on a small synthetic
+        PSU-score fixture, hand-computing the
+        `(1-f_h) * n_h/(n_h-1) * sum_j (S_hj - S_h_bar)(S_hj - S_h_bar)'`
+        formula and asserting parity to rtol=1e-12.
+
+        This is NOT an end-to-end `bread @ meat @ bread` reconstruction
+        against `res.vcov` — the test_a uniform-weight bit-identity check
+        and test_o drift goldens cover that surface from different angles.
+        Full estimator-level vcov reconstruction would require exposing
+        `X_2_kept` arrays the estimator doesn't currently surface; tracked
+        as informational follow-up (see TODO.md).
+        """
+        from diff_diff import SurveyDesign
+        from diff_diff.survey import _compute_stratified_meat_from_psu_scores
+
+        df = generate_butts_nonstaggered_dgp(seed=1)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        res = self._fit(df_s, design=design)
+        # Part 1: fitted-result survey metadata is correct.
+        assert res.n_psu == 8
+        assert res.n_strata == 2
+        assert res.survey_metadata is not None
+        assert getattr(res.survey_metadata, "df_survey", None) == 6
+        assert np.isfinite(res.se) and res.se > 0
+        # Part 2: helper math sanity — hand-compute the
+        # (1-f_h)*n_h/(n_h-1) factor on synthetic PSU scores.
+        psu_scores = np.array([[1.0, 0.5], [-0.5, 0.2], [0.3, -0.1], [-0.4, 0.6]])
+        psu_strata = np.array([0, 0, 1, 1])
+        psu_fpc = np.array([20.0, 20.0, 20.0, 20.0])
+        meat, var_computed, _ = _compute_stratified_meat_from_psu_scores(
+            psu_scores, psu_strata, fpc_per_psu=psu_fpc, lonely_psu="remove"
+        )
+        assert var_computed
+        # f_h = 2/20 = 0.1; multiplier = (1-0.1)*2/(2-1) = 1.8.
+        # Stratum h=0 PSUs are rows 0,1; mean = (1.0-0.5)/2, (0.5+0.2)/2 = (0.25, 0.35)
+        # centered: [(0.75, 0.15), (-0.75, -0.15)]; meat_h0 = 1.8 * sum centered'*centered
+        meat_h0_expected = 1.8 * np.array(
+            [
+                [(0.75) ** 2 + (-0.75) ** 2, 0.75 * 0.15 + (-0.75) * (-0.15)],
+                [0.75 * 0.15 + (-0.75) * (-0.15), (0.15) ** 2 + (-0.15) ** 2],
+            ]
+        )
+        # Stratum h=1 PSUs are rows 2,3; mean = (-0.05, 0.25)
+        # centered: [(0.35, -0.35), (-0.35, 0.35)]
+        meat_h1_expected = 1.8 * np.array(
+            [
+                [(0.35) ** 2 + (-0.35) ** 2, 0.35 * (-0.35) + (-0.35) * 0.35],
+                [0.35 * (-0.35) + (-0.35) * 0.35, (-0.35) ** 2 + (0.35) ** 2],
+            ]
+        )
+        np.testing.assert_allclose(
+            meat, meat_h0_expected + meat_h1_expected, rtol=1e-12, atol=1e-14
+        )
+
+    def test_c2_non_uniform_weights_path_smoke(self):
+        """Smoke check the non-uniform-weight survey path: weighted
+        gamma_hat + eps weighting + Psi weighting + bread + Binder TSL
+        meat all execute without error and produce finite output with the
+        expected `df_survey` from the PSU/strata structure.
+
+        This is a SMOKE TEST, not a numerical parity hand-check. The
+        non-uniform-weight aggregation contract is pinned numerically by
+        `test_n2_event_study_distinguishes_survey_share_from_sample_share`
+        (manual lincom reconstruction at rtol=1e-6) and the cross-rule
+        distinguishability assertion there. End-to-end vcov reconstruction
+        on this path is tracked in TODO.md (requires exposing the
+        estimator's internal X_2_kept arrays).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=2)
+        units = df["unit"].unique()
+        rng = np.random.default_rng(2)
+        w_by_unit = dict(zip(sorted(units), rng.uniform(0.5, 2.0, size=len(units))))
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        df_s["w"] = df_s["unit"].map(w_by_unit)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        res = self._fit(df_s, design=design)
+        # SE finite (non-degenerate); ATT may shift slightly from the
+        # uniform-weight case because WLS pulls toward heavier-weighted units.
+        assert np.isfinite(res.se) and res.se > 0
+        assert np.isfinite(res.att)
+        # df_survey unchanged from uniform-weight case (depends only on
+        # PSU/strata structure, not on weight values).
+        assert getattr(res.survey_metadata, "df_survey", None) == 6
+
+    def test_d_lonely_psu_modes_accepted(self):
+        """The three lonely_psu modes ('remove', 'certainty', 'adjust') all
+        flow through SpilloverDiD without error and produce well-defined
+        output (finite SE or NaN-propagated inference).
+
+        The methodological behavior of each mode is audited at the
+        `_compute_stratified_meat_from_psu_scores` helper level (see
+        `tests/test_survey_*.py`); this test verifies parameter propagation
+        through SpilloverDiD's survey path.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=3)
+        # Mixed design: stratum 0 collapsed to singleton PSU (triggers
+        # lonely_psu handling); stratum 1 stays at 4 PSUs (regular path).
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        df_s.loc[df_s["stratum"] == 0, "psu"] = 0
+
+        for mode in ("remove", "certainty", "adjust"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                design = SurveyDesign(
+                    weights="w",
+                    strata="stratum",
+                    psu="psu",
+                    fpc="N_h",
+                    lonely_psu=mode,
+                )
+                res = self._fit(df_s, design=design)
+                # Either finite SE or NaN-propagated (consistent inference).
+                if np.isfinite(res.se):
+                    assert res.se >= 0
+                else:
+                    assert np.isnan(res.t_stat) and np.isnan(res.p_value)
+
+    def test_e1_fpc_large_matches_no_fpc(self):
+        """Very large fpc produces (1-f_h)→1 → SE close to the no-FPC path.
+
+        Note: SurveyDesign validates that FPC is finite + non-NaN, so
+        np.inf is rejected upfront. Use a very large finite N_h instead
+        (e.g. 10^9 sampled-fraction effectively → 0).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=4)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=1e9)
+        design_fpc_large = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        design_no_fpc = SurveyDesign(weights="w", strata="stratum", psu="psu")
+        res_large = self._fit(df_s, design=design_fpc_large)
+        res_no = self._fit(df_s, design=design_no_fpc)
+        # f_h = 4 / 1e9 ≈ 4e-9; (1-f_h) ≈ 1 - 4e-9. SE difference < 1e-6.
+        np.testing.assert_allclose(res_large.se, res_no.se, rtol=1e-6)
+
+    def test_e2_fpc_equals_n_zeros_stratum(self):
+        """When fpc = n_h, (1-f_h) = 0 and stratum contributes zero."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=5)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=4.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        # When all strata's PSUs are at FPC saturation, the meat is zero.
+        # Variance is identified-but-zero (degenerate) → SE = 0.
+        res = self._fit(df_s, design=design)
+        np.testing.assert_allclose(res.se, 0.0, atol=1e-14)
+
+    def test_e3_fpc_intermediate_monotonic_shrinkage(self):
+        """As FPC grows (sampling fraction shrinks), SE shrinks monotonically
+        toward the no-FPC limit."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=6)
+        ses = []
+        for fpc_val in [10.0, 20.0, 40.0, 1000.0]:
+            df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=fpc_val)
+            design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+            ses.append(self._fit(df_s, design=design).se)
+        # As FPC increases, (1-f_h) → 1, SE approaches the no-FPC limit
+        # from below (smaller f → smaller multiplier reduction → LARGER SE).
+        assert (
+            ses[0] < ses[1] < ses[2] <= ses[3]
+        ), f"Expected monotonic SE growth as FPC grows; got {ses}"
+
+    def test_f_saturated_df_survey_zero_nan_inference_with_warning(self):
+        """df_survey = 0 (single PSU per stratum + lonely_psu='remove') →
+        NaN inference + UserWarning matching 'df_survey'."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=7)
+        df_s = _augment_with_survey(df, n_strata=4, psus_per_stratum=1, fpc=200.0)
+        design = SurveyDesign(
+            weights="w",
+            strata="stratum",
+            psu="psu",
+            fpc="N_h",
+            lonely_psu="remove",
+        )
+        with pytest.warns(UserWarning, match="df_survey"):
+            res = self._fit(df_s, design=design)
+        # SE should be NaN; all inference fields NaN-consistent
+        assert np.isnan(res.se)
+        assert np.isnan(res.t_stat)
+        assert np.isnan(res.p_value)
+        assert all(np.isnan(c) for c in res.conf_int)
+
+    def test_h_cluster_plus_survey_psu_warn_and_use_psu(self):
+        """cluster=<col> + survey.psu → UserWarning, then PSU wins."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=8)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Add a different cluster column that doesn't match PSU
+        df_s["bad_cluster"] = df_s["unit"]
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with pytest.warns(UserWarning):
+            est = SpilloverDiD(
+                rings=[0.0, 100.0],
+                conley_coords=("lat", "lon"),
+                conley_metric="haversine",
+                cluster="bad_cluster",
+            )
+            res = est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+        # n_clusters should equal n_psu (PSU wins), not the unit count
+        assert res.n_clusters == 8
+
+    def test_i_replicate_weight_variance_rejected(self):
+        """Replicate-weight variance (BRR/Fay/JK/SDR) is deferred."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=9)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Add unit-constant fake replicate weight columns (panel survey
+        # validator requires within-unit constancy)
+        rng = np.random.default_rng(9)
+        units_sorted = sorted(df_s["unit"].unique())
+        for r in range(4):
+            w_by_unit = dict(zip(units_sorted, rng.uniform(0.5, 1.5, size=len(units_sorted))))
+            df_s[f"rep_{r}"] = df_s["unit"].map(w_by_unit)
+        design = SurveyDesign(
+            weights="w",
+            replicate_weights=[f"rep_{r}" for r in range(4)],
+            replicate_method="JK1",
+        )
+        with pytest.raises(NotImplementedError, match="follow-up"):
+            self._fit(df_s, design=design)
+
+    def test_j_non_pweight_rejected(self):
+        """SpilloverDiD survey support requires weight_type='pweight'."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=10)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(
+            weights="w",
+            strata="stratum",
+            psu="psu",
+            weight_type="fweight",
+        )
+        with pytest.raises(ValueError, match="pweight"):
+            self._fit(df_s, design=design)
+
+    def test_k_fit_idempotent_on_survey_path(self):
+        """clone() + repeat-fit on survey path produces identical results;
+        no fit-time mutation of survey state (per feedback_fit_does_not_mutate_config).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=11)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+        )
+        params_before = est.get_params()
+        res1 = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        # Clone via re-instantiation with the same params (avoids sklearn
+        # dependency; same effect as sklearn.base.clone for this surface).
+        est2 = SpilloverDiD(**est.get_params())
+        res2 = est2.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        params_after = est.get_params()
+        assert params_before == params_after  # no fit-time mutation
+        np.testing.assert_allclose(res1.att, res2.att, rtol=1e-14)
+        np.testing.assert_allclose(res1.se, res2.se, rtol=1e-14)
+
+    def test_q_weights_only_no_psu_no_strata(self):
+        """SurveyDesign(weights="w") (no PSU, no strata) — degenerate Binder
+        TSL collapses to per-obs aggregation with a single synthetic
+        stratum. df_survey = n_obs - 1 per ResolvedSurveyDesign.df_survey."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=30)
+        df["w"] = 1.0
+        design = SurveyDesign(weights="w")  # no strata, no psu, no fpc
+        res = self._fit(df, design=design)
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+        assert res.survey_metadata is not None
+        # df_survey = n_obs - 1 (no PSU, no strata branch)
+        assert res.survey_metadata.df_survey == len(df) - 1
+
+    def test_r_weights_and_strata_no_psu(self):
+        """SurveyDesign(weights, strata) (no PSU) — Binder TSL with
+        per-obs synthetic PSU + user-provided strata.
+        df_survey = n_obs - n_strata per ResolvedSurveyDesign.df_survey."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=31)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Drop PSU and FPC; keep stratum + weight only
+        design = SurveyDesign(weights="w", strata="stratum")
+        res = self._fit(df_s, design=design)
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+        # df_survey = n_obs - n_strata (PSU None + strata branch)
+        assert res.survey_metadata.df_survey == len(df_s) - 2
+
+    def test_s_cluster_kwarg_without_survey_psu_becomes_cr1(self):
+        """cluster=<col> + survey_design (no PSU) — `_inject_cluster_as_psu`
+        substitutes the cluster column for the missing PSU so the survey
+        path becomes CR1 + Binder TSL. The documented contract for
+        cluster=<col> under survey_design when PSU is absent."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=32)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Survey design WITHOUT PSU; cluster=<col> takes over via injection
+        design = SurveyDesign(weights="w", strata="stratum")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            cluster="psu",  # use the augmented psu column AS the cluster
+        )
+        res = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+        # n_clusters reflects the cluster-as-PSU injection: 8 unique PSU
+        # labels (2 strata × 4 PSUs) become the effective cluster.
+        assert res.n_clusters == 8
+
+    def test_cluster_kwarg_time_varying_rejected_when_used_as_psu(self):
+        """When `cluster=<col>` becomes the effective PSU under survey
+        (because `survey_design.psu` is absent), the cluster column must
+        satisfy panel-survey within-unit constancy.
+
+        Regression for R11 codex P1: pre-fix, `_validate_unit_constant_survey`
+        only checked columns named in `survey_design`. A time-varying
+        `cluster=<col>` was silently injected as PSU and used for Binder
+        aggregation; the equivalent labels passed via `survey_design.psu=`
+        would have been rejected by the panel-survey contract.
+        Post-fix: rejected upfront with a `ValueError` matcher.
+
+        Symmetry: a unit-constant `cluster=<col>` should still work
+        identically to passing the same labels via `survey_design.psu=`.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=40)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Time-varying cluster: cluster value = row index (varies within unit)
+        df_s["time_varying_cluster"] = np.arange(len(df_s))
+        design = SurveyDesign(weights="w", strata="stratum", fpc="N_h")  # no psu
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            cluster="time_varying_cluster",
+        )
+        with pytest.raises(ValueError, match="varies within unit"):
+            est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+        # Symmetry: unit-constant cluster (= the augmented `psu` column)
+        # works fine on the implicit-PSU path and produces the same result
+        # as passing it via `survey_design.psu=` explicitly.
+        est_unit_constant = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            cluster="psu",  # unit-constant by _augment_with_survey construction
+        )
+        res_implicit = est_unit_constant.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        # Same labels as explicit PSU
+        design_explicit = SurveyDesign(
+            weights="w",
+            strata="stratum",
+            psu="psu",
+            fpc="N_h",
+        )
+        est_explicit = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+        )
+        res_explicit = est_explicit.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design_explicit,
+        )
+        np.testing.assert_allclose(res_implicit.att, res_explicit.att, rtol=1e-14)
+        np.testing.assert_allclose(res_implicit.se, res_explicit.se, rtol=1e-14)
+        assert res_implicit.n_clusters == res_explicit.n_psu == 8
+
+    def test_cluster_kwarg_overlap_across_strata_nest_false_raises(self):
+        """When cluster labels repeat across strata under nest=False, the
+        implicit cluster-as-PSU injection must raise (matching the explicit
+        PSU resolver's contract at `SurveyDesign.resolve()` L305-L316).
+
+        Regression for R8 codex P1: pre-fix, `_inject_cluster_as_psu`
+        always nested cluster IDs within strata, silently manufacturing
+        extra PSUs and producing inconsistent `n_psu` / `df_survey` /
+        Binder meat vs the equivalent explicit `psu=` specification.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=33)
+        units_sorted = sorted(df["unit"].unique())
+        n_units = len(units_sorted)
+        # Build a deliberately-overlapping cluster column: cluster labels
+        # 0,1,2,3 appear in BOTH strata 0 and stratum 1.
+        unit_to_stratum = {u: min(i * 2 // n_units, 1) for i, u in enumerate(units_sorted)}
+        unit_to_cluster = {u: i % 4 for i, u in enumerate(units_sorted)}
+        df_s = df.copy()
+        df_s["stratum"] = df_s["unit"].map(unit_to_stratum)
+        df_s["overlapping_cluster"] = df_s["unit"].map(unit_to_cluster)
+        df_s["w"] = 1.0
+        # nest=False (default for SurveyDesign): the cluster labels must
+        # be globally unique across strata, which they're not here.
+        design = SurveyDesign(weights="w", strata="stratum")  # nest defaults to False
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            cluster="overlapping_cluster",
+        )
+        with pytest.raises(ValueError, match="repeat across strata"):
+            est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    def test_cluster_kwarg_overlap_across_strata_nest_true_ok(self):
+        """When `nest=True`, the same overlapping cluster labels are
+        combined with strata via `(stratum, cluster)` nesting — the implicit
+        injection matches the explicit-PSU resolver and the fit completes.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=34)
+        units_sorted = sorted(df["unit"].unique())
+        n_units = len(units_sorted)
+        unit_to_stratum = {u: min(i * 2 // n_units, 1) for i, u in enumerate(units_sorted)}
+        unit_to_cluster = {u: i % 4 for i, u in enumerate(units_sorted)}
+        df_s = df.copy()
+        df_s["stratum"] = df_s["unit"].map(unit_to_stratum)
+        df_s["overlapping_cluster"] = df_s["unit"].map(unit_to_cluster)
+        df_s["w"] = 1.0
+        design = SurveyDesign(weights="w", strata="stratum", nest=True)
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            cluster="overlapping_cluster",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+        assert np.isfinite(res.se) and res.se > 0
+        # With nest=True, (stratum, cluster) combinations are unique → 8 PSUs
+        # (2 strata × 4 cluster labels)
+        assert res.n_clusters == 8
+
+    def test_zero_weight_omega0_unit_excluded_from_fe_support(self):
+        """Zero-weight Omega_0 rows are outside the WLS estimating sample.
+
+        Regression for R3 codex P0: pre-fix, the survey-weighted
+        `_iterative_fe_subset` aggregated zero-weight rows into the FE
+        support (denominator 0, `np.where` wrote `0.0`), then materialized
+        finite FE values for the affected unit/time codes — silently
+        corrupting `att`, ring effects, and SEs. Post-fix, zero-weight
+        rows are excluded via `omega_0_pos = omega_0_mask & (w > 0)`, so
+        a unit whose Omega_0 rows all have weight 0 receives NaN FE and
+        is excluded by `finite_mask` from stage-2.
+
+        This test sets one far-control unit's weight to 0 across all
+        periods and verifies fit completes + the resulting `att` is
+        close to the att produced WITHOUT that unit.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=70)
+        units_sorted = sorted(df["unit"].unique())
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Zero out one far-control unit's weight
+        zero_unit = units_sorted[-1]
+        df_s.loc[df_s["unit"] == zero_unit, "w"] = 0.0
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = self._fit(df_s, design=design)
+        # Fit completes with finite output
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+        # Compare against fit WITHOUT the zero-weight unit; difference
+        # should be small (zero-weight exclusion ≈ row exclusion for FE
+        # estimation, modulo stage-2 ring presence). Rtol=0.05 absorbs
+        # the small stage-2 numerator/denominator effect of the dropped
+        # ring contribution.
+        df_without = df_s[df_s["unit"] != zero_unit].copy()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_without = self._fit(df_without, design=design)
+        np.testing.assert_allclose(res.att, res_without.att, rtol=0.05)
+
+    def test_all_zero_weight_omega0_raises(self):
+        """When ALL weights are zero (and thus all Omega_0 rows have
+        weight 0), fit raises ValueError with the positive-weight pointer.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=71)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        df_s["w"] = 0.0
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with pytest.raises((ValueError, ZeroDivisionError), match="positive|empty|weight"):
+            self._fit(df_s, design=design)
+
+    def test_p_finite_mask_subsetting_path_populated(self):
+        """`survey_metadata` is populated correctly when survey arrays flow
+        through the finite_mask code path. The subsetting block at
+        `spillover.py` (Chunk 3c) runs unconditionally under the survey
+        path — when `n_nan == 0`, the no-op branch passes through; when
+        `n_nan > 0`, the subset/replace branch runs. This test exercises
+        the no-op pass-through; the subset/replace branch is exercised
+        by any DGP whose finite_mask drops rows (e.g. binary-treatment
+        baseline-treated unit panels that pre-PR Wave B tests cover)."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=12)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        res = self._fit(df_s, design=design)
+        # On the no-drop path: n_psu / n_strata reflect the input survey
+        # structure exactly. Both equal what _augment_with_survey created.
+        assert res.n_psu == 8
+        assert res.n_strata == 2
+        # survey_metadata.df_survey computed via the PSU+strata branch
+        assert res.survey_metadata is not None
+        assert res.survey_metadata.df_survey == 6
+        # n_obs reflects the post-finite_mask sample (no drops here)
+        assert res.n_obs == len(df_s)
+
+
+class TestSpilloverDiDWaveE1SurveyDesignEventStudy:
+    """Event-study branch + survey_design, both is_staggered branches."""
+
+    def test_l_event_study_survey_is_staggered_true(self):
+        """Full plumbing works end-to-end on the staggered event-study path."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=20)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            event_study=True,
+            horizon_max=2,
+        )
+        res = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+        assert res.spillover_effects is not None and not res.spillover_effects.empty
+        assert res.att_dynamic is not None and not res.att_dynamic.empty
+        # df_survey threading: t-stat uses df_survey-based critical value,
+        # not OLS-residual df. Verify by computing a manual t-quantile.
+        from scipy import stats as _stats
+
+        # CI half-width at survey DOF should differ from OLS-residual half-width
+        df_survey = res.survey_metadata.df_survey
+        t_crit_survey = _stats.t.ppf(1 - 0.05 / 2, df=df_survey)
+        ci_low, ci_high = res.conf_int
+        expected_half_width = t_crit_survey * res.se
+        observed_half_width = (ci_high - ci_low) / 2
+        np.testing.assert_allclose(observed_half_width, expected_half_width, rtol=1e-6)
+
+    def test_m_event_study_survey_is_staggered_false(self):
+        """Event-study path on the non-staggered branch."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=21, n_periods=4, t_treat=2)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            event_study=True,
+            horizon_max=1,
+        )
+        res = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert np.isfinite(res.att)
+        assert res.is_staggered is False  # confirm we're on the non-staggered branch
+
+    def test_n_aggregate_vs_event_study_parity_nonuniform_weights(self):
+        """Under non-uniform survey weights and a constant-effect DGP, the
+        event-study scalar `att` (lincom on post-treatment horizons with
+        SURVEY-WEIGHTED share weights) approximately reproduces the
+        aggregate ATT.
+
+        Load-bearing test of R2 codex fix: pre-fix, event-study used raw
+        n_obs_per_col shares on weighted WLS horizon coefficients,
+        producing inconsistent estimands. Post-fix, the lincom weights
+        are per-horizon survey-weight totals.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=40, n_periods=4, t_treat=2, error_sd=0.0)
+        units_sorted = sorted(df["unit"].unique())
+        rng = np.random.default_rng(40)
+        w_by_unit = dict(zip(units_sorted, rng.uniform(0.5, 2.0, size=len(units_sorted))))
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        df_s["w"] = df_s["unit"].map(w_by_unit)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+
+        est_agg = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            event_study=False,
+        )
+        res_agg = est_agg.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+
+        est_es = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            event_study=True,
+            horizon_max=1,
+        )
+        res_es = est_es.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert np.isfinite(res_agg.att) and np.isfinite(res_agg.se)
+        assert np.isfinite(res_es.att) and np.isfinite(res_es.se)
+        assert res_agg.n_psu == res_es.n_psu
+        assert res_agg.n_strata == res_es.n_strata
+        # Constant-effect parity: weighted-share event-study att should
+        # match the aggregate WLS coefficient. Tolerance acknowledges
+        # that event-study stage-2 design (treatment + per-k dummies + per-
+        # (ring, k) dummies) differs from the aggregate design (single
+        # treatment + per-ring dummies); residual-share-weighted parity
+        # is approximate.
+        np.testing.assert_allclose(res_es.att, res_agg.att, rtol=0.15)
+
+    def test_n2_event_study_distinguishes_survey_share_from_sample_share(self):
+        """Pin the survey-share lincom rule with a NON-constant-effect
+        staggered DGP. With `tau_k` varying across horizons + non-uniform
+        weights, the WRONG rule (raw n_obs_per_col sample shares) and the
+        documented survey-share rule produce materially different scalar
+        `att` values.
+
+        This test asserts (a) the reported `att` equals the impl-internal
+        survey-share linear combination on the captured `att_dynamic`
+        coefficients AND (b) the wrong sample-share rule would differ
+        from the reported value by more than 0.01. The combination rules
+        out a silent regression to sample-share weighting.
+
+        Reconstructing exact share_k from outside requires replicating
+        the horizon-binning logic (`_apply_horizon_binning`); we do that
+        manually via `np.clip(K_raw, -H, H)` on the post-treatment rows.
+        Note: `att_dynamic.n_obs` stores RAW per-k observation counts on
+        all paths (Wave C/D contract); the survey-share weights the impl
+        uses for the lincom live in the internal
+        `event_study_meta["weight_sum_per_col"]` slot, not in `att_dynamic`.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(
+            seed=80, tau_per_event_time=lambda k: 0.5 * (1.0 + max(k, 0))
+        )
+        units_sorted = sorted(df["unit"].unique())
+        # Correlate weights with treatment cohort so survey shares lean
+        # toward LATER cohorts (whose post-treat rows have larger K_direct
+        # under the tau(k) = 0.5*(1+k) curve). Without this correlation,
+        # uniform-vs-non-uniform weights give nearly identical atts.
+        first_treat_by_unit = df.groupby("unit")["first_treat"].first().to_dict()
+        w_corr = {
+            u: (3.0 if np.isfinite(first_treat_by_unit[u]) and first_treat_by_unit[u] >= 3 else 0.5)
+            for u in units_sorted
+        }
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        df_s["w"] = df_s["unit"].map(w_corr)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            event_study=True,
+            horizon_max=2,
+        )
+        res = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        df_uniform = df_s.copy()
+        df_uniform["w"] = 1.0
+        res_uniform = est.fit(
+            df_uniform,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert np.isfinite(res.att) and np.isfinite(res.se)
+        assert np.isfinite(res_uniform.att)
+        # Distinguishability gap (informational): cohort-correlated weights
+        # + non-constant tau_k skew the survey-share att toward later
+        # cohorts vs the uniform-weight reference.
+        gap = abs(res.att - res_uniform.att)
+        assert gap > 0.005, (
+            f"Test DGP doesn't distinguish survey-share from sample-share "
+            f"(reported {res.att:.4f} vs uniform-weights {res_uniform.att:.4f}, "
+            f"gap {gap:.4f})."
+        )
+
+        # Direct lincom reconstruction on captured att_dynamic.
+        #
+        # The impl computes per-horizon shares as:
+        #   share_k = sum_{i: X_2[i, col_k] != 0} survey_weights_normalized[i]
+        # where col_k is the direct-effect column for horizon k after
+        # `_apply_horizon_binning(K_arr, horizon_max)` (np.clip(-H, +H)).
+        # We replicate this externally:
+        H = 2  # horizon_max
+        # Hájek-normalize over the full sample to match _resolve_survey_for_fit
+        w_norm = df_s["w"] / df_s["w"].mean()
+        # K_direct for treated rows (D=1); D=0 rows carry NaN K and don't
+        # contribute to any direct-effect column.
+        treated_rows = df_s[df_s["D"] == 1].copy()
+        treated_rows["K_raw"] = treated_rows["time"] - treated_rows["first_treat"]
+        # Apply the same endpoint-pooling clip the impl uses
+        treated_rows["K_binned"] = np.clip(treated_rows["K_raw"].values, -H, H)
+        treated_rows["w_norm"] = treated_rows["unit"].map(
+            {u: w_norm.loc[df_s["unit"] == u].iloc[0] for u in treated_rows["unit"].unique()}
+        )
+        # Survey-share per binned k (post-treatment only: k >= 0)
+        survey_shares = (
+            treated_rows.loc[treated_rows["K_binned"] >= 0]
+            .groupby("K_binned")["w_norm"]
+            .sum()
+            .to_dict()
+        )
+        # Sample-share per binned k (raw row counts)
+        sample_shares = (
+            treated_rows.loc[treated_rows["K_binned"] >= 0]
+            .groupby("K_binned")
+            .size()
+            .astype(np.float64)
+            .to_dict()
+        )
+        att_dyn = res.att_dynamic
+        post_k = sorted(int(k) for k in survey_shares.keys() if int(k) in att_dyn.index)
+        if post_k:
+            survey_total = sum(survey_shares[k] for k in post_k)
+            survey_att = sum(
+                (survey_shares[k] / survey_total) * att_dyn.loc[k, "coef"] for k in post_k
+            )
+            sample_total = sum(sample_shares[k] for k in post_k)
+            sample_att = sum(
+                (sample_shares[k] / sample_total) * att_dyn.loc[k, "coef"] for k in post_k
+            )
+            # Impl uses survey-share rule. Tight tolerance (rtol=1e-6).
+            np.testing.assert_allclose(res.att, survey_att, rtol=1e-6)
+            # The wrong (sample-share) rule must differ by a non-trivial
+            # amount on this DGP — otherwise the assertion above wouldn't
+            # have load-bearing distinguishing power.
+            assert abs(survey_att - sample_att) > 1e-3, (
+                f"DGP doesn't distinguish survey-share ({survey_att}) from "
+                f"sample-share ({sample_att}); both rules produce the same "
+                f"att, so this test cannot catch a regression to the wrong rule."
+            )
+
+    def test_p2_finite_mask_forces_drop_under_survey(self):
+        """Force a real `finite_mask` drop on the survey path by including
+        a baseline-treated unit (D=1 at every period) alongside a late-
+        treated unit and an untreated far-control. The baseline-treated
+        unit has no Omega_0 rows → unit FE NaN → y_tilde NaN → finite_mask
+        drops its 2 rows from stage 2. The survey-array subsetting block
+        at `spillover.py` Chunk 3c must subset `survey_weights / strata /
+        psu / fpc` in parallel; without it, the meat helper would either
+        shape-mismatch or silently include dropped-row Psi values.
+
+        DGP shape mirrors the existing pre-Wave-E.1
+        `test_baseline_treated_unit_at_t0_recognized` (3 units × 2 periods
+        with cohort spacing that avoids tripping solve_ols's column-drop
+        path).
+        """
+        from diff_diff import SurveyDesign
+
+        rng = np.random.default_rng(1)
+        rows = []
+        # Mirror the DGP shape from the pre-existing
+        # `test_partial_unsupported_units_warn_and_drop` (haversine
+        # metric: lat=0 vs lat=10 vs lat=20 are degrees → ~1100 / 2200 km
+        # apart, well beyond d_bar=100). Survey columns added per unit
+        # (constant within unit; varied across units so the survey design
+        # is non-degenerate).
+        next_psu = 0
+        # 2 baseline-treated units (no Omega_0 → warn-and-drop).
+        for k in range(2):
+            for t in (0, 1):
+                rows.append(
+                    {
+                        "unit": f"baseline_{k}",
+                        "time": t,
+                        "lat": 0.0 + k * 0.001,
+                        "lon": 0.0,
+                        "D": 1,
+                        "y": rng.normal(),
+                        "w": 1.0,
+                        "stratum": 0,
+                        "psu": next_psu,
+                        "N_h": 200.0,
+                    }
+                )
+            next_psu += 1
+        # 3 validly-treated units (treated from t=1).
+        for k in range(3):
+            for t in (0, 1):
+                rows.append(
+                    {
+                        "unit": f"treated_t1_{k}",
+                        "time": t,
+                        "lat": 10.0 + k * 0.01,
+                        "lon": 0.0,
+                        "D": int(t == 1),
+                        "y": rng.normal(),
+                        "w": 1.0,
+                        "stratum": 0,
+                        "psu": next_psu,
+                        "N_h": 200.0,
+                    }
+                )
+            next_psu += 1
+        # 5 far-controls (full Omega_0 support).
+        for k in range(5):
+            for t in (0, 1):
+                rows.append(
+                    {
+                        "unit": f"far_control_{k}",
+                        "time": t,
+                        "lat": 20.0 + k * 0.01,
+                        "lon": 0.0,
+                        "D": 0,
+                        "y": rng.normal(),
+                        "w": 1.0,
+                        "stratum": 1,
+                        "psu": next_psu,
+                        "N_h": 200.0,
+                    }
+                )
+            next_psu += 1
+        df = pd.DataFrame(rows)
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with pytest.warns(UserWarning, match=r"2 unit\(s\) have NO"):
+            res = est.fit(
+                df,
+                outcome="y",
+                unit="unit",
+                time="time",
+                treatment="D",
+                survey_design=design,
+            )
+        # 2 baselines × 2 periods = 4 rows excluded.
+        # Remaining: 3 treated_t1 × 2 + 5 far × 2 = 16 rows.
+        assert res.n_obs == 16, f"expected 16 post-drop rows, got {res.n_obs}"
+        # survey_metadata recomputed on the subsetted design.
+        # PSUs 0-1 (baselines) dropped → 8 PSUs remain (3 + 5) across 2 strata.
+        assert res.survey_metadata is not None
+        assert res.n_psu == 8, f"expected n_psu=8 post-drop, got {res.n_psu}"
+        assert res.n_strata == 2
+        # df_survey = n_psu - n_strata = 8 - 2 = 6 (the survey-array
+        # subsetting block correctly removed the baseline-PSU labels from
+        # resolved.psu and recomputed n_psu / df_survey post-drop).
+        assert res.survey_metadata.df_survey == 6
+
+    def test_o_drift_golden(self):
+        """Pin Wave E.1 survey ATT + SE on a fixed-seed DGP.
+
+        Hard-coded golden values captured on the initial Wave E.1
+        implementation. Tolerance matches the BLAS-reduction-ordering band
+        per `feedback_assert_allclose_numerical_parity`. If a future change
+        shifts these, investigate (do NOT loosen tolerance per
+        `feedback_holistic_codex_test_failure_deviation`).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=999)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+        )
+        res = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        # Drift pins. Captured on initial Wave E.1 implementation (seed=999,
+        # standard 2-strata × 4-PSU augmentation). assert_allclose tolerance
+        # acknowledges PSU-aggregation BLAS reduction order variation.
+        _WAVE_E1_GOLDEN_ATT = -0.07749624543132044
+        _WAVE_E1_GOLDEN_SE = 0.005063316956088809
+        np.testing.assert_allclose(res.att, _WAVE_E1_GOLDEN_ATT, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(res.se, _WAVE_E1_GOLDEN_SE, rtol=1e-12, atol=1e-14)
+        # Lock down DOF + n_psu (these should be deterministic across runners)
+        assert res.n_psu == 8
+        assert res.n_strata == 2
+        assert res.survey_metadata.df_survey == 6

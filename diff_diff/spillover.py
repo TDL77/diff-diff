@@ -26,6 +26,7 @@ identification argument (Proposition 2.3 + Section 3.1 subsample logic).
 """
 
 import warnings
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -792,6 +793,7 @@ def _extract_event_study_results(
     df_resid: int,
     alpha: float,
     ring_labels: List[str],
+    weight_sum_per_col: Optional[np.ndarray] = None,
 ) -> Tuple[
     float,
     float,
@@ -816,9 +818,12 @@ def _extract_event_study_results(
       ``two_stage.py:1355-1389`` schema (``conf_int`` as ``(low, high)`` tuple,
       reference period as ``(0.0, 0.0)``).
 
-    Scalar ``att`` uses sample-share weighting on post-treatment ``tau_k``
-    with SE from linear-combination inference on the corresponding vcov
-    submatrix.
+    Scalar ``att`` uses share-weighted aggregation on post-treatment
+    ``tau_k`` with SE from linear-combination inference on the
+    corresponding vcov submatrix. When ``weight_sum_per_col`` is supplied
+    (Wave E.1 survey path), the per-horizon shares are SURVEY-WEIGHT
+    TOTALS (consistent with the WLS horizon coefficients); otherwise
+    shares are raw observation counts (Wave C sample-share rule).
     """
     # Per-coefficient inference dict keyed by (series, ring_label, k).
     per_coef: Dict[Tuple[str, Optional[str], int], Dict[str, Any]] = {}
@@ -964,9 +969,16 @@ def _extract_event_study_results(
                 "conf_int": (float("nan"), float("nan")),
             }
 
-    # Scalar att via sample-share-weighted average over post-treatment direct
+    # Scalar att via share-weighted average over post-treatment direct
     # coefficients (k >= 0). SE via linear-combination on the vcov submatrix
     # of those kept columns.
+    #
+    # Wave E.1: when `weight_sum_per_col` is provided (survey-design path),
+    # the per-horizon share weights are SURVEY-WEIGHT TOTALS rather than
+    # raw observation counts. This keeps the aggregation consistent with
+    # the WLS horizon coefficients themselves (which are weighted) — using
+    # raw n_obs_per_col would mix unweighted shares with weighted horizons
+    # and target the wrong estimand on weighted event-study fits.
     #
     # Fail-closed contract (PR #456 R1 fix): if ANY post-treatment direct
     # coefficient is NaN (solve_ols dropped the column as rank-deficient),
@@ -979,7 +991,8 @@ def _extract_event_study_results(
         i for i, (s, _, k) in enumerate(kept_col_meta) if s == "direct" and k >= 0
     ]
     if post_direct_indices and vcov is not None:
-        n_obs_post = np.array([n_obs_per_col[i] for i in post_direct_indices], dtype=np.float64)
+        share_source = weight_sum_per_col if weight_sum_per_col is not None else n_obs_per_col
+        n_obs_post = np.array([share_source[i] for i in post_direct_indices], dtype=np.float64)
         total_post_obs = n_obs_post.sum()
         coefs_post = np.array([coef[i] for i in post_direct_indices], dtype=np.float64)
         has_nan_post = bool(np.any(~np.isfinite(coefs_post)))
@@ -1387,6 +1400,7 @@ def _iterative_fe_subset(
     *,
     max_iter: int = _FE_ITER_MAX,
     tol: float = _FE_ITER_TOL,
+    weights: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray, bool]:
     """Stage-1 iterative-alternating-projection FE solver on the Butts subsample.
 
@@ -1396,8 +1410,16 @@ def _iterative_fe_subset(
     subsample (rank-deficient cells).
 
     Mirrors ``TwoStageDiD._iterative_fe`` structurally but operates on
-    integer-coded factors via ``np.bincount`` for speed and skips the
-    survey-weights branch (Wave B MVP).
+    integer-coded factors via ``np.bincount`` for speed.
+
+    **Wave E.1 weighted path** — when ``weights`` is supplied, the solver
+    minimizes ``sum_i w_i * (y_i - mu_i - lambda_t)^2`` (WLS-FE under
+    positive weights converges to the same fixed point as the unweighted
+    iteration for w == 1). The per-period mean becomes
+    ``sum_{i in t} w_i * resid_i / sum_{i in t} w_i`` (weighted bincount
+    numerator over weighted bincount denominator). The ``weights is None``
+    branch is bit-identical to the pre-Wave-E.1 path so the Wave B/C/D
+    no-survey contract is unchanged.
 
     Parameters
     ----------
@@ -1409,6 +1431,10 @@ def _iterative_fe_subset(
         Integer factor codes per row in ``[0, n_times)``.
     omega_0_mask : ndarray of shape (n_rows,), bool
         True for rows in the stage-1 fit subsample (D_it=0 AND S_it=0).
+    weights : ndarray of shape (n_rows,), optional
+        Hájek-normalized survey weights (``sum_i w_i = n``). When provided,
+        switches the iteration to WLS-FE; when None, the original unweighted
+        bincount path applies.
 
     Returns
     -------
@@ -1426,31 +1452,69 @@ def _iterative_fe_subset(
             "control units have d_it > d_bar (Butts Assumption 5(ii))."
         )
 
+    # Wave E.1: when survey weights are supplied, identification support
+    # for FE is the POSITIVE-WEIGHT portion of Omega_0. Zero-weight rows
+    # are outside the WLS estimating sample (per the registry contract at
+    # `docs/methodology/REGISTRY.md` SpilloverDiD "Variance (Wave E.1)"),
+    # so any unit / period whose Omega_0 rows all have weight 0 has no
+    # identifying contribution and must surface as `NaN` FE (which the
+    # downstream `finite_mask` excludes from stage-2). Without this gate,
+    # the weighted-bincount denominator collapses to 0 for those groups
+    # and `np.where(denom > 0, ...)` writes finite `0.0`, silently
+    # corrupting point estimates.
+    if weights is not None:
+        weights_arr = np.asarray(weights, dtype=np.float64)
+        omega_0_effective = omega_0_mask & (weights_arr > 0)
+        if omega_0_effective.sum() == 0:
+            raise ValueError(
+                "_iterative_fe_subset: positive-weight Omega_0 is empty "
+                "(all untreated-and-unexposed rows have survey_weights == 0). "
+                "Stage-1 FE estimation requires at least one Omega_0 row "
+                "with strictly positive survey weight."
+            )
+    else:
+        omega_0_effective = omega_0_mask
+
     n_units = int(unit_codes_full.max()) + 1
     n_times = int(time_codes_full.max()) + 1
 
     # Operate on the subset only (faster than masking each iteration).
-    y_sub = y_full[omega_0_mask]
-    unit_sub = unit_codes_full[omega_0_mask]
-    time_sub = time_codes_full[omega_0_mask]
+    y_sub = y_full[omega_0_effective]
+    unit_sub = unit_codes_full[omega_0_effective]
+    time_sub = time_codes_full[omega_0_effective]
     n_sub = len(y_sub)
+
+    # Wave E.1: extract weights subset once outside the iterative loop
+    # (mirrors TwoStageDiD's `w_0 = weights[omega_0_mask.values]` cache
+    # pattern in `_compute_gmm_variance`).
+    w_sub: Optional[np.ndarray] = None
+    if weights is not None:
+        w_sub = np.asarray(weights, dtype=np.float64)[omega_0_effective]
 
     alpha = np.zeros(n_sub)
     beta = np.zeros(n_sub)
     converged = False
     for _ in range(max_iter):
-        # beta[t] = mean over rows in time-group t of (y - alpha)
+        # beta[t] = (weighted) mean over rows in time-group t of (y - alpha)
         resid = y_sub - alpha
-        time_sums = np.bincount(time_sub, weights=resid, minlength=n_times)
-        time_counts = np.bincount(time_sub, minlength=n_times)
-        time_means = np.where(time_counts > 0, time_sums / np.maximum(time_counts, 1), 0.0)
+        if w_sub is None:
+            time_sums = np.bincount(time_sub, weights=resid, minlength=n_times)
+            time_denoms = np.bincount(time_sub, minlength=n_times).astype(np.float64)
+        else:
+            time_sums = np.bincount(time_sub, weights=w_sub * resid, minlength=n_times)
+            time_denoms = np.bincount(time_sub, weights=w_sub, minlength=n_times)
+        time_means = np.where(time_denoms > 0, time_sums / np.maximum(time_denoms, 1e-300), 0.0)
         beta_new = time_means[time_sub]
 
-        # alpha[i] = mean over rows in unit-group i of (y - beta_new)
+        # alpha[i] = (weighted) mean over rows in unit-group i of (y - beta_new)
         resid = y_sub - beta_new
-        unit_sums = np.bincount(unit_sub, weights=resid, minlength=n_units)
-        unit_counts = np.bincount(unit_sub, minlength=n_units)
-        unit_means = np.where(unit_counts > 0, unit_sums / np.maximum(unit_counts, 1), 0.0)
+        if w_sub is None:
+            unit_sums = np.bincount(unit_sub, weights=resid, minlength=n_units)
+            unit_denoms = np.bincount(unit_sub, minlength=n_units).astype(np.float64)
+        else:
+            unit_sums = np.bincount(unit_sub, weights=w_sub * resid, minlength=n_units)
+            unit_denoms = np.bincount(unit_sub, weights=w_sub, minlength=n_units)
+        unit_means = np.where(unit_denoms > 0, unit_sums / np.maximum(unit_denoms, 1e-300), 0.0)
         alpha_new = unit_means[unit_sub]
 
         max_change = max(
@@ -2125,10 +2189,23 @@ class SpilloverDiD:
         meat structure ``sigma_hat^2 * (X_10' X_10)``; use ``"hc1"`` for
         heteroskedasticity-robust SE with the GMM correction.
         """
-        if survey_design is not None:
+        # Wave E.1: lift the Wave B/C/D upfront survey_design rejection.
+        # The full resolution block (pweight gate, replicate gate, unit-constant
+        # check, cluster-vs-PSU warn) runs AFTER `_validate_spillover_inputs`
+        # below so it sees the panel columns the validator guarantees.
+        #
+        # The conley × survey composition is genuinely novel methodology
+        # (no reference software combines spatial-HAC + Binder TSL on a
+        # two-stage IF) and ships separately as Wave E.2. Reject upfront so
+        # users get the pointer without waiting through stage 1 / 2 work.
+        if survey_design is not None and self.vcov_type == "conley":
             raise NotImplementedError(
-                "SpilloverDiD does not yet support survey_design= ; planned "
-                "as a follow-up extension. See TODO.md."
+                "SpilloverDiD does not yet support vcov_type='conley' "
+                "combined with survey_design=. Wave E.2 (planned) will "
+                "compose Conley spatial-HAC with within-stratum Conley "
+                "sandwich on PSU totals; see TODO.md for the planned PR. "
+                "For Wave E.1, use vcov_type='hc1' (with optional "
+                "cluster=<col> for CR1) plus survey_design=."
             )
         # Validate `anticipation` up front: must be a non-negative integer.
         # Accepting fractional or negative values would silently shift
@@ -2276,6 +2353,52 @@ class SpilloverDiD:
         # Step 1: front-door validation (rings, d_bar, timing-kwargs XOR,
         # coords, panel structure — all on COERCED time/first_treat labels).
         self._validate_spillover_inputs(data, treatment, first_treat, time, unit, outcome)
+
+        # Step 1b (Wave E.1): survey-design resolution + validation.
+        #
+        # Mirrors TwoStageDiD's resolution block at `two_stage.py:485-511`.
+        # Returns (resolved_survey, survey_weights, weight_type, survey_metadata)
+        # 4-tuple, all None when `survey_design is None`. Weights are
+        # Hájek-normalized (sum_i w_i = n) so the downstream gamma_hat solve
+        # + Psi construction + bread inversion produce design-consistent
+        # variance per Gerber (2026) Proposition 1.
+        from diff_diff.survey import (
+            _inject_cluster_as_psu,
+            _resolve_effective_cluster,
+            _resolve_survey_for_fit,
+            _validate_unit_constant_survey,
+        )
+
+        resolved_survey, survey_weights, survey_weight_type, survey_metadata = (
+            _resolve_survey_for_fit(survey_design, data, "analytical")
+        )
+
+        if resolved_survey is not None:
+            _validate_unit_constant_survey(data, unit, survey_design)
+            # Wave E.1 supports pweight only — fweight / aweight semantics
+            # do not match Gerber (2026) Proposition 1's stratified-cluster
+            # Taylor linearization.
+            if resolved_survey.weight_type != "pweight":
+                raise ValueError(
+                    f"SpilloverDiD survey support requires weight_type='pweight', "
+                    f"got '{resolved_survey.weight_type}'. The Wave E.1 Binder "
+                    f"TSL variance assumes probability weights; see "
+                    f"docs/methodology/REGISTRY.md SpilloverDiD section."
+                )
+            # Wave E.1: replicate-weight variance is deferred as separable
+            # follow-up scope. Per Gerber (2026) Appendix A, the IF-reweighting
+            # shortcut does NOT apply to TwoStageDiD-class estimators because
+            # gamma_hat is weight-sensitive — replicate path requires per-
+            # replicate full re-fit.
+            if resolved_survey.uses_replicate_variance:
+                raise NotImplementedError(
+                    "SpilloverDiD does not yet support replicate-weight variance "
+                    "(BRR / Fay / JK1 / JKn / SDR). Per Gerber (2026) Appendix A, "
+                    "the IF-reweighting shortcut does not apply because gamma_hat "
+                    "is weight-sensitive; correct support requires per-replicate "
+                    "full re-fit of stage 1 and stage 2. Queued as a follow-up. "
+                    "See TODO.md."
+                )
 
         # Step 2: convert binary treatment to per-unit first_treat if needed.
         # Track whether `first_treat` was AUTO-GENERATED (from a binary D
@@ -2452,6 +2575,20 @@ class SpilloverDiD:
         # Step 10: Butts Omega_0 mask = (D_it=0 AND S_it=0).
         omega_0_mask = (D_it == 0) & (S_it == 0)
 
+        # Wave E.1: under survey_design, identification support is the
+        # POSITIVE-WEIGHT portion of Omega_0. Zero-weight rows are outside
+        # the WLS estimating sample (per the registry contract); using raw
+        # Omega_0 for unsupported / connectivity checks would let zero-
+        # weight rows masquerade as identifying support — silently wrong
+        # `att` / ring effects / vcov when a raw Omega_0 bridge has zero
+        # weight (positive-weight Omega_0 subgraph disconnected) or when
+        # a period's only Omega_0 rows all have weight 0 (time FE
+        # unidentified despite passing raw-membership checks).
+        if survey_weights is not None:
+            omega_0_effective = omega_0_mask & (np.asarray(survey_weights) > 0)
+        else:
+            omega_0_effective = omega_0_mask
+
         # Step 10b: row-level Omega_0 identification check.
         #
         # Two regimes (round-16 codex review split):
@@ -2468,8 +2605,8 @@ class SpilloverDiD:
         #     observations rather than requiring every unit estimable.
         unit_codes_arr = np.asarray(unit_codes_full)
         time_codes_arr = np.asarray(time_codes_full)
-        units_in_omega_0 = set(unit_codes_arr[omega_0_mask].tolist())
-        times_in_omega_0 = set(time_codes_arr[omega_0_mask].tolist())
+        units_in_omega_0 = set(unit_codes_arr[omega_0_effective].tolist())
+        times_in_omega_0 = set(time_codes_arr[omega_0_effective].tolist())
         all_unit_codes = set(unit_codes_arr.tolist())
         all_time_codes = set(time_codes_arr.tolist())
         unsupported_units = sorted(all_unit_codes - units_in_omega_0)
@@ -2523,7 +2660,7 @@ class SpilloverDiD:
         # but not SUFFICIENT — connectivity is the load-bearing
         # identification condition for stage 1.
         _check_omega_0_connectivity(
-            omega_0_mask=omega_0_mask,
+            omega_0_mask=omega_0_effective,
             unit_codes_arr=unit_codes_arr,
             time_codes_arr=time_codes_arr,
             units_in_omega_0=units_in_omega_0,
@@ -2531,13 +2668,15 @@ class SpilloverDiD:
             unit_uniques=unit_uniques,
         )
 
-        # Step 11: stage 1 — fit FE on Omega_0.
+        # Step 11: stage 1 — fit FE on Omega_0. Wave E.1 threads Hájek-
+        # normalized survey weights when survey_design was supplied.
         y_full = np.asarray(data[outcome].values, dtype=np.float64)
         unit_fe_arr, time_fe_arr, converged = _iterative_fe_subset(
             y_full,
             np.asarray(unit_codes_full),
             np.asarray(time_codes_full),
             omega_0_mask,
+            weights=survey_weights,
         )
         if not converged:
             warnings.warn(
@@ -2547,7 +2686,7 @@ class SpilloverDiD:
                 UserWarning,
                 stacklevel=2,
             )
-        stage1_n_obs = int(omega_0_mask.sum())
+        stage1_n_obs = int(omega_0_effective.sum())
 
         # Step 12: residualize ALL observations.
         y_tilde = _residualize_butts(
@@ -2675,7 +2814,9 @@ class SpilloverDiD:
         # Step 14: subset arrays to the estimation sample (finite y_tilde rows).
         # Apply to design, outcome, cluster ids, AND the Conley spatial/temporal
         # auxiliary arrays so the HC1/CR1/Conley sample-size adjustments use the
-        # correct n.
+        # correct n. Wave E.1 also subsets the survey-design arrays in parallel
+        # so the Binder TSL meat sees the post-finite_mask sample (mirrors
+        # `two_stage.py:567-601` pattern).
         cluster_ids_full = (
             np.asarray(data[self.cluster].values) if self.cluster is not None else None
         )
@@ -2694,6 +2835,144 @@ class SpilloverDiD:
             time_vals_fit = np.asarray(time_vals)
             unit_vals_fit = np.asarray(unit_vals)
 
+        # Wave E.1 parallel: subset survey_weights + resolved_survey arrays
+        # so PSU aggregation in `_compute_stratified_meat_from_psu_scores`
+        # sees aligned-length arrays. Other ResolvedSurveyDesign fields
+        # (lonely_psu, weight_type, replicate_method, etc.) propagate
+        # UNCHANGED through `replace()`. `replicate_weights` is included for
+        # symmetry with TwoStageDiD's pattern + forward-compat with the
+        # planned replicate follow-up; Wave E.1 rejects replicate variance
+        # upfront so this branch is a no-op in practice.
+        if resolved_survey is not None and n_nan > 0:
+            survey_weights_fit = survey_weights[finite_mask]
+            resolved_survey_fit = replace(
+                resolved_survey,
+                weights=resolved_survey.weights[finite_mask],
+                strata=(
+                    resolved_survey.strata[finite_mask]
+                    if resolved_survey.strata is not None
+                    else None
+                ),
+                psu=(resolved_survey.psu[finite_mask] if resolved_survey.psu is not None else None),
+                fpc=(resolved_survey.fpc[finite_mask] if resolved_survey.fpc is not None else None),
+                replicate_weights=(
+                    resolved_survey.replicate_weights[finite_mask]
+                    if resolved_survey.replicate_weights is not None
+                    else None
+                ),
+            )
+            # Recompute n_psu / n_strata + survey_metadata after subset
+            # (mirror two_stage.py:602-610).
+            resolved_survey_fit = replace(
+                resolved_survey_fit,
+                n_psu=(
+                    len(np.unique(resolved_survey_fit.psu))
+                    if resolved_survey_fit.psu is not None
+                    else 0
+                ),
+                n_strata=(
+                    len(np.unique(resolved_survey_fit.strata))
+                    if resolved_survey_fit.strata is not None
+                    else 0
+                ),
+            )
+            from diff_diff.survey import compute_survey_metadata
+
+            raw_w_fit = (
+                np.asarray(data[survey_design.weights].values, dtype=np.float64)[finite_mask]
+                if (survey_design is not None and getattr(survey_design, "weights", None))
+                else np.ones(int(finite_mask.sum()), dtype=np.float64)
+            )
+            survey_metadata = compute_survey_metadata(resolved_survey_fit, raw_w_fit)
+        else:
+            survey_weights_fit = survey_weights
+            resolved_survey_fit = resolved_survey
+
+        # Wave E.1 cluster-vs-PSU resolution (AFTER `_resolve_survey_for_fit`
+        # so the warning text can reference actual PSU count). Two cases:
+        #
+        # 1. Both `cluster=<col>` and `survey_design.psu` provided:
+        #    `_resolve_effective_cluster` warns + prefers PSU (TwoStageDiD
+        #    parity — see `survey.py:1253-1275`). SpilloverDiD's
+        #    `cluster=<col>` is most often a spatial / unit-level label;
+        #    PSU is the design-relevant cluster.
+        # 2. `cluster=<col>` provided without `survey_design.psu`:
+        #    `_inject_cluster_as_psu` substitutes the cluster column for
+        #    the missing PSU so the survey path becomes proper CR1 +
+        #    Binder TSL (matches the documented contract for `cluster=<col>`
+        #    under survey_design — see REGISTRY "Variance (Wave E.1)").
+        if resolved_survey_fit is not None:
+            effective_cluster_ids = _resolve_effective_cluster(
+                resolved_survey_fit,
+                cluster_ids_fit,
+                self.cluster if self.cluster is not None else None,
+            )
+            if effective_cluster_ids is not None:
+                # Wave E.1 R11 fix: when `cluster=<col>` becomes the effective
+                # PSU (because survey_design.psu is absent), the cluster
+                # column must satisfy the same panel-survey constancy
+                # contract that `_validate_unit_constant_survey` enforces on
+                # explicit `survey_design.psu`. Without this check, a
+                # time-varying cluster column silently becomes the PSU labels
+                # used for Binder TSL aggregation — producing wrong `n_psu`,
+                # `df_survey`, and meat — even though the same labels passed
+                # via `survey_design.psu=` would be rejected by the panel-
+                # survey validator at `survey.py:1015`.
+                if self.cluster is not None and resolved_survey.psu is None:
+                    cluster_arr = np.asarray(effective_cluster_ids)
+                    unit_arr_full = np.asarray(data[unit].values)
+                    # Subset cluster array to fit sample (already done above
+                    # in the n_nan > 0 block via cluster_ids_fit; here
+                    # effective_cluster_ids is the post-resolve PSU labels
+                    # which align with the fit sample's unit ordering).
+                    unit_arr_for_check = unit_arr_full[finite_mask] if n_nan > 0 else unit_arr_full
+                    # Validate within-unit constancy on the cluster column.
+                    constancy_df = pd.DataFrame(
+                        {"unit": unit_arr_for_check, "cluster": cluster_arr}
+                    )
+                    n_vals_per_unit = constancy_df.groupby("unit")["cluster"].nunique()
+                    nonconstant = n_vals_per_unit[n_vals_per_unit > 1]
+                    if len(nonconstant) > 0:
+                        bad_units = list(nonconstant.index[:5])
+                        raise ValueError(
+                            f"`cluster='{self.cluster}'` is being used as the "
+                            f"effective PSU under survey_design= (no explicit "
+                            f"survey_design.psu provided), but the cluster "
+                            f"column varies within unit for "
+                            f"{len(nonconstant)} unit(s) "
+                            f"(examples: {bad_units}). Panel-survey TSL "
+                            f"requires PSU labels to be constant within unit "
+                            f"across periods (matches the explicit-PSU "
+                            f"contract enforced at "
+                            f"`_validate_unit_constant_survey`). Either "
+                            f"collapse the cluster column to be unit-constant, "
+                            f"or pass an explicit unit-constant column via "
+                            f"`survey_design=SurveyDesign(..., psu=<col>)`."
+                        )
+                resolved_survey_fit = _inject_cluster_as_psu(
+                    resolved_survey_fit, effective_cluster_ids
+                )
+                # The Binder TSL meat reads PSU labels directly from
+                # `resolved_survey_fit.psu`; the cluster_ids_fit array is
+                # kept in sync so the downstream non-survey dispatch +
+                # n_clusters reporting see consistent labels.
+                cluster_ids_fit = resolved_survey_fit.psu
+                # Recompute survey_metadata so summary() / to_dict() reflect
+                # the post-injection design (df_survey / n_psu were computed
+                # on the pre-injection state before `_inject_cluster_as_psu`
+                # synthesized PSU from cluster=<col>). Without this,
+                # cluster=<col>+survey-without-PSU fits would report
+                # df_survey=0 / n_psu=0 despite the inference using the
+                # injected cluster labels.
+                from diff_diff.survey import compute_survey_metadata as _csm
+
+                raw_w_for_meta = (
+                    np.asarray(data[survey_design.weights].values, dtype=np.float64)[finite_mask]
+                    if (survey_design is not None and getattr(survey_design, "weights", None))
+                    else np.ones(int(finite_mask.sum()), dtype=np.float64)
+                )
+                survey_metadata = _csm(resolved_survey_fit, raw_w_for_meta)
+
         # Wave C P1 fix (PR #456 R1): for event_study=True, recompute
         # n_obs_per_col on the POST-finite-mask sample. The original
         # n_obs_per_col from _build_event_study_design counted rows on the
@@ -2704,16 +2983,32 @@ class SpilloverDiD:
         # stage-2 estimation sample that solve_ols sees.
         if self.event_study and event_study_meta is not None:
             event_study_meta["n_obs_per_col"] = (X_2_fit != 0).sum(axis=0).astype(np.int64)
+            # Wave E.1: when survey weights are present, also compute per-column
+            # survey-weight totals for the event-study scalar `att` lincom
+            # aggregation. Using raw `n_obs_per_col` shares on weighted WLS
+            # horizon coefficients targets the wrong estimand; the audited
+            # composition is survey-weighted-totals as the lincom weights.
+            if survey_weights_fit is not None:
+                indicator_fit = (X_2_fit != 0).astype(np.float64)
+                event_study_meta["weight_sum_per_col"] = indicator_fit.T @ survey_weights_fit
+            else:
+                event_study_meta["weight_sum_per_col"] = None
 
-        # Step 15: stage-2 OLS — coef + residuals only. Wave D computes the
-        # vcov below via the Gardner GMM first-stage uncertainty correction
-        # (documented synthesis of Butts §3.1 + Gardner §4 + Conley 1999).
+        # Step 15: stage-2 OLS (or WLS under Wave E.1 survey path) —
+        # coef + residuals only. Wave D computes the vcov below via the
+        # Gardner GMM first-stage uncertainty correction (documented
+        # synthesis of Butts §3.1 + Gardner §4 + Conley 1999); Wave E.1
+        # additionally composes Gerber (2026) Prop 1 Binder TSL when
+        # survey_design is supplied.
         # `solve_ols` returns vcov=None when return_vcov=False.
         solve_kwargs: Dict[str, Any] = {
             "return_vcov": False,
             "rank_deficient_action": self.rank_deficient_action,
             "column_names": col_names_all,
         }
+        if survey_weights_fit is not None:
+            solve_kwargs["weights"] = survey_weights_fit
+            solve_kwargs["weight_type"] = "pweight"
         coef, residuals, _ = solve_ols(X_2_fit, y_tilde_fit, **solve_kwargs)  # type: ignore[misc]
 
         # Wave D: Gardner GMM first-stage uncertainty correction.
@@ -2795,6 +3090,13 @@ class SpilloverDiD:
         # without this derivation, a user-supplied `cluster=<col>` was
         # silently ignored on the default hc1 path, yielding HC1 SEs when
         # CR1 was requested.)
+        #
+        # Wave E.1 amendment: when `resolved_survey_fit.psu` is set,
+        # `cluster_ids_fit` was overwritten with the PSU labels above
+        # (TwoStageDiD warn-and-use-PSU pattern). The PSU IS the cluster,
+        # so the dispatch naturally lands on "cluster" — which the meat
+        # helper then routes into the Binder TSL branch because
+        # `resolved_survey_fit is not None`.
         if self.vcov_type == "conley":
             _wave_d_vcov_mode: "Literal['hc1', 'conley', 'cluster']" = "conley"
         elif cluster_ids_fit is not None:
@@ -2804,7 +3106,9 @@ class SpilloverDiD:
 
         # Compute the GMM-corrected meat (Psi' K Psi). Caller-side bread
         # sandwich below mirrors `TwoStageDiD._compute_gmm_variance`
-        # at `two_stage.py:1763-1791`.
+        # at `two_stage.py:1763-1791`. Wave E.1 passes survey_weights +
+        # resolved_survey kwargs; the helper routes to Binder TSL meat
+        # when both are non-None (hc1 / cluster modes).
         meat_kept = _compute_gmm_corrected_meat(
             X_1_sparse=X_1_sparse_fit,
             X_10_sparse=X_10_sparse_fit,
@@ -2820,12 +3124,19 @@ class SpilloverDiD:
             conley_time=_conley_time_arg,
             conley_unit=_conley_unit_arg,
             conley_lag_cutoff=_conley_lag_arg,
+            survey_weights=survey_weights_fit,
+            resolved_survey=resolved_survey_fit,
         )
 
-        # Bread sandwich: A_22^{-1} = (X_2' X_2)^{-1} via `np.linalg.solve`
+        # Bread sandwich: A_22^{-1} = (X_2' W X_2)^{-1} via `np.linalg.solve`
         # with dense lstsq fallback + UserWarning (mirrors the bread-fallback
-        # pattern at `two_stage.py:1763-1788`).
-        A_22_kept = X_2_kept.T @ X_2_kept
+        # pattern at `two_stage.py:1763-1788`). Wave E.1 adds the W diagonal
+        # under the survey path so the bread aligns with the WLS gamma /
+        # weighted Psi construction in the meat helper.
+        if survey_weights_fit is not None:
+            A_22_kept = X_2_kept.T @ (X_2_kept * survey_weights_fit[:, None])
+        else:
+            A_22_kept = X_2_kept.T @ X_2_kept
         eye_kept = np.eye(A_22_kept.shape[0])
         try:
             bread_kept = np.linalg.solve(A_22_kept, eye_kept)
@@ -2851,25 +3162,47 @@ class SpilloverDiD:
         else:
             vcov = vcov_kept
 
-        # Step 16a: shared df_resid computation.
+        # Step 16a: shared df_for_inference computation.
+        #
+        # Wave D (non-survey): df = n_obs - effective_rank (OLS residual df).
+        # Wave E.1 (survey): df = resolved_survey_fit.df_survey, which
+        # encodes the standard survey-statistics DOF
+        # (PSU + strata → n_PSU - n_strata; PSU only → n_PSU - 1;
+        #  strata only → n_obs - n_strata; neither → n_obs - 1; see
+        #  `ResolvedSurveyDesign.df_survey` at survey.py:619-627). The
+        # Binder TSL meat is design-consistent; the OLS residual df is
+        # no longer the right t-distribution DOF.
         n_obs_eff = int(finite_mask.sum())
         k_effective = int(np.isfinite(coef).sum())
         df_resid = n_obs_eff - k_effective
-        if df_resid <= 0:
-            # Degenerate: no residual degrees of freedom. Force NaN
-            # inference by setting df_resid = 0 (safe_inference treats
-            # df = 0 as no usable degrees of freedom, returning NaN for
-            # t-stat / p-value / CI). Distinct from df_resid = None
-            # which would fall through to a normal-distribution
-            # approximation — misleading on a degenerate sample.
+        if resolved_survey_fit is not None:
+            df_survey_val = resolved_survey_fit.df_survey
+            df_for_inference: int = int(df_survey_val) if df_survey_val is not None else 0
+        else:
+            df_for_inference = df_resid
+        if df_for_inference <= 0:
+            # Saturated. Either OLS-saturated (n - k <= 0) or
+            # survey-saturated (df_survey = 0; lonely_psu='remove' may
+            # have removed all strata). Force NaN inference by setting
+            # df = 0 (safe_inference treats df = 0 as no usable degrees
+            # of freedom). Distinct from df = None which would fall
+            # through to a normal-distribution approximation —
+            # misleading on a degenerate sample.
+            survey_note = (
+                " (survey-saturated: df_survey = "
+                f"{int(df_survey_val) if df_survey_val is not None else 0}; "
+                "lonely_psu='remove' may have removed all strata)"
+                if resolved_survey_fit is not None
+                else ""
+            )
             warnings.warn(
-                f"SpilloverDiD stage-2 residual df = {df_resid} (n_obs="
-                f"{n_obs_eff}, effective_rank={k_effective}). Inference "
-                "(t-stat, p-value, CI) will be NaN.",
+                f"SpilloverDiD inference df = {df_for_inference} (n_obs="
+                f"{n_obs_eff}, effective_rank={k_effective}{survey_note}). "
+                "Inference (t-stat, p-value, CI) will be NaN.",
                 UserWarning,
                 stacklevel=2,
             )
-            df_resid = 0
+            df_for_inference = 0
 
         # Step 16b: branch on event_study mode for result extraction.
         att_dynamic_df: Optional[pd.DataFrame] = None
@@ -2896,9 +3229,10 @@ class SpilloverDiD:
                 rectangular_grid=event_study_meta["rectangular_grid"],
                 n_obs_per_col=event_study_meta["n_obs_per_col"],
                 ref_period=event_study_meta["ref_period"],
-                df_resid=df_resid,
+                df_resid=df_for_inference,
                 alpha=self.alpha,
                 ring_labels=ring_labels,
+                weight_sum_per_col=event_study_meta.get("weight_sum_per_col"),
             )
             reference_period_used = event_study_meta["ref_period"]
         else:
@@ -2914,7 +3248,9 @@ class SpilloverDiD:
                 if vcov is not None and np.isfinite(vcov[0, 0])
                 else float("nan")
             )
-            tau_t, tau_p, tau_ci = safe_inference(tau_total, tau_se, alpha=self.alpha, df=df_resid)
+            tau_t, tau_p, tau_ci = safe_inference(
+                tau_total, tau_se, alpha=self.alpha, df=df_for_inference
+            )
 
             # Per-ring inference.
             ring_rows = []
@@ -2926,7 +3262,7 @@ class SpilloverDiD:
                     if vcov is not None and np.isfinite(vcov[idx, idx])
                     else float("nan")
                 )
-                t_j, p_j, ci_j = safe_inference(coef_j, se_j, alpha=self.alpha, df=df_resid)
+                t_j, p_j, ci_j = safe_inference(coef_j, se_j, alpha=self.alpha, df=df_for_inference)
                 ring_rows.append(
                     {
                         "ring": ring_labels[j],
@@ -2979,7 +3315,21 @@ class SpilloverDiD:
                 int(len(np.unique(cluster_ids_fit))) if cluster_ids_fit is not None else None
             ),
             vcov_type=self.vcov_type,
-            cluster_name=self.cluster,
+            # Wave E.1: when survey.psu wins the warn-and-use-PSU override
+            # (`_resolve_effective_cluster`), the EFFECTIVE clustering label
+            # is `survey_design.psu`, not `self.cluster`. Report that so
+            # `DiDResults.to_dict()` machine-readable metadata stays
+            # consistent with the variance numbers.
+            cluster_name=(
+                survey_design.psu
+                if (
+                    survey_design is not None
+                    and getattr(survey_design, "psu", None)
+                    and resolved_survey_fit is not None
+                    and resolved_survey_fit.psu is not None
+                )
+                else self.cluster
+            ),
             conley_lag_cutoff=(self.conley_lag_cutoff if self.vcov_type == "conley" else None),
             spillover_effects=spillover_df,
             ring_breakpoints=list(self.rings),
@@ -2994,6 +3344,29 @@ class SpilloverDiD:
             event_study_effects=event_study_effects_dict,
             horizon_max=self.horizon_max if self.event_study else None,
             reference_period=reference_period_used,
+            # Wave E.1 survey-design metadata. Populated only when
+            # survey_design was supplied (otherwise all None for
+            # backward-compat with the Wave B/C/D no-survey contract).
+            #
+            # `n_psu` follows the implicit-PSU convention from
+            # `ResolvedSurveyDesign.df_survey`: when `psu is None` after
+            # all injection steps (no `cluster=<col>` and no
+            # `survey_design.psu`), each observation is its own singleton
+            # PSU and the reported count is `n_obs`. This keeps the
+            # top-level `n_psu` consistent with `survey_metadata.df_survey`
+            # so `summary()` / `to_dict()` are coherent on no-PSU survey
+            # fits.
+            survey_metadata=survey_metadata,
+            n_psu=(
+                (
+                    resolved_survey_fit.n_psu
+                    if resolved_survey_fit.psu is not None
+                    else int(finite_mask.sum())
+                )
+                if resolved_survey_fit is not None
+                else None
+            ),
+            n_strata=resolved_survey_fit.n_strata if resolved_survey_fit is not None else None,
         )
         self.results_ = result
         self.is_fitted_ = True

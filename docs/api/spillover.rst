@@ -205,13 +205,67 @@ and planned follow-up enhancements:
   (the single bin ``k=0`` leaves no event-time pair to anchor the
   reference period — for a single aggregate effect, use
   ``event_study=False`` instead). Scalar ``att`` becomes a
-  sample-share-weighted average of post-treatment ``tau_k`` with SE
+  share-weighted average of post-treatment ``tau_k`` with SE
   from linear-combination inference on the post-treatment vcov block.
   Per-event-time SEs apply the Wave D Gardner GMM first-stage
   uncertainty correction (see the "Gardner GMM first-stage correction"
-  entry above).
-- **Survey-design integration** — ``survey_design=`` raises
-  ``NotImplementedError``.
+  entry above). Wave E.1 amendment: when ``survey_design=`` is supplied,
+  the per-horizon shares are **survey-weight totals** rather than raw
+  observation counts (``share_k = sum_i w_i * 1{K_direct_i = k AND
+  treated_i = 1}``); the same vector enters both the ``att`` point
+  estimate and ``Var(att) = w' V_subset w``. Without this, the
+  lincom would mix unweighted aggregation shares with weighted WLS
+  horizon coefficients and target the wrong estimand. See the registry
+  "Variance (Wave E.1)" subsection for the full survey-aggregation
+  contract.
+- **Survey-design integration (Wave E.1 — HC1 / CR1 via Binder TSL).**
+  SHIPPED in Wave E.1. ``survey_design=`` is now supported on
+  ``vcov_type ∈ {"hc1"}`` and CR1 (``cluster=<col>``) paths.
+
+  .. note::
+
+     Wave E.1 composes Gerber (2026, arXiv:2605.04124) Proposition 1 —
+     Binder Taylor Series Linearization for IF representations of smooth
+     functionals; explicitly derived for TwoStageDiD in the paper's
+     Appendix — with the Wave D Gardner GMM first-stage uncertainty
+     correction (Butts 2021 §3.1 + Gardner 2022 §4) applied to
+     SpilloverDiD's ring-indicator stage-2 design. The composition is
+     mechanical: SpilloverDiD's per-obs IF
+     ``psi_i = gamma_hat' * X_{10,i} * eps_{10,i} - X_{2,i} * eps_{2,i}``
+     is aggregated to PSU level, then passed to the audited Binder TSL
+     meat helper. Survey weights enter via Hájek normalization at the
+     gamma_hat solve, eps construction, and bread inversion. Degrees of
+     freedom for the t-distribution lookup use
+     ``ResolvedSurveyDesign.df_survey`` (4-way branch: PSU+strata →
+     ``n_PSU - n_strata``; PSU only → ``n_PSU - 1``; strata only →
+     ``n_obs - n_strata``; neither → ``n_obs - 1``). No reference
+     software combines all ingredients.
+
+  Restrictions:
+
+  - ``vcov_type="conley" + survey_design=`` raises
+    ``NotImplementedError``; Wave E.2 (planned) will add the Conley × survey
+    product-kernel synthesis with within-stratum Conley sandwich on PSU
+    totals.
+  - Replicate-weight variance (BRR / Fay / JK1 / JKn / SDR) raises
+    ``NotImplementedError``; per Gerber (2026) Appendix A, the
+    IF-reweighting shortcut does not apply because ``gamma_hat`` is
+    weight-sensitive — follow-up requires per-replicate full re-fit.
+  - Singleton-stratum ``lonely_psu="remove"`` with all strata singletons
+    saturates ``df_survey = 0`` and the meat helper NaN-fails; SE /
+    t-stat / p-value / CI all NaN-propagate (no silent fallback to HC1).
+  - ``cluster=<col> + survey_design.psu`` with **different groupings**
+    emits a ``UserWarning`` and uses PSU as the cluster (mirrors
+    ``TwoStageDiD._resolve_effective_cluster``). When the two groupings
+    are identical, no warning fires; PSU still takes precedence
+    (inference is unchanged either way).
+  - ``SurveyDesign.subpopulation()`` with FE-undefined zero-weight
+    padding rows: Wave E.1 physically removes such rows from the
+    survey design via ``finite_mask`` rather than retaining them as
+    zero-score domain padding. ``n_psu`` / ``df_survey`` / Binder
+    centering reflect the reduced fit sample rather than the full
+    domain design. See the REGISTRY note for details and the Wave E.3
+    follow-up tracked in ``TODO.md``.
 - **Count-of-treated-in-ring** — only the "nearest-treated ring"
   specification is implemented. The "count" form re-introduces
   functional-form dependence (paper Section 3.2 end) and is queued.

@@ -266,6 +266,7 @@ class SurveyDesign:
                     else None
                 ),
                 mse=self.mse,
+                nest=self.nest,
             )
 
         # --- Strata ---
@@ -417,6 +418,7 @@ class SurveyDesign:
             n_strata=n_strata,
             n_psu=n_psu,
             lonely_psu=self.lonely_psu,
+            nest=self.nest,
         )
 
     def subpopulation(
@@ -580,6 +582,10 @@ class ResolvedSurveyDesign:
     replicate_scale: Optional[float] = None
     replicate_rscales: Optional[np.ndarray] = None  # (R,) per-replicate scales
     mse: bool = False
+    # Preserved from SurveyDesign for use by downstream helpers (e.g.
+    # `_inject_cluster_as_psu` honors `nest` when substituting cluster=<col>
+    # for an absent PSU column).
+    nest: bool = False
 
     @property
     def uses_replicate_variance(self) -> bool:
@@ -670,6 +676,7 @@ class ResolvedSurveyDesign:
             replicate_scale=self.replicate_scale,
             replicate_rscales=self.replicate_rscales,
             mse=self.mse,
+            nest=self.nest,
         )
 
     @property
@@ -1182,6 +1189,7 @@ def collapse_survey_to_unit_level(resolved_survey, df, unit_col, all_units):
         replicate_scale=resolved_survey.replicate_scale,
         replicate_rscales=resolved_survey.replicate_rscales,
         mse=resolved_survey.mse,
+        nest=resolved_survey.nest,
     )
 
 
@@ -1280,6 +1288,15 @@ def _inject_cluster_as_psu(resolved, cluster_ids):
     When survey design has no PSU but cluster_ids are provided,
     inject cluster_ids as the effective PSU for TSL variance estimation.
 
+    Honors ``resolved.nest`` matching the explicit-PSU resolver at
+    ``SurveyDesign.resolve()`` (L299-L318):
+      - ``nest=True`` (or no strata): nest cluster IDs within strata via
+        ``f"{s}_{c}"`` so repeated cluster labels across strata become
+        distinct PSUs.
+      - ``nest=False`` AND strata present: cluster labels must be
+        globally unique (no overlap across strata); raise if they
+        repeat, mirroring the explicit-PSU `nest=False` contract.
+
     Returns a new ResolvedSurveyDesign (no mutation) or the original unchanged.
     """
     if resolved is None or cluster_ids is None:
@@ -1295,11 +1312,31 @@ def _inject_cluster_as_psu(resolved, cluster_ids):
             "when used as effective PSUs for survey variance estimation."
         )
 
-    # When strata are present, make cluster IDs unique within strata
-    # (same nesting logic as SurveyDesign.resolve() with nest=True)
     if resolved.strata is not None:
-        combined = np.array([f"{s}_{c}" for s, c in zip(resolved.strata, cluster_ids)])
-        codes, uniques = pd.factorize(combined)
+        if resolved.nest:
+            # Nest cluster IDs within strata: combined `(stratum, cluster)`
+            # labels are globally unique by construction.
+            combined = np.array([f"{s}_{c}" for s, c in zip(resolved.strata, cluster_ids)])
+            codes, uniques = pd.factorize(combined)
+        else:
+            # nest=False contract: cluster labels must be globally unique
+            # across strata (same gate as `SurveyDesign.resolve()` L305-L316).
+            # Validate by checking that each cluster label appears in
+            # exactly one stratum.
+            df_check = pd.DataFrame({"stratum": resolved.strata, "cluster": cluster_ids})
+            overlap = df_check.groupby("cluster")["stratum"].nunique()
+            ambiguous = overlap[overlap > 1]
+            if len(ambiguous) > 0:
+                bad_examples = list(ambiguous.index[:5])
+                raise ValueError(
+                    f"Cluster IDs repeat across strata under nest=False: "
+                    f"{len(ambiguous)} cluster label(s) appear in multiple "
+                    f"strata (examples: {bad_examples}). Either set "
+                    f"nest=True in SurveyDesign so cluster IDs are made "
+                    f"unique within strata, or pass an explicit unique "
+                    f"`psu=<col>` to SurveyDesign."
+                )
+            codes, uniques = pd.factorize(cluster_ids)
     else:
         codes, uniques = pd.factorize(cluster_ids)
     n_clusters = len(uniques)
