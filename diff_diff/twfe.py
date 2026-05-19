@@ -359,9 +359,13 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                     X_list.append(data_demeaned[f"{cov}_demeaned"].values)
             X = np.column_stack([np.ones(len(y))] + X_list)
             df_adjustment = n_units + n_times - 2
-            # Within-transform path: FE dummies are NOT in X (they're absorbed
-            # by demeaning). var_names cover the visible columns only.
-            _twfe_var_names = ["const", "ATT"] + list(covariates or [])
+            # Within-transform path: preserve the historical
+            # `{"ATT": att}` user-facing `result.coefficients` contract.
+            # Broadening this dict here would silently change the
+            # API surface on HC1 / classical / Conley fits — the
+            # full-dummy `_twfe_var_names` exposure is scoped to the
+            # HC2 / HC2-BM paths only (the documented surface change).
+            _twfe_var_names = None
 
         # ATT is the coefficient on treatment_post (index 1) on both branches.
         att_idx = 1
