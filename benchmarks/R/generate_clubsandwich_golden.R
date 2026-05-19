@@ -283,6 +283,191 @@ output$twfe_two_period <- list(
   dof_bm_unit = as.numeric(ct_twfe_unit$df_Satt)
 )
 
+# --- SunAbraham saturated regression HC2 / HC2-BM scenario (Phase 1b PR 1/8) -
+# Mirrors SunAbraham(vcov_type in {"classical","hc2","hc2_bm"}) on a
+# 5-cohort × 8-period balanced panel. SA's Part G auto-route builds a
+# full-dummy saturated design when vcov_type needs the hat matrix —
+# matches lm(y ~ D_ge interactions + factor(unit) + factor(period)).
+# Targets the (g=4, e=0) cohort × event-time interaction (the canonical
+# at-treatment effect of the earliest cohort).
+
+set.seed(42)
+n_units_per_cohort <- 8
+n_sa_periods <- 8
+sa_cohorts <- c(0, 4, 5, 6, 7)  # 0 = never-treated
+
+d_sa <- expand.grid(u_in_cohort = seq_len(n_units_per_cohort),
+                    period = seq_len(n_sa_periods),
+                    cohort_idx = seq_along(sa_cohorts))
+d_sa <- d_sa[order(d_sa$cohort_idx, d_sa$u_in_cohort, d_sa$period), ]
+d_sa$unit <- (d_sa$cohort_idx - 1) * n_units_per_cohort + d_sa$u_in_cohort - 1
+d_sa$first_treat <- sa_cohorts[d_sa$cohort_idx]
+d_sa$time <- d_sa$period
+d_sa$rel_time <- ifelse(d_sa$first_treat > 0,
+                         d_sa$time - d_sa$first_treat, -999L)
+sa_unit_fe <- rnorm(max(d_sa$unit) + 1, mean = 0, sd = 1)
+d_sa$treated <- as.integer(d_sa$first_treat > 0 & d_sa$time >= d_sa$first_treat)
+d_sa$y <- sa_unit_fe[d_sa$unit + 1] + 0.3 * d_sa$time +
+          1.0 * d_sa$treated + rnorm(nrow(d_sa), sd = 0.5)
+
+# Build cohort × event-time interaction columns (excluding ref period -1).
+# Sanitize negative event times for R formula compatibility (e=-3 → "n3").
+sa_treatment_groups <- sort(unique(d_sa$first_treat[d_sa$first_treat > 0]))
+sa_all_rel_times <- sort(unique(d_sa$rel_time[d_sa$first_treat > 0]))
+sa_all_rel_times <- sa_all_rel_times[sa_all_rel_times != -1]
+sa_interaction_cols <- c()
+sa_col_map <- list()
+for (g in sa_treatment_groups) {
+  for (e in sa_all_rel_times) {
+    e_safe <- if (e < 0) paste0("n", abs(e)) else as.character(e)
+    col_name <- paste0("D_", g, "_", e_safe)
+    original_name <- paste0("D_", g, "_", e)
+    ind <- as.integer(d_sa$first_treat == g & d_sa$rel_time == e)
+    if (sum(ind) > 0) {
+      d_sa[[col_name]] <- ind
+      sa_interaction_cols <- c(sa_interaction_cols, col_name)
+      sa_col_map[[original_name]] <- col_name
+    }
+  }
+}
+
+sa_target_orig <- "D_4_0"  # the (g=4, e=0) interaction
+sa_target_safe <- sa_col_map[[sa_target_orig]]
+stopifnot(!is.null(sa_target_safe))
+
+sa_rhs <- paste(c(sa_interaction_cols, "factor(unit)", "factor(time)"),
+                collapse = " + ")
+fit_sa <- lm(as.formula(paste("y ~", sa_rhs)), data = d_sa)
+sa_coef_names <- names(coef(fit_sa))
+sa_target_idx <- which(sa_coef_names == sa_target_safe)
+stopifnot(length(sa_target_idx) == 1L)
+
+# Extract SE/DOF for the target only (atol=1e-10 pin in Python tests).
+sa_classical_se <- summary(fit_sa)$coefficients[sa_target_safe, "Std. Error"]
+sa_vcov_hc2 <- sandwich::vcovHC(fit_sa, type = "HC2")
+sa_hc2_se <- sqrt(sa_vcov_hc2[sa_target_safe, sa_target_safe])
+# Singleton-cluster CR2 reduces to one-way HC2-BM.
+sa_vcov_cr2_singleton <- vcovCR(fit_sa, cluster = seq_len(nrow(d_sa)),
+                                type = "CR2")
+sa_cr2_singleton_se <- sqrt(sa_vcov_cr2_singleton[sa_target_safe,
+                                                   sa_target_safe])
+sa_ct_singleton <- coef_test(fit_sa, vcov = sa_vcov_cr2_singleton)
+sa_dof_bm_singleton <- sa_ct_singleton[sa_target_safe, "df_Satt"]
+# CR2-BM clustered at unit (the SA auto-cluster default for hc2_bm).
+sa_vcov_cr2_unit <- vcovCR(fit_sa, cluster = d_sa$unit, type = "CR2")
+sa_cr2_unit_se <- sqrt(sa_vcov_cr2_unit[sa_target_safe, sa_target_safe])
+sa_ct_unit <- coef_test(fit_sa, vcov = sa_vcov_cr2_unit)
+sa_dof_bm_unit <- sa_ct_unit[sa_target_safe, "df_Satt"]
+# fixest::sunab() parity for SA's HC1 cluster-at-unit default path.
+# SA HC1 uses within-transform; fixest also uses within-transform.
+# Note: fixest::sunab requires a specific encoding — first_treat=0 means
+# never-treated. fixest auto-handles that.
+suppressPackageStartupMessages(library(fixest, quietly = TRUE))
+fit_sunab <- fixest::feols(
+  y ~ sunab(first_treat, time) | unit + time,
+  data = d_sa,
+  cluster = ~unit
+)
+# fixest::sunab aggregates to event-study coefficients (IW-aggregated
+# across cohorts). The coefficient labels are "time::<event_time>".
+# Compare SA's event_study_effects[0] (overall e=0 ATT) against fixest's
+# "time::0" event-study SE.
+sunab_coef_table <- as.data.frame(summary(fit_sunab)$coeftable)
+sunab_target_label <- "time::0"
+sunab_hc1_es0_se <- if (sunab_target_label %in% rownames(sunab_coef_table)) {
+  sunab_coef_table[sunab_target_label, "Std. Error"]
+} else {
+  warning("Could not locate fixest sunab event-study target ",
+          sunab_target_label)
+  NA_real_
+}
+
+# CR2-BM Bell-McCaffrey contrast DOF for the IW-aggregated event-time e=0
+# effect (under cluster=unit). The contrast at e=0 aggregates all cohorts
+# present at relative time 0 with weights w_{g,0} = n_{g,0} / Σ_g n_{g,0}.
+# All 4 treated cohorts (g=4,5,6,7) have 8 units each at e=0 → equal
+# weights 0.25 each. Build the contrast in full-coef space and call
+# Wald_test(test="HTZ") — on a 1-row constraint matrix HTZ reduces to a
+# Satterthwaite t-test whose df_denom IS the BM DOF.
+sa_all_coef_names <- names(coef(fit_sa))
+sa_n_coef <- length(sa_all_coef_names)
+sa_es0_contrast <- setNames(rep(0, sa_n_coef), sa_all_coef_names)
+sa_es0_cols <- c("D_4_0", "D_5_0", "D_6_0", "D_7_0")
+sa_es0_contrast[sa_es0_cols] <- 0.25
+# Subset to non-NA coefficients (clubSandwich's convention).
+sa_finite_mask <- !is.na(coef(fit_sa))
+sa_es0_kept <- sa_es0_contrast[sa_finite_mask]
+sa_dof_bm_es0_unit <- Wald_test(
+  fit_sa,
+  constraints = matrix(sa_es0_kept, 1),
+  vcov = sa_vcov_cr2_unit,
+  test = "HTZ"
+)$df_denom
+
+# CR2-BM Bell-McCaffrey contrast DOF for the IW-aggregated OVERALL ATT.
+# SA's overall ATT = Σ_e w_e × Σ_g w_{g,e} × δ_{g,e} where w_e is the
+# mass at post-period event-time e and w_{g,e} is the IW cohort share.
+# Post-period event-times e ∈ {0, 1, 2, 3} on this panel; n_{g,e} = 8
+# for e=0 (all 4 cohorts), 6 for e=1 (3 cohorts), 4 for e=2 (2 cohorts),
+# 2 for e=3 (1 cohort) — actually, per fixest::sunab construction:
+# cohort g treats at time g; observed event-times for cohort g are
+# t - g for t ∈ {1..8}. Compute the cohort × event-time mass matrix
+# empirically.
+# Post-period event-times: SA includes ALL observed e >= 0, not just
+# those where multiple cohorts contribute. For the 4-cohort × 8-period
+# panel, max observed e = 8 - 4 = 4 (cohort g=4 at t=8).
+sa_post_event_times <- sort(unique(d_sa$rel_time[d_sa$first_treat > 0 & d_sa$rel_time >= 0]))
+sa_overall_contrast <- setNames(rep(0, sa_n_coef), sa_all_coef_names)
+sa_per_event_mass <- numeric(length(sa_post_event_times))
+for (i in seq_along(sa_post_event_times)) {
+  e <- sa_post_event_times[i]
+  cohorts_at_e <- sort(unique(d_sa$first_treat[d_sa$first_treat > 0 & d_sa$rel_time == e]))
+  if (length(cohorts_at_e) == 0) next
+  n_per_cohort <- sapply(cohorts_at_e, function(g) sum(d_sa$first_treat == g & d_sa$rel_time == e))
+  sa_per_event_mass[i] <- sum(n_per_cohort)
+}
+sa_post_weights <- sa_per_event_mass / sum(sa_per_event_mass)
+for (i in seq_along(sa_post_event_times)) {
+  e <- sa_post_event_times[i]
+  cohorts_at_e <- sort(unique(d_sa$first_treat[d_sa$first_treat > 0 & d_sa$rel_time == e]))
+  if (length(cohorts_at_e) == 0) next
+  n_per_cohort <- sapply(cohorts_at_e, function(g) sum(d_sa$first_treat == g & d_sa$rel_time == e))
+  iw_weights <- n_per_cohort / sum(n_per_cohort)
+  for (j in seq_along(cohorts_at_e)) {
+    g <- cohorts_at_e[j]
+    e_safe <- if (e < 0) paste0("n", abs(e)) else as.character(e)
+    col_name <- paste0("D_", g, "_", e_safe)
+    sa_overall_contrast[col_name] <- sa_post_weights[i] * iw_weights[j]
+  }
+}
+sa_overall_kept <- sa_overall_contrast[sa_finite_mask]
+sa_dof_bm_overall_unit <- Wald_test(
+  fit_sa,
+  constraints = matrix(sa_overall_kept, 1),
+  vcov = sa_vcov_cr2_unit,
+  test = "HTZ"
+)$df_denom
+
+output$sun_abraham_two_cohort <- list(
+  unit = d_sa$unit,
+  time = d_sa$time,
+  first_treat = d_sa$first_treat,
+  y = d_sa$y,
+  target_cohort_g = 4L,
+  target_event_time_e = 0L,
+  target_col_safe = sa_target_safe,
+  classical_se = unname(sa_classical_se),
+  hc2_se = unname(sa_hc2_se),
+  cr2_bm_singleton_se = unname(sa_cr2_singleton_se),
+  dof_bm_singleton = unname(sa_dof_bm_singleton),
+  cr2_bm_unit_se = unname(sa_cr2_unit_se),
+  dof_bm_unit = unname(sa_dof_bm_unit),
+  sunab_hc1_event_study_e0_se = unname(sunab_hc1_es0_se),
+  sunab_event_study_target_label = sunab_target_label,
+  dof_bm_contrast_es0_unit = unname(sa_dof_bm_es0_unit),
+  dof_bm_contrast_overall_unit = unname(sa_dof_bm_overall_unit)
+)
+
 output$meta <- list(
   source = "clubSandwich",
   clubSandwich_version = as.character(packageVersion("clubSandwich")),

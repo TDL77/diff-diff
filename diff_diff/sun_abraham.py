@@ -63,6 +63,17 @@ class SunAbrahamResults:
         Significance level used for confidence intervals.
     control_group : str
         Type of control group used.
+    vcov_type : str
+        Variance-covariance family from the fit-time configuration
+        (``classical``, ``hc1``, ``hc2``, or ``hc2_bm``). Note: when a
+        ``survey_design=`` is supplied, the survey-design Taylor Series
+        Linearization (or replicate-weight refit) variance overrides
+        this analytical family — the field still records the
+        configured value but ``survey_metadata`` indicates the survey
+        path was active. Likewise, on bootstrap fits (``n_bootstrap >
+        0``) the SE comes from the pairs bootstrap (or Rao-Wu rescaled
+        bootstrap under stratified / PSU survey designs), not the
+        analytical family.
     """
 
     event_study_effects: Dict[int, Dict[str, Any]]
@@ -79,6 +90,7 @@ class SunAbrahamResults:
     n_control_units: int
     alpha: float = 0.05
     control_group: str = "never_treated"
+    vcov_type: str = "hc1"
     # Anticipation periods (``k``) used at fit time. Persisted so
     # downstream diagnostics (``BusinessReport`` / ``DiagnosticReport``
     # / ``compute_pretrends_power``) can classify pre-period vs
@@ -372,7 +384,13 @@ class SunAbraham:
         Significance level for confidence intervals.
     cluster : str, optional
         Column name for cluster-robust standard errors.
-        If None, clusters at the unit level by default.
+        If None, clusters at the unit level by default — UNLESS
+        ``vcov_type`` is explicitly set to ``"hc2"`` or ``"classical"``,
+        in which case the unit auto-cluster is dropped (both are
+        one-way families and the linalg validator rejects them with
+        ``cluster_ids``). Use ``vcov_type="hc1"`` (default) or
+        ``vcov_type="hc2_bm"`` for cluster-robust inference; the latter
+        routes to CR2 Bell-McCaffrey at the cluster level.
     n_bootstrap : int, default=0
         Number of bootstrap iterations for inference.
         If 0, uses analytical cluster-robust standard errors.
@@ -383,6 +401,54 @@ class SunAbraham:
         - "warn": Issue warning and drop linearly dependent columns (default)
         - "error": Raise ValueError
         - "silent": Drop columns silently without warning
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm"}, default "hc1"
+        Variance-covariance family for analytical inference. Defaults to
+        ``"hc1"`` (preserves prior behavior bit-equally; SA historically
+        hard-coded HC1).
+
+        - ``"classical"``: homoskedastic OLS standard errors. One-way
+          only (linalg validator rejects ``classical + cluster_ids``);
+          the unit auto-cluster is dropped when ``classical`` is
+          explicitly opted into.
+        - ``"hc1"``: Eicker-Huber-White HC1 finite-sample correction
+          (default; cluster-robust when ``cluster=`` is set or the unit
+          auto-cluster fires).
+        - ``"hc2"``: Eicker-Huber-White HC2 leverage correction. One-way
+          only; the linalg validator rejects combining ``hc2`` with
+          clusters. The unit auto-cluster is dropped when ``hc2`` is
+          explicitly opted into.
+        - ``"hc2_bm"``: HC2 + Bell-McCaffrey CR2 Satterthwaite DOF for
+          cluster-robust inference. Routes to CR2-BM at the cluster
+          level; preserves the auto-cluster default.
+
+        When ``vcov_type ∈ {"classical","hc2","hc2_bm"}``, the
+        saturated regression switches from the within-transform path
+        to a full-dummy ``[intercept + interactions + covariates +
+        unit_dummies + time_dummies]`` build. For ``hc2`` and
+        ``hc2_bm``, the Frisch-Waugh-Lovell theorem preserves
+        coefficients but NOT the hat matrix, so HC2 leverage and BM
+        Satterthwaite DOF must be computed on the full FE projection.
+        ``classical`` also routes through full-dummy so the ``(n-k)``
+        finite-sample correction in ``s² × (X'X)^{-1}`` matches R's
+        ``lm()`` interpretation. Empirically matches
+        ``lm(...) + sandwich::vcovHC(type="HC2")`` and
+        ``clubSandwich::vcovCR(..., type="CR2")`` at atol=1e-10.
+
+        ``"hc1"`` keeps the within-transform path (cluster-robust HC1
+        does not depend on the hat matrix); empirically close to
+        ``fixest::sunab(cluster=~unit)``. See REGISTRY.md for the
+        documented HC1 finite-sample-correction deviation.
+
+        Survey designs (``survey_design=``) are rejected for
+        ``vcov_type ∈ {"classical","hc2","hc2_bm"}`` because the
+        survey-design Taylor Series Linearization (or replicate-weight
+        refit) variance overrides the analytical sandwich family, and
+        the auto-cluster guard for one-way families would silently
+        downgrade unit-level PSUs to per-observation PSUs. Use
+        ``vcov_type="hc1"`` (default) for survey designs.
+
+        ``conley`` spatial-HAC is not yet wired up for SunAbraham; see
+        TODO.md.
 
     Attributes
     ----------
@@ -460,6 +526,7 @@ class SunAbraham:
         n_bootstrap: int = 0,
         seed: Optional[int] = None,
         rank_deficient_action: str = "warn",
+        vcov_type: str = "hc1",
     ):
         if control_group not in ["never_treated", "not_yet_treated"]:
             raise ValueError(
@@ -473,6 +540,20 @@ class SunAbraham:
                 f"got '{rank_deficient_action}'"
             )
 
+        if vcov_type not in ("classical", "hc1", "hc2", "hc2_bm"):
+            if vcov_type == "conley":
+                raise ValueError(
+                    "vcov_type='conley' is not yet wired up for SunAbraham: "
+                    "would require threading conley_coords / conley_cutoff_km / "
+                    "conley_metric / conley_kernel / conley_time / conley_unit / "
+                    "conley_lag_cutoff through the saturated regression call. "
+                    "Tracked in TODO.md (SA Conley follow-up row)."
+                )
+            raise ValueError(
+                f"vcov_type must be one of "
+                f"{{'classical','hc1','hc2','hc2_bm'}}; got '{vcov_type}'"
+            )
+
         self.control_group = control_group
         self.anticipation = anticipation
         self.alpha = alpha
@@ -480,6 +561,15 @@ class SunAbraham:
         self.n_bootstrap = n_bootstrap
         self.seed = seed
         self.rank_deficient_action = rank_deficient_action
+        self.vcov_type = vcov_type
+        # Track whether the user explicitly opted out of the "hc1" default.
+        # The auto-cluster-at-unit default in `fit` is suppressed only when
+        # the user explicitly opts into a one-way family — currently
+        # ``vcov_type in {"hc2","classical"}``. Both are rejected by the
+        # linalg validator when combined with ``cluster_ids``. Leaving the
+        # auto-cluster on the default "hc1" path preserves backward compat;
+        # ``hc2_bm`` also keeps the auto-cluster (routes to CR2-BM at unit).
+        self._vcov_type_explicit = vcov_type != "hc1"
 
         self.is_fitted_ = False
         self.results_: Optional[SunAbrahamResults] = None
@@ -537,6 +627,31 @@ class SunAbraham:
         if missing:
             raise ValueError(f"Missing columns: {missing}")
 
+        # Validate explicit cluster column upfront. Without this guard, a
+        # missing `cluster=` column would cascade through cluster_var=None
+        # and silently downgrade clustered inference to one-way (HC1 →
+        # heteroskedasticity-only; HC2-BM → singleton CR2-BM). Explicit
+        # user input must error, not silently weaken the SE convention.
+        if self.cluster is not None:
+            if self.cluster not in data.columns:
+                raise ValueError(
+                    f"cluster column {self.cluster!r} not found in data; "
+                    f"available columns: {list(data.columns)}"
+                )
+            # NA cluster labels are silently dropped by the meat-side
+            # `groupby(cluster_ids)` but counted by `np.unique(cluster_ids)`
+            # in `n_clusters`, producing malformed cluster-robust SEs. Reject
+            # explicitly so the user fixes the cluster column rather than
+            # consuming silently-wrong inference.
+            if data[self.cluster].isna().any():
+                n_na = int(data[self.cluster].isna().sum())
+                raise ValueError(
+                    f"cluster column {self.cluster!r} contains {n_na} "
+                    "NA/NaN values. Cluster labels must be non-missing for "
+                    "all observations to produce well-formed cluster-robust "
+                    "standard errors. Drop or impute the NA rows before fit."
+                )
+
         # Resolve survey design if provided
         from diff_diff.survey import (
             _resolve_effective_cluster,
@@ -559,6 +674,36 @@ class SunAbraham:
                 "Cannot use n_bootstrap > 0 with replicate-weight survey designs. "
                 "Replicate weights provide their own variance estimation."
             )
+
+        # Survey-design + non-HC1 analytical family reject: survey-design
+        # Taylor Series Linearization (or replicate-weight refit) variance
+        # overrides the analytical sandwich family, so the requested
+        # vcov_type ∈ {classical, hc2, hc2_bm} would either silently downgrade
+        # unit-as-PSU injection to per-observation PSUs (auto-cluster guard
+        # drops cluster_var=None before the survey path injects unit as PSU)
+        # or hit the linalg validator's hc2/classical + cluster_ids reject.
+        # Explicit reject preserves the "survey TSL overrides analytical"
+        # contract documented in REGISTRY. Use vcov_type='hc1' (default) for
+        # survey designs.
+        if resolved_survey is not None and self.vcov_type in ("classical", "hc2", "hc2_bm"):
+            raise NotImplementedError(
+                f"SunAbraham(vcov_type={self.vcov_type!r}) with survey_design "
+                "is not yet supported: the survey-design TSL (or replicate-"
+                "weight refit) variance overrides the analytical sandwich, "
+                "so the requested HC2/HC2-BM/classical family would be "
+                "silently discarded. Additionally, the auto-cluster guard "
+                "for explicit one-way families (classical/hc2) would drop "
+                "the unit auto-cluster before survey-PSU injection, "
+                "downgrading the panel structure from unit-level to "
+                "per-observation PSUs. Use vcov_type='hc1' (default) for "
+                "survey designs; the survey TSL machinery computes the "
+                "design-aware SE on the within-transform path."
+            )
+
+        # Note: the broader survey reject above (line ~625) already covers
+        # the replicate-weight + hc2/hc2_bm combo (replicate is a subset of
+        # survey). The replicate-only reject that previously lived here is
+        # redundant and was removed; see commit history for the rationale.
 
         # Bootstrap + survey supported via Rao-Wu rescaled bootstrap.
         # Determine Rao-Wu eligibility from the *original* survey_design
@@ -632,7 +777,24 @@ class SunAbraham:
         ]
 
         # Determine cluster variable
-        cluster_var = self.cluster if self.cluster is not None else unit
+        # One-way HC2 and classical are single-way only — the linalg
+        # validator rejects `vcov_type ∈ {"hc2","classical"} + cluster_ids`.
+        # Drop the unit auto-cluster when the user opts into either
+        # explicitly. `hc1` and `hc2_bm` preserve the auto-cluster
+        # (route to CR1 / CR2-Bell-McCaffrey at unit respectively).
+        # SA has no `inference=` parameter — its bootstrap path uses the
+        # pairs bootstrap (or Rao-Wu rescaled bootstrap on stratified /
+        # PSU survey designs) via `n_bootstrap > 0`, which overrides the
+        # analytical SE downstream and does NOT consume the cluster
+        # structure of the main fit. So the SA guard simplifies to
+        # "explicit-vcov-only", without TWFE's `inference == "analytical"`
+        # subguard.
+        if self.cluster is not None:
+            cluster_var: Optional[str] = self.cluster
+        elif self.vcov_type in ("hc2", "classical") and self._vcov_type_explicit:
+            cluster_var = None
+        else:
+            cluster_var = unit
 
         # Filter data based on control_group setting
         if self.control_group == "never_treated":
@@ -642,8 +804,14 @@ class SunAbraham:
             # Keep all units (not_yet_treated will be handled by the regression)
             df_reg = df.copy()
 
-        # Resolve effective cluster and inject cluster-as-PSU
-        cluster_ids_raw = df_reg[cluster_var].values if cluster_var in df_reg.columns else None
+        # Resolve effective cluster and inject cluster-as-PSU.
+        # When `cluster_var is None` (one-way HC2 explicit path), the survey
+        # path skips PSU injection and the saturated regression receives
+        # `cluster_ids=None` downstream.
+        if cluster_var is not None and cluster_var in df_reg.columns:
+            cluster_ids_raw = df_reg[cluster_var].values
+        else:
+            cluster_ids_raw = None
         effective_cluster_ids = _resolve_effective_cluster(
             resolved_survey, cluster_ids_raw, cluster_var if self.cluster is not None else None
         )
@@ -665,6 +833,7 @@ class SunAbraham:
             cohort_ses,
             vcov_cohort,
             coef_index_map,
+            bm_artifacts,
         ) = self._fit_saturated_regression(
             df_reg,
             outcome,
@@ -681,6 +850,7 @@ class SunAbraham:
             # computing bogus replicate vcov on already-demeaned data.  We
             # override vcov_cohort below with the correct estimator-level refit.
             resolved_survey=None if _uses_replicate_sa else resolved_survey,
+            vcov_type=self.vcov_type,
         )
 
         # Replicate variance override: fully refit the IW estimator per
@@ -699,7 +869,7 @@ class SunAbraham:
                 nz = w_r > 0
                 df_reg_nz = df_reg[nz] if not np.all(nz) else df_reg
                 w_nz = w_r[nz] if not np.all(nz) else w_r
-                ce_r, _, vcov_r, cim_r = self._fit_saturated_regression(
+                ce_r, _, vcov_r, cim_r, _ = self._fit_saturated_regression(
                     df_reg_nz,
                     outcome,
                     unit,
@@ -712,6 +882,7 @@ class SunAbraham:
                     survey_weights=w_nz,
                     survey_weight_type=survey_weight_type,
                     resolved_survey=None,
+                    vcov_type=self.vcov_type,
                 )
                 # Create temp weight column for IW aggregation with w_r
                 # Use full w_r (including zeros) for correct mass computation
@@ -809,8 +980,9 @@ class SunAbraham:
                         W_mat[i, j] = w
             es_vcov = W_mat @ vcov_cohort @ W_mat.T
 
-        # Compute overall ATT (average of post-treatment effects)
-        overall_att, overall_se = self._compute_overall_att(
+        # Compute overall ATT (average of post-treatment effects).
+        # Capture overall_weights_by_coef for the hc2_bm contrast-DOF path.
+        overall_att, overall_se, _overall_weights_by_coef = self._compute_overall_att(
             df,
             first_treat,
             event_study_effects,
@@ -819,10 +991,109 @@ class SunAbraham:
             vcov_cohort,
             coef_index_map,
             survey_weight_col=survey_weight_col,
+            return_overall_weights=True,
         )
 
+        # Bell-McCaffrey contrast-DOF for analytical hc2_bm aggregated
+        # inference. Cohort-level coefficients already use BM DOF via
+        # `LinearRegression.get_inference()` inside `_fit_saturated_regression`,
+        # but `event_study_effects` (IW-aggregated) and `overall_att` are
+        # linear contrasts of the cohort × event-time coefficients. Per
+        # the registry contract for `vcov_type="hc2_bm"`, the user-facing
+        # aggregated inference must use CR2 Bell-McCaffrey Satterthwaite
+        # DOF for each contrast — not the normal distribution that
+        # `safe_inference(..., df=None)` would otherwise default to.
+        # Mirrors the MultiPeriodDiD post-period-average contrast pattern
+        # added in PR #465 (`_compute_cr2_bm_contrast_dof`).
+        _es_contrast_dofs: Dict[int, float] = {}
+        _overall_att_contrast_dof: Optional[float] = None
+        if bm_artifacts is not None and not _uses_replicate_sa:
+            from diff_diff.linalg import _compute_cr2_bm_contrast_dof
+
+            X_full, cluster_ids_full, bread_matrix = bm_artifacts
+            n_full_coef = X_full.shape[1]
+            # `coef_index_map` is 0-indexed within the cohort-effects
+            # block; under full-dummy the interactions occupy columns
+            # `coef_offset .. coef_offset + n_interactions - 1` in
+            # X_full (where coef_offset == 1 for the intercept). Shift
+            # by the same offset when building the contrast vector in
+            # full-coef space — otherwise the contrast lands on the
+            # wrong columns (off-by-one with the intercept).
+            _coef_offset_bm = 1  # full-dummy → interactions at cols 1..n
+            # Per-event-time contrasts (IW aggregation across cohorts at
+            # each event-time): c_e[full_idx(g, e)] = w_{g,e} for each g.
+            es_contrast_keys: List[int] = []
+            es_contrast_columns: List[np.ndarray] = []
+            for e in sorted(event_study_effects.keys()):
+                w_dict = cohort_weights.get(e, {})
+                if not w_dict:
+                    continue
+                col = np.zeros(n_full_coef)
+                for g, w_ge in w_dict.items():
+                    key = (g, e)
+                    if key in coef_index_map:
+                        col[coef_index_map[key] + _coef_offset_bm] = w_ge
+                if np.any(col != 0):
+                    es_contrast_keys.append(e)
+                    es_contrast_columns.append(col)
+            # Overall ATT contrast: c_overall[full_idx(g,e)] = period_w × cohort_w
+            overall_col: Optional[np.ndarray] = None
+            if _overall_weights_by_coef:
+                overall_col = np.zeros(n_full_coef)
+                for (g, e), w in _overall_weights_by_coef.items():
+                    if (g, e) in coef_index_map:
+                        overall_col[coef_index_map[(g, e)] + _coef_offset_bm] = w
+            if es_contrast_columns or overall_col is not None:
+                contrast_cols: List[np.ndarray] = list(es_contrast_columns)
+                if overall_col is not None:
+                    contrast_cols.append(overall_col)
+                contrasts_matrix = np.column_stack(contrast_cols)
+                try:
+                    dof_vec = _compute_cr2_bm_contrast_dof(
+                        X_full, cluster_ids_full, bread_matrix, contrasts_matrix
+                    )
+                    for idx, e in enumerate(es_contrast_keys):
+                        _es_contrast_dofs[e] = float(dof_vec[idx])
+                    if overall_col is not None:
+                        _overall_att_contrast_dof = float(dof_vec[-1])
+                except (ValueError, np.linalg.LinAlgError) as exc:
+                    # Rank-deficient or other linalg issue: fall back to
+                    # the shared analytical df (downgraded to normal
+                    # inference). Emit a UserWarning so the deviation is
+                    # visible.
+                    warnings.warn(
+                        f"SunAbraham(vcov_type='hc2_bm') aggregated inference "
+                        f"could not compute Bell-McCaffrey contrast DOF "
+                        f"({type(exc).__name__}: {exc}). Falling back to "
+                        "shared df; aggregated p-values/CIs may use normal "
+                        "distribution instead of t(BM DOF).",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
+        # Apply contrast DOFs to the user-facing aggregated inference.
+        # Override the per-event-time inference fields with BM-DOF-aware
+        # values when available; otherwise leave the `safe_inference`
+        # output from `_compute_iw_effects` in place (which used
+        # `df=_sa_survey_df`).
+        if _es_contrast_dofs:
+            for e, df_e in _es_contrast_dofs.items():
+                eff_e = event_study_effects[e]["effect"]
+                se_e = event_study_effects[e]["se"]
+                t_e, p_e, ci_e = safe_inference(eff_e, se_e, alpha=self.alpha, df=df_e)
+                event_study_effects[e]["t_stat"] = t_e
+                event_study_effects[e]["p_value"] = p_e
+                event_study_effects[e]["conf_int"] = ci_e
+
         overall_t, overall_p, overall_ci = safe_inference(
-            overall_att, overall_se, alpha=self.alpha, df=_sa_survey_df
+            overall_att,
+            overall_se,
+            alpha=self.alpha,
+            df=(
+                _overall_att_contrast_dof
+                if _overall_att_contrast_dof is not None
+                else _sa_survey_df
+            ),
         )
 
         # Replicate variance override: refit fully re-aggregated estimates
@@ -871,7 +1142,7 @@ class SunAbraham:
                 nz = w_r > 0
                 df_reg_nz = df_reg[nz] if not np.all(nz) else df_reg
                 w_nz = w_r[nz] if not np.all(nz) else w_r
-                ce_r, _, _, _ = self._fit_saturated_regression(
+                ce_r, _, _, _, _ = self._fit_saturated_regression(
                     df_reg_nz,
                     outcome,
                     unit,
@@ -884,6 +1155,7 @@ class SunAbraham:
                     survey_weights=w_nz,
                     survey_weight_type=survey_weight_type,
                     resolved_survey=None,
+                    vcov_type=self.vcov_type,
                 )
                 return np.array([ce_r.get(k, np.nan) for k in _keys_ordered])
 
@@ -971,6 +1243,7 @@ class SunAbraham:
             alpha=self.alpha,
             control_group=self.control_group,
             anticipation=self.anticipation,
+            vcov_type=self.vcov_type,
             bootstrap_results=bootstrap_results,
             cohort_effects=cohort_effects_storage,
             survey_metadata=survey_metadata,
@@ -991,22 +1264,33 @@ class SunAbraham:
         treatment_groups: List[Any],
         rel_periods: List[int],
         covariates: Optional[List[str]],
-        cluster_var: str,
+        cluster_var: Optional[str],
         survey_weights: Optional[np.ndarray] = None,
         survey_weight_type: str = "pweight",
         resolved_survey: object = None,
+        vcov_type: str = "hc1",
     ) -> Tuple[
         Dict[Tuple[Any, int], float],
         Dict[Tuple[Any, int], float],
         np.ndarray,
         Dict[Tuple[Any, int], int],
+        Optional[Tuple[np.ndarray, Optional[np.ndarray], np.ndarray]],
     ]:
         """
         Fit saturated TWFE regression with cohort × relative-time interactions.
 
         Y_it = α_i + λ_t + Σ_g Σ_e [δ_{g,e} × D_{g,e,it}] + X'γ + ε
 
-        Uses within-transformation for unit fixed effects and time dummies.
+        Uses within-transformation for unit + time fixed effects when
+        ``vcov_type == "hc1"`` (cluster-robust HC1 does not depend on
+        the hat matrix; matches ``fixest::sunab()`` convention). Routes
+        to a full-dummy saturated design when
+        ``vcov_type ∈ {"classical","hc2","hc2_bm"}``. For ``hc2`` /
+        ``hc2_bm``, FWL preserves coefficients/residuals but NOT the
+        hat matrix —
+        HC2 leverage and Bell-McCaffrey DOF must be computed on the full
+        FE projection. Mirrors the TwoWayFixedEffects Gate 1 pattern
+        from PR #469.
 
         Returns
         -------
@@ -1015,15 +1299,25 @@ class SunAbraham:
         cohort_ses : dict
             Mapping (cohort, rel_period) -> standard error
         vcov : np.ndarray
-            Variance-covariance matrix for cohort effects
+            Variance-covariance matrix for cohort effects (size
+            n_interactions × n_interactions; extracted from the full
+            vcov regardless of which path was taken).
         coef_index_map : dict
-            Mapping (cohort, rel_period) -> index in coefficient vector
+            Mapping (cohort, rel_period) -> index in the cohort_effects
+            block (0-based, NOT the index in the full coefficient vector
+            of the underlying regression).
         """
         df = df.copy()
 
         # Create cohort × relative-time interaction dummies
         # Exclude reference period
-        # Build all columns at once to avoid fragmentation
+        # Build all columns at once to avoid fragmentation.
+        # `coef_index_map` is 0-based within the interactions block; the
+        # index in the full coefficient vector depends on the branch:
+        #  - Within-transform branch: matches coef_index_map directly
+        #    (X has no intercept; interactions occupy positions 0..n-1)
+        #  - Full-dummy branch: shift by 1 (intercept at position 0;
+        #    interactions occupy positions 1..n)
         interaction_data = {}
         coef_index_map: Dict[Tuple[Any, int], int] = {}
         idx = 0
@@ -1051,58 +1345,149 @@ class SunAbraham:
                 "No valid cohort × relative-time interactions found. " "Check your data structure."
             )
 
-        # Apply within-transformation for unit and time fixed effects
-        variables_to_demean = [outcome] + interaction_cols
-        if covariates:
-            variables_to_demean.extend(covariates)
-
-        df_demeaned = _within_transform_util(
-            df, variables_to_demean, unit, time, suffix="_dm", weights=survey_weights
-        )
-
-        # Build design matrix
-        X_cols = [f"{col}_dm" for col in interaction_cols]
-        if covariates:
-            X_cols.extend([f"{cov}_dm" for cov in covariates])
-
-        X = df_demeaned[X_cols].values
-        y = df_demeaned[f"{outcome}_dm"].values
-
-        # Fit OLS using LinearRegression helper (more stable than manual X'X inverse)
-        cluster_ids = df_demeaned[cluster_var].values
-
-        # Degrees of freedom adjustment for absorbed unit and time fixed effects
+        n_interactions = len(interaction_cols)
         n_units_fe = df[unit].nunique()
         n_times_fe = df[time].nunique()
-        df_adj = n_units_fe + n_times_fe - 1
+        # Route through the full-dummy saturated design when the variance
+        # family depends on the hat matrix (hc2 / hc2_bm) — FWL preserves
+        # coefficients but not the hat matrix, so HC2 leverage and BM DOF
+        # must be computed on the full FE projection. Also route classical
+        # through full-dummy so the (n-k) finite-sample correction in
+        # ``s² × (X'X)^{-1}`` matches R's ``lm(y ~ ... + factor(unit) +
+        # factor(time))`` interpretation at atol=1e-12.
+        #
+        # hc1 stays on the within-transform path: cluster-robust HC1
+        # uses the cluster-mean residual outer product (no hat matrix), and
+        # matches ``fixest::sunab(cluster=~unit)`` (which also uses
+        # within-transform) at atol=1e-8 — fixest is the natural R parity
+        # anchor for SA's HC1 default.
+        use_full_dummy = vcov_type in ("hc2", "hc2_bm", "classical")
+
+        if use_full_dummy:
+            # Full-dummy auto-route: build [intercept, interactions,
+            # covariates, unit_dummies, time_dummies] explicitly. FWL
+            # preserves cohort coefficients but NOT the hat matrix, so HC2
+            # leverage and Bell-McCaffrey Satterthwaite DOF must be
+            # computed on the full FE projection (matches lm() +
+            # sandwich::vcovHC / clubSandwich::vcovCR). Memory guard
+            # mirrors PR #469's TWFE Gate 1 threshold.
+            n_obs = len(df)
+            n_cov = len(covariates or [])
+            dense_cells = n_obs * (1 + n_interactions + n_cov + (n_units_fe - 1) + (n_times_fe - 1))
+            if dense_cells > 50_000_000:
+                import warnings
+
+                warnings.warn(
+                    f"SunAbraham(vcov_type={vcov_type!r}) builds a dense "
+                    f"full-dummy saturated design (~{dense_cells:,} float64 "
+                    "cells, >50M). FWL preserves coefficients but not the hat "
+                    "matrix, so HC2/HC2-BM requires the full-dummy projection "
+                    "(within-transform would produce a methodologically "
+                    "different statistic). For very high-cardinality panels, "
+                    "consider vcov_type='hc1' (within-transform; no full-"
+                    "dummy needed) or reducing the panel size.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+            interaction_arrs = [df[c].values.astype(np.float64) for c in interaction_cols]
+            cov_arrs = [df[c].values.astype(np.float64) for c in (covariates or [])]
+            unit_dummies = pd.get_dummies(
+                df[unit], prefix=f"_fe_{unit}", drop_first=True
+            ).values.astype(np.float64)
+            time_dummies = pd.get_dummies(
+                df[time], prefix=f"_fe_{time}", drop_first=True
+            ).values.astype(np.float64)
+            intercept = np.ones(len(df))
+            X = np.column_stack(
+                [intercept] + interaction_arrs + cov_arrs + [unit_dummies, time_dummies]
+            )
+            y = df[outcome].values.astype(np.float64)
+            if cluster_var is not None and cluster_var in df.columns:
+                cluster_ids = df[cluster_var].values
+            else:
+                cluster_ids = None
+            # Full-dummy already counts unit + time dummies in n_params, so
+            # no extra adjustment (matches TWFE PR #469 Gate 1).
+            df_adj = 0
+            # Interactions occupy columns 1..n_interactions (intercept at 0)
+            coef_offset = 1
+        else:
+            # Within-transform path (existing) — used for hc1 only.
+            # classical now routes through the full-dummy branch above so its
+            # (n-k) finite-sample correction matches R's lm() interpretation.
+            variables_to_demean = [outcome] + interaction_cols
+            if covariates:
+                variables_to_demean.extend(covariates)
+
+            df_demeaned = _within_transform_util(
+                df, variables_to_demean, unit, time, suffix="_dm", weights=survey_weights
+            )
+
+            X_cols = [f"{col}_dm" for col in interaction_cols]
+            if covariates:
+                X_cols.extend([f"{cov}_dm" for cov in covariates])
+
+            X = df_demeaned[X_cols].values
+            y = df_demeaned[f"{outcome}_dm"].values
+            if cluster_var is not None and cluster_var in df_demeaned.columns:
+                cluster_ids = df_demeaned[cluster_var].values
+            else:
+                cluster_ids = None
+            df_adj = n_units_fe + n_times_fe - 1
+            # Interactions occupy columns 0..n_interactions-1 (no intercept)
+            coef_offset = 0
 
         reg = LinearRegression(
-            include_intercept=False,  # Already demeaned, no intercept needed
-            robust=True,
+            include_intercept=False,  # Full design already built (with or without intercept)
+            robust=True,  # legacy alias; vcov_type below overrides
             cluster_ids=cluster_ids,
             rank_deficient_action=self.rank_deficient_action,
             weights=survey_weights,
             weight_type=survey_weight_type,
             survey_design=resolved_survey,
+            vcov_type=vcov_type,
         ).fit(X, y, df_adjustment=df_adj)
 
         vcov = reg.vcov_
 
-        # Extract cohort effects and standard errors using get_inference
+        # Extract cohort effects and standard errors using get_inference.
+        # coef_index_map is 0-based within the interactions block; under
+        # full-dummy we shift by +1 to skip the intercept.
         cohort_effects: Dict[Tuple[Any, int], float] = {}
         cohort_ses: Dict[Tuple[Any, int], float] = {}
 
-        n_interactions = len(interaction_cols)
         for (g, e), coef_idx in coef_index_map.items():
-            inference = reg.get_inference(coef_idx)
+            full_idx = coef_idx + coef_offset
+            inference = reg.get_inference(full_idx)
             cohort_effects[(g, e)] = inference.coefficient
             cohort_ses[(g, e)] = inference.se
 
-        # Extract just the vcov for cohort effects (excluding covariates)
+        # Extract the vcov sub-block for cohort effects only (covariates
+        # and FE dummies excluded). Under full-dummy the interactions
+        # start at column 1; under within-transform they start at 0.
         assert vcov is not None
-        vcov_cohort = vcov[:n_interactions, :n_interactions]
+        vcov_cohort = vcov[
+            coef_offset : coef_offset + n_interactions,
+            coef_offset : coef_offset + n_interactions,
+        ]
 
-        return cohort_effects, cohort_ses, vcov_cohort, coef_index_map
+        # Stash BM contrast-DOF artifacts when hc2_bm — needed by the
+        # aggregated inference layer to compute per-event-time and
+        # overall-ATT Satterthwaite DOF on user-facing outputs. Under
+        # other vcov_type values aggregated inference falls back to the
+        # shared analytical df (None → normal distribution).
+        if vcov_type == "hc2_bm":
+            bread_matrix = X.T @ X
+            bm_artifacts: Optional[Tuple[np.ndarray, Optional[np.ndarray], np.ndarray]] = (
+                X,
+                cluster_ids,
+                bread_matrix,
+            )
+        else:
+            bm_artifacts = None
+
+        return cohort_effects, cohort_ses, vcov_cohort, coef_index_map, bm_artifacts
 
     def _within_transform(
         self,
@@ -1225,6 +1610,7 @@ class SunAbraham:
         vcov_cohort: np.ndarray,
         coef_index_map: Dict[Tuple[Any, int], int],
         survey_weight_col: Optional[str] = None,
+        return_overall_weights: bool = False,
     ) -> Tuple[float, float]:
         """
         Compute overall ATT as weighted average of post-treatment effects.
@@ -1232,11 +1618,19 @@ class SunAbraham:
         When survey weights are provided, the per-period weights use
         survey-weighted mass rather than raw observation counts.
 
-        Returns (att, se) tuple.
+        Returns (att, se) tuple. When ``return_overall_weights=True``,
+        the returned tuple is extended to (att, se, overall_weights_by_coef)
+        where the dict maps (g, e) → weight in the overall ATT
+        contrast (i.e. ``c[full_idx(g,e)] = period_weight × cohort_weight``).
+        Used by the analytical hc2_bm path to build Bell-McCaffrey
+        contrast DOFs for the user-facing aggregated inference. The dict
+        is ``None`` when the simplified-variance fallback path was taken.
         """
         post_effects = [(e, eff) for e, eff in event_study_effects.items() if e >= 0]
 
         if not post_effects:
+            if return_overall_weights:
+                return np.nan, np.nan, None
             return np.nan, np.nan
 
         # Weight by (survey-weighted) mass of treated observations at each relative time
@@ -1288,6 +1682,8 @@ class SunAbraham:
                     (post_weights_arr**2) * np.array([eff["se"] ** 2 for _, eff in post_effects])
                 )
             )
+            if return_overall_weights:
+                return overall_att, np.sqrt(overall_var), None
             return overall_att, np.sqrt(overall_var)
 
         # Build full weight vector and compute variance
@@ -1297,6 +1693,8 @@ class SunAbraham:
         overall_var = float(weight_vec @ vcov_subset @ weight_vec)
         overall_se = np.sqrt(max(overall_var, 0))
 
+        if return_overall_weights:
+            return overall_att, overall_se, overall_weights_by_coef
         return overall_att, overall_se
 
     def _run_bootstrap(
@@ -1309,7 +1707,7 @@ class SunAbraham:
         treatment_groups: List[Any],
         rel_periods_to_estimate: List[int],
         covariates: Optional[List[str]],
-        cluster_var: str,
+        cluster_var: Optional[str],
         original_event_study: Dict[int, Dict[str, Any]],
         original_overall_att: float,
         resolved_survey: object = None,
@@ -1400,6 +1798,7 @@ class SunAbraham:
                     cohort_ses_b,
                     vcov_b,
                     coef_map_b,
+                    _,
                 ) = self._fit_saturated_regression(
                     df_b,
                     outcome,
@@ -1413,6 +1812,7 @@ class SunAbraham:
                     survey_weights=boot_survey_weights,
                     survey_weight_type=survey_weight_type,
                     resolved_survey=None,  # Use explicit weights, not stale design
+                    vcov_type=self.vcov_type,
                 )
 
                 # Compute IW effects for this bootstrap sample
@@ -1509,7 +1909,7 @@ class SunAbraham:
         treatment_groups: List[Any],
         rel_periods_to_estimate: List[int],
         covariates: Optional[List[str]],
-        cluster_var: str,
+        cluster_var: Optional[str],
         original_event_study: Dict[int, Dict[str, Any]],
         original_overall_att: float,
         resolved_survey: object,
@@ -1631,6 +2031,7 @@ class SunAbraham:
                     cohort_ses_b,
                     vcov_b,
                     coef_map_b,
+                    _,
                 ) = self._fit_saturated_regression(
                     df_b,
                     outcome,
@@ -1644,6 +2045,7 @@ class SunAbraham:
                     survey_weights=boot_weights_b,
                     survey_weight_type=survey_weight_type,
                     resolved_survey=None,
+                    vcov_type=self.vcov_type,
                 )
 
                 # Compute IW effects using rescaled weights for cohort shares
@@ -1742,6 +2144,7 @@ class SunAbraham:
             "n_bootstrap": self.n_bootstrap,
             "seed": self.seed,
             "rank_deficient_action": self.rank_deficient_action,
+            "vcov_type": self.vcov_type,
         }
 
     def set_params(self, **params) -> "SunAbraham":
@@ -1751,6 +2154,10 @@ class SunAbraham:
                 setattr(self, key, value)
             else:
                 raise ValueError(f"Unknown parameter: {key}")
+        # Refresh the explicit-vcov-type flag if vcov_type changed, so the
+        # auto-cluster guard at fit time uses the updated value.
+        if "vcov_type" in params:
+            self._vcov_type_explicit = self.vcov_type != "hc1"
         return self
 
     def summary(self) -> str:
