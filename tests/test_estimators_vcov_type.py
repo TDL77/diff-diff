@@ -965,6 +965,57 @@ class TestFitBehavior:
         np.testing.assert_allclose(res_twfe.fitted_values, res_did.fitted_values, atol=1e-12)
         np.testing.assert_allclose(res_twfe.r_squared, res_did.r_squared, atol=1e-12)
 
+    @pytest.mark.parametrize("vcov", ["hc2", "hc2_bm"])
+    def test_twfe_hc2_with_survey_weights_matches_did_fixed_effects(self, vcov):
+        """TWFE(vcov_type in {'hc2','hc2_bm'}) with a non-replicate
+        SurveyDesign(weights=...) routes through the full-dummy build,
+        with survey TSL variance taking precedence over the analytical
+        HC2/HC2-BM sandwich (per the documented survey-design scope).
+
+        End-to-end consistency check: TWFE's auto-route on the full-dummy
+        design under survey weights must match
+        DifferenceInDifferences(fixed_effects=[unit, time]) with the same
+        survey design and cluster. Both paths feed the survey-resolved
+        design to LinearRegression's compute_survey_vcov (TSL) on an
+        identical full-dummy X, so ATT and SE match bit-equally at
+        atol=1e-12. Regression for the concern that the survey path could
+        revert to the within-transform branch or mishandle PSU injection
+        under the new FE route.
+
+        Note: `cluster='unit'` is passed EXPLICITLY to TWFE on the
+        `hc2_bm` branch to align with DiD's explicit-cluster + survey
+        PSU-injection convention. Without explicit cluster, TWFE's
+        survey-design scope rule (twfe.py:_resolve_effective_cluster
+        branch) drops the auto-cluster from PSU injection — that's
+        intentional but causes the path to diverge from DiD here. The
+        explicit-cluster form is the documented user-facing way to
+        invoke clustered survey-aware HC2-BM on TWFE.
+        """
+        data = _make_did_panel(n_units=20).copy()
+        rng = np.random.default_rng(7)
+        data["w"] = rng.uniform(0.5, 2.0, size=len(data))
+        sd = SurveyDesign(weights="w")
+        # Explicit cluster on both paths so PSU injection matches.
+        cluster_kwarg = "unit" if vcov == "hc2_bm" else None
+        res_twfe = TwoWayFixedEffects(vcov_type=vcov, cluster=cluster_kwarg).fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
+            survey_design=sd,
+        )
+        res_did = DifferenceInDifferences(vcov_type=vcov, cluster=cluster_kwarg).fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            fixed_effects=["unit", "time"],
+            survey_design=sd,
+        )
+        np.testing.assert_allclose(res_twfe.att, res_did.att, atol=1e-12)
+        np.testing.assert_allclose(res_twfe.se, res_did.se, atol=1e-12)
+
     def test_twfe_results_record_cluster_name(self):
         """TWFE results should label the auto-clustered SE with the unit column."""
         rng = np.random.default_rng(1)
