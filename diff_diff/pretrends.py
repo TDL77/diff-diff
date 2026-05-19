@@ -25,6 +25,7 @@ https://github.com/jonathandroth/pretrends - R package implementation
 diff_diff.honest_did - Sensitivity analysis for parallel trends violations
 """
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
@@ -86,6 +87,89 @@ def _compute_nis_acceptance_prob(
         accept_prob = float(in_box.mean())
 
     return float(np.clip(accept_prob, 0.0, 1.0))
+
+
+def _coerce_relative_times_from_reference(
+    estimated_pre_periods: List[Any],
+    reference_period: Any,
+) -> Optional[np.ndarray]:
+    """
+    Convert ``estimated_pre_periods`` to Roth-style relative-time offsets
+    from a numeric / Period / datetime ``reference_period``.
+
+    Returns ``np.ndarray`` of float relative times when conversion succeeds,
+    or ``None`` when the labels are genuinely non-numeric / unordered
+    (string period IDs, categoricals, etc.). In the ``None`` case, the
+    caller's downstream linear-violation weight construction falls back to
+    the legacy count-based normalized direction — the reported MDV is then
+    NOT in Roth's γ units. We emit a ``UserWarning`` so the user knows
+    the γ-unit contract did not hold and can re-fit with numeric labels.
+
+    Supported regimes:
+
+    - Numeric (``int`` / ``float`` / ``np.int64``): direct ``float()``
+      coercion gives the correct relative offset.
+    - ``pandas.Period`` / ``pandas.Timestamp`` / ``np.datetime64``: period
+      arithmetic returns an offset / ``Timedelta`` that we coerce to a
+      float via ``.n`` (for Period frequencies) or ``.days`` (for
+      Timedelta-like). The result is in units of the reference's
+      frequency for Period, days for Timestamp / datetime64 — the linear
+      γ-units scale is per-unit-of-frequency.
+    - Anything else (string period IDs, categoricals with no ordering,
+      mixed types): returns ``None`` with a warning.
+    """
+    # Path 1: direct float coercion (numeric scalars).
+    try:
+        ref_float = float(reference_period)
+        return np.asarray(
+            [float(p) - ref_float for p in estimated_pre_periods],
+            dtype=float,
+        )
+    except (TypeError, ValueError):
+        pass
+
+    # Path 2: pandas.Period / pandas.Timestamp / datetime64 — try
+    # subtraction-based offset arithmetic.
+    try:
+        diffs = [p - reference_period for p in estimated_pre_periods]
+        floats: List[float] = []
+        for d in diffs:
+            # pandas.tseries.offsets.* or pandas.Period offset — has `.n`.
+            n_attr = getattr(d, "n", None)
+            if n_attr is not None:
+                floats.append(float(n_attr))
+                continue
+            # pandas.Timedelta / numpy.timedelta64 — convert to days.
+            days_attr = getattr(d, "days", None)
+            if days_attr is not None:
+                floats.append(float(days_attr))
+                continue
+            # Bare numpy.timedelta64 fallback.
+            try:
+                floats.append(float(d / np.timedelta64(1, "D")))
+                continue
+            except (TypeError, ValueError):
+                raise TypeError(
+                    f"cannot coerce difference {d!r} of type {type(d).__name__} "
+                    "to float days/periods"
+                )
+        return np.asarray(floats, dtype=float)
+    except (TypeError, ValueError):
+        pass
+
+    # Path 3: genuinely non-numeric labels — warn and fall back to legacy.
+    warnings.warn(
+        f"PreTrendsPower: reference_period {reference_period!r} (type "
+        f"{type(reference_period).__name__}) is not numeric or datetime-like, "
+        "so per-period relative times cannot be derived. Linear-violation "
+        "weights will use the legacy count-based [n_pre-1, ..., 0]/||·||_2 "
+        "direction; the reported MDV is NOT in Roth (2022) γ units. Re-fit "
+        "with numeric period labels (int year, pandas.Period, datetime) to "
+        "obtain γ-unit MDV.",
+        UserWarning,
+        stacklevel=3,
+    )
+    return None
 
 
 def _extract_event_study_vcov_subblock(
@@ -914,27 +998,27 @@ class PreTrendsPower:
             # For MultiPeriodDiDResults, period identifiers are generic
             # (often calendar years, sometimes pre-shifted relative times).
             # Roth's δ_t = γ·t convention needs RELATIVE offsets from the
-            # treatment / reference period. Derive them from
-            # `results.reference_period` when numeric:
-            #   relative_times = estimated_pre_periods - reference_period
-            # If `reference_period` is None or non-numeric (string, categorical),
-            # return None so `_get_violation_weights('linear')` falls back to
-            # the legacy count-based [n_pre-1, ..., 0] / ||·||_2 direction
-            # (the pre-PR-B shipped behavior; preserves backwards-compat for
-            # MPD callers that don't expose a numeric reference period).
+            # treatment / reference period. Three label-type regimes:
+            #
+            #   1. Numeric (int / float / np.int64) — direct float() coercion
+            #      gives the correct relative offset.
+            #   2. pandas.Period — period arithmetic works on the Period
+            #      object directly (``p - ref`` returns ordinal-difference);
+            #      we cast via the `n` attribute on the resulting offset for
+            #      sub-period frequencies. Datetime-like labels (Timestamp,
+            #      np.datetime64) are caught the same way and converted to
+            #      days via numpy timedelta semantics.
+            #   3. Genuinely non-numeric / unordered labels (string period
+            #      IDs, categoricals without a ranking) — emit an explicit
+            #      UserWarning and fall back to the legacy count-based
+            #      [n_pre-1, ..., 0] / ||·||_2 normalized direction. The
+            #      reported MDV under this fallback is NOT in Roth's γ
+            #      units; users on non-numeric labels who need γ-unit MDV
+            #      should re-fit with numeric period labels.
             ref = getattr(results, "reference_period", None)
             relative_times: Optional[np.ndarray] = None
             if ref is not None:
-                try:
-                    ref_float = float(ref)
-                    relative_times = np.asarray(
-                        [float(p) - ref_float for p in estimated_pre_periods],
-                        dtype=float,
-                    )
-                except (TypeError, ValueError):
-                    # Non-numeric labels (string period IDs, etc.) — fall
-                    # back to legacy normalized linear direction.
-                    relative_times = None
+                relative_times = _coerce_relative_times_from_reference(estimated_pre_periods, ref)
             return effects, ses, vcov, n_pre, relative_times, covariance_source
 
         # Try CallawaySantAnnaResults

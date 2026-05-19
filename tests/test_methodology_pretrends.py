@@ -526,15 +526,20 @@ class TestPretrendsLinearGrid:
         weights = pt._get_violation_weights(n_pre, relative_times=relative_times)
         np.testing.assert_allclose(weights, [4.0, 3.0, 2.0, 1.0])
 
-    def test_mpd_non_numeric_reference_falls_back_to_legacy_weights(self):
-        """MPD with non-numeric reference_period falls back to legacy direction.
+    def test_mpd_non_numeric_reference_warns_and_falls_back_to_legacy_weights(self):
+        """MPD with non-numeric reference_period warns + falls back to legacy.
 
-        When ``reference_period`` is a string / categorical (e.g., "2019Q4"),
-        the MPD branch returns ``relative_times=None`` so
+        When ``reference_period`` is a genuinely non-numeric / non-datetime
+        label (e.g., the string "REF_STRING"), the MPD branch emits an
+        explicit ``UserWarning`` and returns ``relative_times=None`` so
         ``_get_violation_weights('linear')`` uses the legacy count-based
-        direction. Preserves backwards-compat for MPD callers that don't
-        expose a numeric reference period.
+        direction. The warning surfaces the contract that the reported
+        MDV is NOT in Roth's γ units under this fallback (R8 CI codex
+        fix: was previously a silent fallback, undocumented as a
+        deviation in REGISTRY).
         """
+        import warnings as _warnings
+
         from diff_diff.results import MultiPeriodDiDResults, PeriodEffect
 
         period_ids = ["A", "B", "C"]
@@ -556,12 +561,72 @@ class TestPretrendsLinearGrid:
             n_control=50,
             pre_periods=period_ids,
             post_periods=["D", "E"],
-            reference_period="REF_STRING",  # non-numeric
+            reference_period="REF_STRING",  # non-numeric, non-datetime
         )
 
         pt = PreTrendsPower(pretest_form="nis", violation_type="linear")
-        _, _, _, _, relative_times, _ = pt._extract_pre_period_params(mpd_results)
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            _, _, _, _, relative_times, _ = pt._extract_pre_period_params(mpd_results)
+
         assert relative_times is None, "Non-numeric reference should yield None"
+        nis_warns = [
+            w
+            for w in caught
+            if "reference_period" in str(w.message) and "γ units" in str(w.message)
+        ]
+        assert len(nis_warns) >= 1, (
+            "Non-numeric reference_period must emit an explicit UserWarning "
+            f"noting the γ-unit contract is not held; got warnings: {[str(w.message) for w in caught]}"
+        )
+
+    def test_mpd_pandas_period_reference_yields_numeric_relative_times(self):
+        """MPD with pandas.Period reference_period produces γ-unit weights.
+
+        Quarterly-Period labels ``[2019Q1, 2019Q2, 2019Q3]`` with
+        ``reference_period=2019Q4`` produce relative offsets in units of
+        quarters: ``[-3, -2, -1]``. Validates the R8 CI codex fix that
+        datetime-like labels are NOT silently fall-through cases — Period
+        / Timestamp arithmetic supplies the γ-unit relative times the
+        legacy fallback would have lost.
+        """
+        from diff_diff.results import MultiPeriodDiDResults, PeriodEffect
+
+        periods = [pd.Period(f"2019Q{q}", freq="Q") for q in (1, 2, 3)]
+        reference_period = pd.Period("2019Q4", freq="Q")
+        period_effects = {
+            p: PeriodEffect(
+                period=p, effect=0.1, se=0.2, t_stat=0.0, p_value=0.5, conf_int=(0.0, 0.0)
+            )
+            for p in periods
+        }
+        mpd_results = MultiPeriodDiDResults(
+            period_effects=period_effects,
+            avg_att=0.0,
+            avg_se=0.2,
+            avg_t_stat=0.0,
+            avg_p_value=0.5,
+            avg_conf_int=(0.0, 0.0),
+            n_obs=100,
+            n_treated=50,
+            n_control=50,
+            pre_periods=periods,
+            post_periods=[pd.Period(f"2020Q{q}", freq="Q") for q in (1, 2)],
+            reference_period=reference_period,
+        )
+
+        pt = PreTrendsPower(pretest_form="nis", violation_type="linear")
+        _, _, _, n_pre, relative_times, _ = pt._extract_pre_period_params(mpd_results)
+
+        # Period subtraction yields a Period offset whose `.n` is the
+        # number-of-frequencies difference; signs matter and pre-periods
+        # are NEGATIVE offsets from the reference.
+        assert relative_times is not None
+        np.testing.assert_allclose(relative_times, [-3.0, -2.0, -1.0])
+
+        # Plumbed through to linear weights: |t| = [3, 2, 1] in γ units.
+        weights = pt._get_violation_weights(n_pre, relative_times=relative_times)
+        np.testing.assert_allclose(weights, [3.0, 2.0, 1.0])
 
     def test_backwards_compat_no_relative_times_uses_legacy_normalized(self):
         """Without relative_times: legacy [n-1, ..., 0]/||·||_2 direction.

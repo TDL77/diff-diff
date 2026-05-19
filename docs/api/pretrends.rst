@@ -133,7 +133,9 @@ The module supports several types of pre-trends violations:
    ``delta[-1] = M``, all other pre-periods are zero.
 
 **custom**
-   User-specified violation pattern via the ``custom_delta`` parameter.
+   User-specified violation pattern via the ``violation_weights`` parameter.
+   Accepted by both ``PreTrendsPower`` (constructor kwarg) and the convenience
+   helpers ``compute_pretrends_power`` / ``compute_mdv`` (forwarded kwarg).
 
 Complete Example
 ----------------
