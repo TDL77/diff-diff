@@ -1120,7 +1120,7 @@ class TestPretrendsParityR:
     ``scipy.stats.multivariate_normal.cdf`` (Python) use Genz-Bretz
     randomized-lattice rules with different absolute-error defaults
     (abseps ≈ 1e-3 vs 1e-5). Combined, the empirical NIS power gap is
-    bounded by ~5e-5 in the K=4 anticipation fixture (smaller for K∈{1,3}).
+    bounded by ~5e-5 in the K=4 shifted-grid fixture (smaller for K∈{1,3}).
     For the inverse path (γ_p), R's ``slope_for_power`` uses
     ``uniroot(tol = .Machine$double.eps^0.25 ≈ 1.22e-4)`` versus Python
     ``brentq(xtol=2e-12)``; the inverse-solver tolerance gap dominates the

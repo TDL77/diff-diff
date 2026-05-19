@@ -23,11 +23,11 @@
 #       (R) and scipy.stats.multivariate_normal.cdf (Python) use Genz-Bretz
 #       randomized-lattice rules with different absolute-error defaults
 #       (abseps ~ 1e-3 vs 1e-5). The empirical NIS power gap is bounded by
-#       ~5e-5 on the K=4 anticipation fixture; ~3e-5 on K=3 fixtures; ~2e-5
+#       ~5e-5 on the K=4 shifted-grid fixture; ~3e-5 on K=3 fixtures; ~2e-5
 #       on K=1. atol=1e-4 is the realistic atol without tightening
 #       thresholdTstat.Pretest in R or relaxing the Genz tolerances.
 #   (2) gamma_p MDV (slope at target power 0.5 and 0.8) on regular, irregular,
-#       anticipation, and K=1 grids, at atol=1e-4. R uniroot defaults to
+#       shifted-grid, and K=1 grids, at atol=1e-4. R uniroot defaults to
 #       tol = .Machine$double.eps^0.25 ~= 1.22e-4 vs Python brentq xtol=2e-12;
 #       the inverse-solver tolerance gap dominates, so 1e-4 is the realistic
 #       atol without tightening either solver.
@@ -42,9 +42,20 @@
 #      never-treated control. Default-case parity baseline.
 #   2. irregular_pre_periods — K=3 with relative_times = [-5, -3, -1].
 #      Exercises the PR-B gamma-unit linear-pattern fix end-to-end.
-#   3. anticipation_shifted — K=4 with anticipation=1 (pre-cutoff at t<-1,
-#      so pre-periods are {-5, -4, -3, -2}). Verifies the pre-period filter
-#      logic in `_extract_pre_period_params`.
+#   3. anticipation_shifted — K=4 shifted-grid case (pre-periods at
+#      {-5, -4, -3, -2}, leaving a notional t=-1 anticipation gap to the
+#      reference period 0). Locks R parity at a larger K than the K=3
+#      fixtures and on a non-adjacent-to-reference grid. NOTE: the R-side
+#      `pretrends` package has no anticipation parameter, so this fixture
+#      does NOT exercise the Python-side `_extract_pre_period_params`
+#      CS/SA anticipation filter (`if t < _pre_cutoff` in pretrends.py)
+#      against R goldens — that filter is exercised by the existing
+#      `TestPretrendsCovarianceSource` suite (PR-B Step 3) and by the
+#      MC-based `TestPretrendsPropositions` tests, but a CS/SA-level
+#      anticipation+R-parity test would need a synthetic
+#      CallawaySantAnnaResults with `anticipation=1` and a t=-1 entry
+#      that gets filtered before reaching `_compute_power_nis`. Deferred
+#      to a follow-up.
 #   4. single_pre_period_closed_form — K=1 with diagonal Sigma = 0.25*I
 #      (Roth Proposition 2 univariate truncated-normal closed form). Locks
 #      the scalar fast-path against R AND against the analytical expression
@@ -58,9 +69,25 @@ suppressPackageStartupMessages({
   library(jsonlite)
 })
 
-stopifnot(packageVersion("pretrends") >= "0.1.0")
-
 PRETRENDS_COMMIT <- "122731d082"
+
+# Provenance fail-closed: refuse to regenerate goldens unless the installed
+# pretrends matches the pinned (version, commit) pair. The JSON stamps the
+# pinned commit string into meta.pretrends_commit, so without this check a
+# future rerun could silently regenerate goldens from a drifted revision
+# while still labeling the artifact with the original commit.
+stopifnot(packageVersion("pretrends") == "0.1.0")
+.installed_sha <- packageDescription("pretrends")$RemoteSha
+if (is.null(.installed_sha) || !startsWith(.installed_sha, PRETRENDS_COMMIT)) {
+  stop(sprintf(
+    "pretrends provenance mismatch: expected RemoteSha to start with '%s' but got '%s'. Reinstall with: remotes::install_github('jonathandroth/pretrends', ref = '%s')",
+    PRETRENDS_COMMIT,
+    if (is.null(.installed_sha)) "<missing — not installed via install_github>" else .installed_sha,
+    PRETRENDS_COMMIT
+  ))
+}
+cat("pretrends provenance verified: version 0.1.0, RemoteSha =",
+    .installed_sha, "\n")
 
 # ---------------------------------------------------------------------------
 # DGP helper: build a synthetic event-study coefficient vector + VCV under a
@@ -186,10 +213,13 @@ f2 <- build_event_study_fixture(
 )
 fixture_2 <- extract_pretrends(f2, "irregular_pre_periods")
 
-cat("Building fixture 3: anticipation_shifted...\n")
-# K=4 pre-periods with anticipation=1. Real pre-treatment cutoff is t < -1,
-# so the {-5, -4, -3, -2} cells are the genuine pre-periods; t=-1 is the
-# anticipation window. Tests the pre-period filtering logic.
+cat("Building fixture 3: anticipation_shifted (K=4 shifted-grid)...\n")
+# K=4 pre-periods at {-5, -4, -3, -2} — a shifted-grid case (gap at t=-1
+# between the last pre-period and the reference period 0). Locks R parity
+# at a larger K and on a non-adjacent-to-reference grid. Note: does NOT
+# exercise the Python-side `_extract_pre_period_params` CS/SA
+# anticipation-filter path against R goldens — see the file-header
+# comment for the rationale and deferred follow-up.
 f3 <- build_event_study_fixture(
   pre_periods = c(-5L, -4L, -3L, -2L),
   post_periods = c(1L, 2L, 3L),
@@ -230,7 +260,7 @@ out <- list(
       "scipy MVN CDF Genz-Bretz randomized-lattice differences bound the",
       "K=4 NIS power gap at ~5e-5);",
       "(2) gamma_p MDV (slope at target power 0.5 and 0.8) on regular,",
-      "irregular, anticipation, and K=1 grids (atol=1e-4; R uniroot tol",
+      "irregular, shifted-grid (K=4), and K=1 grids (atol=1e-4; R uniroot tol",
       "vs Python brentq xtol gap dominates);",
       "(3) gamma-unit MDV invariance: PR-B's skip-L2-norm path produces MDV",
       "in Roth's gamma units exactly, matching R's slope_for_power().",
