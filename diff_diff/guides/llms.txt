@@ -10,6 +10,10 @@ diff-diff offers 17 estimators covering basic 2x2 DiD, modern staggered adoption
 - Source: https://github.com/igerber/diff-diff
 - Docs: https://diff-diff.readthedocs.io/en/stable/
 
+## Agent Quickstart
+
+LLM agents: call `diff_diff.agent_workflow(df, unit=..., time=..., treatment=..., outcome=...)` first. It prints the recommended 5-step workflow (`profile_panel` → `get_llm_guide` → `<Estimator>().fit` → `practitioner_next_steps` → `BusinessReport`) with your column names wired in.
+
 ## Practitioner Workflow (based on Baker et al. 2025)
 
 IMPORTANT: For rigorous DiD analysis, follow these 8 steps. Skipping
