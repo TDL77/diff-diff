@@ -14,6 +14,8 @@ Covers the Phase 1a commitments in the approved plan:
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -824,6 +826,57 @@ class TestFitBehavior:
         assert np.isfinite(res.se)
         # No auto-cluster on explicit one-way hc2 + analytical.
         assert res.cluster_name is None
+
+    def test_twfe_hc2_wild_bootstrap_survives_rank_deficient_full_dummy(self):
+        """TWFE(vcov_type='hc2', inference='wild_bootstrap') stays finite when
+        the full-dummy design has a rank-deficient nuisance column.
+
+        Regression for a P1 bug in `wild_bootstrap_se()`: it previously built
+        `y_star = X @ beta_restricted`, which propagates NaN through every
+        observation whenever solve_ols dropped a nuisance column (e.g. a
+        time-invariant covariate collinear with the unit FE). The ATT was
+        analytically identified, but the bootstrap crashed because every
+        `y_star` was all-NaN. Reachable on the new TWFE HC2 full-dummy path
+        (the within-transform path absorbed time-invariant covariates so
+        the issue was hidden pre-PR).
+
+        Fix: `wild_bootstrap_se()` now uses solve_ols's kept-columns
+        `fitted_restricted` instead of `X @ beta_restricted`, so dropped
+        nuisance columns no longer poison `y_star`.
+        """
+        data = _make_did_panel(n_units=20).copy()
+        # x_invariant is time-invariant (only varies across units),
+        # so it's collinear with the unit fixed effect on the
+        # full-dummy design and gets dropped by solve_ols.
+        rng = np.random.default_rng(99)
+        unit_to_x = {u: rng.normal() for u in data["unit"].unique()}
+        data["x_invariant"] = data["unit"].map(unit_to_x).astype(float)
+        with warnings.catch_warnings():
+            # The expected rank-deficient column drop emits a UserWarning;
+            # we accept it as part of the documented full-dummy path.
+            warnings.simplefilter("ignore", UserWarning)
+            res = TwoWayFixedEffects(
+                vcov_type="hc2",
+                inference="wild_bootstrap",
+                n_bootstrap=50,
+                seed=1,
+            ).fit(
+                data,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+                covariates=["x_invariant"],
+            )
+        # ATT remains identified despite the dropped nuisance column.
+        assert np.isfinite(res.att), "ATT should remain finite despite rank deficiency"
+        assert np.isfinite(res.se), (
+            "Bootstrap SE should be finite — if NaN, wild_bootstrap_se's "
+            "y_star construction is propagating NaN from beta_restricted."
+        )
+        assert res.se > 0
+        assert np.isfinite(res.p_value)
+        assert np.isfinite(res.conf_int[0]) and np.isfinite(res.conf_int[1])
 
     def test_twfe_hc2_wild_bootstrap_keeps_auto_cluster(self):
         """Wild-bootstrap inference on TWFE(vcov_type='hc2') must keep the

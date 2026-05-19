@@ -572,16 +572,30 @@ def wild_bootstrap_se(
 
     # Fit restricted model (but we need to drop the column for the restricted coef)
     # Actually, for WCR bootstrap we keep all columns but impose the null via residuals
-    # Re-estimate with the restricted dependent variable
-    beta_restricted, residuals_restricted, _ = _solve_ols_linalg(X, y_restricted, return_vcov=False)
+    # Re-estimate with the restricted dependent variable.
+    #
+    # Use return_fitted=True so we get NaN-safe fitted values from the kept
+    # columns when solve_ols drops rank-deficient nuisance columns. Without
+    # this, building y_star via `X @ beta_restricted` would propagate NaN
+    # through every observation whenever a nuisance column was dropped
+    # (e.g. always-treated unit dummy collinear with treated*post on the
+    # full-dummy TWFE HC2/HC2-BM path), poisoning the entire bootstrap loop
+    # despite the ATT being analytically identified.
+    beta_restricted, residuals_restricted, fitted_restricted, _ = _solve_ols_linalg(
+        X, y_restricted, return_vcov=False, return_fitted=True
+    )
 
     # Create cluster-to-observation mapping for efficiency
     cluster_map = {c: np.where(cluster_ids == c)[0] for c in unique_clusters}
     cluster_indices = [cluster_map[c] for c in unique_clusters]
 
     # Step 3: Bootstrap loop
-    bootstrap_t_stats = np.zeros(n_bootstrap)
-    bootstrap_coefs = np.zeros(n_bootstrap)
+    # Use NaN for invalid draws (singular bootstrap SE) and filter at the
+    # p-value step, rather than coercing to t*=0 which biases the p-value
+    # toward small values (since |0| < |t_original| counts as "non-rejection"
+    # only when the original t is large).
+    bootstrap_t_stats = np.full(n_bootstrap, np.nan)
+    bootstrap_coefs = np.full(n_bootstrap, np.nan)
 
     for b in range(n_bootstrap):
         # Generate cluster-level weights
@@ -592,8 +606,10 @@ def wild_bootstrap_se(
         for g, indices in enumerate(cluster_indices):
             obs_weights[indices] = cluster_weights[g]
 
-        # Construct bootstrap sample: y* = X @ beta_restricted + e_restricted * weights
-        y_star = np.dot(X, beta_restricted) + residuals_restricted * obs_weights
+        # Construct bootstrap sample: y* = fitted_restricted + e_restricted * weights
+        # (fitted_restricted comes from solve_ols's kept-columns reconstruction,
+        # so it's NaN-safe even when beta_restricted has NaN on dropped columns)
+        y_star = fitted_restricted + residuals_restricted * obs_weights
 
         # Estimate bootstrap coefficients with cluster-robust SE
         beta_star, residuals_star, vcov_star = _solve_ols_linalg(
@@ -603,28 +619,40 @@ def wild_bootstrap_se(
         assert vcov_star is not None
         se_star = np.sqrt(vcov_star[coefficient_index, coefficient_index])
 
-        # Compute bootstrap t-statistic (under null hypothesis)
-        if se_star > 0:
+        # Compute bootstrap t-statistic (under null hypothesis); invalid
+        # draws (singular SE) leave the NaN sentinel for filtering below.
+        if se_star > 0 and np.isfinite(beta_star[coefficient_index]):
             bootstrap_t_stats[b] = (beta_star[coefficient_index] - null_hypothesis) / se_star
-        else:
-            bootstrap_t_stats[b] = 0.0
 
-    # Step 4: Compute bootstrap p-value
-    # P-value is proportion of |t*| >= |t_original|
-    p_value = np.mean(np.abs(bootstrap_t_stats) >= np.abs(t_stat_original))
+    # Step 4: Compute bootstrap p-value from VALID (finite) draws only
+    finite_mask = np.isfinite(bootstrap_t_stats)
+    n_valid = int(finite_mask.sum())
+    if n_valid == 0:
+        # All bootstrap draws were singular; fall back to a conservative
+        # p-value of 1.0 rather than silently returning a misleading value.
+        p_value = 1.0
+    else:
+        p_value = float(np.mean(np.abs(bootstrap_t_stats[finite_mask]) >= np.abs(t_stat_original)))
+        # Ensure p-value is at least 1/(n_valid+1) to avoid exact zero.
+        p_value = float(max(p_value, 1 / (n_valid + 1)))
 
-    # Ensure p-value is at least 1/(n_bootstrap+1) to avoid exact zero
-    p_value = float(max(float(p_value), 1 / (n_bootstrap + 1)))
-
-    # Step 5: Compute bootstrap SE and confidence interval
-    # SE from standard deviation of bootstrap coefficient distribution
-    se_bootstrap = float(np.std(bootstrap_coefs, ddof=1))
+    # Step 5: Compute bootstrap SE and confidence interval from valid draws
+    # only (use nan-safe reductions, mirroring the p-value filtering above).
+    valid_coefs = bootstrap_coefs[np.isfinite(bootstrap_coefs)]
+    if valid_coefs.size >= 2:
+        se_bootstrap = float(np.std(valid_coefs, ddof=1))
+    else:
+        se_bootstrap = float("nan")
 
     # Percentile confidence interval from bootstrap distribution
     lower_percentile = alpha / 2 * 100
     upper_percentile = (1 - alpha / 2) * 100
-    ci_lower = float(np.percentile(bootstrap_coefs, lower_percentile))
-    ci_upper = float(np.percentile(bootstrap_coefs, upper_percentile))
+    if valid_coefs.size >= 1:
+        ci_lower = float(np.percentile(valid_coefs, lower_percentile))
+        ci_upper = float(np.percentile(valid_coefs, upper_percentile))
+    else:
+        ci_lower = float("nan")
+        ci_upper = float("nan")
 
     return WildBootstrapResults(
         se=se_bootstrap,
@@ -823,7 +851,11 @@ def check_parallel_trends_robust(
 
     # Compute outcome changes
     treated_changes, control_changes = _compute_outcome_changes(
-        pre_data, outcome, time, treatment_group, unit,
+        pre_data,
+        outcome,
+        time,
+        treatment_group,
+        unit,
         caller_label="check_parallel_trends_robust",
     )
 
@@ -1026,7 +1058,11 @@ def equivalence_test_trends(
 
     # Compute outcome changes
     treated_changes, control_changes = _compute_outcome_changes(
-        pre_data, outcome, time, treatment_group, unit,
+        pre_data,
+        outcome,
+        time,
+        treatment_group,
+        unit,
         caller_label="equivalence_test_trends",
     )
 
@@ -1367,15 +1403,9 @@ def _sc_weight_fw(
     """
     Y_c = np.ascontiguousarray(Y, dtype=np.float64)
     init_c = (
-        np.ascontiguousarray(init_weights, dtype=np.float64)
-        if init_weights is not None
-        else None
+        np.ascontiguousarray(init_weights, dtype=np.float64) if init_weights is not None else None
     )
-    rw_c = (
-        np.ascontiguousarray(reg_weights, dtype=np.float64)
-        if reg_weights is not None
-        else None
-    )
+    rw_c = np.ascontiguousarray(reg_weights, dtype=np.float64) if reg_weights is not None else None
 
     if rw_c is not None:
         # Validate reg_weights shape at the dispatcher so Rust and NumPy
@@ -1396,26 +1426,53 @@ def _sc_weight_fw(
         if reg_weights is not None:
             if return_convergence:
                 weights, converged = _rust_sc_weight_fw_weighted_with_convergence(
-                    Y_c, zeta, intercept, init_c, min_decrease, max_iter, rw_c,
+                    Y_c,
+                    zeta,
+                    intercept,
+                    init_c,
+                    min_decrease,
+                    max_iter,
+                    rw_c,
                 )
                 return np.asarray(weights), converged
             return np.asarray(
                 _rust_sc_weight_fw_weighted(
-                    Y_c, zeta, intercept, init_c, min_decrease, max_iter, rw_c,
+                    Y_c,
+                    zeta,
+                    intercept,
+                    init_c,
+                    min_decrease,
+                    max_iter,
+                    rw_c,
                 )
             )
         if return_convergence:
             weights, converged = _rust_sc_weight_fw_with_convergence(
-                Y_c, zeta, intercept, init_c, min_decrease, max_iter,
+                Y_c,
+                zeta,
+                intercept,
+                init_c,
+                min_decrease,
+                max_iter,
             )
             return np.asarray(weights), converged
         return np.asarray(
             _rust_sc_weight_fw(
-                Y_c, zeta, intercept, init_c, min_decrease, max_iter,
+                Y_c,
+                zeta,
+                intercept,
+                init_c,
+                min_decrease,
+                max_iter,
             )
         )
     return _sc_weight_fw_numpy(
-        Y, zeta, intercept, init_weights, min_decrease, max_iter,
+        Y,
+        zeta,
+        intercept,
+        init_weights,
+        min_decrease,
+        max_iter,
         return_convergence=return_convergence,
         reg_weights=reg_weights,
     )
@@ -1910,8 +1967,7 @@ def compute_sdid_unit_weights_survey(
 
     if rw_control.shape != (n_control,):
         raise ValueError(
-            f"rw_control shape {rw_control.shape} does not match expected "
-            f"({n_control},)"
+            f"rw_control shape {rw_control.shape} does not match expected " f"({n_control},)"
         )
 
     if n_control == 0:
@@ -1924,10 +1980,12 @@ def compute_sdid_unit_weights_survey(
     # Build the column-scaled Y matrix: each control column j is multiplied by
     # rw_control[j], so A·ω in the loss equals Σ_j rw_j·ω_j·Y_j,pre.
     rw = np.ascontiguousarray(rw_control, dtype=np.float64)
-    Y_scaled = np.column_stack([
-        Y_pre_control * rw[np.newaxis, :],
-        Y_pre_treated_mean.reshape(-1, 1),
-    ])
+    Y_scaled = np.column_stack(
+        [
+            Y_pre_control * rw[np.newaxis, :],
+            Y_pre_treated_mean.reshape(-1, 1),
+        ]
+    )
 
     if return_convergence:
         omega, conv1 = _sc_weight_fw(
@@ -2031,8 +2089,7 @@ def compute_time_weights_survey(
 
     if rw_control.shape != (n_control,):
         raise ValueError(
-            f"rw_control shape {rw_control.shape} does not match expected "
-            f"({n_control},)"
+            f"rw_control shape {rw_control.shape} does not match expected " f"({n_control},)"
         )
 
     if Y_post_control.shape[0] == 0:
@@ -2058,9 +2115,7 @@ def compute_time_weights_survey(
     # does not re-center on the row-scaled matrix.
     rw_sum = float(np.sum(rw_control))
     if intercept and rw_sum > 0:
-        col_weighted_means = (
-            (Y_time * rw_control[:, np.newaxis]).sum(axis=0) / rw_sum
-        )
+        col_weighted_means = (Y_time * rw_control[:, np.newaxis]).sum(axis=0) / rw_sum
         Y_time = Y_time - col_weighted_means[np.newaxis, :]
 
     # Row-scale by sqrt(rw): after weighted centering (if any), each
