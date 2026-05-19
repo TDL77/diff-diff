@@ -330,16 +330,35 @@ a library setting.
   `PreTrendsPowerResults.covariance_source` field records the actual
   extraction path (`"full_pre_period_vcov"` vs `"diag_fallback"`), and
   the `DiagnosticReport.pretrends_power` block surfaces that label
-  unchanged. The PR-A-era `well_powered → moderately_powered`
-  conservative downgrade was a workaround for the implementation gap
-  PR-B closed; it now fires only for the dead-code legacy sentinel
-  label `"diag_fallback_available_full_vcov_unused"` (no in-tree path
-  produces this anymore — see
-  `_apply_diag_fallback_downgrade` in `diagnostic_report.py`).
-  Remaining `"diag_fallback"` cases — bootstrap / replicate-weight CS
-  and SA, plus ImputationDiD / Stacked / EfficientDiD / TwoStageDiD —
-  pass through unchanged because nothing better is available on those
-  result types yet.
+  unchanged. There are two paths through the report layer with
+  different downgrade semantics:
+
+  - **New fits** (post-PR-B, `PreTrendsPowerResults.covariance_source`
+    is populated): `DiagnosticReport` reads the persisted label
+    directly. Non-bootstrap CS / SA fits report
+    `"full_pre_period_vcov"` and are NOT downgraded; bootstrap /
+    replicate-weight paths report `"diag_fallback"` and also pass
+    through unchanged (no "available but unused" concern — the
+    estimator did its best with what was available).
+  - **Legacy serialized results** (pre-PR-B, no
+    `covariance_source` field on the object): the report layer falls
+    back to type-based inference in
+    `_infer_cov_source(source_fit)`. For event-study result types
+    (CS / SA / etc.) with populated `event_study_vcov`, the legacy-
+    ambiguous case still emits the conservative
+    `"diag_fallback_available_full_vcov_unused"` sentinel and the
+    `well_powered → moderately_powered` downgrade still applies —
+    because without the persisted provenance we cannot rule out that
+    the stored power was computed from `diag(ses^2)` under PR-A
+    semantics. For `MultiPeriodDiDResults` without
+    `interaction_indices`, the legacy fallback reports
+    `"diag_fallback"` (a genuine fallback, not the "available but
+    unused" case, so no downgrade applies).
+
+  Remaining `"diag_fallback"` cases on new fits — bootstrap /
+  replicate-weight CS and SA, plus ImputationDiD / Stacked /
+  EfficientDiD / TwoStageDiD — pass through unchanged because
+  nothing better is available on those result types yet.
 
 - **Note:** Unit-translation policy. BusinessReport does not
   arithmetically translate log-points to percents or level effects to
