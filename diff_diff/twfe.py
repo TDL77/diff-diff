@@ -36,14 +36,16 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         parameter passed to `fit()`). This differs from
         DifferenceInDifferences where cluster=None means no clustering.
 
-        **Exception:** when ``vcov_type="classical"`` and
+        **Exception (one-way analytical):** when
+        ``vcov_type in {"classical", "hc2"}`` is explicit AND
         ``inference="analytical"``, the unit auto-cluster is dropped
-        because the classical family is by construction one-way only and
-        the validator rejects ``cluster_ids + classical``. The user's
-        explicit choice of the classical family wins over the TWFE default
-        in that narrow analytical-inference case. Under
-        ``inference="wild_bootstrap"`` the auto-cluster is preserved (the
-        bootstrap uses the cluster structure to resample residuals).
+        because these families are by construction one-way only and the
+        validator rejects ``cluster_ids + classical`` / ``cluster_ids +
+        hc2``. The user's explicit one-way choice wins over the TWFE
+        default. Under ``inference="wild_bootstrap"`` the auto-cluster
+        is preserved regardless of ``vcov_type`` (the bootstrap uses the
+        cluster structure to resample residuals). On ``hc2_bm`` the
+        auto-cluster is also preserved (routes to CR2-BM at unit).
     alpha : float, default=0.05
         Significance level for confidence intervals.
 
@@ -55,17 +57,28 @@ class TwoWayFixedEffects(DifferenceInDifferences):
 
     where α_i are unit fixed effects and γ_t are time fixed effects.
 
-    **HC2 / Bell-McCaffrey are not available on TWFE.** Because TWFE uses
-    within-transformation (demeaning) to absorb the fixed effects, the
-    reduced design's hat matrix is not the full FE projection; HC2 leverage
-    and CR2 Bell-McCaffrey corrections on the demeaned design would produce
-    silently-wrong small-sample SEs (FWL preserves coefficients, not the
-    hat matrix). ``vcov_type in {"hc2","hc2_bm"}`` therefore raises
-    ``NotImplementedError`` with workarounds: use ``vcov_type="hc1"`` (HC1/
-    CR1 survive FWL), or switch to ``DifferenceInDifferences(fixed_effects=
-    [...])`` where the dummies appear in the full design. Tracked in
-    ``TODO.md`` under Methodology/Correctness; also documented in
-    ``docs/methodology/REGISTRY.md``.
+    **HC2 / Bell-McCaffrey are supported via an internal full-dummy build.**
+    Because TWFE's within-transformation preserves coefficients but not the
+    hat matrix, HC2 leverage and CR2 Bell-McCaffrey corrections on the
+    demeaned design would produce wrong small-sample SEs. When
+    ``vcov_type in {"hc2","hc2_bm"}``, TWFE bypasses the within-transform
+    and builds the full-dummy design ``[intercept, treated×post,
+    covariates, unit_dummies, time_dummies]`` directly, so the leverage
+    correction and BM DOF compute on the full FE projection. Under this
+    path, ``result.coefficients``, ``result.vcov``, ``result.residuals``,
+    ``result.fitted_values``, and ``result.r_squared`` reflect the
+    full-dummy fit rather than the within-transformed reduced fit; the
+    ATT coefficient, its SE, and analytical inference are unchanged.
+    Auto-cluster-at-unit is preserved on ``hc2_bm`` (routes to CR2-BM at
+    unit) and on ``hc2`` + ``wild_bootstrap``; dropped on explicit ``hc2``
+    + ``analytical`` to match the one-way contract. **This wording applies
+    to the non-survey analytical path**: under ``survey_design=`` with no
+    explicit ``cluster=``, TWFE intentionally keeps the documented
+    implicit-PSU path (auto-cluster is NOT injected into the survey PSU
+    structure) — users who want unit-level PSU injection under a survey
+    design must pass explicit ``cluster="unit"`` or set
+    ``survey_design.psu``. Documented in
+    ``docs/methodology/REGISTRY.md`` under the scope-limitation note.
 
     **Conley spatial-HAC (``vcov_type="conley"``) is supported via the
     block-decomposed panel sandwich (matches R ``conleyreg`` with
@@ -137,34 +150,15 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         if unit not in data.columns:
             raise ValueError(f"Unit column '{unit}' not found in data")
 
-        # Reject HC2 / HC2 + Bell-McCaffrey on TWFE (and any absorbed-FE fit).
-        # TWFE demeans outcomes and regressors via within-transformation before
-        # solving OLS, and passes only the reduced (already-residualized)
-        # regressor matrix into ``LinearRegression``. The HC2 leverage
-        # correction ``h_ii = x_i' (X'X)^{-1} x_i`` and the CR2 Bell-McCaffrey
-        # adjustment matrix ``A_g = (I - H_gg)^{-1/2}`` both depend on the
-        # FULL fixed-effects hat matrix, not the residualized one: FWL
-        # preserves coefficients but NOT the hat matrix, so applying HC2 or
-        # CR2 to the demeaned design produces the wrong leverage and the
-        # wrong Bell-McCaffrey DOF. The correct fix (compute leverage from
-        # the full absorbed projection) is deferred to a follow-up PR; until
-        # then, reject fast rather than ship silently-wrong small-sample SEs.
-        # HC1 and CR1 are unaffected (no leverage term, meat uses only the
-        # residuals which FWL preserves). Tracked in TODO.md.
-        if self.vcov_type in ("hc2", "hc2_bm"):
-            raise NotImplementedError(
-                f"TwoWayFixedEffects(vcov_type={self.vcov_type!r}) is not "
-                "yet supported: TWFE uses within-transformation (demeaning) "
-                "before OLS, and the HC2 leverage correction / CR2 Bell-"
-                "McCaffrey DOF depend on the full FE hat matrix, not the "
-                "residualized one (FWL preserves coefficients but not "
-                "leverage). Applying HC2/CR2-BM to the demeaned design "
-                "would produce silently-wrong small-sample inference. Use "
-                "vcov_type='hc1' (HC1/CR1 preserve correctly under FWL), or "
-                "switch to fixed_effects= dummies on DifferenceInDifferences "
-                "for a full-dummy design where HC2/CR2-BM are computed on "
-                "the full projection."
-            )
+        # HC2 / HC2 Bell-McCaffrey are now SUPPORTED via the inline
+        # full-dummy build below (see "use_full_dummy" branch around the
+        # design-construction block). FWL preserves coefficients and
+        # residuals but NOT the hat matrix, so HC2 leverage and CR2-BM
+        # DOF must compute on the full FE projection; building the design
+        # with explicit unit + time dummies routes through ``solve_ols``'s
+        # full-design hat matrix. HC1/CR1 paths remain on the demeaned
+        # design (no leverage term).
+        use_full_dummy = self.vcov_type in ("hc2", "hc2_bm")
 
         # Phase 2 panel block-decomposed Conley (matches R conleyreg).
         # FWL composability: the within-transformed scores S = X_demeaned *
@@ -230,69 +224,151 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 "survey designs. Replicate weights provide their own variance "
                 "estimation."
             )
+        # Replicate weights + HC2 / HC2-BM is incompatible with the
+        # full-dummy auto-route: the replicate path re-demeans per
+        # replicate (re-demeaning depends on the per-replicate weight
+        # vector), which doesn't compose with the full-dummy design
+        # build. A correct implementation would need to re-build the
+        # full-dummy X per replicate and recompute the HC2 leverage,
+        # which is deferred. Mirrors the
+        # ``linalg.py::_validate_vcov_args`` ``hc2_bm + weights`` gate.
+        if _uses_replicate_twfe and self.vcov_type in ("hc2", "hc2_bm"):
+            raise NotImplementedError(
+                f"TwoWayFixedEffects(vcov_type={self.vcov_type!r}) with "
+                "replicate-weight survey designs is not yet supported: the "
+                "replicate path re-demeans per replicate, which does not "
+                "compose with the full-dummy HC2/HC2-BM build (would need "
+                "per-replicate full-dummy refit). Use vcov_type='hc1' for "
+                "replicate-weight CR1, or drop to analytical inference."
+            )
 
         # Unit-level clustering is the TWFE default when `cluster` is not
-        # explicitly provided. But the one-way ``classical`` family is by
-        # construction not cluster-robust and the validator in
-        # ``compute_robust_vcov`` rejects ``cluster_ids + vcov_type=="classical"``.
-        # When the user EXPLICITLY asks for ``classical`` analytical inference
-        # (via ``vcov_type="classical"``) and does NOT set ``cluster=``,
-        # honor that choice by disabling the auto-cluster.
+        # explicitly provided. But the one-way ``classical`` and ``hc2``
+        # families are by construction not cluster-robust and the validator
+        # in ``compute_robust_vcov`` rejects
+        # ``cluster_ids + vcov_type in ("classical","hc2")``. When the user
+        # EXPLICITLY asks for one of these analytical-one-way families AND
+        # does NOT set ``cluster=``, honor that choice by disabling the
+        # auto-cluster.
         #
         # When ``"classical"`` is IMPLICIT (from the legacy alias
         # ``robust=False``), keep the unit auto-cluster so
         # ``_resolve_effective_vcov_type`` below can remap it to ``"hc1"``
         # and preserve the historical CR1-at-unit behavior. Wild-bootstrap
-        # inference also keeps the unit auto-cluster regardless (bootstrap
-        # consumes cluster structure for resampling). ``hc2``/``hc2_bm``
-        # don't reach this block — they are rejected above.
+        # inference also keeps the unit auto-cluster regardless of
+        # ``vcov_type`` (bootstrap consumes cluster structure for
+        # resampling, independent of the analytical sandwich). ``hc2_bm``
+        # also keeps the auto-cluster (routes to CR2-BM at unit).
         if self.cluster is not None:
             cluster_var: Optional[str] = self.cluster
         elif (
-            self.vcov_type == "classical"
+            self.vcov_type in ("classical", "hc2")
             and self._vcov_type_explicit
             and self.inference == "analytical"
         ):
-            # Explicit classical + analytical inference: drop the auto-cluster
-            # so the validator doesn't reject ``cluster_ids + classical``.
+            # Explicit one-way analytical vcov: drop the auto-cluster so
+            # the validator doesn't reject ``cluster_ids`` with these
+            # families. Wild-bootstrap is exempt because the bootstrap
+            # uses the cluster structure for resampling regardless of
+            # the analytical sandwich choice.
             cluster_var = None
         else:
             cluster_var = unit
 
-        # Create treatment × post interaction from raw data before demeaning.
-        # This must be within-transformed alongside the outcome and covariates
-        # so that the regression uses demeaned regressors (FWL theorem).
+        # Create treatment × post interaction from raw data.
         data = data.copy()
         data["_treatment_post"] = data[treatment] * data[time]
 
-        # Demean outcome, covariates, AND interaction in a single pass
-        all_vars = [outcome] + (covariates or []) + ["_treatment_post"]
-        data_demeaned = _within_transform_util(
-            data,
-            all_vars,
-            unit,
-            time,
-            suffix="_demeaned",
-            weights=survey_weights,
-        )
-
-        # Extract variables for regression
-        y = data_demeaned[f"{outcome}_demeaned"].values
-        X_list = [data_demeaned["_treatment_post_demeaned"].values]
-
-        if covariates:
-            for cov in covariates:
-                X_list.append(data_demeaned[f"{cov}_demeaned"].values)
-
-        X = np.column_stack([np.ones(len(y))] + X_list)
-
-        # ATT is the coefficient on treatment_post (index 1)
-        att_idx = 1
-
-        # Degrees of freedom adjustment for fixed effects
         n_units = data[unit].nunique()
         n_times = data[time].nunique()
-        df_adjustment = n_units + n_times - 2
+
+        if use_full_dummy:
+            # HC2 / HC2-BM full-dummy build: bypass the within-transform
+            # and stack [intercept, treated×post, covariates, unit_dummies,
+            # time_dummies] explicitly. FWL preserves the ATT coefficient
+            # and residuals, but NOT the hat matrix — so the leverage
+            # correction `h_ii = x_i' (X'X)^{-1} x_i` and the CR2 Bell-
+            # McCaffrey adjustment matrix `A_g = (I - H_gg)^{-1/2}` must
+            # be computed on the full FE projection. Pivoted-QR rank
+            # detection in `solve_ols` cleanly drops any collinear FE
+            # dummies (e.g. an always-treated unit × treatment_post
+            # collinearity) without poisoning the ATT.
+            # Memory guard: the full-dummy design materializes a dense
+            # n × (1 + 1 + n_covs + (n_units-1) + (n_times-1)) matrix.
+            # On large TWFE panels (n_units > 5000 typical) this can blow
+            # up working memory. Warn when the design exceeds ~50M float64
+            # entries (~400 MB) so users can switch to HC1 (within-
+            # transform path) for those panels.
+            _design_cols = 2 + len(covariates or []) + max(0, n_units - 1) + max(0, n_times - 1)
+            _design_entries = len(data) * _design_cols
+            if _design_entries > 50_000_000:
+                warnings.warn(
+                    f"TwoWayFixedEffects(vcov_type={self.vcov_type!r}) builds a "
+                    f"dense {len(data)} × {_design_cols} full-dummy design "
+                    f"(~{_design_entries / 1e6:.1f}M float64 entries, "
+                    f"~{_design_entries * 8 / 1e9:.2f} GB). For panels with "
+                    f"many units/periods, consider vcov_type='hc1' (within-"
+                    "transform path; no leverage term, lower memory) unless "
+                    "small-sample HC2/HC2-BM inference is required.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            y = data[outcome].values.astype(np.float64)
+            cov_arrs = [data[c].values.astype(np.float64) for c in (covariates or [])]
+            unit_dummies_df = pd.get_dummies(data[unit], prefix=f"_fe_{unit}", drop_first=True)
+            time_dummies_df = pd.get_dummies(data[time], prefix=f"_fe_{time}", drop_first=True)
+            unit_dummies = unit_dummies_df.values.astype(np.float64)
+            time_dummies = time_dummies_df.values.astype(np.float64)
+            X = np.column_stack(
+                [np.ones(len(data)), data["_treatment_post"].values]
+                + cov_arrs
+                + [unit_dummies, time_dummies]
+            )
+            # FEs are now in X explicitly; solve_ols's n - k accounting
+            # already subtracts them, so the extra unit + time DOF
+            # adjustment used on the within-transform path would
+            # double-count.
+            df_adjustment = 0
+            # var_names parallels the X columns so the downstream
+            # `coefficients` dict can mirror the full-dummy vcov shape
+            # (matching the MPD invariant
+            # ``len(result.coefficients) == result.vcov.shape[0]``).
+            _twfe_var_names: Optional[List[str]] = (
+                ["const", "ATT"]
+                + list(covariates or [])
+                + list(unit_dummies_df.columns)
+                + list(time_dummies_df.columns)
+            )
+        else:
+            # Default within-transform path (HC1 / classical / Conley):
+            # demean outcome, covariates, AND interaction in a single pass
+            # so the regression uses demeaned regressors (FWL theorem).
+            all_vars = [outcome] + (covariates or []) + ["_treatment_post"]
+            data_demeaned = _within_transform_util(
+                data,
+                all_vars,
+                unit,
+                time,
+                suffix="_demeaned",
+                weights=survey_weights,
+            )
+            y = data_demeaned[f"{outcome}_demeaned"].values
+            X_list = [data_demeaned["_treatment_post_demeaned"].values]
+            if covariates:
+                for cov in covariates:
+                    X_list.append(data_demeaned[f"{cov}_demeaned"].values)
+            X = np.column_stack([np.ones(len(y))] + X_list)
+            df_adjustment = n_units + n_times - 2
+            # Within-transform path: preserve the historical
+            # `{"ATT": att}` user-facing `result.coefficients` contract.
+            # Broadening this dict here would silently change the
+            # API surface on HC1 / classical / Conley fits — the
+            # full-dummy `_twfe_var_names` exposure is scoped to the
+            # HC2 / HC2-BM paths only (the documented surface change).
+            _twfe_var_names = None
+
+        # ATT is the coefficient on treatment_post (index 1) on both branches.
+        att_idx = 1
 
         # Always use LinearRegression for initial fit (unified code path)
         # For wild bootstrap, we don't need cluster SEs from the initial fit.
@@ -571,6 +647,21 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         else:
             _twfe_cluster_label = unit
 
+        # Build the coefficients dict mirroring the actual X columns. On the
+        # full-dummy path this surfaces the FE-dummy entries alongside the ATT;
+        # on the within-transform path it only carries the visible
+        # [const, ATT, covariates] columns. The "ATT" name at index 1 is
+        # preserved as the ATT key on both paths, so existing
+        # `result.coefficients["ATT"]` consumers continue to work. The
+        # invariant ``len(coefficients) == vcov.shape[0]`` is now upheld on the
+        # full-dummy path (matches the MPD absorb auto-route invariant
+        # checked at tests/test_estimators_vcov_type.py:1611).
+        coef_array = np.asarray(reg.coefficients_)
+        _coefficients_dict: dict = (
+            {name: float(c) for name, c in zip(_twfe_var_names, coef_array)}
+            if _twfe_var_names is not None
+            else {"ATT": float(att)}
+        )
         self.results_ = DiDResults(
             att=att,
             se=se,
@@ -581,7 +672,7 @@ class TwoWayFixedEffects(DifferenceInDifferences):
             n_treated=n_treated,
             n_control=n_control,
             alpha=self.alpha,
-            coefficients={"ATT": float(att)},
+            coefficients=_coefficients_dict,
             vcov=vcov,
             residuals=residuals,
             fitted_values=fitted,

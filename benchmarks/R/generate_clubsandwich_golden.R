@@ -232,6 +232,57 @@ output$mpd_clustered_avg_att_dof <- list(
   n_post_periods = length(post_names)
 )
 
+# --- TwoWayFixedEffects HC2 / HC2-BM scenario (Gate 1 lift PR) ---------------
+# Mirrors TwoWayFixedEffects(vcov_type in {"hc2","hc2_bm"}) on a 2-period
+# panel (binary post indicator). TWFE's `time` parameter is the post
+# indicator, so the FE design is factor(unit) + factor(post), NOT
+# factor(period). HC2 SE pinned via sandwich::vcovHC; one-way HC2-BM DOF
+# via the singleton-cluster CR2 trick (Pustejovsky-Tipton 2018 Section 3.3
+# — CR2 with cluster=seq_len(n) reduces to Imbens-Kolesar BM). CR2-BM
+# clustered at unit pinned separately for the auto-cluster path.
+
+set.seed(20260518)
+n_twfe_units <- 8
+n_twfe_periods <- 4
+twfe_treated_units <- c(1, 3, 5, 7)
+twfe_post_start <- 3
+d_twfe <- expand.grid(unit = seq_len(n_twfe_units),
+                      period = seq_len(n_twfe_periods))
+d_twfe$treated <- as.integer(d_twfe$unit %in% twfe_treated_units)
+d_twfe$post <- as.integer(d_twfe$period >= twfe_post_start)
+d_twfe$treat_post <- d_twfe$treated * d_twfe$post
+twfe_alpha_unit <- rnorm(n_twfe_units, mean = 0, sd = 1)
+twfe_gamma_time <- rnorm(n_twfe_periods, mean = 0, sd = 0.5)
+d_twfe$y <- 1.0 + 0.7 * d_twfe$treat_post +
+            twfe_alpha_unit[d_twfe$unit] +
+            twfe_gamma_time[d_twfe$period] +
+            rnorm(nrow(d_twfe), sd = 0.4)
+fit_twfe <- lm(y ~ treat_post + factor(unit) + factor(post), data = d_twfe)
+vcov_twfe_hc2 <- sandwich::vcovHC(fit_twfe, type = "HC2")
+# Singleton-cluster CR2 trick for one-way HC2-BM DOF.
+vcov_twfe_cr2_one_way <- vcovCR(fit_twfe, cluster = seq_len(nrow(d_twfe)),
+                                type = "CR2")
+ct_twfe_one_way <- coef_test(fit_twfe, vcov = vcov_twfe_cr2_one_way)
+# CR2-BM clustered at unit (the TWFE auto-cluster default).
+vcov_twfe_cr2_unit <- vcovCR(fit_twfe, cluster = d_twfe$unit, type = "CR2")
+ct_twfe_unit <- coef_test(fit_twfe, vcov = vcov_twfe_cr2_unit)
+output$twfe_two_period <- list(
+  unit = d_twfe$unit,
+  period = d_twfe$period,
+  treated = d_twfe$treated,
+  post = d_twfe$post,
+  treat_post = d_twfe$treat_post,
+  y = d_twfe$y,
+  coef = as.numeric(coef(fit_twfe)),
+  coef_names = names(coef(fit_twfe)),
+  vcov_hc2 = as.numeric(vcov_twfe_hc2),
+  vcov_hc2_shape = dim(vcov_twfe_hc2),
+  vcov_cr2_one_way = as.numeric(vcov_twfe_cr2_one_way),
+  dof_bm_one_way = as.numeric(ct_twfe_one_way$df_Satt),
+  vcov_cr2_unit = as.numeric(vcov_twfe_cr2_unit),
+  dof_bm_unit = as.numeric(ct_twfe_unit$df_Satt)
+)
+
 output$meta <- list(
   source = "clubSandwich",
   clubSandwich_version = as.character(packageVersion("clubSandwich")),
