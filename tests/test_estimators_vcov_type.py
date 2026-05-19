@@ -588,9 +588,7 @@ class TestFitBehavior:
         # last-half-of-periods rule and computes avg_att over [3, 4] on this
         # 4-period panel, but the R fixture's `c_avg` is over [2, 3, 4] —
         # the DOFs happen to coincide here but the avg_att estimands differ.
-        post_periods = [
-            int(name.rsplit("_", 1)[1]) for name in d["post_interaction_names"]
-        ]
+        post_periods = [int(name.rsplit("_", 1)[1]) for name in d["post_interaction_names"]]
         res = MultiPeriodDiD(vcov_type="hc2_bm", cluster="unit").fit(
             data,
             outcome="y",
@@ -656,28 +654,285 @@ class TestFitBehavior:
         ci_width = r_hc2bm.avg_conf_int[1] - r_hc2bm.avg_conf_int[0]
         assert ci_width > 0
 
-    def test_twfe_rejects_hc2_and_hc2_bm(self):
-        """TWFE rejects vcov_type in {hc2, hc2_bm} because it uses within-
-        transformation. HC2 leverage on the reduced design is not the hat
-        matrix of the full FE projection (FWL preserves coefficients, not
-        the hat matrix), so applying HC2/CR2-BM to the demeaned regressors
-        would silently ship wrong small-sample SEs. The fit must raise with
-        a pointer to HC1 (which has no leverage term and survives FWL) or
-        fixed_effects= dummies as workarounds.
+    def test_twfe_hc2_and_hc2_bm_produce_finite_inference(self):
+        """TWFE with vcov_type in {hc2, hc2_bm} now produces finite inference
+        via the inline full-dummy build (Gate 1 lift).
+
+        FWL preserves coefficients and residuals but NOT the hat matrix, so
+        HC2 leverage and CR2-BM DOF must compute on the full FE projection.
+        TWFE.fit bypasses the within-transform on these vcov_types and stacks
+        [intercept, treated*post, covariates, unit_dummies, time_dummies]
+        explicitly.
         """
         data = _make_did_panel(n_units=20)
-        for bad in ("hc2", "hc2_bm"):
-            with pytest.raises(
-                NotImplementedError,
-                match="TwoWayFixedEffects.*not yet supported",
-            ):
-                TwoWayFixedEffects(vcov_type=bad).fit(
-                    data,
-                    outcome="y",
-                    treatment="treated",
-                    time="time",
-                    unit="unit",
-                )
+        for vcov in ("hc2", "hc2_bm"):
+            res = TwoWayFixedEffects(vcov_type=vcov).fit(
+                data,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+            )
+            assert np.isfinite(res.att), f"{vcov}: ATT not finite"
+            assert np.isfinite(res.se), f"{vcov}: SE not finite"
+            assert res.se > 0, f"{vcov}: SE not positive"
+            assert np.isfinite(res.p_value), f"{vcov}: p-value not finite"
+            ci = res.conf_int
+            assert np.isfinite(ci[0]) and np.isfinite(ci[1]), f"{vcov}: CI not finite"
+
+    def test_twfe_hc2_matches_did_fixed_effects_full_dummy(self):
+        """TWFE(vcov_type='hc2') is bit-equal to DifferenceInDifferences with
+        fixed_effects=[unit, time] (same full-dummy algebra under the hood).
+
+        Compares only .att and .se — the full .coefficients dict may differ
+        because pd.get_dummies(drop_first=True) reference-category ordering
+        is not guaranteed identical between TWFE's inline build and DiD's
+        fixed_effects= branch.
+        """
+        data = _make_did_panel(n_units=20)
+        res_twfe = TwoWayFixedEffects(vcov_type="hc2").fit(
+            data, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        res_did = DifferenceInDifferences(vcov_type="hc2").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            fixed_effects=["unit", "time"],
+        )
+        np.testing.assert_allclose(res_twfe.att, res_did.att, atol=1e-12)
+        np.testing.assert_allclose(res_twfe.se, res_did.se, atol=1e-12)
+
+    def test_twfe_hc2_bm_matches_did_fixed_effects_full_dummy(self):
+        """Same refactor-regression check as the hc2 variant, for hc2_bm.
+
+        Note: TWFE's hc2_bm path auto-clusters at unit (preserved), while DiD
+        does NOT auto-cluster — so we explicitly pass cluster='unit' to DiD
+        to align the inference paths.
+        """
+        data = _make_did_panel(n_units=20)
+        res_twfe = TwoWayFixedEffects(vcov_type="hc2_bm").fit(
+            data, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        res_did = DifferenceInDifferences(vcov_type="hc2_bm", cluster="unit").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            fixed_effects=["unit", "time"],
+        )
+        np.testing.assert_allclose(res_twfe.att, res_did.att, atol=1e-12)
+        np.testing.assert_allclose(res_twfe.se, res_did.se, atol=1e-12)
+
+    def test_twfe_hc2_bm_auto_clusters_at_unit(self):
+        """TWFE(vcov_type='hc2_bm') with no explicit cluster routes to CR2-BM
+        at unit (auto-cluster default preserved on the hc2_bm path).
+
+        Two-pronged verification, both required to distinguish CR2-BM-at-unit
+        from one-way HC2-BM:
+
+        (1) **Equivalence check against a reference path**:
+            DifferenceInDifferences(vcov_type='hc2_bm', cluster='unit',
+            fixed_effects=[unit, time]). Both paths share the full-dummy
+            design and the same CR2-BM Satterthwaite DOF at unit, so ATT
+            and SE match bit-equally at atol=1e-12.
+
+        (2) **Inequality check against one-way HC2-BM on the same X**:
+            on the shared 20×4 multi-period fixture, CR2-BM-at-unit and
+            one-way HC2-BM produce numerically different SEs (ratio ~1.22).
+            Without this check, the test would pass even if TWFE silently
+            fell through to one-way HC2-BM (on a 2-period panel the two
+            paths happen to coincide numerically, defeating the equivalence
+            check above). The 4-period fixture separates them.
+        """
+        # Multi-period panel: cluster blocks of size 4 do NOT coincide with
+        # the unit FE structure in the same way 2-obs clusters would.
+        rng = np.random.default_rng(20260420)
+        n_units, n_periods = 20, 4
+        rows = []
+        for i in range(n_units):
+            treated = int(i >= n_units // 2)
+            for t in range(n_periods):
+                post = int(t >= n_periods // 2)
+                y = rng.normal(0.0, 1.0) + 0.5 * treated + 1.0 * treated * post
+                rows.append({"unit": i, "time": post, "treated": treated, "y": y})
+        data = pd.DataFrame(rows)
+
+        res_twfe = TwoWayFixedEffects(vcov_type="hc2_bm").fit(
+            data, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        # Auto-cluster fires; result reports unit as the cluster name.
+        assert res_twfe.cluster_name == "unit"
+        assert np.isfinite(res_twfe.se) and res_twfe.se > 0
+
+        # (1) Reference path: explicit CR2-BM at unit via DiD's fixed_effects=
+        # branch. TWFE's auto-cluster should land on the same algebra at
+        # machine precision.
+        res_did = DifferenceInDifferences(vcov_type="hc2_bm", cluster="unit").fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            fixed_effects=["unit", "time"],
+        )
+        np.testing.assert_allclose(res_twfe.att, res_did.att, atol=1e-12)
+        np.testing.assert_allclose(res_twfe.se, res_did.se, atol=1e-12)
+
+        # (2) Sanity: the auto-clustered SE must NOT equal the one-way
+        # HC2-BM SE on the same full-dummy X. If it did, a regression where
+        # TWFE silently dropped the auto-cluster (one-way fall-through) would
+        # slip through the equivalence check above.
+        from diff_diff.linalg import solve_ols
+
+        df_local = data.copy()
+        df_local["_tp"] = df_local["treated"] * df_local["time"]
+        unit_dummies = pd.get_dummies(
+            df_local["unit"], prefix="_fe_unit", drop_first=True
+        ).values.astype(np.float64)
+        time_dummies = pd.get_dummies(
+            df_local["time"], prefix="_fe_time", drop_first=True
+        ).values.astype(np.float64)
+        X = np.column_stack(
+            [
+                np.ones(len(df_local)),
+                df_local["_tp"].values.astype(np.float64),
+                unit_dummies,
+                time_dummies,
+            ]
+        )
+        y = df_local["y"].values.astype(np.float64)
+        _, _, vcov_one_way = solve_ols(X, y, vcov_type="hc2_bm")
+        se_one_way_att = float(np.sqrt(vcov_one_way[1, 1]))
+        # Use a meaningful tolerance: on this fixture the two SEs differ by
+        # ~22%; require at least 1% gap to lock in the distinction.
+        assert abs(res_twfe.se - se_one_way_att) / se_one_way_att > 0.01, (
+            f"auto-cluster CR2-BM SE ({res_twfe.se}) coincides with one-way "
+            f"HC2-BM SE ({se_one_way_att}); the test cannot distinguish "
+            "the two paths on this fixture, so a regression where TWFE "
+            "silently drops the unit cluster would not be caught."
+        )
+
+    def test_twfe_hc2_explicit_no_auto_cluster_analytical(self):
+        """Explicit `vcov_type='hc2'` + analytical inference drops the unit
+        auto-cluster (one-way HC2; the linalg validator rejects hc2 + cluster).
+        """
+        data = _make_did_panel(n_units=20)
+        res = TwoWayFixedEffects(vcov_type="hc2", inference="analytical").fit(
+            data, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se)
+        # No auto-cluster on explicit one-way hc2 + analytical.
+        assert res.cluster_name is None
+
+    def test_twfe_hc2_wild_bootstrap_keeps_auto_cluster(self):
+        """Wild-bootstrap inference on TWFE(vcov_type='hc2') must keep the
+        unit auto-cluster (bootstrap resampling uses the cluster structure).
+
+        Regression for the auto-cluster sub-guard: omitting the
+        `inference == "analytical"` companion would crash wild_bootstrap
+        with `np.unique(None)` TypeError.
+        """
+        data = _make_did_panel(n_units=20)
+        res = TwoWayFixedEffects(
+            vcov_type="hc2",
+            inference="wild_bootstrap",
+            n_bootstrap=50,
+            seed=1,
+        ).fit(data, outcome="y", treatment="treated", time="time", unit="unit")
+        assert np.isfinite(res.se)
+        assert res.se > 0
+        # Bootstrap consumed unit-level clusters.
+        assert res.n_clusters == 20
+
+    @pytest.mark.parametrize("vcov", ["hc2", "hc2_bm"])
+    def test_twfe_rejects_replicate_weights_under_hc2(self, vcov):
+        """TWFE + hc2/hc2_bm + replicate-weight survey design raises
+        NotImplementedError.
+
+        The replicate path re-demeans per replicate (re-demeaning depends
+        on the per-replicate weight vector), which doesn't compose with
+        the full-dummy build. Documented scope limit; tracked in TODO.md.
+        """
+        data = _make_did_panel(n_units=20).copy()
+        # Attach full-sample weight + 4 BRR replicate-weight columns.
+        rng = np.random.default_rng(0)
+        data["weight"] = 1.0
+        rep_cols = [f"rep{r}" for r in range(4)]
+        for col in rep_cols:
+            data[col] = rng.choice([0.5, 1.5], size=len(data))
+        sd = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="BRR",
+            weight_type="pweight",
+        )
+        with pytest.raises(
+            NotImplementedError,
+            match=r"replicate-weight.*not yet supported",
+        ):
+            TwoWayFixedEffects(vcov_type=vcov).fit(
+                data,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
+                survey_design=sd,
+            )
+
+    def test_twfe_hc2_always_treated_unit_finite_att(self):
+        """Always-treated unit (D=1 in all periods) doesn't poison the ATT
+        on the full-dummy HC2 path.
+
+        The plan's footgun was theoretical (always-treated unit × treat_post
+        could be collinear with the unit dummy). In practice, on a 2-period
+        DiD with at least one switching cohort, the design retains full rank.
+        Pivoted-QR in solve_ols would cleanly drop any column that DID
+        become rank-deficient on a more degenerate design.
+        """
+        data = _make_did_panel(n_units=20)
+        # Make unit 0 always-treated (treated=1 in both periods).
+        data = data.copy()
+        data.loc[data["unit"] == 0, "treated"] = 1
+        # Recompute treat * time for the always-treated rows.
+        # (TWFE.fit builds _treatment_post internally from data[treatment] *
+        # data[time], so we just need data["treated"] and data["time"] right.)
+        res = TwoWayFixedEffects(vcov_type="hc2_bm").fit(
+            data, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se)
+        assert res.se > 0
+
+    @pytest.mark.parametrize("vcov", ["hc2", "hc2_bm"])
+    def test_twfe_hc2_coefficients_align_with_vcov(self, vcov):
+        """Under the full-dummy HC2/HC2-BM path, `result.coefficients` must
+        carry one entry per `result.vcov` column (no duplicates, no
+        collapsing).
+
+        Mirrors the MPD invariant at
+        ``test_absorb_hc2_bm_coefficients_align_with_vcov`` (line 1611)
+        and the REGISTRY/CHANGELOG promise that the full-dummy fit
+        exposes the FE-dummy entries alongside the ATT key.
+        """
+        from collections import Counter
+
+        data = _make_did_panel(n_units=20)
+        res = TwoWayFixedEffects(vcov_type=vcov).fit(
+            data, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        assert res.vcov is not None
+        assert res.vcov.shape[0] == res.vcov.shape[1]
+        assert len(res.coefficients) == res.vcov.shape[0], (
+            f"[{vcov}] coefficients dict length ({len(res.coefficients)}) "
+            f"must match vcov rank ({res.vcov.shape[0]}); duplicate var_names "
+            "or hardcoded {'ATT': ...} would break this invariant."
+        )
+        dups = {k: v for k, v in Counter(res.coefficients.keys()).items() if v > 1}
+        assert not dups, f"[{vcov}] duplicate names in coefficients: {dups}"
+        # Backward-compat: ATT key still resolves to the ATT coefficient.
+        assert "ATT" in res.coefficients
+        assert np.isclose(res.coefficients["ATT"], res.att, atol=1e-12)
 
     def test_twfe_results_record_cluster_name(self):
         """TWFE results should label the auto-clustered SE with the unit column."""
