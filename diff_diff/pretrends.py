@@ -287,10 +287,16 @@ class PreTrendsPowerResults:
         Acceptance probability ``P(beta_hat_pre in B_NIS(Sigma))`` under the
         alternative ``M * weights``. NIS-only; NaN for Wald fits.
     violation_weights : np.ndarray, optional
-        The normalized violation-direction vector used at fit time. Populated
-        for all violation types on fresh fits. Old serialized results may have
-        ``None`` here; ``power_at()`` falls back to reconstruction in that
-        case (with the PR-A NotImplementedError guard retained only for
+        The violation-direction vector used at fit time. Populated for all
+        violation types on fresh fits. Normalization depends on the type:
+        ``constant`` / ``last_period`` / ``custom`` (or ``linear`` without
+        ``relative_times``) are stored L2-normalized; ``linear`` threaded
+        with ``relative_times`` (the post-PR-B Step 4 γ-unit path)
+        intentionally persists the unnormalized ``|t|`` direction so that
+        ``δ_pre = M · |t|`` and the reported MDV equals Roth's γ exactly.
+        Old serialized results may have ``None`` here; ``power_at()``
+        falls back to reconstruction in that case (with the PR-A
+        ``NotImplementedError`` guard retained only for
         ``violation_type='custom'`` with ``violation_weights=None``).
     """
 

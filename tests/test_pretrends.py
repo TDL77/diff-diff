@@ -610,14 +610,16 @@ class TestConvenienceFunctions:
     def test_compute_pretrends_power_rejects_custom_violation_type(
         self, mock_multiperiod_results
     ):
-        """compute_pretrends_power(..., violation_type='custom') must raise ValueError.
+        """compute_pretrends_power(..., violation_type='custom') without explicit
+        ``violation_weights`` must raise ValueError.
 
-        The helper does not accept ``violation_weights``, so a custom-type
-        call cannot supply the required weights vector. The underlying
-        PreTrendsPower constructor must raise to prevent the helper from
-        silently coercing a custom request into a degenerate fit. See
-        REGISTRY.md PreTrendsPower section + docs/methodology/papers/
-        roth-2022-review.md (helper/class API gap).
+        PR-B Step 6 added the ``violation_weights`` kwarg to both helpers, so
+        ``violation_type='custom'`` is now usable from the helper API when the
+        weights vector is supplied. This regression locks the loud-fail
+        contract for the unsupplied-weights case: silently coercing a custom
+        request into a degenerate (zero / equal-weights) fit was the PR-A
+        R18 silent-failure that the loud guard prevents. See REGISTRY.md
+        PreTrendsPower section + docs/methodology/papers/roth-2022-review.md.
         """
         with pytest.raises(ValueError, match="violation_weights"):
             compute_pretrends_power(
@@ -625,11 +627,12 @@ class TestConvenienceFunctions:
             )
 
     def test_compute_mdv_rejects_custom_violation_type(self, mock_multiperiod_results):
-        """compute_mdv(..., violation_type='custom') must raise ValueError.
+        """compute_mdv(..., violation_type='custom') without ``violation_weights``
+        must raise ValueError.
 
-        Same contract as ``compute_pretrends_power``: the helper does not
-        accept ``violation_weights``, so the custom path is unusable from
-        the helper.
+        Same contract as ``compute_pretrends_power``: PR-B Step 6 made the
+        helper accept ``violation_weights``, so the rejection is now scoped
+        to the unsupplied-weights case rather than the entire custom path.
         """
         with pytest.raises(ValueError, match="violation_weights"):
             compute_mdv(mock_multiperiod_results, violation_type="custom")
