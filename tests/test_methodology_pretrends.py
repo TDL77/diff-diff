@@ -30,9 +30,11 @@ Class structure:
   violation_weights + pretest_form end-to-end (PR-B Step 6 regression).
 - ``TestPretrendsNISvsWald`` — NIS and Wald forms produce form-consistent
   output; backwards-compat regression on the Wald path.
-- ``TestPretrendsParityR`` — R `pretrends` package parity (skips when
-  goldens at ``benchmarks/data/r_pretrends_golden.json`` are missing;
-  populated in PR-C).
+- ``TestPretrendsParityR`` — R `pretrends` package parity at
+  `jonathandroth/pretrends` commit ``122731d082`` (package version 0.1.0).
+  Goldens at ``benchmarks/data/r_pretrends_golden.json`` populated in PR-C
+  (2026-05-19). The ``@pytest.mark.skipif`` guards partial checkouts where
+  the JSON is absent.
 """
 
 import json
@@ -1101,17 +1103,29 @@ class TestPretrendsNISvsWald:
             "r_pretrends_golden.json",
         )
     ),
-    reason="R `pretrends` parity goldens not yet committed — see PR-C",
+    reason="R `pretrends` parity goldens not present (partial checkout)",
 )
 class TestPretrendsParityR:
-    """R `pretrends` package parity at `atol=1e-6`.
+    """R `pretrends` package parity at commit ``122731d082`` (PR-C).
 
-    All tests skip when `benchmarks/data/r_pretrends_golden.json` is absent
-    (the canonical PR-B-vs-PR-C handoff: the generator script ships in PR-B
-    with a placeholder commit reference; PR-C pins the audited revision,
-    runs the script, commits the JSON, and activates these tests). See
-    REGISTRY.md `## PreTrendsPower` requirements checklist for the R-parity
-    deferred-to-PR-C status.
+    Goldens at ``benchmarks/data/r_pretrends_golden.json`` populated in
+    PR-C 2026-05-19 against `jonathandroth/pretrends` commit ``122731d082``
+    (package version 0.1.0). The ``@pytest.mark.skipif`` decorator guards
+    partial checkouts where the JSON is absent (the full repo always has
+    it post-PR-C).
+
+    Tolerance rationale: R hardcodes ``thresholdTstat.Pretest = 1.96``
+    while Python uses ``scipy.stats.norm.ppf(0.975) = 1.959963984540054``
+    (``dz ≈ 3.6e-5``); on top of that, ``mvtnorm::pmvnorm`` (R) and
+    ``scipy.stats.multivariate_normal.cdf`` (Python) use Genz-Bretz
+    randomized-lattice rules with different absolute-error defaults
+    (abseps ≈ 1e-3 vs 1e-5). Combined, the empirical NIS power gap is
+    bounded by ~5e-5 in the K=4 anticipation fixture (smaller for K∈{1,3}).
+    For the inverse path (γ_p), R's ``slope_for_power`` uses
+    ``uniroot(tol = .Machine$double.eps^0.25 ≈ 1.22e-4)`` versus Python
+    ``brentq(xtol=2e-12)``; the inverse-solver tolerance gap dominates the
+    γ_p residual. ``atol=1e-4`` is therefore the realistic ceiling on both
+    tiers without tightening either solver.
     """
 
     @staticmethod
@@ -1125,40 +1139,194 @@ class TestPretrendsParityR:
         with open(path) as f:
             return json.load(f)
 
-    def test_nis_power_matches_r_pretrends_at_atol_1e_6(self):
-        """Python NIS power matches R `pretrends::pretrends()` at atol=1e-6.
+    @staticmethod
+    def _extract_python_params(fixture):
+        """Parse a fixture's panel into ``(pre_periods, Sigma_22, weights)``.
 
-        Stub — PR-C populates with concrete fixture iteration.
+        ``weights = |pre_periods|`` is the Roth γ-unit linear violation
+        weight. ``Sigma_22`` is the pre-period sub-block of the full
+        ``Sigma``. K=1 fixtures arrive with jsonlite ``auto_unbox`` scalar
+        ``pre_periods`` — ``np.atleast_1d`` normalizes them to a length-1
+        array.
+        """
+        panel = fixture["panel"]
+        pre_periods = np.atleast_1d(np.array(panel["pre_periods"], dtype=float))
+        K_pre = len(pre_periods)
+        Sigma_full = np.atleast_2d(np.array(panel["Sigma"], dtype=float))
+        Sigma_22 = Sigma_full[:K_pre, :K_pre]
+        weights = np.abs(pre_periods)
+        return pre_periods, Sigma_22, weights
+
+    def test_nis_power_matches_r_pretrends(self):
+        """Python ``_compute_power_nis`` matches R ``pretrends()`` at atol=1e-4.
+
+        Iterates all 4 fixtures × 4 γ values (16 comparisons). See class
+        docstring for the tolerance derivation.
+        """
+        goldens = self._load_r_golden()
+        pt = PreTrendsPower(alpha=0.05, pretest_form="nis")
+        for fixture_name, fixture in goldens.items():
+            if fixture_name == "meta":
+                continue
+            _, Sigma_22, weights = self._extract_python_params(fixture)
+            for g_val, r_power in zip(
+                fixture["r_power_at_gamma"]["gamma_test_values"],
+                fixture["r_power_at_gamma"]["power_values"],
+            ):
+                py_power, _, _, _ = pt._compute_power_nis(g_val, weights, Sigma_22)
+                assert np.isclose(py_power, r_power, atol=1e-4), (
+                    f"{fixture_name} γ={g_val}: Python={py_power:.7f}, "
+                    f"R={r_power:.7f}, diff={py_power - r_power:+.2e}"
+                )
+
+    def test_mdv_gamma_p_matches_r_slope_for_power(self):
+        """Python ``_compute_mdv_nis`` matches R ``slope_for_power()`` at atol=1e-4.
+
+        Iterates all 4 fixtures × 2 target_power values (8 comparisons).
+        See class docstring for the tolerance derivation — R uniroot vs
+        Python brentq solver gap dominates.
         """
         goldens = self._load_r_golden()
         for fixture_name, fixture in goldens.items():
             if fixture_name == "meta":
                 continue
-            # PR-C will iterate fixture['panel'] + fixture['r_power_at_gamma'] etc.
-            assert isinstance(fixture, dict)
+            _, Sigma_22, weights = self._extract_python_params(fixture)
+            for target_p, r_gamma_p in zip(
+                fixture["r_gamma_p"]["target_power"],
+                fixture["r_gamma_p"]["gamma_p_values"],
+            ):
+                pt = PreTrendsPower(alpha=0.05, power=target_p, pretest_form="nis")
+                py_mdv = pt._compute_mdv_nis(weights, Sigma_22)
+                assert np.isclose(py_mdv, r_gamma_p, atol=1e-4), (
+                    f"{fixture_name} target_power={target_p}: "
+                    f"Python={py_mdv:.7f}, R={r_gamma_p:.7f}, "
+                    f"diff={py_mdv - r_gamma_p:+.2e}"
+                )
 
-    def test_mdv_gamma_p_matches_r_slope_for_power_at_atol_1e_6(self):
-        """Python MDV (γ_p) matches R `slope_for_power()` at atol=1e-6.
+    def test_irregular_grid_gamma_unit_end_to_end_matches_r(self):
+        """End-to-end ``fit()`` on irregular grid matches R γ_p at atol=1e-4.
 
-        Stub — PR-C populates with concrete fixture iteration.
+        Constructs a synthetic ``MultiPeriodDiDResults`` from the
+        ``irregular_pre_periods`` fixture (pre {-5, -3, -1}; post {1, 2, 3};
+        reference_period 0) with the fixture's β̂ + full Σ + populated
+        ``interaction_indices``, then calls ``pt.fit()`` and asserts the
+        produced ``mdv`` matches R's ``slope_for_power()``. This exercises
+        the full
+        ``fit() → _extract_pre_period_params → _get_violation_weights
+        (γ-unit linear path) → _compute_mdv_nis`` chain, which the direct
+        ``_compute_mdv_nis`` test in
+        ``test_mdv_gamma_p_matches_r_slope_for_power`` does not. Locks the
+        PR-B Step 4 γ-unit fix at the public API boundary.
+        """
+        from diff_diff.results import MultiPeriodDiDResults, PeriodEffect
+
+        goldens = self._load_r_golden()
+        fixture = goldens["irregular_pre_periods"]
+        pre_periods, _, _ = self._extract_python_params(fixture)
+        panel = fixture["panel"]
+        Sigma_full = np.atleast_2d(np.array(panel["Sigma"], dtype=float))
+        beta_hat = np.array(panel["beta_hat"], dtype=float)
+        all_periods = list(np.atleast_1d(np.array(panel["all_periods"], dtype=int)))
+        pre_period_ids = [int(p) for p in pre_periods]
+        post_period_ids = [
+            int(p) for p in np.atleast_1d(np.array(panel["post_periods"], dtype=int))
+        ]
+
+        # Build period_effects + interaction_indices over all_periods.
+        ses_full = np.sqrt(np.diag(Sigma_full))
+        period_effects = {
+            int(p): PeriodEffect(
+                period=int(p),
+                effect=float(beta_hat[i]),
+                se=float(ses_full[i]),
+                t_stat=0.0,
+                p_value=0.5,
+                conf_int=(0.0, 0.0),
+            )
+            for i, p in enumerate(all_periods)
+        }
+        interaction_indices = {int(p): i for i, p in enumerate(all_periods)}
+
+        mpd_results = MultiPeriodDiDResults(
+            period_effects=period_effects,
+            avg_att=0.0,
+            avg_se=0.2,
+            avg_t_stat=0.0,
+            avg_p_value=0.5,
+            avg_conf_int=(0.0, 0.0),
+            n_obs=1000,
+            n_treated=500,
+            n_control=500,
+            pre_periods=pre_period_ids,
+            post_periods=post_period_ids,
+            reference_period=0,
+            vcov=Sigma_full,
+            interaction_indices=interaction_indices,
+        )
+
+        # Target power 0.8 (second entry in r_gamma_p).
+        target_p = fixture["r_gamma_p"]["target_power"][1]
+        r_gamma_p = fixture["r_gamma_p"]["gamma_p_values"][1]
+
+        pt = PreTrendsPower(alpha=0.05, power=target_p, pretest_form="nis")
+        result = pt.fit(mpd_results)
+
+        # Provenance assertion: end-to-end path took the full-Σ_22 branch,
+        # not the diag fallback (PR-B Step 3 routing).
+        assert (
+            result.covariance_source == "full_pre_period_vcov"
+        ), f"Expected full_pre_period_vcov, got {result.covariance_source}"
+
+        assert np.isclose(result.mdv, r_gamma_p, atol=1e-4), (
+            f"End-to-end fit() mdv={result.mdv:.7f} ≠ R slope_for_power()={r_gamma_p:.7f}, "
+            f"diff={result.mdv - r_gamma_p:+.2e}"
+        )
+
+    def test_k1_matches_r_and_closed_form(self):
+        """K=1 fixture: Python ≡ closed form, both within atol=1e-4 of R.
+
+        Three-way cross-check on the ``single_pre_period_closed_form``
+        fixture (K=1, diagonal Σ = 0.25·I). Roth Proposition 2 univariate
+        truncated-normal scalar:
+
+            power(γ) = 1 - Φ(z - γ/σ) + Φ(-z - γ/σ)
+
+        where ``z = Φ⁻¹(1 - α/2) = 1.959963984540054`` and
+        ``σ = sqrt(Σ_22[0,0]) = 0.5``. Python ``_compute_power_nis`` for
+        K=1 reduces to the same scalar normal-tail computation (no MVN
+        randomization), so the Python-vs-closed-form match is essentially
+        exact (atol=1e-7). R differs by the ``thresholdTstat=1.96`` vs
+        ``qnorm(0.975)`` z-hardcoding (~1e-5 to ~2e-5 on power, ~3e-6 to
+        ~2e-5 on γ_p). All three within 1e-4 of each other. Strongest
+        parity claim in the suite.
         """
         goldens = self._load_r_golden()
-        for fixture_name, fixture in goldens.items():
-            if fixture_name == "meta":
-                continue
-            assert isinstance(fixture, dict)
+        fixture = goldens["single_pre_period_closed_form"]
+        _, Sigma_22, weights = self._extract_python_params(fixture)
+        sigma = float(np.sqrt(Sigma_22[0, 0]))
+        z = float(stats.norm.ppf(1 - 0.05 / 2))
 
-    def test_irregular_grid_gamma_unit_matches_r(self):
-        """γ-unit MDV on irregular pre-period grids matches R at atol=1e-6.
-
-        Specifically tests the PR-B linear-units fix: irregular grid
-        {-5, -3, -1} should produce a γ value that R's pretrends package
-        also reports as the slope, not a normalized direction.
-
-        Stub — PR-C populates with concrete fixture iteration.
-        """
-        goldens = self._load_r_golden()
-        for fixture_name, fixture in goldens.items():
-            if fixture_name == "meta":
-                continue
-            assert isinstance(fixture, dict)
+        pt = PreTrendsPower(alpha=0.05, pretest_form="nis")
+        for g_val, r_power in zip(
+            fixture["r_power_at_gamma"]["gamma_test_values"],
+            fixture["r_power_at_gamma"]["power_values"],
+        ):
+            py_power, _, _, _ = pt._compute_power_nis(g_val, weights, Sigma_22)
+            closed_form = (
+                1.0 - stats.norm.cdf(z - g_val / sigma) + stats.norm.cdf(-z - g_val / sigma)
+            )
+            # Python ≡ closed form (effectively exact — same scalar path).
+            assert np.isclose(py_power, closed_form, atol=1e-7), (
+                f"K=1 Python NIS power ≠ analytical closed form (γ={g_val}): "
+                f"Python={py_power:.10f}, closed_form={closed_form:.10f}"
+            )
+            # Both within 1e-4 of R (z-hardcoding gap).
+            assert np.isclose(py_power, r_power, atol=1e-4), (
+                f"K=1 Python ≠ R (γ={g_val}): "
+                f"Python={py_power:.7f}, R={r_power:.7f}, diff={py_power - r_power:+.2e}"
+            )
+            assert np.isclose(closed_form, r_power, atol=1e-4), (
+                f"K=1 closed form ≠ R (γ={g_val}): "
+                f"closed_form={closed_form:.7f}, R={r_power:.7f}, "
+                f"diff={closed_form - r_power:+.2e}"
+            )

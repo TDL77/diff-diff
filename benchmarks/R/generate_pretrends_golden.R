@@ -1,47 +1,48 @@
 #!/usr/bin/env Rscript
 # Generate R `pretrends` parity goldens for diff-diff PreTrendsPower (PR-C).
 #
-# This script is committed in PR-B (PreTrendsPower implementation audit,
-# Roth 2022); the JSON goldens at ../data/r_pretrends_golden.json are
-# DEFERRED to PR-C. Running this script writes the JSON to that path; PR-C
-# pins the R `pretrends` package commit / release, runs this script, and
-# commits the resulting JSON to land the parity tests.
+# Script committed in PR-B; JSON goldens generated and committed in PR-C
+# against `jonathandroth/pretrends` commit `122731d082` (package version
+# 0.1.0). Running this script writes ../data/r_pretrends_golden.json.
 #
 # Requires:
 #   - R 4.4+ (tested on 4.5.2)
 #   - install.packages("remotes")
-#   - remotes::install_github("jonathandroth/pretrends", ref = "<PR-C-PIN>")
-#   - install.packages("jsonlite")
-#
-# **R `pretrends` commit pin (TODO — PR-C):** the audited revision MUST be
-# recorded here before parity assertions are committed. As of 2026-05-18
-# (PR-B implementation date) the script targets the default `main` branch
-# at https://github.com/jonathandroth/pretrends with no pin. PR-C will
-# replace `<PR-C-PIN>` with the exact commit hash AND verify the surface
-# claims documented in REGISTRY.md `## PreTrendsPower` and the paper
-# review's "R `pretrends` package version pin (provisional)" Gaps bullet.
+#   - remotes::install_github("jonathandroth/pretrends", ref = "122731d082")
+#   - install.packages(c("jsonlite", "MASS"))
 #
 # Output: ../data/r_pretrends_golden.json
 #
 # diff-diff PreTrendsPower with `pretest_form='nis'` (the new default per
-# PR-B Step 2) is expected to match the values in this JSON at atol=1e-6
-# along a three-tier contract:
-#   (1) NIS box probability `P(β̂_pre ∈ B_NIS(Σ))` at fixed M values on
-#       all 3 fixtures;
-#   (2) MDV / gamma_p (slope at target power 0.5 and 0.8) on regular and
-#       irregular pre-period grids;
-#   (3) γ-unit MDV invariance: PR-B's "skip L2 norm for linear with
-#       relative_times" path produces MDV in Roth's γ units exactly,
-#       matching R's `slope_for_power()` which also reports γ.
+# PR-B Step 2) matches the values in this JSON along a three-tier contract:
+#   (1) NIS box probability `P(beta_hat_pre in B_NIS(Sigma))` at fixed gamma
+#       values on all 4 fixtures, at atol=1e-5. R hardcodes thresholdTstat
+#       = 1.96 while Python uses scipy.stats.norm.ppf(0.975) =
+#       1.959963984540054; the ~4e-5 dz gap propagates to a ~1e-6 ceiling on
+#       the box probability — 1e-5 is the realistic atol.
+#   (2) gamma_p MDV (slope at target power 0.5 and 0.8) on regular, irregular,
+#       anticipation, and K=1 grids, at atol=1e-4. R uniroot defaults to
+#       tol = .Machine$double.eps^0.25 ~= 1.22e-4 vs Python brentq xtol=2e-12;
+#       the inverse-solver tolerance gap dominates, so 1e-4 is the realistic
+#       atol without tightening either solver.
+#   (3) gamma-unit MDV invariance: PR-B's "skip L2 norm for linear with
+#       relative_times" path produces MDV in Roth's gamma units exactly,
+#       matching R's `slope_for_power()` which also reports gamma. Fixture 2
+#       (irregular grid {-5, -3, -1}) and the end-to-end fit() test in
+#       tests/test_methodology_pretrends.py lock this.
 #
-# Three fixtures (matched to test_methodology_pretrends.py expectations):
-#   1. uniform_3_pre_periods_no_anticipation — K=3 regular grid (t ∈ {-3, -2, -1}),
+# Four fixtures (matched to test_methodology_pretrends.py expectations):
+#   1. uniform_3_pre_periods_no_anticipation — K=3 regular grid (t in {-3, -2, -1}),
 #      never-treated control. Default-case parity baseline.
 #   2. irregular_pre_periods — K=3 with relative_times = [-5, -3, -1].
-#      Exercises the PR-B γ-unit linear-pattern fix.
+#      Exercises the PR-B gamma-unit linear-pattern fix end-to-end.
 #   3. anticipation_shifted — K=4 with anticipation=1 (pre-cutoff at t<-1,
 #      so pre-periods are {-5, -4, -3, -2}). Verifies the pre-period filter
 #      logic in `_extract_pre_period_params`.
+#   4. single_pre_period_closed_form — K=1 with diagonal Sigma = 0.25*I
+#      (Roth Proposition 2 univariate truncated-normal closed form). Locks
+#      the scalar fast-path against R AND against the analytical expression
+#      `1 - Phi(z - gamma/sigma) + Phi(-z - gamma/sigma)`.
 #
 # Run:
 #   cd benchmarks/R && Rscript generate_pretrends_golden.R
@@ -53,9 +54,11 @@ suppressPackageStartupMessages({
 
 stopifnot(packageVersion("pretrends") >= "0.1.0")
 
+PRETRENDS_COMMIT <- "122731d082"
+
 # ---------------------------------------------------------------------------
 # DGP helper: build a synthetic event-study coefficient vector + VCV under a
-# stylized null DGP (β = 0, Σ_22 ~ correlated). Mirrors the simulation
+# stylized null DGP (beta = 0, Sigma_22 ~ correlated). Mirrors the simulation
 # fixtures in test_methodology_pretrends.py.
 # ---------------------------------------------------------------------------
 
@@ -66,8 +69,9 @@ build_event_study_fixture <- function(
   rho = 0.3,
   seed = 42L
 ) {
-  # Generate a correlated equicorrelation Σ across all (pre + post) periods.
-  # Realized β̂ drawn from N(0, Σ) — null DGP, no real treatment effect.
+  # Generate a correlated equicorrelation Sigma across all (pre + post) periods.
+  # Realized beta_hat drawn from N(0, Sigma) — null DGP, no real treatment
+  # effect.
   set.seed(seed)
   all_periods <- c(pre_periods, post_periods)
   K_total <- length(all_periods)
@@ -95,32 +99,36 @@ extract_pretrends <- function(fixture_data, fixture_name) {
   all_periods <- fixture_data$all_periods
 
   # R `pretrends` expects: betahat (coefficient vector), sigma (VCV matrix),
-  # tVec (relative-time labels including the reference period 0, omitted
-  # from betahat / sigma per convention), referencePeriod = 0, alpha = 0.05.
+  # tVec (relative-time labels excluding the reference period 0),
+  # referencePeriod = 0, and deltatrue (length-K_total hypothesized delta
+  # vector — only the pre-period entries are used for the rejection
+  # probability).
 
-  # The `slopes_for_power` helper returns gamma values at target power.
-  # For the three-tier parity contract, we capture both NIS power at a fixed
-  # slope and the inverse (γ_p MDV) at target power 0.5 and 0.8.
-
-  # NIS power at fixed gamma values (for tier-1 parity):
+  # Tier 1: NIS power at fixed gamma values.
+  # Build delta_pre = gamma * pre_periods per Roth's slope convention
+  # delta_t = gamma * t (t < 0 for pre-periods, so delta_pre is negative;
+  # the NIS box is symmetric, so the sign does not affect the rejection
+  # probability).
   gamma_test_values <- c(0.0, 0.2, 0.5, 1.0)
   power_values <- sapply(gamma_test_values, function(g) {
-    # Build δ = γ * |t| for pre-periods (Roth's δ_t = γ·t convention,
-    # using |t| since pre-period t < 0).
-    delta_pre <- g * abs(pre_periods)
-    # `pretrends` package: pretrends() with explicit delta vector.
-    # The exact R API: pretrends(betahat, sigma, tVec, referencePeriod,
-    #                            deltahypothesis, ...).
-    # PR-C: replace this stub with the actual R pretrends() call and
-    # extract the rejection probability.
-    NA_real_  # PR-C will populate
+    deltatrue_full <- rep(0, length(all_periods))
+    deltatrue_full[seq_along(pre_periods)] <- g * pre_periods
+    res <- pretrends(betahat = beta_hat,
+                     sigma = Sigma,
+                     deltatrue = deltatrue_full,
+                     tVec = all_periods,
+                     referencePeriod = 0)
+    as.numeric(res$df_power$Power)
   })
 
-  # γ_p MDV: solve for γ such that NIS rejection probability = target power.
-  # R `slope_for_power(betahat, sigma, tVec, referencePeriod, power)`.
+  # Tier 2: gamma_p MDV at target powers 0.5 and 0.8.
+  # R `slope_for_power()` solves uniroot on the slope -> rejection-probability
+  # map; returns gamma in the same units as Roth's slope convention.
   gamma_p_values <- sapply(c(0.5, 0.8), function(p) {
-    # PR-C: replace with actual R slope_for_power() call.
-    NA_real_
+    as.numeric(slope_for_power(sigma = Sigma,
+                               targetPower = p,
+                               tVec = all_periods,
+                               referencePeriod = 0))
   })
 
   list(
@@ -156,10 +164,11 @@ f1 <- build_event_study_fixture(
 fixture_1 <- extract_pretrends(f1, "uniform_3_pre_periods_no_anticipation")
 
 cat("Building fixture 2: irregular_pre_periods...\n")
-# K=3 with t ∈ {-5, -3, -1}. Tests PR-B's γ-unit linear-pattern fix:
-# pre-PR-B Python with normalized count-based weights would silently report
-# MDV in [0.45, 0.30, 0.15] / sqrt(0.3) units, not γ. R `slope_for_power()`
-# always reports γ; Python's PR-B Step 4 makes the two match at atol=1e-6.
+# K=3 with t in {-5, -3, -1}. Tests PR-B's gamma-unit linear-pattern fix:
+# pre-PR-B Python with normalized count-based weights silently reported
+# MDV in [0.45, 0.30, 0.15] / sqrt(0.3) units, not gamma. R
+# `slope_for_power()` always reports gamma; Python's PR-B Step 4 makes the
+# two match at atol=1e-4.
 f2 <- build_event_study_fixture(
   pre_periods = c(-5L, -3L, -1L),
   post_periods = c(1L, 2L, 3L),
@@ -172,11 +181,24 @@ cat("Building fixture 3: anticipation_shifted...\n")
 # so the {-5, -4, -3, -2} cells are the genuine pre-periods; t=-1 is the
 # anticipation window. Tests the pre-period filtering logic.
 f3 <- build_event_study_fixture(
-  pre_periods = c(-5L, -4L, -3L, -2L),  # genuine pre-periods (cutoff = -1)
+  pre_periods = c(-5L, -4L, -3L, -2L),
   post_periods = c(1L, 2L, 3L),
   seed = 303L
 )
 fixture_3 <- extract_pretrends(f3, "anticipation_shifted")
+
+cat("Building fixture 4: single_pre_period_closed_form...\n")
+# K=1 with diagonal Sigma = 0.25*I. Locks Roth Proposition 2 univariate
+# truncated-normal closed form against R AND the analytical scalar
+# expression `1 - Phi(z - gamma/sigma) + Phi(-z - gamma/sigma)`.
+f4 <- build_event_study_fixture(
+  pre_periods = c(-1L),
+  post_periods = c(1L),
+  sigma2 = 0.25,
+  rho = 0.0,
+  seed = 404L
+)
+fixture_4 <- extract_pretrends(f4, "single_pre_period_closed_form")
 
 # ---------------------------------------------------------------------------
 # Write JSON
@@ -186,38 +208,30 @@ out <- list(
   meta = list(
     generated_at = format(Sys.Date()),
     pretrends_version = as.character(packageVersion("pretrends")),
-    pretrends_commit = "<PR-C-PIN>",  # TODO PR-C: replace with actual git SHA
+    pretrends_commit = PRETRENDS_COMMIT,
     r_version = R.version.string,
     description = paste(
       "Roth (2022) PreTrendsPower parity goldens for diff-diff",
-      "compute_pretrends_power / PreTrendsPower (PR-C parity target).",
-      "Parity at atol=1e-6 along a three-tier contract:",
-      "(1) NIS box probability at fixed γ values on all 3 fixtures;",
-      "(2) γ_p MDV (slope at target power 0.5 and 0.8) on regular and",
-      "irregular grids;",
-      "(3) γ-unit MDV invariance: PR-B's skip-L2-norm path produces MDV",
-      "in Roth's γ units exactly, matching R's slope_for_power().",
+      "compute_pretrends_power / PreTrendsPower (PR-C).",
+      "Three-tier parity contract:",
+      "(1) NIS box probability at fixed gamma values on all 4 fixtures",
+      "(atol=1e-5; R hardcodes thresholdTstat=1.96, Python uses qnorm(0.975)",
+      "= 1.959963984540054);",
+      "(2) gamma_p MDV (slope at target power 0.5 and 0.8) on regular,",
+      "irregular, anticipation, and K=1 grids (atol=1e-4; R uniroot tol",
+      "vs Python brentq xtol gap);",
+      "(3) gamma-unit MDV invariance: PR-B's skip-L2-norm path produces MDV",
+      "in Roth's gamma units exactly, matching R's slope_for_power().",
       "See diff-diff/docs/methodology/papers/roth-2022-review.md for",
       "the full derivation."
     )
   ),
   uniform_3_pre_periods_no_anticipation = fixture_1,
   irregular_pre_periods = fixture_2,
-  anticipation_shifted = fixture_3
+  anticipation_shifted = fixture_3,
+  single_pre_period_closed_form = fixture_4
 )
 
 out_path <- "../data/r_pretrends_golden.json"
 write_json(out, out_path, pretty = TRUE, digits = NA, auto_unbox = TRUE)
 cat(sprintf("Wrote %s\n", out_path))
-cat("\n")
-cat("PR-C TODO checklist:\n")
-cat("  [ ] Replace <PR-C-PIN> commit-hash placeholder above with actual\n")
-cat("      git SHA from https://github.com/jonathandroth/pretrends.\n")
-cat("  [ ] Replace the NA_real_ stubs in extract_pretrends() with the\n")
-cat("      actual pretrends::pretrends() / slope_for_power() calls.\n")
-cat("  [ ] Verify the surface claims in REGISTRY.md PreTrendsPower\n")
-cat("      Reference implementations section against the pinned revision.\n")
-cat("  [ ] Activate tests/test_methodology_pretrends.py::TestPretrendsParityR\n")
-cat("      (currently skips via @pytest.mark.skipif when the JSON is missing).\n")
-cat("  [ ] Flip METHODOLOGY_REVIEW.md PreTrendsPower row from\n")
-cat("      **Complete** (R parity pending) → **Complete**.\n")
