@@ -1525,11 +1525,13 @@ class DiagnosticReport:
 
         Classification rules:
 
-        - ``"full_pre_period_vcov"`` — non-event-study result types
-          (``MultiPeriodDiDResults``, basic ``DiDResults``, etc.) that
-          always exposed full pre-period covariance via
-          ``interaction_indices`` or equivalent. No ambiguity for these
-          types regardless of pre-/post-PR-B serialization.
+        - ``"full_pre_period_vcov"`` — basic ``DiDResults`` and other
+          non-event-study, non-MPD result types that historically expose
+          the full pre-period covariance. ``MultiPeriodDiDResults`` is
+          handled by an explicit branch below because its
+          ``pretrends.py`` MPD branch only takes the full sub-block path
+          when ``interaction_indices`` is populated, otherwise falling
+          through to ``diag(ses**2)``.
         - ``"diag_fallback_available_full_vcov_unused"`` — event-study
           result types with populated ``event_study_vcov``. Under PR-B,
           new fits route through the full sub-block, but a legacy
@@ -1543,7 +1545,10 @@ class DiagnosticReport:
         - ``"diag_fallback"`` — event-study result types with
           ``event_study_vcov is None`` (bootstrap or replicate-weight
           CS / SA fits, plus ImputationDiD / Stacked / EfficientDiD /
-          TwoStageDiD / etc. which don't yet expose ``event_study_vcov``).
+          TwoStageDiD / etc. which don't yet expose ``event_study_vcov``);
+          OR ``MultiPeriodDiDResults`` without ``interaction_indices``
+          (genuine diag-only path inside ``pretrends.py:_extract_pre_period_params``,
+          no "available but unused" concern, so no downgrade applies).
         """
         is_event_study_type = type(source_fit).__name__ in {
             "CallawaySantAnnaResults",

@@ -2425,19 +2425,21 @@ class TestDiagFallbackDowngradeAppliedCentrally:
         consumes the full ``event_study_vcov`` sub-block (PR-B Step 3),
         the DR / BR layer must NOT downgrade ``well_powered``.
 
-        Exercises the live PR-B path on a real CS fit. The fit is
-        non-bootstrap (analytical CS), so ``event_study_vcov`` is
-        populated and ``pretrends.py`` records
-        ``covariance_source='full_pre_period_vcov'`` on the result —
-        which the DR adapter consumes directly. If the headline is
-        well-powered, the BR ``summary()`` prose (the actual surface
-        the well-powered phrasing is rendered on) must reflect that
-        positively, not via the conservative moderately-informative
-        phrasing.
+        Exercises the live PR-B path on the deterministic ``cs_fit``
+        fixture (analytical non-bootstrap CS, ``seed=7``,
+        ``treatment_effect=1.5``). On this fixture the raw
+        ``mdv / |att|`` ratio is well under the ``0.25`` well_powered
+        threshold, so the expected tier is unconditionally
+        ``well_powered`` — no skip-on-different-tier branch (R6 codex:
+        previous version would silently bypass the key assertion if a
+        regression reintroduced the downgrade).
 
-        Skips if the fixture happens to land in a different tier; the
-        important contract is "when the full-VCV path fires, the
-        downgrade does NOT".
+        ``pretrends.py`` records
+        ``covariance_source='full_pre_period_vcov'`` on the result, which
+        the DR adapter consumes directly. The BR ``summary()`` prose
+        (the actual surface the well-powered phrasing is rendered on)
+        must contain the well-powered text and lack the conservative
+        moderately-informative text.
         """
         from diff_diff import BusinessReport, DiagnosticReport
         from diff_diff.pretrends import compute_pretrends_power
@@ -2452,41 +2454,48 @@ class TestDiagFallbackDowngradeAppliedCentrally:
             first_treat="first_treat",
         )
         block = dr.to_dict()["pretrends_power"]
-        if block.get("status") != "ran":
-            pytest.skip("pretrends_power did not run on this fixture")
+        assert block.get("status") == "ran", "pretrends_power should run on cs_fit"
 
-        # Provenance: PR-B records full_pre_period_vcov on non-bootstrap CS.
-        cov = block.get("covariance_source")
-        if cov != "full_pre_period_vcov":
-            pytest.skip(f"fixture did not exercise the full-VCV path (got {cov})")
+        # Deterministic fixture pins: cov_source = full_pre_period_vcov,
+        # mdv/|att| ratio ≈ 0.053 (well under 0.25), tier = well_powered.
+        # Codex R6 P3: pin the expected tier explicitly so a future
+        # regression that reintroduces the conservative downgrade fails
+        # this test loudly (was previously bypassed by the `if tier ==
+        # well_powered` guard).
+        assert block["covariance_source"] == "full_pre_period_vcov", (
+            "cs_fit is analytical CS with event_study_vcov populated — "
+            "PR-B routing must report full_pre_period_vcov"
+        )
+        ratio = block["mdv_share_of_att"]
+        assert ratio is not None and ratio < 0.25, (
+            f"cs_fit raw mdv/|att|={ratio} must be in the well_powered "
+            "range (<0.25) for this assertion to pin the no-downgrade contract"
+        )
+        assert block["tier"] == "well_powered", (
+            "well-powered raw ratio must NOT be downgraded under the PR-B " "full-VCV path"
+        )
 
-        # Sanity: the same label appears on the compute_pretrends_power
-        # output's persisted field — locks the architectural fix
-        # (provenance recorded at fit time, consumed at the report layer).
+        # Architectural fix: the same provenance label appears on the
+        # compute_pretrends_power output's persisted field, locking that
+        # provenance is recorded at fit time and consumed at the report
+        # layer (not re-inferred from the source-fit type).
         pp = compute_pretrends_power(fit, alpha=0.05, target_power=0.80)
         assert pp.covariance_source == "full_pre_period_vcov"
 
-        # Positive prose contract: when the tier is well_powered post-PR-B,
-        # BR.summary() must contain the well-powered phrasing and must NOT
-        # contain the moderately-informative phrasing (which would only
-        # appear under the conservative downgrade). BR.full_report() also
-        # must not surface the downgrade phrasing as a defensive secondary
-        # check; the primary assertion is on summary() per
-        # ``diff_diff/business_report.py`` rendering surface.
-        if block["tier"] == "well_powered":
-            br = BusinessReport(fit, data=sdf)
-            summary = br.summary()
-            full = br.full_report()
-            # Primary surface: summary() renders the tier prose.
-            assert "well-powered" in summary, (
-                "BR.summary() should surface well-powered phrasing under the "
-                "PR-B full-VCV no-downgrade path"
-            )
-            assert "moderately informative" not in summary
-            assert "moderately-informative" not in summary
-            # Secondary defensive check on full_report().
-            assert "moderately informative" not in full.lower()
-            assert "moderately-informative" not in full.lower()
+        # Positive prose contract on the rendered surfaces.
+        br = BusinessReport(fit, data=sdf)
+        summary = br.summary()
+        full = br.full_report()
+        # Primary surface: summary() renders the tier prose.
+        assert "well-powered" in summary, (
+            "BR.summary() should surface well-powered phrasing under the "
+            "PR-B full-VCV no-downgrade path"
+        )
+        assert "moderately informative" not in summary
+        assert "moderately-informative" not in summary
+        # Secondary defensive check on full_report().
+        assert "moderately informative" not in full.lower()
+        assert "moderately-informative" not in full.lower()
 
 
 class TestCSNotYetTreatedControlGroupSemantics:
