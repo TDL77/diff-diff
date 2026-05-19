@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-05-19
+
 ### Added
 - **Agent-discoverability contract test (`tests/test_agent_discoverability.py`).** New static-snapshot test pinning the agent-facing surface introduced by PR #464: `__all__` membership of `agent_workflow` / `profile_panel` / `get_llm_guide` / `practitioner_next_steps` / `BusinessReport`; `dir(diff_diff)` head-first ordering against `_AGENT_FACING_ORDER` (catches drift in the `_OrderedName` `__lt__` ordering trick); `_OrderedName` `isinstance(_, str)` + str-method compatibility; `dir()` full-namespace + `inspect.getmembers` parity; top-level `__doc__` first-paragraph mention of `agent_workflow` + named references to the 5-step workflow primitives; `agent_workflow()` script content references each downstream helper by name; canonical estimator class names (CallawaySantAnna, ContinuousDiD, HeterogeneousAdoptionDiD, etc.) remain importable. No live API calls; runs in the default pytest suite. Closes [issue #461](https://github.com/igerber/diff-diff/issues/461) (snapshot variant — live-agent regression test deferred to a separate follow-up that depends on causal-llm-eval packaging its harness). Also closes the `__dir__()` contract-test row from `TODO.md` that PR #464 deferred here.
 - **`diff_diff.agent_workflow(df, unit=..., time=..., treatment=..., outcome=...)` — stateless orchestrator for LLM-agent discoverability** (`diff_diff/agent_workflow.py`). Prints (and returns as dict) a copy-pasteable 5-step workflow with the caller's column names templated in: `profile_panel` → `get_llm_guide("autonomous")` → `<Estimator>(...).fit(df, ...)` → `practitioner_next_steps(result)` → `BusinessReport(result).full_report()`. The function calls nothing internally and does not inspect `df`; it is a guided tour, not a router. Surfaces the canonical workflow primitives (`profile_panel`, `get_llm_guide`, `practitioner_next_steps`, `BusinessReport`) that cold-start agent dry-passes at [igerber/causal-llm-eval](https://github.com/igerber/causal-llm-eval) showed agents practically never reach for on their own. Output structure: `{"profile_call", "guide_call", "fit_candidates", "validation_calls", "reporting_call", "script"}`; `fit_candidates` is a flat list of estimator/diagnostic class names referenced in the workflow patterns (each must remain importable on `diff_diff`, locked by `tests/test_agent_workflow.py::test_fit_candidates_all_importable`). Closes [issue #460](https://github.com/igerber/diff-diff/issues/460).
@@ -1477,6 +1479,7 @@ for the full feature history leading to this release.
 [2.1.2]: https://github.com/igerber/diff-diff/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/igerber/diff-diff/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/igerber/diff-diff/compare/v2.0.3...v2.1.0
+[3.4.0]: https://github.com/igerber/diff-diff/compare/v3.3.3...v3.4.0
 [3.3.3]: https://github.com/igerber/diff-diff/compare/v3.3.2...v3.3.3
 [3.3.2]: https://github.com/igerber/diff-diff/compare/v3.3.1...v3.3.2
 [3.3.1]: https://github.com/igerber/diff-diff/compare/v3.3.0...v3.3.1
