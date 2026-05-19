@@ -71,7 +71,13 @@ class TwoWayFixedEffects(DifferenceInDifferences):
     ATT coefficient, its SE, and analytical inference are unchanged.
     Auto-cluster-at-unit is preserved on ``hc2_bm`` (routes to CR2-BM at
     unit) and on ``hc2`` + ``wild_bootstrap``; dropped on explicit ``hc2``
-    + ``analytical`` to match the one-way contract. Documented in
+    + ``analytical`` to match the one-way contract. **This wording applies
+    to the non-survey analytical path**: under ``survey_design=`` with no
+    explicit ``cluster=``, TWFE intentionally keeps the documented
+    implicit-PSU path (auto-cluster is NOT injected into the survey PSU
+    structure) — users who want unit-level PSU injection under a survey
+    design must pass explicit ``cluster="unit"`` or set
+    ``survey_design.psu``. Documented in
     ``docs/methodology/REGISTRY.md`` under the scope-limitation note.
 
     **Conley spatial-HAC (``vcov_type="conley"``) is supported via the

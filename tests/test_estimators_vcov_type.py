@@ -1016,6 +1016,51 @@ class TestFitBehavior:
         np.testing.assert_allclose(res_twfe.att, res_did.att, atol=1e-12)
         np.testing.assert_allclose(res_twfe.se, res_did.se, atol=1e-12)
 
+    @pytest.mark.parametrize("vcov", ["hc2", "hc2_bm"])
+    def test_twfe_hc2_with_survey_strata_psu_matches_did_fixed_effects(self, vcov):
+        """TWFE(vcov_type in {'hc2','hc2_bm'}) with a full SurveyDesign
+        (weights + strata + psu) routes through the full-dummy build, with
+        survey TSL variance (including stratified-design adjustments)
+        taking precedence over the analytical sandwich.
+
+        Extends the weights-only regression with a multi-stage survey
+        design (strata + PSU). Verifies that TWFE's full-dummy route
+        threads strata / PSU columns to LinearRegression's survey
+        variance path identically to DiD's fixed_effects= branch — so
+        ATT and SE match bit-equally at atol=1e-12 under non-trivial
+        survey design metadata.
+        """
+        data = _make_did_panel(n_units=20).copy()
+        rng = np.random.default_rng(11)
+        data["w"] = rng.uniform(0.5, 2.0, size=len(data))
+        # Stratum = unit cohort (treated vs control); PSU = unit. Both
+        # constant within each unit, satisfying typical survey-design
+        # constraints. Globally unique PSU ids per SurveyDesign convention.
+        data["stratum"] = data["treated"].astype(int)
+        data["psu"] = data["unit"].astype(int)
+        sd = SurveyDesign(weights="w", strata="stratum", psu="psu")
+        # Explicit cluster='unit' on both paths so PSU injection matches
+        # under hc2_bm; hc2 paths drop the cluster as one-way.
+        cluster_kwarg = "unit" if vcov == "hc2_bm" else None
+        res_twfe = TwoWayFixedEffects(vcov_type=vcov, cluster=cluster_kwarg).fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
+            survey_design=sd,
+        )
+        res_did = DifferenceInDifferences(vcov_type=vcov, cluster=cluster_kwarg).fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            fixed_effects=["unit", "time"],
+            survey_design=sd,
+        )
+        np.testing.assert_allclose(res_twfe.att, res_did.att, atol=1e-12)
+        np.testing.assert_allclose(res_twfe.se, res_did.se, atol=1e-12)
+
     def test_twfe_results_record_cluster_name(self):
         """TWFE results should label the auto-clustered SE with the unit column."""
         rng = np.random.default_rng(1)
