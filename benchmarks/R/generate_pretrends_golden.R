@@ -14,12 +14,18 @@
 # Output: ../data/r_pretrends_golden.json
 #
 # diff-diff PreTrendsPower with `pretest_form='nis'` (the new default per
-# PR-B Step 2) matches the values in this JSON along a three-tier contract:
+# PR-B Step 2) matches the values in this JSON along a three-tier contract,
+# both tiers at atol=1e-4:
 #   (1) NIS box probability `P(beta_hat_pre in B_NIS(Sigma))` at fixed gamma
-#       values on all 4 fixtures, at atol=1e-5. R hardcodes thresholdTstat
+#       values on all 4 fixtures, at atol=1e-4. R hardcodes thresholdTstat
 #       = 1.96 while Python uses scipy.stats.norm.ppf(0.975) =
-#       1.959963984540054; the ~4e-5 dz gap propagates to a ~1e-6 ceiling on
-#       the box probability — 1e-5 is the realistic atol.
+#       1.959963984540054 (~4e-5 dz gap); on top of that, mvtnorm::pmvnorm
+#       (R) and scipy.stats.multivariate_normal.cdf (Python) use Genz-Bretz
+#       randomized-lattice rules with different absolute-error defaults
+#       (abseps ~ 1e-3 vs 1e-5). The empirical NIS power gap is bounded by
+#       ~5e-5 on the K=4 anticipation fixture; ~3e-5 on K=3 fixtures; ~2e-5
+#       on K=1. atol=1e-4 is the realistic atol without tightening
+#       thresholdTstat.Pretest in R or relaxing the Genz tolerances.
 #   (2) gamma_p MDV (slope at target power 0.5 and 0.8) on regular, irregular,
 #       anticipation, and K=1 grids, at atol=1e-4. R uniroot defaults to
 #       tol = .Machine$double.eps^0.25 ~= 1.22e-4 vs Python brentq xtol=2e-12;
@@ -132,20 +138,24 @@ extract_pretrends <- function(fixture_data, fixture_name) {
   })
 
   list(
+    # Wrap vector fields in I() to prevent jsonlite's auto_unbox=TRUE from
+    # collapsing length-1 vectors to scalars (matters for the K=1 fixture:
+    # `pre_periods` and `post_periods` are singletons but must serialize as
+    # length-1 arrays so downstream Python loaders can iterate uniformly).
     panel = list(
-      pre_periods = as.integer(pre_periods),
-      post_periods = as.integer(post_periods),
-      all_periods = as.integer(all_periods),
-      beta_hat = as.numeric(beta_hat),
+      pre_periods = I(as.integer(pre_periods)),
+      post_periods = I(as.integer(post_periods)),
+      all_periods = I(as.integer(all_periods)),
+      beta_hat = I(as.numeric(beta_hat)),
       Sigma = Sigma
     ),
     r_power_at_gamma = list(
-      gamma_test_values = as.numeric(gamma_test_values),
-      power_values = as.numeric(power_values)
+      gamma_test_values = I(as.numeric(gamma_test_values)),
+      power_values = I(as.numeric(power_values))
     ),
     r_gamma_p = list(
-      target_power = c(0.5, 0.8),
-      gamma_p_values = as.numeric(gamma_p_values)
+      target_power = I(c(0.5, 0.8)),
+      gamma_p_values = I(as.numeric(gamma_p_values))
     ),
     fixture_name = fixture_name
   )
@@ -213,13 +223,15 @@ out <- list(
     description = paste(
       "Roth (2022) PreTrendsPower parity goldens for diff-diff",
       "compute_pretrends_power / PreTrendsPower (PR-C).",
-      "Three-tier parity contract:",
+      "Three-tier parity contract, both numeric tiers at atol=1e-4:",
       "(1) NIS box probability at fixed gamma values on all 4 fixtures",
-      "(atol=1e-5; R hardcodes thresholdTstat=1.96, Python uses qnorm(0.975)",
-      "= 1.959963984540054);",
+      "(atol=1e-4; R hardcodes thresholdTstat=1.96 while Python uses",
+      "qnorm(0.975) = 1.959963984540054, and mvtnorm::pmvnorm vs",
+      "scipy MVN CDF Genz-Bretz randomized-lattice differences bound the",
+      "K=4 NIS power gap at ~5e-5);",
       "(2) gamma_p MDV (slope at target power 0.5 and 0.8) on regular,",
       "irregular, anticipation, and K=1 grids (atol=1e-4; R uniroot tol",
-      "vs Python brentq xtol gap);",
+      "vs Python brentq xtol gap dominates);",
       "(3) gamma-unit MDV invariance: PR-B's skip-L2-norm path produces MDV",
       "in Roth's gamma units exactly, matching R's slope_for_power().",
       "See diff-diff/docs/methodology/papers/roth-2022-review.md for",
