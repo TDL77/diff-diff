@@ -40,18 +40,13 @@ def test_agent_facing_names_in_all():
     """The named primitives must remain in the public API surface.
 
     Catches an export pruning that would silently remove an agent-facing
-    name from ``from diff_diff import *``.
+    name from ``from diff_diff import *``. Required set mirrors
+    ``_AGENT_FACING_ORDER`` so adding a name to the head order also
+    enforces its presence in ``__all__``.
     """
-    required = {
-        "agent_workflow",
-        "profile_panel",
-        "get_llm_guide",
-        "practitioner_next_steps",
-        "BusinessReport",
-    }
-    assert required <= set(
-        diff_diff.__all__
-    ), f"missing from __all__: {required - set(diff_diff.__all__)}"
+    required: set[str] = set(_AGENT_FACING_ORDER)
+    all_names: set[str] = set(diff_diff.__all__)
+    assert required <= all_names, f"missing from __all__: {required - all_names}"
 
 
 def test_estimator_class_names_importable():
@@ -118,30 +113,46 @@ def test_dir_tail_alphabetic_by_str():
 def test_dir_returns_full_module_namespace():
     """``dir(diff_diff)`` must enumerate the full module namespace.
 
-    Restricting to ``__all__`` would drop module dunders (``__doc__``,
-    ``__name__``, ``__file__``) and break ``inspect.getmembers``
-    consumers. The override returns ``[_OrderedName(n) for n in
-    globals()]`` to preserve that compatibility.
+    Compared against ``vars(diff_diff)`` (the real underlying module
+    namespace, which `__dir__` does NOT derive from automatically) so
+    a regression that reduces `__dir__` to only `__all__` would fail
+    here. Without this check, a tautology was hiding: CPython's
+    `inspect.getmembers()` derives its name list FROM `dir(obj)`, so
+    `dir() == getmembers()` is always true regardless of how narrow
+    `__dir__` becomes.
+
+    The override returns ``[_OrderedName(n) for n in globals()]`` to
+    preserve `vars()`-equivalent coverage; this assertion locks that
+    contract.
     """
-    names = dir(diff_diff)
-    for dunder in ("__doc__", "__name__", "__file__", "__all__"):
-        assert dunder in names, f"{dunder!r} missing from dir() output"
-
-
-def test_getmembers_parity_with_default_module_dir():
-    """``inspect.getmembers(diff_diff)`` should return the same set of
-    names as ``dir(diff_diff)``, with ``__doc__`` accessible.
-
-    Catches regressions where ``__dir__`` is reduced to ``__all__`` only.
-    """
-    dir_names = set(dir(diff_diff))
-    gm_names = {name for name, _ in inspect.getmembers(diff_diff)}
-    assert dir_names == gm_names, (
-        f"dir() and inspect.getmembers() disagree by " f"{sorted(dir_names ^ gm_names)[:5]}"
+    dir_names = {str(n) for n in dir(diff_diff)}
+    vars_names = set(vars(diff_diff))
+    assert dir_names == vars_names, (
+        f"dir() is not equal to vars() namespace. "
+        f"In dir() only: {sorted(dir_names - vars_names)[:8]!r}; "
+        f"In vars() only: {sorted(vars_names - dir_names)[:8]!r}."
     )
-    # And the steering surface must be accessible.
+    # Spot-check the dunders that downstream tooling expects.
+    for dunder in ("__doc__", "__name__", "__file__", "__all__"):
+        assert dunder in dir_names, f"{dunder!r} missing from dir() output"
+
+
+def test_getmembers_returns_accessible_values():
+    """``inspect.getmembers(diff_diff)`` is the standard agent-facing
+    introspection call. Its name list is derived from ``dir()`` (see
+    `test_dir_returns_full_module_namespace` for the independent
+    membership check); here we verify every reported name produces an
+    accessible value with no AttributeError, AND that the steering
+    surface (`__doc__`) is reachable through it.
+    """
+    members = dict(inspect.getmembers(diff_diff))
+    # Every name must resolve to an accessible value.
+    for name in members:
+        getattr(diff_diff, name)
+    # And the steering surface must be accessible + content-correct.
     assert diff_diff.__doc__ is not None
     assert "agent_workflow" in diff_diff.__doc__.lower()
+    assert members["__doc__"] is diff_diff.__doc__
 
 
 # ---------------------------------------------------------------------------
@@ -264,25 +275,16 @@ def test_agent_workflow_fit_candidates_resolve_on_diff_diff():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    "name",
-    sorted(
-        {
-            "agent_workflow",
-            "profile_panel",
-            "get_llm_guide",
-            "practitioner_next_steps",
-            "BusinessReport",
-        }
-    ),
-)
+@pytest.mark.parametrize("name", sorted(_AGENT_FACING_ORDER))
 def test_agent_facing_entrypoint_callable(name):
-    """Each agent-facing primitive must remain a callable attribute on
-    the top-level package.
+    """Each name in ``_AGENT_FACING_ORDER`` must remain a callable
+    attribute on the top-level package.
 
     Catches an accidental replacement of one of these names with a
     module or constant (which would silently break the agent's
-    ``help(name)`` follow-up).
+    ``help(name)`` follow-up). Anchored to ``_AGENT_FACING_ORDER`` so
+    adding a new head name automatically extends coverage rather than
+    needing two sources of truth.
     """
     obj = getattr(diff_diff, name)
     assert callable(obj), f"{name!r} is not callable on the diff_diff namespace"
