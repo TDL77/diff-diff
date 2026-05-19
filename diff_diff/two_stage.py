@@ -23,7 +23,7 @@ Butts, K. & Gardner, J. (2022). did2s: Two-Stage
 
 import warnings
 from dataclasses import replace
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,12 @@ from diff_diff.two_stage_results import (
     TwoStageDiDResults,
 )  # noqa: F401 (re-export)
 from diff_diff.utils import safe_inference, warn_if_not_converged
+
+if TYPE_CHECKING:
+    # Forward reference for the Wave E.1 survey-design path. Imported under
+    # TYPE_CHECKING to keep the runtime cost zero and avoid any future
+    # circular-import surprises with diff_diff.survey.
+    from diff_diff.survey import ResolvedSurveyDesign
 
 # Maximum number of elements before falling back to per-column sparse aggregation.
 # 10M float64 elements ≈ 80 MB peak allocation. Above this, per-column .getcol()
@@ -69,6 +75,8 @@ def _compute_gmm_corrected_meat(
     conley_time: Optional[np.ndarray] = None,
     conley_unit: Optional[np.ndarray] = None,
     conley_lag_cutoff: Optional[int] = None,
+    survey_weights: Optional[np.ndarray] = None,
+    resolved_survey: Optional["ResolvedSurveyDesign"] = None,
 ) -> np.ndarray:
     """Gardner (2022) GMM first-stage uncertainty correction — unified IF meat.
 
@@ -82,12 +90,22 @@ def _compute_gmm_corrected_meat(
     The caller wraps with the bread ``A_22^{-1} = (X_2' W X_2)^{-1}``:
     ``V = A_22^{-1} @ meat @ A_22^{-1}``.
 
-    **Methodology synthesis** (Wave D): no reference software combines all
-    three ingredients. Butts (2021) §3.1 gives the IF construction for
-    spillover-aware DiD; Gardner (2022) §4 gives the two-stage GMM sandwich;
-    Conley (1999) gives the spatial kernel.
+    **Methodology synthesis (Wave D + Wave E.1):**
 
-    **Kernel dispatch:**
+    *Wave D* (no reference software combines all three): Butts (2021) §3.1
+    gives the IF construction for spillover-aware DiD; Gardner (2022) §4
+    gives the two-stage GMM sandwich; Conley (1999) gives the spatial kernel.
+
+    *Wave E.1* (additional composition for ``survey_design=``): Gerber
+    (2026, arXiv:2605.04124) Proposition 1 — Binder Taylor Series
+    Linearization for IF representations of smooth functionals; explicitly
+    derived for TwoStageDiD in the paper's Appendix — composed with the
+    Wave D GMM correction. The composition is mechanical: the Wave D Psi
+    (with survey weights threaded through gamma_hat / eps / bread) is
+    aggregated to PSU level and passed to the audited Binder TSL meat
+    helper :func:`diff_diff.survey._compute_stratified_meat_from_psu_scores`.
+
+    **Kernel dispatch (no survey):**
 
     - ``vcov_type="hc1"``: ``K = I_n``; ``meat = Psi' @ Psi`` with
       ``n / (n - p_2)`` finite-sample multiplier.
@@ -99,14 +117,38 @@ def _compute_gmm_corrected_meat(
       ``conley_unit`` / ``conley_lag_cutoff`` set). No finite-sample
       multiplier — preserves the ``conleyreg`` / Wave B convention.
 
-    **`gamma_hat` solve** (mirror of `TwoStageDiD._compute_gmm_variance`
-    pattern at `two_stage.py:1648-1670`): factorize ``X_10' X_10`` via
-    ``sparse_factorized`` (fast path); fall back to dense ``lstsq`` with
-    UserWarning when factorization fails. ``gamma_hat`` has shape
-    ``(p_1, p_2)``.
+    **Kernel dispatch (Wave E.1 — ``resolved_survey is not None``):**
 
-    **Survey weights:** NOT supported in Wave D (parameter omitted).
-    Wave E will extend with stratified-survey × GMM × Conley methodology.
+    - ``vcov_type="hc1"``: aggregate Psi to PSU totals; call
+      ``_compute_stratified_meat_from_psu_scores`` with strata + FPC +
+      ``lonely_psu`` handling. No HC1 finite-sample multiplier (Binder
+      TSL has its own ``(1-f_h) * n_h/(n_h-1)`` correction).
+    - ``vcov_type="cluster"``: ``cluster_ids`` IS the PSU (via upstream
+      ``_inject_cluster_as_psu``); identical to the HC1+survey branch.
+    - ``vcov_type="conley"``: raises ``NotImplementedError``. Wave E.2
+      (planned) will compose Conley spatial-HAC with within-stratum
+      Conley sandwich on PSU totals.
+
+    **`gamma_hat` solve** (mirror of `TwoStageDiD._compute_gmm_variance`
+    pattern at `two_stage.py:1886-1917`): factorize ``X_10' W X_10`` via
+    ``sparse_factorized`` (fast path); fall back to dense ``lstsq`` with
+    UserWarning when factorization fails. ``W`` is the diagonal of
+    ``survey_weights`` when provided (Hájek-normalized, ``sum_i w_i = n``);
+    identity otherwise. ``gamma_hat`` has shape ``(p_1, p_2)``.
+
+    **Note (saturation — three distinct conditions, additive):**
+
+    1. HC1 saturation (Wave D, pre-existing): ``n - p_2 <= 0`` → NaN meat
+       + UserWarning. Fires on both no-survey and survey paths whenever
+       the HC1 multiplier is invoked.
+    2. CR1 saturation (Wave D, pre-existing): same gate, CR1 message.
+    3. Survey-saturation (Wave E.1, NEW): when
+       ``_compute_stratified_meat_from_psu_scores`` returns
+       ``(_, var_computed=False, legit_zero=0)`` → NaN meat + UserWarning
+       mentioning ``df_survey`` so callers can ``pytest.warns(match="df_survey")``.
+       Departure from ``two_stage.py::_compute_gmm_variance`` (lines
+       ~2003-2005) which currently NaN-fails SILENTLY; Wave E.1 surfaces
+       the diagnostic per ``feedback_no_silent_failures``.
 
     Parameters
     ----------
@@ -129,11 +171,22 @@ def _compute_gmm_corrected_meat(
     cluster_ids : np.ndarray of shape (n,), optional
         Cluster identifiers. Required for ``vcov_type="cluster"``;
         used as the product-kernel cluster mask under ``vcov_type="conley"``
-        when supplied. HC1 path passes ``None``.
+        when supplied. HC1 path passes ``None``. Under the survey path
+        with ``vcov_type="cluster"``, ``cluster_ids`` is the PSU label
+        (caller injects via ``_inject_cluster_as_psu``).
     conley_coords, conley_cutoff_km, conley_metric, conley_kernel,
     conley_time, conley_unit, conley_lag_cutoff
         Conley spatial-HAC kwargs. Required when ``vcov_type="conley"``.
         See :func:`diff_diff.conley._compute_conley_meat` for semantics.
+    survey_weights : np.ndarray of shape (n,), optional
+        Hájek-normalized survey weights (``sum_i w_i = n``). When provided,
+        enters at the ``gamma_hat`` solve and per-obs Psi construction
+        (eps weighting). When None, the no-survey Wave D path applies.
+    resolved_survey : ResolvedSurveyDesign, optional
+        Resolved survey design with PSU / strata / FPC arrays for the
+        Wave E.1 Binder TSL meat. Required when ``survey_weights`` is
+        supplied and stratified-cluster variance is requested. When None,
+        the no-survey Wave D dispatch applies.
 
     Returns
     -------
@@ -159,11 +212,27 @@ def _compute_gmm_corrected_meat(
             cluster_ids=cluster_ids,
         )
 
-    # 1. gamma_hat = (X_10' X_10)^{-1} (X_1' X_2). Mirror the existing
-    #    TwoStageDiD method at two_stage.py:1648-1670 — sparse_factorized
+    # Wave E.1: reject the conley × survey composition. Wave E.2 (planned)
+    # will add the within-stratum Conley sandwich on PSU totals.
+    if vcov_type == "conley" and resolved_survey is not None:
+        raise NotImplementedError(
+            "SpilloverDiD does not yet support vcov_type='conley' combined "
+            "with survey_design=. Wave E.2 (planned) will compose Conley "
+            "spatial-HAC with within-stratum Conley sandwich on PSU totals; "
+            "see TODO.md for the planned PR. For now, use vcov_type='hc1' "
+            "(+ cluster=<col> for CR1) with survey_design=."
+        )
+
+    # 1. gamma_hat = (X_10' W X_10)^{-1} (X_1' W X_2). Mirror the existing
+    #    TwoStageDiD method at two_stage.py:1886-1917 — sparse_factorized
     #    fast path with dense lstsq fallback + UserWarning on singular.
-    XtX_10 = X_10_sparse.T @ X_10_sparse  # (p_1, p_1) sparse
-    Xt1_X2 = X_1_sparse.T @ X_2  # (p_1, p_2) dense
+    #    When survey_weights is provided, X_10/X_1 cross-products use W.
+    if survey_weights is not None:
+        XtX_10 = X_10_sparse.T @ X_10_sparse.multiply(survey_weights[:, None])
+        Xt1_X2 = X_1_sparse.T @ (X_2 * survey_weights[:, None])
+    else:
+        XtX_10 = X_10_sparse.T @ X_10_sparse  # (p_1, p_1) sparse
+        Xt1_X2 = X_1_sparse.T @ X_2  # (p_1, p_2) dense
 
     try:
         solve_XtX = sparse_factorized(XtX_10.tocsc())
@@ -186,10 +255,20 @@ def _compute_gmm_corrected_meat(
             gamma_hat = gamma_hat.reshape(-1, 1)
 
     # 2. Psi = (X_10 @ gamma_hat) * eps_10[:, None] - X_2 * eps_2[:, None].
-    #    sparse @ dense = dense; element-wise scale by eps_10; subtract
-    #    the stage-2 contribution. Shape (n, p_2).
+    #    Under Wave E.1 survey path, weights enter via element-wise eps
+    #    multiplication (mirrors TwoStageDiD's `weighted_eps_10 = w * eps_10`
+    #    pattern at two_stage.py:1922-1925); the additional w factor on
+    #    each obs preserves Hájek scaling because the downstream
+    #    `_compute_stratified_meat_from_psu_scores` and the caller-side
+    #    `(X_2' W X_2)^{-1}` bread together yield the design-consistent
+    #    variance per Gerber (2026) Proposition 1.
     Psi_stage1 = X_10_sparse @ gamma_hat  # (n, p_2) dense
-    Psi = Psi_stage1 * eps_10[:, None] - X_2 * eps_2[:, None]
+    if survey_weights is not None:
+        weighted_eps_10 = survey_weights * eps_10
+        weighted_eps_2 = survey_weights * eps_2
+        Psi = Psi_stage1 * weighted_eps_10[:, None] - X_2 * weighted_eps_2[:, None]
+    else:
+        Psi = Psi_stage1 * eps_10[:, None] - X_2 * eps_2[:, None]
 
     if not np.all(np.isfinite(Psi)):
         # Defensive: NaN in Psi would propagate silently through Psi.T @ Psi.
@@ -206,6 +285,17 @@ def _compute_gmm_corrected_meat(
         return np.full((p_2, p_2), np.nan)
 
     # 3. Kernel dispatch.
+    #
+    # Wave E.1 survey path (`resolved_survey is not None`) overrides the
+    # Wave D HC1 / cluster branches with Binder TSL on PSU-aggregated Psi.
+    # The Conley + survey combination is rejected upfront above.
+    if resolved_survey is not None and vcov_type in ("hc1", "cluster"):
+        return _compute_binder_tsl_meat(
+            Psi,
+            resolved_survey=resolved_survey,
+            cluster_ids=cluster_ids if vcov_type == "cluster" else None,
+        )
+
     if vcov_type == "hc1":
         # K = I_n: meat = Psi' Psi with HC1 finite-sample multiplier.
         # Fail closed when n - p_2 <= 0 (saturated design — every degree
@@ -286,6 +376,140 @@ def _compute_gmm_corrected_meat(
             f"_compute_gmm_corrected_meat: vcov_type must be one of "
             f"'hc1', 'conley', 'cluster'; got {vcov_type!r}."
         )
+
+    return meat
+
+
+def _compute_binder_tsl_meat(
+    Psi: np.ndarray,
+    *,
+    resolved_survey: "ResolvedSurveyDesign",
+    cluster_ids: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Wave E.1 Binder TSL meat on PSU-aggregated Psi.
+
+    Composes Gerber (2026, arXiv:2605.04124) Proposition 1 (Binder Taylor
+    Series Linearization for IF representations of smooth functionals;
+    explicitly derived for TwoStageDiD in the paper's Appendix) with the
+    Wave D Gardner GMM Psi to produce a design-consistent variance for
+    SpilloverDiD's stage-2 inference.
+
+    The composition: aggregate per-obs Psi to PSU totals
+    (``S_psu[g] = sum_{i in PSU g} Psi[i]``), then pass to
+    :func:`diff_diff.survey._compute_stratified_meat_from_psu_scores` which
+    applies the stratified-cluster formula
+    ``meat = sum_h (1-f_h) * n_h/(n_h-1) * sum_j (S_hj - S_h_bar)(S_hj - S_h_bar)'``
+    with FPC and ``lonely_psu`` handling.
+
+    Mirrors ``TwoStageDiD._compute_gmm_variance`` at
+    ``two_stage.py:1959-2005`` (the stratified-meat branch); the chief
+    departure is that Wave E.1 surfaces a UserWarning on the saturated
+    failure (``df_survey = 0``) rather than NaN-failing silently, per
+    ``feedback_no_silent_failures``.
+
+    Parameters
+    ----------
+    Psi : np.ndarray of shape (n, p_2)
+        Per-obs influence-function scores (already weighted by survey
+        weights via the upstream eps multiplication).
+    resolved_survey : ResolvedSurveyDesign
+        ``.psu`` may be None; when absent, each observation is treated as
+        its own singleton PSU (matches the implicit-PSU convention of
+        ``ResolvedSurveyDesign.df_survey`` no-PSU branches at
+        ``survey.py:619-627``). ``.strata`` and ``.fpc`` are optional;
+        absent strata synthesizes a single stratum (mirrors
+        ``TwoStageDiD._compute_gmm_variance`` at L1976-1977).
+    cluster_ids : np.ndarray of shape (n,), optional
+        Ignored under the survey path — PSU is the cluster (upstream
+        ``_inject_cluster_as_psu`` substitutes it for any user-supplied
+        ``cluster=<col>``). The parameter is retained on the signature
+        for symmetry with the non-survey dispatch; callers may pass None.
+
+    Returns
+    -------
+    meat : np.ndarray of shape (p_2, p_2)
+        The Binder TSL meat on PSU-aggregated scores.
+    """
+    # Local import keeps the module load cheap and avoids any circular-import
+    # surprise with diff_diff.survey, which is the typical aggregation site
+    # for SurveyDesign-touching helpers.
+    from diff_diff.survey import _compute_stratified_meat_from_psu_scores
+
+    del cluster_ids  # PSU substitutes upstream; kept on signature for symmetry
+
+    p_2 = Psi.shape[1]
+    n_obs = Psi.shape[0]
+    # When PSU is absent, each obs is its own singleton PSU — matches the
+    # `ResolvedSurveyDesign.df_survey` no-PSU branches (`n_obs - n_strata`
+    # / `n_obs - 1`) and degenerates the Binder formula to obs-level
+    # stratified-cluster meat. The caller-side cluster injection has
+    # already handled the `cluster=<col>` case by populating
+    # `resolved_survey.psu` from the cluster column; this fallback covers
+    # the documented no-PSU SurveyDesign configurations (weights-only,
+    # strata-only).
+    if resolved_survey.psu is None:
+        psu_arr: np.ndarray = np.arange(n_obs, dtype=np.int64)
+    else:
+        psu_arr = np.asarray(resolved_survey.psu)
+    # Single np.unique call gives unique values, first-occurrence indices,
+    # and the inverse map in one pass — O(n log n) total. The previous
+    # impl used `np.where(psu_arr == c)[0][0]` per PSU, making the
+    # PSU→strata / PSU→fpc mapping O(G·n); under the no-PSU survey path
+    # (`psu_arr = arange(n_obs)`) G == n_obs and the mapping becomes
+    # quadratic in n_obs. R14 codex P2 fix.
+    unique_psus, first_idx, psu_indices = np.unique(psu_arr, return_index=True, return_inverse=True)
+    G = len(unique_psus)
+
+    # Aggregate Psi to PSU totals: S_psu[g, :] = sum_{i in PSU g} Psi[i, :].
+    S_psu = np.zeros((G, p_2))
+    for j in range(p_2):
+        np.add.at(S_psu[:, j], psu_indices, Psi[:, j])
+
+    # Map observation-level strata + fpc to PSU level via first-occurrence
+    # indices (one fancy-index per array — O(G) — instead of O(G·n)).
+    # Strata synthesizes a single stratum when absent (Binder formula
+    # degenerates to one-stratum cluster-robust under unstratified FPC).
+    if resolved_survey.strata is not None:
+        psu_strata = np.asarray(resolved_survey.strata)[first_idx]
+    else:
+        psu_strata = np.zeros(G, dtype=int)
+
+    psu_fpc: Optional[np.ndarray] = None
+    if resolved_survey.fpc is not None:
+        psu_fpc = np.asarray(resolved_survey.fpc, dtype=np.float64)[first_idx]
+
+    # Unstratified single-PSU is variance-unidentified (matches
+    # `_compute_stratified_psu_meat` convention at survey.py:1225 which
+    # treats n_psu < 2 with no strata as NaN).
+    if resolved_survey.strata is None and G < 2:
+        warnings.warn(
+            "SpilloverDiD Wave E.1 survey sandwich: df_survey is undefined "
+            f"(single PSU, no strata; G={G}). Returning NaN meat so "
+            "downstream inference NaN-propagates.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return np.full((p_2, p_2), np.nan)
+
+    meat, _variance_computed, _legit_zero = _compute_stratified_meat_from_psu_scores(
+        psu_scores=S_psu,
+        psu_strata=psu_strata,
+        fpc_per_psu=psu_fpc,
+        lonely_psu=resolved_survey.lonely_psu,
+    )
+
+    # Wave E.1 survey-saturated NaN-fail (NEW; departs from TwoStageDiD
+    # silent NaN-VCV at two_stage.py:2003-2005 per `feedback_no_silent_failures`).
+    if not _variance_computed and _legit_zero == 0:
+        warnings.warn(
+            "SpilloverDiD Wave E.1 survey sandwich: df_survey = 0 "
+            "(all strata removed by lonely_psu='remove' on single-PSU "
+            "strata; no PSU contributed to the meat). Returning NaN meat "
+            "so downstream inference NaN-propagates.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return np.full((p_2, p_2), np.nan)
 
     return meat
 

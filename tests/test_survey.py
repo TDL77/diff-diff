@@ -2903,8 +2903,10 @@ class TestRound15Fixes:
 class TestRound16Fixes:
     """Tests for PR #218 review round 16: cluster-as-PSU nesting and FPC."""
 
-    def test_injected_cluster_nested_in_strata(self):
-        """Injected cluster IDs with repeated labels across strata get unique codes."""
+    def test_injected_cluster_nested_in_strata_under_nest_true(self):
+        """Under nest=True, injected cluster IDs with repeated labels across
+        strata get nested via (stratum, cluster) so they receive unique codes.
+        """
         from diff_diff.survey import _inject_cluster_as_psu
 
         # 2 strata, cluster "1" appears in both → should produce 4 unique PSUs
@@ -2918,6 +2920,7 @@ class TestRound16Fixes:
             n_strata=2,
             n_psu=0,
             lonely_psu="remove",
+            nest=True,
         )
         cluster_ids = np.array([1, 1, 2, 2, 1, 1, 2, 2])  # labels repeat across strata
         result = _inject_cluster_as_psu(resolved, cluster_ids)
@@ -2925,6 +2928,78 @@ class TestRound16Fixes:
         assert result.n_psu == 4
         # df_survey = n_psu - n_strata = 4 - 2 = 2
         assert result.df_survey == 2
+
+    def test_injected_cluster_overlap_raises_under_nest_false(self):
+        """Under nest=False, the explicit-PSU contract is that cluster
+        labels must be globally unique. The implicit injection mirrors
+        that contract: cross-stratum label overlap raises ValueError
+        (matches `SurveyDesign.resolve()` L305-L316).
+        """
+        from diff_diff.survey import _inject_cluster_as_psu
+
+        strata = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+        resolved = ResolvedSurveyDesign(
+            weights=np.ones(8),
+            weight_type="pweight",
+            strata=strata,
+            psu=None,
+            fpc=None,
+            n_strata=2,
+            n_psu=0,
+            lonely_psu="remove",
+            nest=False,
+        )
+        cluster_ids = np.array([1, 1, 2, 2, 1, 1, 2, 2])  # labels repeat across strata
+        with pytest.raises(ValueError, match="repeat across strata"):
+            _inject_cluster_as_psu(resolved, cluster_ids)
+
+    def test_subset_to_units_propagates_nest_flag(self):
+        """`ResolvedSurveyDesign.subset_to_units()` must preserve `nest`
+        on the unit-level copy so the cluster-as-PSU injection contract
+        continues to apply when downstream estimators (ContinuousDiD,
+        EfficientDiD) collapse a panel survey design to unit level.
+        Without propagation, a `nest=True` design would silently revert
+        to `nest=False` after subsetting.
+        """
+        from diff_diff.survey import ResolvedSurveyDesign
+
+        n_obs = 6  # 3 units × 2 periods, panel-level
+        # row_idx picks one row per unit (the panel's per-unit anchor)
+        row_idx = np.array([0, 2, 4])
+        unit_weights = np.ones(3)
+        unit_strata = np.array([0, 0, 1])
+        unit_psu = np.array([0, 1, 2])
+        resolved_nest_true = ResolvedSurveyDesign(
+            weights=np.ones(n_obs),
+            weight_type="pweight",
+            strata=np.array([0, 0, 0, 0, 1, 1]),
+            psu=np.array([0, 0, 1, 1, 2, 2]),
+            fpc=None,
+            n_strata=2,
+            n_psu=3,
+            lonely_psu="remove",
+            nest=True,
+        )
+        subset = resolved_nest_true.subset_to_units(
+            row_idx, unit_weights, unit_strata, unit_psu, None, n_strata=2, n_psu=3
+        )
+        assert subset.nest is True, f"subset_to_units must preserve nest=True; got {subset.nest}"
+        # Default-case parity: nest=False propagates too
+        resolved_nest_false = ResolvedSurveyDesign(
+            weights=np.ones(n_obs),
+            weight_type="pweight",
+            strata=None,
+            psu=None,
+            fpc=None,
+            n_strata=0,
+            n_psu=0,
+            lonely_psu="remove",
+            nest=False,
+        )
+        subset2 = resolved_nest_false.subset_to_units(
+            row_idx, unit_weights, None, None, None, n_strata=0, n_psu=0
+        )
+        assert subset2.nest is False
 
     def test_fpc_with_strata_no_psu_accepted(self):
         """FPC + strata (no PSU) resolves — FPC validated later against effective PSUs."""
@@ -3401,9 +3476,7 @@ class TestSurveyVcovIllConditionedWarning:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             vcov = compute_survey_vcov(X, resid, resolved)
-        ill_cond_warnings = [
-            w for w in caught if "X'WX is ill-conditioned" in str(w.message)
-        ]
+        ill_cond_warnings = [w for w in caught if "X'WX is ill-conditioned" in str(w.message)]
         assert ill_cond_warnings == [], (
             f"Unexpected cond-number warning on clean data: "
             f"{[str(w.message) for w in ill_cond_warnings]}"

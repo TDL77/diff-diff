@@ -425,6 +425,15 @@ class SpilloverDiDResults(DiDResults):
     # Reference row uses ``conf_int = (0.0, 0.0)`` (TwoStageDiD parity).
     horizon_max: Optional[int] = field(default=None)
     reference_period: Optional[int] = field(default=None)
+    # Wave E.1 survey-design fields (None when survey_design=None on fit).
+    # `survey_metadata` is a ``SurveyMetadata`` dataclass with DEFF /
+    # df_survey / n_psu / n_strata; populated only on the survey path.
+    # ``n_psu`` and ``n_strata`` are surfaced as top-level fields for
+    # convenient access without unpacking ``survey_metadata`` (parity
+    # with TwoStageDiDResults convention).
+    survey_metadata: Optional[Any] = field(default=None)
+    n_psu: Optional[int] = field(default=None)
+    n_strata: Optional[int] = field(default=None)
 
     def summary(self, alpha: Optional[float] = None) -> str:
         """Extended summary with ATT row, per-event-time direct block, and

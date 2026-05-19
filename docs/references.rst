@@ -90,6 +90,10 @@ Survey-Design Inference (Taylor-Series Linearization)
 
   Foundational TSL (Taylor-Series Linearization) variance derivation used across diff-diff's survey-aware estimators (``compute_survey_if_variance`` and the per-estimator influence-function compositions, including the dCDH and HeterogeneousAdoptionDiD ``survey_design=`` paths).
 
+- **Gerber, I. (2026).** "Design-Based Variance Estimation for Modern Heterogeneity-Robust Difference-in-Differences Estimators." *arXiv:2605.04124* (stat.ME). https://arxiv.org/abs/2605.04124
+
+  Proposition 1 shows that the influence-function representations of 15 modern DiD estimators (including TwoStageDiD, explicitly derived in the Appendix) satisfy Binder's (1983) smoothness conditions, so standard stratified-cluster Taylor linearization produces design-consistent SEs. SpilloverDiD's Wave E.1 survey-design integration composes this result with the Wave D Gardner GMM first-stage uncertainty correction; see ``docs/methodology/REGISTRY.md`` SpilloverDiD section "Variance (Wave E.1)".
+
 Placebo Tests and DiD Diagnostics
 ---------------------------------
 
