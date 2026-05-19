@@ -890,11 +890,30 @@ class PreTrendsPower:
         Returns
         -------
         np.ndarray
-            Violation weights. For ``violation_type='linear'`` with
-            ``relative_times`` provided: ``|t|`` directly, NOT L2-normalized
-            (so ``M=γ`` directly under Roth's slope convention). For all
-            other paths (constant, last_period, custom, or
-            linear-without-relative_times): L2-normalized to unit norm.
+            Violation weights, with per-violation-type normalization
+            conventions chosen so the magnitude `M` matches what
+            ``REGISTRY.md`` documents for the pattern:
+
+            - ``'linear'`` with ``relative_times``: ``|t|`` directly,
+              NOT L2-normalized (so ``δ_t = M * |t|`` and the reported
+              MDV is in Roth's γ units). PR-B Step 4.
+            - ``'linear'`` without ``relative_times`` (legacy): the
+              count-based ``[n_pre-1, ..., 0]`` direction, L2-normalized
+              to unit norm (preserves pre-PR-B shipped behavior).
+            - ``'constant'``: ``[1, 1, ..., 1]`` directly, NOT
+              normalized — ``δ_t = M`` per period (a true level shift,
+              matching the documented ``δ_t = c`` convention). PR-B R13
+              fix: pre-R13 normalization gave ``δ_t = M/√K``, a silent
+              rescaling that the REGISTRY/API did not document.
+            - ``'last_period'``: ``[0, ..., 0, 1]`` directly. Already
+              unit-norm so the post-normalization output was identical;
+              the unconditional early return locks the level-shift
+              contract.
+            - ``'custom'``: user-supplied ``violation_weights``,
+              L2-normalized to unit norm (M is the magnitude along the
+              user's direction; downstream
+              ``max_abs_pre_violation = M * max(|weights|)`` exposes
+              the level-scale max under the MDV).
         """
         if self.violation_type == "custom":
             assert self.violation_weights is not None
@@ -930,18 +949,33 @@ class PreTrendsPower:
             weights = np.arange(-n_pre + 1, 1, dtype=float)
             weights = -weights  # Now [n-1, n-2, ..., 1, 0]
         elif self.violation_type == "constant":
-            # Same violation in all periods
-            weights = np.ones(n_pre)
+            # δ_t = M for all pre-periods (level shift). Skip L2
+            # normalization so M is exactly the per-period level shift
+            # the REGISTRY documents (`δ_t = c`). Pre-PR-B (and the
+            # pre-R13 PR-B state) divided by sqrt(K), making `δ_t =
+            # M/sqrt(K)` and silently re-scaling reported MDV/power on
+            # constant fits by sqrt(K). PR-B R13 fix: skip the norm
+            # so the public contract matches the docs.
+            return np.ones(n_pre, dtype=float)
         elif self.violation_type == "last_period":
-            # Violation only in last pre-period (period -1)
-            weights = np.zeros(n_pre)
+            # Violation only in last pre-period (period -1). Unnormalized
+            # `[0, ..., 0, 1]` already has L2 norm 1, so this path was
+            # always equivalent to the post-normalization output; keep
+            # the early return for symmetry with constant + linear-with-
+            # relative_times so the level-shift contract is uniform
+            # across all level-pattern violation types.
+            weights = np.zeros(n_pre, dtype=float)
             weights[-1] = 1.0
+            return weights
         else:
             raise ValueError(f"Unknown violation_type: {self.violation_type}")
 
         # Normalize to unit norm (if not all zeros). The early-return
-        # branch above for linear-with-relative_times intentionally skips
-        # this normalization to preserve the γ-unit scale.
+        # branches above for linear-with-relative_times, constant, and
+        # last_period intentionally skip this normalization to preserve
+        # the level-shift contract documented in REGISTRY.md
+        # `## PreTrendsPower`. This block only fires for the linear-
+        # legacy-fallback path and `violation_type='custom'`.
         norm = np.linalg.norm(weights)
         if norm > 0:
             weights = weights / norm

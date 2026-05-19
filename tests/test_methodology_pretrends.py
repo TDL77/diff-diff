@@ -523,6 +523,44 @@ class TestPretrendsLinearGrid:
             res.max_abs_pre_violation > 4 * mdv
         ), "max_abs_pre_violation must scale by max(|w|)=5, not collapse to mdv"
 
+    def test_constant_violation_pattern_is_level_shift(self, sa_results):
+        """``violation_type='constant'`` produces a per-period level shift,
+        not an L2-normalized direction (PR-B R13 fix).
+
+        REGISTRY ``## PreTrendsPower`` documents constant as ``δ_t = c``.
+        The implementation now returns unnormalized ``[1, 1, ..., 1]``
+        weights so the contract holds at the public API surface:
+
+        - ``violation_weights == [1, 1, ..., 1]`` after fit (no L2 norm).
+        - ``max_abs_pre_violation == mdv * 1 == mdv`` (level-scale and
+          γ-scale coincide for the constant pattern).
+        - ``power_at(M)`` evaluates the violation `δ_t = M` per period,
+          not `δ_t = M/√K`.
+
+        Pre-PR-B-R13 the constant path was silently divided by √K,
+        so a constant MDV of 0.5 was a per-period shift of 0.5/√K,
+        not 0.5 as the docs claimed. Locks the level-shift contract
+        end-to-end on a real fit.
+        """
+        pt = PreTrendsPower(violation_type="constant", pretest_form="nis")
+        result = pt.fit(sa_results)
+
+        n_pre = result.n_pre_periods
+        # Weights are exactly [1, 1, ..., 1] — NOT L2-normalized.
+        assert result.violation_weights is not None
+        np.testing.assert_allclose(result.violation_weights, np.ones(n_pre))
+        # L2 norm of weights is √K, not 1.
+        assert np.isclose(np.linalg.norm(result.violation_weights), np.sqrt(n_pre))
+        # Level-scale max coincides with raw mdv (max(|w|) = 1).
+        assert np.isclose(result.max_abs_pre_violation, result.mdv)
+
+        # power_at(M) round-trip: under the level-shift contract,
+        # power_at(M) for constant must equal power at `M=0.1` of a refit.
+        # Loose atol because scipy MVN CDF and the centered helper take
+        # slightly different paths with ~1e-6 sub-ULP roundoff.
+        refit = pt.fit(sa_results, M=0.1)
+        assert np.isclose(result.power_at(0.1), refit.power, atol=1e-4)
+
     def test_is_informative_uses_level_scale_not_raw_gamma(self):
         """``is_informative`` consumes ``max_abs_pre_violation`` (level scale)
         rather than raw ``mdv`` (slope scale) — locks the R12 fix on the

@@ -2467,11 +2467,18 @@ def _render_full_report(schema: Dict[str, Any]) -> str:
         if tier:
             lines.append(f"- Power tier: `{tier}`")
         mdv = pt.get("mdv")
+        max_abs_pre = pt.get("max_abs_pre_violation")
         ratio = pt.get("mdv_share_of_att")
         if isinstance(mdv, (int, float)):
             lines.append(f"- Minimum detectable violation (MDV): {mdv:.3g}")
+        if isinstance(max_abs_pre, (int, float)):
+            lines.append(f"- Max pre-period level deviation at MDV: {max_abs_pre:.3g}")
         if isinstance(ratio, (int, float)):
-            lines.append(f"- MDV / |ATT|: {ratio:.2g}")
+            # PR-B R12: ratio is now max_abs_pre_violation / |ATT|, the
+            # level-scale comparable to ATT (not raw γ-unit mdv on linear
+            # fits). Label updated to match the numerator definition in
+            # REPORTING.md "Power-aware phrasing" Note.
+            lines.append(f"- Max pre-period level deviation / |ATT|: {ratio:.2g}")
     else:
         lines.append(f"- Pre-trends not computed: {pt.get('reason', 'unavailable')}")
     lines.append("")
