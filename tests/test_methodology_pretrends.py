@@ -632,6 +632,36 @@ class TestPretrendsCustomWeightPersistence:
             power_via_method, power_via_refit, atol=1e-6
         ), f"power_at={power_via_method:.6f}, refit={power_via_refit:.6f}"
 
+    def test_to_dict_is_json_serializable(self, sa_results):
+        """PR-B R5 regression: ``to_dict()`` must produce JSON-serializable
+        output. ``violation_weights`` is emitted as ``list[float]`` (not raw
+        ``np.ndarray``) so ``json.dumps`` works out of the box.
+
+        Pre-R5 the dict carried a raw ``np.ndarray`` for ``violation_weights``;
+        ``json.dumps(result.to_dict())`` raised ``TypeError``. Post-R5 the
+        helper coerces to a Python list of floats.
+        """
+        probe = PreTrendsPower(violation_type="linear", pretest_form="nis").fit(sa_results)
+        n_pre = probe.n_pre_periods
+        custom_w = np.linspace(0.1, 0.6, n_pre)
+
+        pt = PreTrendsPower(violation_type="custom", violation_weights=custom_w, pretest_form="nis")
+        result = pt.fit(sa_results)
+
+        d = result.to_dict()
+        # Type contract: violation_weights round-trips as list[float] or None.
+        assert isinstance(d["violation_weights"], list)
+        for w in d["violation_weights"]:
+            assert isinstance(w, float)
+
+        # End-to-end JSON round-trip (NaN → strings in default mode? scipy
+        # returns finite NaN — json.dumps with allow_nan=True is default).
+        encoded = json.dumps(d, allow_nan=True)
+        decoded = json.loads(encoded)
+        # Spot-check provenance fields round-trip intact.
+        assert decoded["covariance_source"] == result.covariance_source
+        assert decoded["pretest_form"] == result.pretest_form
+
 
 # =============================================================================
 # TestPretrendsCovarianceSource — CS/SA full-VCV routing (PR-B Step 3)

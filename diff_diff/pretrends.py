@@ -329,14 +329,25 @@ class PreTrendsPowerResults:
         print(self.summary())
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert results to dictionary.
+        """Convert results to JSON-serializable dictionary.
 
         Includes the post-PR-B provenance fields (``violation_weights``,
         ``covariance_source``) so callers that round-trip the result
         through ``to_dict``/``to_dataframe`` (e.g., for serialization
         or downstream transport) preserve the same information the
         reporting layer reads off the dataclass directly.
+
+        ``violation_weights`` is emitted as ``list[float]`` (or ``None``)
+        so ``json.dumps(result.to_dict())`` works out of the box. Use
+        ``self.violation_weights`` directly on the dataclass when an
+        ndarray is needed.
         """
+        weights = self.violation_weights
+        weights_list: Optional[List[float]]
+        if weights is None:
+            weights_list = None
+        else:
+            weights_list = [float(w) for w in np.asarray(weights).ravel()]
         return {
             "power": self.power,
             "mdv": self.mdv,
@@ -350,7 +361,7 @@ class PreTrendsPowerResults:
             "noncentrality": self.noncentrality,
             "pretest_form": self.pretest_form,
             "nis_box_probability": self.nis_box_probability,
-            "violation_weights": self.violation_weights,
+            "violation_weights": weights_list,
             "covariance_source": self.covariance_source,
             "is_informative": self.is_informative,
             "power_adequate": self.power_adequate,
@@ -359,9 +370,9 @@ class PreTrendsPowerResults:
     def to_dataframe(self) -> pd.DataFrame:
         """Convert results to DataFrame.
 
-        Includes ``violation_weights`` (as an ndarray scalar in the cell,
-        pandas-friendly) and ``covariance_source`` alongside the legacy
-        columns; mirrors ``to_dict``.
+        ``violation_weights`` is stored as a Python list in the single
+        row (pandas-friendly); ``covariance_source`` is a plain string.
+        Mirrors ``to_dict``.
         """
         return pd.DataFrame([self.to_dict()])
 

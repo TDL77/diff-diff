@@ -1568,6 +1568,22 @@ class DiagnosticReport:
             return "diag_fallback_available_full_vcov_unused"
         if is_event_study_type:
             return "diag_fallback"
+        # Non-event-study path. MultiPeriodDiDResults takes the full
+        # ``vcov[ix_]`` sub-block only when ``interaction_indices`` is
+        # populated (pretrends.py MPD branch); otherwise it falls
+        # through to ``diag(ses**2)`` and ships the diag-fallback path
+        # — which is a normal (not "available but unused") fallback,
+        # so no conservative downgrade applies. Legacy MPD result
+        # objects without ``interaction_indices`` should be reported as
+        # ``diag_fallback`` rather than overclaiming full-Σ_22.
+        if type(source_fit).__name__ == "MultiPeriodDiDResults":
+            mpd_has_full_vcov = (
+                getattr(source_fit, "vcov", None) is not None
+                and getattr(source_fit, "interaction_indices", None) is not None
+            )
+            return "full_pre_period_vcov" if mpd_has_full_vcov else "diag_fallback"
+        # Other non-event-study types (basic DiDResults, TWFE, etc.)
+        # historically expose the full covariance.
         return "full_pre_period_vcov"
 
     def _check_sensitivity(self) -> Dict[str, Any]:

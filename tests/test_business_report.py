@@ -2430,8 +2430,10 @@ class TestDiagFallbackDowngradeAppliedCentrally:
         populated and ``pretrends.py`` records
         ``covariance_source='full_pre_period_vcov'`` on the result —
         which the DR adapter consumes directly. If the headline is
-        well-powered the BR prose must reflect that, not the conservative
-        moderately-informative phrasing.
+        well-powered, the BR ``summary()`` prose (the actual surface
+        the well-powered phrasing is rendered on) must reflect that
+        positively, not via the conservative moderately-informative
+        phrasing.
 
         Skips if the fixture happens to land in a different tier; the
         important contract is "when the full-VCV path fires, the
@@ -2464,15 +2466,27 @@ class TestDiagFallbackDowngradeAppliedCentrally:
         pp = compute_pretrends_power(fit, alpha=0.05, target_power=0.80)
         assert pp.covariance_source == "full_pre_period_vcov"
 
-        # Whatever the tier is, no downgrade fired — i.e. it equals the
-        # raw mdv/|att| tier with no conservative adjustment. We test
-        # the negative contract: BR prose must not contain the
-        # moderately-informative phrasing when the headline is
-        # well-powered (the case the downgrade was specifically gated on).
+        # Positive prose contract: when the tier is well_powered post-PR-B,
+        # BR.summary() must contain the well-powered phrasing and must NOT
+        # contain the moderately-informative phrasing (which would only
+        # appear under the conservative downgrade). BR.full_report() also
+        # must not surface the downgrade phrasing as a defensive secondary
+        # check; the primary assertion is on summary() per
+        # ``diff_diff/business_report.py`` rendering surface.
         if block["tier"] == "well_powered":
-            br = BusinessReport(fit, data=sdf).full_report()
-            assert "moderately informative" not in br.lower()
-            assert "moderately-informative" not in br.lower()
+            br = BusinessReport(fit, data=sdf)
+            summary = br.summary()
+            full = br.full_report()
+            # Primary surface: summary() renders the tier prose.
+            assert "well-powered" in summary, (
+                "BR.summary() should surface well-powered phrasing under the "
+                "PR-B full-VCV no-downgrade path"
+            )
+            assert "moderately informative" not in summary
+            assert "moderately-informative" not in summary
+            # Secondary defensive check on full_report().
+            assert "moderately informative" not in full.lower()
+            assert "moderately-informative" not in full.lower()
 
 
 class TestCSNotYetTreatedControlGroupSemantics:

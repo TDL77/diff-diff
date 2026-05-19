@@ -479,6 +479,60 @@ class TestPrecomputed:
         assert block["covariance_source"] == "diag_fallback_available_full_vcov_unused"
         assert block["tier"] == "moderately_powered"
 
+    def test_precomputed_pretrends_power_legacy_mpd_without_interaction_indices_reports_diag(
+        self,
+    ):
+        """PR-B R5 regression: ``MultiPeriodDiDResults`` legacy fits without
+        ``interaction_indices`` truly take the ``np.diag(ses**2)`` fallback
+        inside ``pretrends.py:_extract_pre_period_params`` MPD branch. The
+        report-layer's ``_infer_cov_source`` fallback must surface that
+        accurately as ``"diag_fallback"`` rather than overclaiming
+        ``"full_pre_period_vcov"`` (MPD is not in the event-study type set,
+        so the previous non-event-study branch unconditionally returned
+        ``"full_pre_period_vcov"`` — wrong for MPD without interaction
+        indices).
+        """
+
+        class _LegacyMPDStub:
+            avg_att = 1.0
+            avg_se = 0.25
+            avg_t_stat = 4.0
+            avg_p_value = 0.001
+            avg_conf_int = (0.5, 1.5)
+            alpha = 0.05
+            n_obs = 400
+            n_treated = 80
+            n_control = 320
+            survey_metadata = None
+            # No interaction_indices, no full vcov — pretrends.py MPD
+            # branch falls through to diag(ses**2).
+            vcov = None
+            interaction_indices = None
+
+        stub = _LegacyMPDStub()
+        stub.__class__.__name__ = "MultiPeriodDiDResults"
+
+        class _LegacyPPStub:
+            mdv = 0.1
+            violation_type = "linear"
+            alpha = 0.05
+            target_power = 0.80
+            violation_magnitude = 0.1
+            power = 0.80
+            n_pre_periods = 2
+            original_results = stub
+            # Legacy — no covariance_source field set.
+
+        dr = DiagnosticReport(stub, precomputed={"pretrends_power": _LegacyPPStub()})
+        block = dr.to_dict()["pretrends_power"]
+        assert block["status"] == "ran"
+        # Legacy MPD without interaction_indices reports diag_fallback —
+        # the conservative downgrade does NOT fire (this isn't an
+        # "available but unused" case, just a normal fallback).
+        assert block["covariance_source"] == "diag_fallback"
+        # No downgrade applies on "diag_fallback" (vs the sentinel label).
+        assert block["tier"] == "well_powered"
+
     def test_precomputed_pretrends_power_consumes_persisted_cov_source(self):
         """PR-B R3 regression: the precomputed adapter must prefer the
         ``covariance_source`` recorded on ``PreTrendsPowerResults`` over
