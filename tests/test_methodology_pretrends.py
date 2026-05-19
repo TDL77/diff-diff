@@ -687,9 +687,7 @@ class TestPretrendsCovarianceSource:
             pytest.skip("No pre-periods in fixture")
 
         ses = np.array([sa_results.event_study_effects[t]["se"] for t in sorted(pre_periods)])
-        sub, source = _extract_event_study_vcov_subblock(
-            sa_results, sorted(pre_periods), ses
-        )
+        sub, source = _extract_event_study_vcov_subblock(sa_results, sorted(pre_periods), ses)
         diag_fallback = np.diag(ses**2)
 
         # Source label reflects the full-VCV path being actually taken.

@@ -1517,20 +1517,29 @@ class DiagnosticReport:
         full pre-period covariance on ``source_fit``.
 
         Backwards-compatibility helper for legacy ``PreTrendsPowerResults``
-        objects produced before PR-B (which now records the actual
-        extraction path on ``PreTrendsPowerResults.covariance_source`` at
-        fit time). New fits read provenance directly off the result
-        object; this fallback is only invoked when that field is missing
-        or set to ``"unknown"``.
+        objects produced before PR-B (which records the actual extraction
+        path on ``PreTrendsPowerResults.covariance_source`` at fit time).
+        New fits read provenance directly off the result object; this
+        fallback is only invoked when that field is missing or set to
+        ``"unknown"`` (legacy-ambiguous).
 
-        Classification rules (post PR-B):
+        Classification rules:
 
         - ``"full_pre_period_vcov"`` — non-event-study result types
-          (``MultiPeriodDiDResults``, basic ``DiDResults``, etc.), OR
-          event-study types whose ``event_study_vcov`` is populated.
-          Since PR-B Step 3 routes CS / SA through the full sub-block
-          when ``event_study_vcov`` is available, this label is the
-          correct provenance for non-bootstrap CS / SA fits.
+          (``MultiPeriodDiDResults``, basic ``DiDResults``, etc.) that
+          always exposed full pre-period covariance via
+          ``interaction_indices`` or equivalent. No ambiguity for these
+          types regardless of pre-/post-PR-B serialization.
+        - ``"diag_fallback_available_full_vcov_unused"`` — event-study
+          result types with populated ``event_study_vcov``. Under PR-B,
+          new fits route through the full sub-block, but a legacy
+          ``PreTrendsPowerResults`` lacking ``covariance_source`` may
+          have been computed from ``diag(ses**2)`` even though the full
+          matrix was attached on the source fit (PR-A behavior). Without
+          the persisted provenance label we cannot distinguish the two,
+          and the conservative default is to apply the PR-A downgrade.
+          New PR-B fits set ``covariance_source`` directly and bypass
+          this fallback entirely.
         - ``"diag_fallback"`` — event-study result types with
           ``event_study_vcov is None`` (bootstrap or replicate-weight
           CS / SA fits, plus ImputationDiD / Stacked / EfficientDiD /
@@ -1552,10 +1561,11 @@ class DiagnosticReport:
             and getattr(source_fit, "event_study_vcov_index", None) is not None
         )
         if is_event_study_type and has_full_es_vcov:
-            # PR-B Step 3: pretrends.py NOW routes CS/SA through the full
-            # event_study_vcov sub-block when populated, so this case
-            # legitimately uses the full pre-period covariance.
-            return "full_pre_period_vcov"
+            # Legacy-ambiguous: we don't know whether this serialized
+            # result was computed pre- or post-PR-B; conservatively
+            # downgrade. New PR-B fits will set covariance_source
+            # explicitly on the result and never reach this branch.
+            return "diag_fallback_available_full_vcov_unused"
         if is_event_study_type:
             return "diag_fallback"
         return "full_pre_period_vcov"
@@ -2740,14 +2750,15 @@ def _apply_diag_fallback_downgrade(tier: str, cov_source: str) -> str:
     flagged per-surface divergence; round-20 flagged that the precomputed
     adapter bypassed the downgrade entirely.
 
-    PR-B (Roth 2022 audit) note: this downgrade rule is now effectively
-    a no-op for CS / SA non-bootstrap fits, because
-    ``pretrends.py:_extract_event_study_vcov_subblock`` actually
-    consumes the full ``event_study_vcov`` sub-block and the recorded
-    provenance label is ``"full_pre_period_vcov"`` — i.e., the
-    "available but unused" sentinel is no longer produced by any
-    in-tree path. The function is retained for backwards-compat with
-    legacy serialized results that may carry the old sentinel.
+    PR-B (Roth 2022 audit) note: new fits set
+    ``PreTrendsPowerResults.covariance_source`` directly at fit time
+    based on the actual extraction path, so the report-layer adapters
+    bypass ``_infer_cov_source`` whenever the persisted field is set.
+    The "available but unused" sentinel is still produced for legacy
+    ``PreTrendsPowerResults`` objects that lack the field — there we
+    cannot distinguish a pre-PR-B fit (which DID drop to diag despite
+    the populated source-fit matrix) from a post-PR-B fit, so the
+    conservative downgrade still applies to legacy-ambiguous results.
     """
     if tier == "well_powered" and cov_source == "diag_fallback_available_full_vcov_unused":
         return "moderately_powered"

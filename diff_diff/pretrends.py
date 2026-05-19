@@ -329,7 +329,14 @@ class PreTrendsPowerResults:
         print(self.summary())
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert results to dictionary."""
+        """Convert results to dictionary.
+
+        Includes the post-PR-B provenance fields (``violation_weights``,
+        ``covariance_source``) so callers that round-trip the result
+        through ``to_dict``/``to_dataframe`` (e.g., for serialization
+        or downstream transport) preserve the same information the
+        reporting layer reads off the dataclass directly.
+        """
         return {
             "power": self.power,
             "mdv": self.mdv,
@@ -343,12 +350,19 @@ class PreTrendsPowerResults:
             "noncentrality": self.noncentrality,
             "pretest_form": self.pretest_form,
             "nis_box_probability": self.nis_box_probability,
+            "violation_weights": self.violation_weights,
+            "covariance_source": self.covariance_source,
             "is_informative": self.is_informative,
             "power_adequate": self.power_adequate,
         }
 
     def to_dataframe(self) -> pd.DataFrame:
-        """Convert results to DataFrame."""
+        """Convert results to DataFrame.
+
+        Includes ``violation_weights`` (as an ndarray scalar in the cell,
+        pandas-friendly) and ``covariance_source`` alongside the legacy
+        columns; mirrors ``to_dict``.
+        """
         return pd.DataFrame([self.to_dict()])
 
     def power_at(self, M: float) -> float:

@@ -2420,6 +2420,60 @@ class TestDiagFallbackDowngradeAppliedCentrally:
         # ``well_powered`` — centralized downgrade guarantees this.
         assert pp["tier"] != "well_powered"
 
+    def test_full_vcov_path_no_downgrade_on_real_cs_fit(self, cs_fit):
+        """PR-B R4 regression: when ``compute_pretrends_power`` actually
+        consumes the full ``event_study_vcov`` sub-block (PR-B Step 3),
+        the DR / BR layer must NOT downgrade ``well_powered``.
+
+        Exercises the live PR-B path on a real CS fit. The fit is
+        non-bootstrap (analytical CS), so ``event_study_vcov`` is
+        populated and ``pretrends.py`` records
+        ``covariance_source='full_pre_period_vcov'`` on the result —
+        which the DR adapter consumes directly. If the headline is
+        well-powered the BR prose must reflect that, not the conservative
+        moderately-informative phrasing.
+
+        Skips if the fixture happens to land in a different tier; the
+        important contract is "when the full-VCV path fires, the
+        downgrade does NOT".
+        """
+        from diff_diff import BusinessReport, DiagnosticReport
+        from diff_diff.pretrends import compute_pretrends_power
+
+        fit, sdf = cs_fit
+        dr = DiagnosticReport(
+            fit,
+            data=sdf,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+        )
+        block = dr.to_dict()["pretrends_power"]
+        if block.get("status") != "ran":
+            pytest.skip("pretrends_power did not run on this fixture")
+
+        # Provenance: PR-B records full_pre_period_vcov on non-bootstrap CS.
+        cov = block.get("covariance_source")
+        if cov != "full_pre_period_vcov":
+            pytest.skip(f"fixture did not exercise the full-VCV path (got {cov})")
+
+        # Sanity: the same label appears on the compute_pretrends_power
+        # output's persisted field — locks the architectural fix
+        # (provenance recorded at fit time, consumed at the report layer).
+        pp = compute_pretrends_power(fit, alpha=0.05, target_power=0.80)
+        assert pp.covariance_source == "full_pre_period_vcov"
+
+        # Whatever the tier is, no downgrade fired — i.e. it equals the
+        # raw mdv/|att| tier with no conservative adjustment. We test
+        # the negative contract: BR prose must not contain the
+        # moderately-informative phrasing when the headline is
+        # well-powered (the case the downgrade was specifically gated on).
+        if block["tier"] == "well_powered":
+            br = BusinessReport(fit, data=sdf).full_report()
+            assert "moderately informative" not in br.lower()
+            assert "moderately-informative" not in br.lower()
+
 
 class TestCSNotYetTreatedControlGroupSemantics:
     """Round-13 P1 regression: ``BusinessReport`` must not relabel
