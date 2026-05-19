@@ -934,6 +934,37 @@ class TestFitBehavior:
         assert "ATT" in res.coefficients
         assert np.isclose(res.coefficients["ATT"], res.att, atol=1e-12)
 
+    @pytest.mark.parametrize("vcov", ["hc2", "hc2_bm"])
+    def test_twfe_hc2_full_surface_matches_did_fixed_effects(self, vcov):
+        """Under the HC2/HC2-BM full-dummy path, the entire `DiDResults`
+        surface (residuals, fitted_values, r_squared) reflects the
+        full-dummy fit and matches DiD(fixed_effects=[unit, time]) bit-
+        equally, not just ATT/SE.
+
+        Regression for the REGISTRY/CHANGELOG disclosure that under
+        `vcov_type in {"hc2","hc2_bm"}`, `result.residuals`,
+        `result.fitted_values`, and `result.r_squared` reflect the
+        un-demeaned full-dummy fit (matching DiD-absorb / MPD-absorb
+        auto-route behavior).
+        """
+        data = _make_did_panel(n_units=20)
+        res_twfe = TwoWayFixedEffects(vcov_type=vcov).fit(
+            data, outcome="y", treatment="treated", time="time", unit="unit"
+        )
+        cluster_kwarg = "unit" if vcov == "hc2_bm" else None
+        res_did = DifferenceInDifferences(vcov_type=vcov, cluster=cluster_kwarg).fit(
+            data,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            fixed_effects=["unit", "time"],
+        )
+        assert res_twfe.residuals is not None and res_did.residuals is not None
+        assert res_twfe.fitted_values is not None and res_did.fitted_values is not None
+        np.testing.assert_allclose(res_twfe.residuals, res_did.residuals, atol=1e-12)
+        np.testing.assert_allclose(res_twfe.fitted_values, res_did.fitted_values, atol=1e-12)
+        np.testing.assert_allclose(res_twfe.r_squared, res_did.r_squared, atol=1e-12)
+
     def test_twfe_results_record_cluster_name(self):
         """TWFE results should label the auto-clustered SE with the unit column."""
         rng = np.random.default_rng(1)

@@ -287,6 +287,26 @@ class TwoWayFixedEffects(DifferenceInDifferences):
             # detection in `solve_ols` cleanly drops any collinear FE
             # dummies (e.g. an always-treated unit × treatment_post
             # collinearity) without poisoning the ATT.
+            # Memory guard: the full-dummy design materializes a dense
+            # n × (1 + 1 + n_covs + (n_units-1) + (n_times-1)) matrix.
+            # On large TWFE panels (n_units > 5000 typical) this can blow
+            # up working memory. Warn when the design exceeds ~50M float64
+            # entries (~400 MB) so users can switch to HC1 (within-
+            # transform path) for those panels.
+            _design_cols = 2 + len(covariates or []) + max(0, n_units - 1) + max(0, n_times - 1)
+            _design_entries = len(data) * _design_cols
+            if _design_entries > 50_000_000:
+                warnings.warn(
+                    f"TwoWayFixedEffects(vcov_type={self.vcov_type!r}) builds a "
+                    f"dense {len(data)} × {_design_cols} full-dummy design "
+                    f"(~{_design_entries / 1e6:.1f}M float64 entries, "
+                    f"~{_design_entries * 8 / 1e9:.2f} GB). For panels with "
+                    f"many units/periods, consider vcov_type='hc1' (within-"
+                    "transform path; no leverage term, lower memory) unless "
+                    "small-sample HC2/HC2-BM inference is required.",
+                    UserWarning,
+                    stacklevel=2,
+                )
             y = data[outcome].values.astype(np.float64)
             cov_arrs = [data[c].values.astype(np.float64) for c in (covariates or [])]
             unit_dummies_df = pd.get_dummies(data[unit], prefix=f"_fe_{unit}", drop_first=True)
