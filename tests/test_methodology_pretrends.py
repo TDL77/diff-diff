@@ -838,7 +838,17 @@ class TestPretrendsHelperAPI:
         assert mdv >= 0
 
     def test_compute_pretrends_power_accepts_pretest_form_wald(self, sa_results):
-        """pretest_form='wald' opt-in preserves the pre-PR-B Wald output."""
+        """pretest_form='wald' opt-in selects the Wald acceptance-region form.
+
+        Routes through ``_compute_power_wald`` / ``_compute_mdv_wald`` (the
+        renamed pre-PR-B math), preserving the noncentral-χ² ellipsoidal
+        acceptance region. NOTE: bit-identity to pre-PR-B numerical output
+        on a fitted result is only guaranteed on the legacy `relative_times=None`
+        path; new fits via `compute_pretrends_power(...)` thread `relative_times`
+        into both NIS and Wald linear-weight construction, so a Wald fit on an
+        irregular grid produces γ-unit MDV (not the pre-PR-B count-based L2-
+        normalized MDV). See REGISTRY `## PreTrendsPower` linear-pattern Note.
+        """
         wald_result = compute_pretrends_power(sa_results, pretest_form="wald")
         nis_result = compute_pretrends_power(sa_results, pretest_form="nis")
 
@@ -865,19 +875,38 @@ class TestPretrendsNISvsWald:
         pt = PreTrendsPower()
         assert pt.pretest_form == "nis"
 
-    def test_wald_path_preserves_pre_pr_b_output(self, sa_results):
-        """pretest_form='wald' produces output identical to the pre-PR-B default.
+    def test_wald_path_preserves_pre_pr_b_acceptance_region_form(self, sa_results):
+        """pretest_form='wald' preserves the pre-PR-B acceptance-region form.
 
-        The Wald math is byte-identical to pre-PR-B (renamed to
-        _compute_power_wald + _compute_mdv_wald but the function bodies are
-        unchanged). This test exercises the dispatcher path to lock the
-        backwards-compat invariant.
+        The Wald math (noncentral-χ² on the quadratic form
+        ``δ' Σ_22^{-1} δ``) is byte-identical to pre-PR-B: the methods
+        are renamed to ``_compute_power_wald`` + ``_compute_mdv_wald``
+        with unchanged function bodies, and the dispatcher in
+        ``_compute_power`` / ``_compute_mdv`` selects this branch when
+        ``pretest_form='wald'``.
+
+        **Backward-compat scope**: this test locks the form-of-the-test
+        contract, NOT bit-identity to pre-PR-B fitted-result numerics.
+        Bit-identity for fitted results is regime-dependent:
+
+        - On the **legacy `relative_times=None` path** (callers that
+          bypass `fit()` and call `_get_violation_weights(n_pre)`
+          directly), the count-based L2-normalized direction is
+          unchanged, so Wald numerics ARE bit-identical to pre-PR-B.
+        - On the **new `fit()`-threaded path** (PR-B Step 4), both NIS
+          and Wald consume `relative_times` for linear violations and
+          skip L2 normalization → γ-unit MDV. A Wald fit on an
+          irregular grid `{-5, -3, -1}` therefore produces a
+          γ-different MDV than pre-PR-B. See REGISTRY linear-pattern
+          Note for the convention.
         """
         pt = PreTrendsPower(pretest_form="wald")
         result = pt.fit(sa_results)
-        # Wald-specific fields populated
+        # Wald-specific fields populated (acceptance-region form contract)
         assert np.isfinite(result.noncentrality)
         assert np.isfinite(result.test_statistic)
+        # NIS-specific fields are NaN under Wald
+        assert np.isnan(result.nis_box_probability)
         # Power is in [0, 1]
         assert 0.0 <= result.power <= 1.0
 
