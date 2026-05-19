@@ -1425,19 +1425,28 @@ class DiagnosticReport:
                 "reason": f"compute_pretrends_power raised " f"{type(exc).__name__}: {exc}",
             }
 
-        # Build the schema section and compute the MDV/|ATT| ratio for BR.
+        # Build the schema section and compute the level-scale max-pre-
+        # violation / |ATT| ratio for BR tier classification. Post-PR-B
+        # Step 4 the linear `mdv` is in Roth's γ units (a slope on
+        # relative time), so the level-scale comparable quantity is
+        # `max_abs_pre_violation = mdv * max(|violation_weights|)` —
+        # the largest pre-period level deviation under the MDV. Using
+        # raw `mdv` here would mix slope and level scales on irregular
+        # grids and mis-tier well_powered / moderately_powered /
+        # underpowered.
         headline_metric = self._extract_headline_metric()
         att = headline_metric.get("value") if headline_metric else None
         mdv = _to_python_float(getattr(pp, "mdv", None))
+        max_abs_pre_violation = _to_python_float(getattr(pp, "max_abs_pre_violation", mdv))
         ratio: Optional[float] = None
         if (
-            mdv is not None
+            max_abs_pre_violation is not None
             and att is not None
             and np.isfinite(att)
             and abs(att) > 0
-            and np.isfinite(mdv)
+            and np.isfinite(max_abs_pre_violation)
         ):
-            ratio = mdv / abs(att)
+            ratio = max_abs_pre_violation / abs(att)
 
         # Prefer the provenance label `pretrends.py` records on the result
         # itself (PR-B: `PreTrendsPowerResults.covariance_source` captures
@@ -1455,6 +1464,7 @@ class DiagnosticReport:
             "alpha": _to_python_float(getattr(pp, "alpha", self._alpha)),
             "target_power": _to_python_float(getattr(pp, "target_power", 0.80)),
             "mdv": mdv,
+            "max_abs_pre_violation": max_abs_pre_violation,
             "mdv_share_of_att": ratio,
             # Power is reported at ``violation_magnitude`` — the M that
             # the helper actually evaluated (defaults to the MDV when
@@ -1482,11 +1492,22 @@ class DiagnosticReport:
         populates at construction time), falling back to ``self._results``.
         """
         mdv = _to_python_float(getattr(obj, "mdv", None))
+        # PR-B Step 4: use level-scale max_abs_pre_violation rather than
+        # raw γ-unit mdv to tier (see ``_check_pretrends_power`` for the
+        # rationale). Legacy precomputed PreTrendsPowerResults objects
+        # without the property fall back to raw ``mdv``.
+        max_abs_pre_violation = _to_python_float(getattr(obj, "max_abs_pre_violation", mdv))
         hm = self._extract_headline_metric()
         att = hm.get("value") if hm else None
         ratio: Optional[float] = None
-        if mdv is not None and att is not None and np.isfinite(att) and abs(att) > 0:
-            ratio = mdv / abs(att)
+        if (
+            max_abs_pre_violation is not None
+            and att is not None
+            and np.isfinite(att)
+            and abs(att) > 0
+            and np.isfinite(max_abs_pre_violation)
+        ):
+            ratio = max_abs_pre_violation / abs(att)
         source_fit = getattr(obj, "original_results", None) or self._results
         # PR-B: prefer the provenance label `pretrends.py` records on the
         # precomputed result; fall back to type-based inference only for
@@ -1502,6 +1523,7 @@ class DiagnosticReport:
             "alpha": _to_python_float(getattr(obj, "alpha", self._alpha)),
             "target_power": _to_python_float(getattr(obj, "target_power", 0.80)),
             "mdv": mdv,
+            "max_abs_pre_violation": max_abs_pre_violation,
             "mdv_share_of_att": ratio,
             "violation_magnitude": _to_python_float(getattr(obj, "violation_magnitude", None)),
             "power_at_violation_magnitude": _to_python_float(getattr(obj, "power", None)),

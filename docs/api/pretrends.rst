@@ -63,8 +63,13 @@ Example
    print(f"Power: {pt_results.power:.2%}")
    print(f"NIS box probability (accept H0): {pt_results.nis_box_probability:.4f}")
 
-   # Opt back into the pre-PR-B Wald (noncentral-χ²) form for backwards-
-   # compatible numerical output:
+   # Select the Wald (noncentral-χ²) acceptance-region form instead of the
+   # default NIS box probability. Wald preserves the pre-PR-B acceptance-
+   # region math byte-identically; numerical-output bit-identity to pre-PR-B
+   # fitted results only holds on regular pre-period grids and on the
+   # legacy `relative_times=None` path. PR-B Step 4's `relative_times`
+   # threading applies to BOTH NIS and Wald, so on irregular grids the
+   # Wald MDV is also in Roth's γ units (see REGISTRY linear-pattern Note).
    pt_wald = PreTrendsPower(
        alpha=0.05, power=0.80, violation_type='linear', pretest_form='wald'
    )

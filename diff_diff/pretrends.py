@@ -336,13 +336,53 @@ class PreTrendsPowerResults:
         """
         Check if the pre-trends test is informative.
 
-        A pre-trends test is considered informative if the MDV is reasonably
-        small relative to typical effect sizes. This is a heuristic check;
-        see the summary for interpretation guidance.
+        A pre-trends test is considered informative if the MAX level-scale
+        pre-period violation under the MDV is reasonably small relative to
+        the per-period standard errors. Post PR-B Step 4 the `linear`
+        MDV is in Roth's γ units (a slope), so comparing the raw ``mdv``
+        scalar to the level-scale ``max(pre_period_ses)`` would mix units
+        on irregular pre-period grids. The comparable level-scale scalar
+        is ``mdv * max(|violation_weights|)`` (the largest pre-period
+        deviation under the MDV — see ``max_abs_pre_violation``).
         """
-        # Heuristic: MDV < 2x the max observed pre-period SE
         max_se = np.max(self.pre_period_ses) if len(self.pre_period_ses) > 0 else 1.0
-        return bool(self.mdv < 2 * max_se)
+        return bool(self.max_abs_pre_violation < 2 * max_se)
+
+    @property
+    def max_abs_pre_violation(self) -> float:
+        """
+        Largest level-scale pre-period deviation under the MDV.
+
+        Returns ``mdv * max(|violation_weights|)`` — the maximum
+        absolute pre-period violation ``δ_t`` when the violation
+        magnitude equals the MDV. This is the right level-scale
+        scalar for comparing pre-trends sensitivity against
+        coefficient-scale quantities (post-treatment ATT, per-period
+        SEs, HonestDiD's M bound).
+
+        Why this matters: PR-B Step 4 made the linear ``mdv`` report
+        Roth's γ units (a slope on relative time). On a regular grid
+        ``[-3, -2, -1]`` the max deviation is ``γ * 3``; on an
+        irregular grid ``[-5, -3, -1]`` it is ``γ * 5``. Raw ``mdv``
+        alone cannot be compared to level effects without applying
+        the weight scale.
+
+        For non-linear violation types: constant weights ``[1/√K, ...,
+        1/√K]`` yield ``max_abs_pre_violation = mdv / √K``;
+        last_period ``[0, ..., 0, 1]`` yields ``max_abs_pre_violation
+        = mdv``; custom uses the user-supplied weight vector.
+
+        Backwards-compat: legacy serialized results without
+        ``violation_weights`` (pre-PR-B) fall back to the raw ``mdv``
+        (which under the pre-PR-B count-based L2-normalized linear
+        convention already had a roughly level-scale magnitude).
+        """
+        if self.violation_weights is None or len(self.violation_weights) == 0:
+            return float(self.mdv)
+        if not np.isfinite(self.mdv):
+            return float(self.mdv)
+        max_w = float(np.max(np.abs(self.violation_weights)))
+        return float(self.mdv * max_w)
 
     @property
     def power_adequate(self) -> bool:
@@ -1622,22 +1662,30 @@ class PreTrendsPower:
         """
         pt_results = self.fit(results, pre_periods=pre_periods)
         mdv = pt_results.mdv
+        # Level-scale scalar for comparison against the level-scale
+        # per-period SEs. PR-B Step 4: raw `mdv` for `linear` violations
+        # is now Roth's γ units (a slope); the level-scale quantity is
+        # `mdv * max(|violation_weights|)`. See PreTrendsPowerResults.
+        max_abs_pre_violation = pt_results.max_abs_pre_violation
 
-        # The MDV represents the size of violation the test could detect
+        # The MDV represents the size of violation the test could detect.
         # In HonestDiD's relative magnitudes framework, M=1 means
-        # post-treatment violations can be as large as the max pre-period violation
-        # The MDV gives us a sense of how large that max violation could be
+        # post-treatment violations can be as large as the max pre-period
+        # violation. ``max_abs_pre_violation`` gives us that level-scale
+        # number directly.
 
         max_pre_se = np.max(pt_results.pre_period_ses)
 
         interpretation = []
         interpretation.append(f"Minimum Detectable Violation (MDV): {mdv:.4f}")
+        interpretation.append(f"Max pre-period level deviation at MDV: {max_abs_pre_violation:.4f}")
         interpretation.append(f"Max pre-period SE: {max_pre_se:.4f}")
 
-        if np.isfinite(mdv):
-            # Ratio of MDV to max SE - gives sense of how many SEs the MDV is
-            mdv_in_ses = mdv / max_pre_se if max_pre_se > 0 else np.inf
-            interpretation.append(f"MDV / max(SE): {mdv_in_ses:.2f}")
+        if np.isfinite(max_abs_pre_violation):
+            # Ratio of max-level-deviation to max SE — how many SEs the
+            # largest pre-period violation under the MDV would be.
+            mdv_in_ses = max_abs_pre_violation / max_pre_se if max_pre_se > 0 else np.inf
+            interpretation.append(f"Max level deviation / max(SE): {mdv_in_ses:.2f}")
 
             if mdv_in_ses < 1:
                 interpretation.append("→ Pre-trends test is fairly sensitive to violations.")
@@ -1656,8 +1704,13 @@ class PreTrendsPower:
 
         return {
             "mdv": mdv,
+            "max_abs_pre_violation": float(max_abs_pre_violation),
             "max_pre_se": max_pre_se,
-            "mdv_in_ses": mdv / max_pre_se if max_pre_se > 0 and np.isfinite(mdv) else np.inf,
+            "mdv_in_ses": (
+                max_abs_pre_violation / max_pre_se
+                if max_pre_se > 0 and np.isfinite(max_abs_pre_violation)
+                else np.inf
+            ),
             "interpretation": "\n".join(interpretation),
         }
 

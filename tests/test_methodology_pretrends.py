@@ -449,6 +449,114 @@ class TestPretrendsLinearGrid:
         weights = pt._get_violation_weights(3, relative_times=np.array([-5, -3, -1]))
         np.testing.assert_allclose(weights, [5.0, 3.0, 1.0])
 
+    def test_max_abs_pre_violation_uses_weight_scale_on_irregular_grid(self):
+        """PR-B R12 P1 regression: ``PreTrendsPowerResults.max_abs_pre_violation``
+        scales raw γ-unit ``mdv`` by ``max(|violation_weights|)`` so the
+        level-scale comparison against ``|att|`` / per-period SEs is
+        unit-consistent.
+
+        On an irregular grid ``[-5, -3, -1]`` with linear weights
+        ``[5, 3, 1]``, the largest level-scale pre-period violation under
+        the MDV is ``mdv * 5``, NOT ``mdv * 1`` (the wrong unit-mixed
+        scalar the report layer used pre-R12). Locks the architectural
+        fix: raw γ should NEVER be compared to a level effect; always go
+        through ``max_abs_pre_violation``.
+
+        Uses synthetic Σ_22 + sa_results-shaped inputs so the fixture
+        runs deterministically across pure-Python and Rust backends.
+        """
+        from diff_diff.pretrends import _coerce_relative_times_from_reference
+
+        # Confirm the helper produces the irregular relative times.
+        _ = _coerce_relative_times_from_reference([-5, -3, -1], 0)
+
+        # K=3, ρ=0.4 equicorrelated, σ²=0.04 → moderate-power regime
+        # so we get a finite mdv and can spot-check the level-scale scalar.
+        K = 3
+        rho = 0.4
+        sigma2 = 0.04
+        vcov = sigma2 * (rho * np.ones((K, K)) + (1 - rho) * np.eye(K))
+
+        # Construct a synthetic result skeleton directly to exercise the
+        # max_abs_pre_violation property end-to-end.
+        relative_times = np.array([-5.0, -3.0, -1.0])
+        pt = PreTrendsPower(violation_type="linear", pretest_form="nis", power=0.5)
+        weights = pt._get_violation_weights(3, relative_times=relative_times)
+        np.testing.assert_allclose(weights, [5.0, 3.0, 1.0])
+
+        mdv = pt._compute_mdv_nis(weights, vcov)
+        assert np.isfinite(mdv), f"MDV should be finite, got {mdv}"
+
+        # Hand-construct the result with the right weights field so the
+        # property exercises the new code path. Use minimal repr=False
+        # field placeholders.
+        from diff_diff.pretrends import PreTrendsPowerResults
+
+        res = PreTrendsPowerResults(
+            power=0.5,
+            mdv=mdv,
+            violation_magnitude=mdv,
+            violation_type="linear",
+            alpha=0.05,
+            target_power=0.5,
+            n_pre_periods=3,
+            test_statistic=np.nan,
+            critical_value=1.96,
+            noncentrality=np.nan,
+            pre_period_effects=np.zeros(3),
+            pre_period_ses=np.full(3, np.sqrt(sigma2)),
+            vcov=vcov,
+            violation_weights=weights,
+            covariance_source="full_pre_period_vcov",
+        )
+        # Level-scale scalar: mdv * max(|weights|) = mdv * 5 (the
+        # `t=-5` slot dominates on irregular grids).
+        expected = float(mdv * 5.0)
+        assert np.isclose(res.max_abs_pre_violation, expected, atol=1e-10), (
+            f"max_abs_pre_violation={res.max_abs_pre_violation} should equal "
+            f"mdv * max(|w|) = {expected} on irregular grid [-5, -3, -1]"
+        )
+        # Sanity: raw mdv is materially smaller — confirms the unit-fix
+        # actually moves the scalar (regression against a future revert
+        # back to raw γ).
+        assert (
+            res.max_abs_pre_violation > 4 * mdv
+        ), "max_abs_pre_violation must scale by max(|w|)=5, not collapse to mdv"
+
+    def test_is_informative_uses_level_scale_not_raw_gamma(self):
+        """``is_informative`` consumes ``max_abs_pre_violation`` (level scale)
+        rather than raw ``mdv`` (slope scale) — locks the R12 fix on the
+        property surface so future regressions cannot flip back to the
+        wrong-unit heuristic.
+        """
+        from diff_diff.pretrends import PreTrendsPowerResults
+
+        # SE = 0.5 across pre-periods; MDV = 0.4 (raw γ); weights have
+        # max(|w|)=3 on a regular `[-3, -2, -1]` grid → level-scale max
+        # violation = 1.2, well above 2 * max(SE) = 1.0 → NOT informative.
+        res = PreTrendsPowerResults(
+            power=0.5,
+            mdv=0.4,
+            violation_magnitude=0.4,
+            violation_type="linear",
+            alpha=0.05,
+            target_power=0.5,
+            n_pre_periods=3,
+            test_statistic=np.nan,
+            critical_value=1.96,
+            noncentrality=np.nan,
+            pre_period_effects=np.zeros(3),
+            pre_period_ses=np.full(3, 0.5),
+            vcov=np.eye(3) * 0.25,
+            violation_weights=np.array([3.0, 2.0, 1.0]),
+        )
+        # max_abs_pre_violation = 0.4 * 3 = 1.2 > 2 * 0.5 = 1.0 → not informative
+        assert np.isclose(res.max_abs_pre_violation, 1.2, atol=1e-10)
+        assert res.is_informative is False, (
+            "raw mdv=0.4 < 2*SE=1.0 would say 'informative', but the level-scale "
+            "violation 1.2 > 1.0 says 'not informative' — the level-scale check wins"
+        )
+
     def test_no_l2_normalization_when_relative_times_provided(self):
         """Linear-with-relative_times skips L2 norm → ||weights||_2 ≠ 1."""
         pt = PreTrendsPower(violation_type="linear", pretest_form="nis")

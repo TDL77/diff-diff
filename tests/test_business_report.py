@@ -2456,24 +2456,33 @@ class TestDiagFallbackDowngradeAppliedCentrally:
         block = dr.to_dict()["pretrends_power"]
         assert block.get("status") == "ran", "pretrends_power should run on cs_fit"
 
-        # Deterministic fixture pins: cov_source = full_pre_period_vcov,
-        # mdv/|att| ratio ≈ 0.053 (well under 0.25), tier = well_powered.
-        # Codex R6 P3: pin the expected tier explicitly so a future
-        # regression that reintroduces the conservative downgrade fails
-        # this test loudly (was previously bypassed by the `if tier ==
-        # well_powered` guard).
+        # Deterministic fixture pins (cs_fit at seed=7, treatment_effect=1.5):
+        # cov_source = full_pre_period_vcov; max_abs_pre_violation ≈ 0.375
+        # (γ * max(|t|) where pre-periods are [-4, -3, -2]); |att| ≈ 1.779;
+        # mdv_share_of_att ≈ 0.211, well under 0.25 → tier = well_powered.
+        # Codex R12 P1: this ratio is now `max_abs_pre_violation / |att|`,
+        # the level-scale max pre-period violation under the MDV (post-PR-B
+        # Step 4 linear MDV is in Roth's γ units, a slope; the level-scale
+        # comparable is mdv * max(|violation_weights|)).
         assert block["covariance_source"] == "full_pre_period_vcov", (
             "cs_fit is analytical CS with event_study_vcov populated — "
             "PR-B routing must report full_pre_period_vcov"
         )
+        # max_abs_pre_violation = mdv * max(|t|) = 0.0937 * 4 ≈ 0.375
+        assert block.get("max_abs_pre_violation") is not None
+        assert 0.35 < block["max_abs_pre_violation"] < 0.40, (
+            f"cs_fit max_abs_pre_violation={block['max_abs_pre_violation']} "
+            "should be ≈ 0.375 (γ ≈ 0.094 × max|t|=4)"
+        )
         ratio = block["mdv_share_of_att"]
         assert ratio is not None and ratio < 0.25, (
-            f"cs_fit raw mdv/|att|={ratio} must be in the well_powered "
-            "range (<0.25) for this assertion to pin the no-downgrade contract"
+            f"cs_fit mdv_share_of_att={ratio} (level-scale max_abs_pre_violation / "
+            "|att|) must be in the well_powered range (<0.25) for this assertion "
+            "to pin the no-downgrade contract"
         )
-        assert block["tier"] == "well_powered", (
-            "well-powered raw ratio must NOT be downgraded under the PR-B " "full-VCV path"
-        )
+        assert (
+            block["tier"] == "well_powered"
+        ), "well-powered ratio must NOT be downgraded under the PR-B full-VCV path"
 
         # Architectural fix: the same provenance label appears on the
         # compute_pretrends_power output's persisted field, locking that

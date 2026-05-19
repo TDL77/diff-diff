@@ -298,7 +298,16 @@ a library setting.
   while `schema["pre_trends"]["power_status"]` carries the
   machine-readable enum (`"ran"` / `"skipped"` / `"error"` /
   `"not_applicable"`). BusinessReport then reads
-  `mdv_share_of_att = mdv / abs(att)` and selects a tier:
+  `mdv_share_of_att = max_abs_pre_violation / abs(att)` and selects a tier.
+  The numerator is the **level-scale max pre-period violation under the
+  MDV**, computed as `mdv * max(|violation_weights|)` — NOT the raw `mdv`
+  scalar. Post PR-B Step 4, raw `mdv` for `violation_type='linear'` is in
+  Roth's γ units (a slope on relative time), so comparing it directly to
+  a level-scale `|att|` would mix units on irregular pre-period grids and
+  mis-tier the result. The level-scale quantity is exposed via the new
+  `PreTrendsPowerResults.max_abs_pre_violation` property and the
+  `DiagnosticReport.pretrends_power` block schema field of the same name.
+  Tier thresholds:
 
   - `< 0.25` &rarr; `well_powered` &mdash; "the test has 80% power to
     detect a violation of magnitude M, which is only X% of the
