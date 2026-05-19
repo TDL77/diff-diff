@@ -375,14 +375,23 @@ class TestPrecomputed:
         assert default_block["tier"] == precomp_block["tier"]
         assert default_block["covariance_source"] == precomp_block["covariance_source"]
 
-    def test_precomputed_pretrends_power_downgrades_when_full_vcov_unused(self):
-        """Stub-based regression: when the source fit has both
-        ``event_study_vcov`` and ``event_study_vcov_index`` populated but
-        the diagonal fallback was used, the precomputed adapter must emit
-        ``covariance_source='diag_fallback_available_full_vcov_unused'`` and
-        downgrade a ``well_powered`` tier to ``moderately_powered`` — just
-        like the default compute path. Complements the live-fit parity test
-        by exercising the tier-bumping edge explicitly.
+    def test_precomputed_pretrends_power_full_vcov_yields_no_downgrade(self):
+        """PR-B regression: CS / SA fits with populated ``event_study_vcov``
+        now legitimately route through the full pre-period covariance in
+        ``pretrends.py`` (PR-B Step 3). The PR-A conservative downgrade
+        was a workaround for the implementation gap PR-B closed — so the
+        precomputed adapter must NOT downgrade ``well_powered`` to
+        ``moderately_powered`` for such fits anymore.
+
+        Stub-based test mirroring the live-fit parity test: a CS-shaped
+        stub with ``event_study_vcov`` populated must produce
+        ``covariance_source='full_pre_period_vcov'`` and preserve the
+        ``well_powered`` tier (ratio = 0.1).
+
+        See PR #463 R3 codex review (P1) — the bug was that
+        ``DiagnosticReport`` had not been updated for PR-B's estimator-layer
+        routing change, so correctly-computed full-VCV fits were silently
+        being downgraded to ``moderately_powered``.
         """
 
         # Minimal CS-shaped stub with full vcov flagged.
@@ -405,7 +414,7 @@ class TestPrecomputed:
         stub.__class__.__name__ = "CallawaySantAnnaResults"
 
         class _PPStub:
-            mdv = 0.1  # |ATT| = 1.0 -> ratio = 0.1 -> well_powered before downgrade
+            mdv = 0.1  # |ATT| = 1.0 -> ratio = 0.1 -> well_powered
             violation_type = "linear"
             alpha = 0.05
             target_power = 0.80
@@ -413,13 +422,70 @@ class TestPrecomputed:
             power = 0.80
             n_pre_periods = 2
             original_results = stub
+            # Legacy serialized result (no covariance_source field) — the
+            # adapter falls back to type-based inference, which correctly
+            # identifies CS-with-es_vcov as a full-VCV path post-PR-B.
 
         dr = DiagnosticReport(stub, precomputed={"pretrends_power": _PPStub()})
         block = dr.to_dict()["pretrends_power"]
         assert block["status"] == "ran"
-        assert block["covariance_source"] == "diag_fallback_available_full_vcov_unused"
-        # Downgrade must apply: pre-tier is well_powered, post-tier is moderately_powered.
-        assert block["tier"] == "moderately_powered"
+        assert block["covariance_source"] == "full_pre_period_vcov"
+        # No downgrade — PR-B closed the implementation gap.
+        assert block["tier"] == "well_powered"
+
+    def test_precomputed_pretrends_power_consumes_persisted_cov_source(self):
+        """PR-B regression: the precomputed adapter must prefer the
+        ``covariance_source`` recorded on ``PreTrendsPowerResults`` over
+        the legacy type-based inference. Demonstrates the architectural
+        fix the R3 codex review called out (provenance should be recorded
+        on the result, not re-inferred from result type each time)."""
+        from diff_diff.pretrends import PreTrendsPowerResults
+
+        # Same CS-shaped stub; the persisted label takes precedence.
+        class _CSStub:
+            overall_att = 1.0
+            overall_se = 0.25
+            overall_t_stat = 4.0
+            overall_p_value = 0.001
+            overall_conf_int = (0.5, 1.5)
+            alpha = 0.05
+            n_obs = 400
+            n_treated = 80
+            n_control = 320
+            survey_metadata = None
+            event_study_effects = None
+            event_study_vcov = np.eye(3)
+            event_study_vcov_index = {-2: 0, -1: 1, 0: 2}
+
+        stub = _CSStub()
+        stub.__class__.__name__ = "CallawaySantAnnaResults"
+
+        # Construct a real PreTrendsPowerResults with the new field set
+        # explicitly. Even though the type-based inference would say
+        # "full_pre_period_vcov", asserting that the explicit label
+        # wins demonstrates the architectural fix.
+        pp = PreTrendsPowerResults(
+            power=0.80,
+            mdv=0.1,
+            violation_magnitude=0.1,
+            violation_type="linear",
+            alpha=0.05,
+            target_power=0.80,
+            n_pre_periods=2,
+            test_statistic=np.nan,
+            critical_value=1.96,
+            noncentrality=np.nan,
+            pre_period_effects=np.zeros(2),
+            pre_period_ses=np.ones(2),
+            vcov=np.eye(2),
+            original_results=stub,
+            covariance_source="full_pre_period_vcov",
+        )
+
+        dr = DiagnosticReport(stub, precomputed={"pretrends_power": pp})
+        block = dr.to_dict()["pretrends_power"]
+        assert block["covariance_source"] == "full_pre_period_vcov"
+        assert block["tier"] == "well_powered"
 
     def test_precomputed_parallel_trends_bypasses_applicability_gate(self, cs_fit):
         """Round-22 P1 regression: ``precomputed["parallel_trends"]`` was

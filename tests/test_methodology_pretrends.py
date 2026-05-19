@@ -502,7 +502,14 @@ class TestPretrendsLinearGrid:
         )
 
         pt = PreTrendsPower(pretest_form="nis", violation_type="linear")
-        _, ses, vcov, n_pre, relative_times = pt._extract_pre_period_params(mpd_results)
+        (
+            _,
+            ses,
+            vcov,
+            n_pre,
+            relative_times,
+            covariance_source,
+        ) = pt._extract_pre_period_params(mpd_results)
 
         # End-to-end assertion: the MPD branch produced Roth-style relative
         # times derived from `reference_period`, not the raw period IDs.
@@ -512,6 +519,8 @@ class TestPretrendsLinearGrid:
         # vcov falls through to diag(ses**2) because the mock has no
         # interaction_indices and no full vcov.
         np.testing.assert_allclose(np.diag(vcov), np.array(ses) ** 2)
+        # MPD without `interaction_indices` records the diag-fallback source.
+        assert covariance_source == "diag_fallback"
 
         # Plumbed through to _get_violation_weights: weights = |t| = [4, 3, 2, 1].
         weights = pt._get_violation_weights(n_pre, relative_times=relative_times)
@@ -551,7 +560,7 @@ class TestPretrendsLinearGrid:
         )
 
         pt = PreTrendsPower(pretest_form="nis", violation_type="linear")
-        _, _, _, _, relative_times = pt._extract_pre_period_params(mpd_results)
+        _, _, _, _, relative_times, _ = pt._extract_pre_period_params(mpd_results)
         assert relative_times is None, "Non-numeric reference should yield None"
 
     def test_backwards_compat_no_relative_times_uses_legacy_normalized(self):
@@ -678,9 +687,13 @@ class TestPretrendsCovarianceSource:
             pytest.skip("No pre-periods in fixture")
 
         ses = np.array([sa_results.event_study_effects[t]["se"] for t in sorted(pre_periods)])
-        sub = _extract_event_study_vcov_subblock(sa_results, sorted(pre_periods), ses)
+        sub, source = _extract_event_study_vcov_subblock(
+            sa_results, sorted(pre_periods), ses
+        )
         diag_fallback = np.diag(ses**2)
 
+        # Source label reflects the full-VCV path being actually taken.
+        assert source == "full_pre_period_vcov"
         # Should NOT be identical (assuming the panel produces nonzero
         # off-diagonal cohort overlap). At minimum the shape matches.
         assert sub.shape == diag_fallback.shape

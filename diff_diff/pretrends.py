@@ -92,7 +92,7 @@ def _extract_event_study_vcov_subblock(
     results: Any,
     pre_periods: List[int],
     ses: np.ndarray,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, str]:
     """
     Extract the pre-period sub-block of ``results.event_study_vcov`` when
     available; otherwise fall back to ``diag(ses**2)``.
@@ -122,14 +122,20 @@ def _extract_event_study_vcov_subblock(
 
     Returns
     -------
-    np.ndarray
+    vcov : np.ndarray
         The (n_pre, n_pre) covariance sub-block. Full event_study_vcov
         sub-block when available; diag(ses**2) otherwise.
+    source : str
+        Provenance label for downstream report-layer tier classification:
+        ``"full_pre_period_vcov"`` when the full event-study sub-block
+        was used (no off-diagonal information was discarded), or
+        ``"diag_fallback"`` when ``event_study_vcov`` was missing /
+        cleared (bootstrap / replicate-weight CS or SA paths).
     """
     es_vcov = getattr(results, "event_study_vcov", None)
     es_vcov_index = getattr(results, "event_study_vcov_index", None)
     if es_vcov is None or es_vcov_index is None:
-        return np.diag(ses**2)
+        return np.diag(ses**2), "diag_fallback"
 
     try:
         indices = [list(es_vcov_index).index(t) for t in pre_periods]
@@ -144,7 +150,7 @@ def _extract_event_study_vcov_subblock(
             f"{list(es_vcov_index)}. Original error: {e}"
         ) from e
 
-    return np.asarray(es_vcov)[np.ix_(indices, indices)]
+    return np.asarray(es_vcov)[np.ix_(indices, indices)], "full_pre_period_vcov"
 
 
 # =============================================================================
@@ -221,6 +227,13 @@ class PreTrendsPowerResults:
     pretest_form: Literal["nis", "wald"] = "wald"
     nis_box_probability: float = np.nan
     violation_weights: Optional[np.ndarray] = field(default=None, repr=False)
+    # Provenance for downstream tier classification. Populated at fit time
+    # from `_extract_pre_period_params`. ``"full_pre_period_vcov"`` when
+    # off-diagonal pre-period covariances were used; ``"diag_fallback"``
+    # when only per-period SEs were available; ``"unknown"`` for legacy
+    # serialized results pre-PR-B (backwards-compat default). See
+    # ``diagnostic_report._infer_cov_source`` for consumer-side use.
+    covariance_source: str = "unknown"
 
     def __repr__(self) -> str:
         return (
@@ -784,7 +797,7 @@ class PreTrendsPower:
         self,
         results: Union[MultiPeriodDiDResults, Any],
         pre_periods: Optional[List[int]] = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, Optional[np.ndarray]]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, Optional[np.ndarray], str]:
         """
         Extract pre-period parameters from results.
 
@@ -805,6 +818,27 @@ class PreTrendsPower:
             Variance-covariance matrix for pre-period effects.
         n_pre : int
             Number of pre-periods.
+        relative_times : np.ndarray or None
+            Pre-period relative-time labels (Roth's δ_t = γ·t convention),
+            or None for callers that bypass the labeled-grid path.
+        covariance_source : str
+            Provenance label describing which covariance path the
+            extraction actually took:
+
+            - ``"full_pre_period_vcov"`` when a full pre-period
+              covariance sub-block was used (MPD with
+              ``interaction_indices``, or CS/SA with populated
+              ``event_study_vcov``).
+            - ``"diag_fallback"`` when only the per-period standard
+              errors were available (bootstrap / replicate-weight CS or
+              SA fits, MPD without ``interaction_indices``).
+
+            ``DiagnosticReport`` consumes this label downstream to
+            decide whether the power-tier should be conservatively
+            downgraded (REPORTING.md "conservative deviation" rule),
+            rather than re-inferring covariance provenance from the
+            result type (which would diverge from the actual extraction
+            path the moment the routing changes — see PR-B Step 3).
         """
         if isinstance(results, MultiPeriodDiDResults):
             # Get pre-period information - use explicit pre_periods if provided
@@ -847,8 +881,10 @@ class PreTrendsPower:
             ):
                 indices = [results.interaction_indices[p] for p in estimated_pre_periods]
                 vcov = results.vcov[np.ix_(indices, indices)]
+                covariance_source = "full_pre_period_vcov"
             else:
                 vcov = np.diag(ses**2)
+                covariance_source = "diag_fallback"
 
             # For MultiPeriodDiDResults, period identifiers are generic
             # (often calendar years, sometimes pre-shifted relative times).
@@ -874,7 +910,7 @@ class PreTrendsPower:
                     # Non-numeric labels (string period IDs, etc.) — fall
                     # back to legacy normalized linear direction.
                     relative_times = None
-            return effects, ses, vcov, n_pre, relative_times
+            return effects, ses, vcov, n_pre, relative_times, covariance_source
 
         # Try CallawaySantAnnaResults
         try:
@@ -926,10 +962,12 @@ class PreTrendsPower:
                 # (non-bootstrap CS fits at staggered_results.py:126-128).
                 # Bootstrap CS fits clear event_study_vcov at
                 # staggered.py:2032-2036, falling through to diag.
-                vcov = _extract_event_study_vcov_subblock(results, pre_periods, ses)
+                vcov, covariance_source = _extract_event_study_vcov_subblock(
+                    results, pre_periods, ses
+                )
 
                 relative_times = np.asarray(pre_periods, dtype=float)
-                return effects, ses, vcov, n_pre, relative_times
+                return effects, ses, vcov, n_pre, relative_times, covariance_source
         except ImportError:
             pass
 
@@ -970,10 +1008,12 @@ class PreTrendsPower:
                 # via W @ vcov_cohort @ W.T after _compute_iw_effects).
                 # Bootstrap SA fits and replicate-weight survey fits clear
                 # event_study_vcov, falling through to diag.
-                vcov = _extract_event_study_vcov_subblock(results, pre_periods, ses)
+                vcov, covariance_source = _extract_event_study_vcov_subblock(
+                    results, pre_periods, ses
+                )
 
                 relative_times = np.asarray(pre_periods, dtype=float)
-                return effects, ses, vcov, n_pre, relative_times
+                return effects, ses, vcov, n_pre, relative_times, covariance_source
         except ImportError:
             pass
 
@@ -1302,10 +1342,17 @@ class PreTrendsPower:
             Power analysis results including power and MDV.
         """
         # Extract pre-period parameters (now includes relative_times for
-        # γ-unit MDV under linear violation_type).
-        effects, ses, vcov, n_pre, relative_times = self._extract_pre_period_params(
-            results, pre_periods
-        )
+        # γ-unit MDV under linear violation_type, plus the covariance-source
+        # provenance label for downstream DiagnosticReport / BusinessReport
+        # tier classification).
+        (
+            effects,
+            ses,
+            vcov,
+            n_pre,
+            relative_times,
+            covariance_source,
+        ) = self._extract_pre_period_params(results, pre_periods)
 
         # Get violation weights. relative_times threaded through so the
         # linear-violation path produces γ-unit MDV per Roth's δ_t = γ·t
@@ -1344,6 +1391,7 @@ class PreTrendsPower:
             pretest_form=self.pretest_form,
             nis_box_probability=nis_box_probability,
             violation_weights=weights,
+            covariance_source=covariance_source,
         )
 
     def power_at(
@@ -1399,8 +1447,12 @@ class PreTrendsPower:
         PreTrendsPowerCurve
             Power curve data with plot method.
         """
-        # Extract parameters (5-tuple now includes relative_times)
-        _, ses, vcov, n_pre, relative_times = self._extract_pre_period_params(results, pre_periods)
+        # Extract parameters (6-tuple includes relative_times + covariance
+        # source; the source label is currently unused on the curve path but
+        # the unpack must match the helper's signature).
+        _, ses, vcov, n_pre, relative_times, _ = self._extract_pre_period_params(
+            results, pre_periods
+        )
         weights = self._get_violation_weights(n_pre, relative_times=relative_times)
 
         # Compute MDV

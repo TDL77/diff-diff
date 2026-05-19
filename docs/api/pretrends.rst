@@ -54,12 +54,20 @@ Example
                        time='period', unit='unit_id',
                        post_periods=[5, 6, 7], reference_period=4)
 
-   # Compute pre-trends power for linear violations
+   # Compute pre-trends power for linear violations.
+   # Default acceptance region is the Roth (2022) NIS box probability.
    pt = PreTrendsPower(alpha=0.05, power=0.80, violation_type='linear')
    pt_results = pt.fit(results)
 
    print(f"MDV: {pt_results.mdv:.3f}")
    print(f"Power: {pt_results.power:.2%}")
+   print(f"NIS box probability (accept H0): {pt_results.nis_box_probability:.4f}")
+
+   # Opt back into the pre-PR-B Wald (noncentral-χ²) form for backwards-
+   # compatible numerical output:
+   pt_wald = PreTrendsPower(
+       alpha=0.05, power=0.80, violation_type='linear', pretest_form='wald'
+   )
 
 PreTrendsPowerResults
 ---------------------

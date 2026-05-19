@@ -1439,7 +1439,14 @@ class DiagnosticReport:
         ):
             ratio = mdv / abs(att)
 
-        cov_source = self._infer_cov_source(self._results)
+        # Prefer the provenance label `pretrends.py` records on the result
+        # itself (PR-B: `PreTrendsPowerResults.covariance_source` captures
+        # which extraction path was actually taken — full Σ_22 sub-block
+        # vs diag fallback). Fall back to type-based inference for legacy
+        # serialized results pre-PR-B that lack the field.
+        cov_source = getattr(pp, "covariance_source", "unknown")
+        if cov_source == "unknown":
+            cov_source = self._infer_cov_source(self._results)
         tier = _apply_diag_fallback_downgrade(_power_tier(ratio), cov_source)
         return {
             "status": "ran",
@@ -1481,7 +1488,12 @@ class DiagnosticReport:
         if mdv is not None and att is not None and np.isfinite(att) and abs(att) > 0:
             ratio = mdv / abs(att)
         source_fit = getattr(obj, "original_results", None) or self._results
-        cov_source = self._infer_cov_source(source_fit)
+        # PR-B: prefer the provenance label `pretrends.py` records on the
+        # precomputed result; fall back to type-based inference only for
+        # legacy serialized results that lack the field.
+        cov_source = getattr(obj, "covariance_source", "unknown")
+        if cov_source == "unknown":
+            cov_source = self._infer_cov_source(source_fit)
         tier = _apply_diag_fallback_downgrade(_power_tier(ratio), cov_source)
         return {
             "status": "ran",
@@ -1504,12 +1516,25 @@ class DiagnosticReport:
         """Classify whether ``compute_pretrends_power`` had access to the
         full pre-period covariance on ``source_fit``.
 
-        CS / SA / ImputationDiD / EfficientDiD / Stacked / etc. currently
-        fall back to ``np.diag(ses**2)`` inside ``pretrends.py``, even when
-        ``event_study_vcov`` is populated on the result; the returned
-        ``PreTrendsPowerResults.vcov`` therefore ignores off-diagonal pre-
-        period correlations. Annotating the source explicitly lets BR
-        downgrade the tier conservatively.
+        Backwards-compatibility helper for legacy ``PreTrendsPowerResults``
+        objects produced before PR-B (which now records the actual
+        extraction path on ``PreTrendsPowerResults.covariance_source`` at
+        fit time). New fits read provenance directly off the result
+        object; this fallback is only invoked when that field is missing
+        or set to ``"unknown"``.
+
+        Classification rules (post PR-B):
+
+        - ``"full_pre_period_vcov"`` — non-event-study result types
+          (``MultiPeriodDiDResults``, basic ``DiDResults``, etc.), OR
+          event-study types whose ``event_study_vcov`` is populated.
+          Since PR-B Step 3 routes CS / SA through the full sub-block
+          when ``event_study_vcov`` is available, this label is the
+          correct provenance for non-bootstrap CS / SA fits.
+        - ``"diag_fallback"`` — event-study result types with
+          ``event_study_vcov is None`` (bootstrap or replicate-weight
+          CS / SA fits, plus ImputationDiD / Stacked / EfficientDiD /
+          TwoStageDiD / etc. which don't yet expose ``event_study_vcov``).
         """
         is_event_study_type = type(source_fit).__name__ in {
             "CallawaySantAnnaResults",
@@ -1527,7 +1552,10 @@ class DiagnosticReport:
             and getattr(source_fit, "event_study_vcov_index", None) is not None
         )
         if is_event_study_type and has_full_es_vcov:
-            return "diag_fallback_available_full_vcov_unused"
+            # PR-B Step 3: pretrends.py NOW routes CS/SA through the full
+            # event_study_vcov sub-block when populated, so this case
+            # legitimately uses the full pre-period covariance.
+            return "full_pre_period_vcov"
         if is_event_study_type:
             return "diag_fallback"
         return "full_pre_period_vcov"
@@ -2711,6 +2739,15 @@ def _apply_diag_fallback_downgrade(tier: str, cov_source: str) -> str:
     ``summary()`` all read the same adjusted tier. Round-14 CI review
     flagged per-surface divergence; round-20 flagged that the precomputed
     adapter bypassed the downgrade entirely.
+
+    PR-B (Roth 2022 audit) note: this downgrade rule is now effectively
+    a no-op for CS / SA non-bootstrap fits, because
+    ``pretrends.py:_extract_event_study_vcov_subblock`` actually
+    consumes the full ``event_study_vcov`` sub-block and the recorded
+    provenance label is ``"full_pre_period_vcov"`` — i.e., the
+    "available but unused" sentinel is no longer produced by any
+    in-tree path. The function is retained for backwards-compat with
+    legacy serialized results that may carry the old sentinel.
     """
     if tier == "well_powered" and cov_source == "diag_fallback_available_full_vcov_unused":
         return "moderately_powered"

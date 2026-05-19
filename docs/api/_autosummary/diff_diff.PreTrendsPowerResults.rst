@@ -41,4 +41,8 @@
       ~PreTrendsPowerResults.pre_period_effects
       ~PreTrendsPowerResults.pre_period_ses
       ~PreTrendsPowerResults.vcov
+      ~PreTrendsPowerResults.pretest_form
+      ~PreTrendsPowerResults.nis_box_probability
+      ~PreTrendsPowerResults.violation_weights
+      ~PreTrendsPowerResults.covariance_source
 

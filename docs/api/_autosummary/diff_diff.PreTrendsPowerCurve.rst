@@ -28,4 +28,5 @@
       ~PreTrendsPowerCurve.alpha
       ~PreTrendsPowerCurve.target_power
       ~PreTrendsPowerCurve.violation_type
+      ~PreTrendsPowerCurve.pretest_form
 
