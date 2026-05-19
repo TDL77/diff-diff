@@ -3281,9 +3281,10 @@ def _render_overall_interpretation(schema: Dict[str, Any], labels: Dict[str, str
             if tier == "well_powered":
                 sentences.append(
                     f"{subject} are consistent with parallel trends"
-                    f"{jp_str} and the test is well-powered (MDV is a small "
-                    "share of the estimated effect), so a material pre-trend "
-                    "would likely have been detected."
+                    f"{jp_str} and the test is well-powered (the max pre-period "
+                    "level deviation at the MDV is a small share of the estimated "
+                    "effect), so a material pre-trend would likely have been "
+                    "detected."
                 )
             elif tier == "moderately_powered":
                 sentences.append(

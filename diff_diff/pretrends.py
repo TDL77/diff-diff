@@ -288,12 +288,19 @@ class PreTrendsPowerResults:
         alternative ``M * weights``. NIS-only; NaN for Wald fits.
     violation_weights : np.ndarray, optional
         The violation-direction vector used at fit time. Populated for all
-        violation types on fresh fits. Normalization depends on the type:
-        ``constant`` / ``last_period`` / ``custom`` (or ``linear`` without
-        ``relative_times``) are stored L2-normalized; ``linear`` threaded
-        with ``relative_times`` (the post-PR-B Step 4 γ-unit path)
-        intentionally persists the unnormalized ``|t|`` direction so that
-        ``δ_pre = M · |t|`` and the reported MDV equals Roth's γ exactly.
+        violation types on fresh fits. Normalization depends on the type
+        so that ``M`` always matches the documented per-pattern contract:
+
+        - ``linear`` threaded with ``relative_times`` (post PR-B Step 4):
+          ``|t|`` directly, NOT L2-normalized, so ``δ_t = M·|t|`` and the
+          reported MDV equals Roth's γ exactly.
+        - ``linear`` without ``relative_times`` (legacy):
+          ``[n_pre-1, ..., 0]`` L2-normalized.
+        - ``constant`` (post PR-B R13): ``[1, ..., 1]`` directly, NOT
+          L2-normalized, so ``δ_t = M`` is a true per-period level shift.
+        - ``last_period``: ``[0, ..., 0, 1]`` (already unit-norm).
+        - ``custom``: user vector L2-normalized to unit norm.
+
         Old serialized results may have ``None`` here; ``power_at()``
         falls back to reconstruction in that case (with the PR-A
         ``NotImplementedError`` guard retained only for
@@ -367,10 +374,14 @@ class PreTrendsPowerResults:
         alone cannot be compared to level effects without applying
         the weight scale.
 
-        For non-linear violation types: constant weights ``[1/√K, ...,
-        1/√K]`` yield ``max_abs_pre_violation = mdv / √K``;
-        last_period ``[0, ..., 0, 1]`` yields ``max_abs_pre_violation
-        = mdv``; custom uses the user-supplied weight vector.
+        For non-linear violation types under the PR-B R13 level-shift
+        convention: constant weights ``[1, ..., 1]`` (unnormalized)
+        yield ``max_abs_pre_violation = mdv * 1 = mdv`` — raw ``mdv``
+        IS the per-period level shift, so level- and γ-scales coincide.
+        Last_period ``[0, ..., 0, 1]`` yields ``max_abs_pre_violation
+        = mdv`` for the same reason. Custom uses the L2-normalized
+        user-supplied weight vector, so ``max_abs_pre_violation``
+        depends on the user's direction.
 
         Backwards-compat: legacy serialized results without
         ``violation_weights`` (pre-PR-B) fall back to the raw ``mdv``

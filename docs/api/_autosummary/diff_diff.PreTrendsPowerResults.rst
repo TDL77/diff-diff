@@ -26,6 +26,7 @@
    .. autosummary::
 
       ~PreTrendsPowerResults.is_informative
+      ~PreTrendsPowerResults.max_abs_pre_violation
       ~PreTrendsPowerResults.original_results
       ~PreTrendsPowerResults.power_adequate
       ~PreTrendsPowerResults.power

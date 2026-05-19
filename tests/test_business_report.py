@@ -2506,6 +2506,27 @@ class TestDiagFallbackDowngradeAppliedCentrally:
         assert "moderately informative" not in full.lower()
         assert "moderately-informative" not in full.lower()
 
+        # PR-B R14 P2: max_abs_pre_violation must round-trip through the
+        # BR schema lift AND render in full_report(). Pre-R14 the field
+        # was emitted by DR, the renderer printed it, but the BR lift
+        # boundary at `_lift_pre_trends` silently dropped it — so the
+        # rendered line never fired even though the renderer had the
+        # branch.
+        br_schema = br.to_dict()
+        pt_block = br_schema.get("pre_trends", {})
+        assert "max_abs_pre_violation" in pt_block, (
+            "BR.to_dict()['pre_trends'] must surface max_abs_pre_violation "
+            "post-PR-B R14 — _lift_pre_trends regression"
+        )
+        assert pt_block["max_abs_pre_violation"] is not None
+        assert np.isclose(pt_block["max_abs_pre_violation"], 0.375, atol=0.05)
+        # full_report() must render the new "Max pre-period level
+        # deviation at MDV" line.
+        assert "Max pre-period level deviation at MDV:" in full, (
+            "BR.full_report() must render the max_abs_pre_violation line "
+            "(renderer wired in R12; lift boundary fixed in R14)"
+        )
+
 
 class TestCSNotYetTreatedControlGroupSemantics:
     """Round-13 P1 regression: ``BusinessReport`` must not relabel

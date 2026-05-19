@@ -924,6 +924,13 @@ def _lift_pre_trends(dr: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "power_reason": pp.get("reason"),
         "power_tier": pp.get("tier"),
         "mdv": pp.get("mdv"),
+        # Level-scale max pre-period violation under the MDV
+        # (PR-B R12: `mdv * max(|violation_weights|)`). Carried alongside
+        # the raw `mdv` so BR schema consumers and the full-report
+        # renderer can show both quantities. Pre-R14 this was silently
+        # dropped at the BR lift boundary so the new renderer line never
+        # fired even though DR emitted the value.
+        "max_abs_pre_violation": pp.get("max_abs_pre_violation"),
         "mdv_share_of_att": pp.get("mdv_share_of_att"),
         # Carry the covariance-source annotation through so BR can hedge the
         # power-tier phrasing when compute_pretrends_power silently used a
@@ -2158,8 +2165,9 @@ def _render_summary(schema: Dict[str, Any]) -> str:
             if tier == "well_powered":
                 sentences.append(
                     f"{subject} are consistent with parallel trends, and "
-                    "the test is well-powered (the minimum-detectable "
-                    "violation is small relative to the estimated effect)."
+                    "the test is well-powered (the max pre-period level "
+                    "deviation at the MDV is small relative to the "
+                    "estimated effect)."
                 )
             elif tier == "moderately_powered":
                 sentences.append(
