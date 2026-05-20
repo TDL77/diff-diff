@@ -190,6 +190,10 @@ Multi-Period and Staggered Adoption
 
   Identifies the ring-indicator estimator implemented in our ``SpilloverDiD`` class. Section 2-3 covers non-staggered timing (Equations 5/6/8); Section 5 covers staggered timing via two-stage Gardner (Table 2). Section 3.1 (page 13) recommends Conley spatial-HAC for inference with cutoff = ``d_bar``.
 
+- **Conley, T. G. (1999).** "GMM Estimation with Cross Sectional Dependence." *Journal of Econometrics*, 92(1), 1-45. https://doi.org/10.1016/S0304-4076(98)00084-0
+
+  Primary source for the Conley spatial-HAC variance estimator. Equations 5-9 derive the spatial-kernel cross-product meat. Our ``diff_diff/conley.py`` implements the practitioner specializations (Bartlett / uniform kernels with haversine / euclidean metrics) cited in our ``SpilloverDiD`` Wave A/D Conley path and composed with Binder TSL + Gardner GMM in Wave E.2 (``_compute_stratified_conley_meat`` at ``diff_diff/two_stage.py``).
+
 - **de Chaisemartin, C., & D'Haultfœuille, X. (2020).** "Two-Way Fixed Effects Estimators with Heterogeneous Treatment Effects." *American Economic Review*, 110(9), 2964-2996. https://doi.org/10.1257/aer.20181169
 
 - **de Chaisemartin, C., & D'Haultfœuille, X. (2022, revised 2024).** "Difference-in-Differences Estimators of Intertemporal Treatment Effects." *NBER Working Paper* 29873. https://www.nber.org/papers/w29873

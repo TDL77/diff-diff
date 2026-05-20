@@ -577,43 +577,6 @@ class TestSpilloverDiDInitGetParamsSetParams:
         with pytest.raises(ValueError, match="Unknown parameter"):
             est.set_params(nonexistent_kwarg=42)
 
-    def test_fit_conley_plus_survey_design_not_implemented(self):
-        """Wave E.1 ships HC1 / CR1 + survey_design; Conley × survey is
-        deferred to Wave E.2 (the novel within-stratum Conley sandwich on
-        PSU totals). Confirm the upfront rejection points at the planned
-        follow-up PR.
-        """
-        from diff_diff import SurveyDesign
-
-        est = SpilloverDiD(
-            rings=[0.0, 50.0],
-            conley_coords=("lat", "lon"),
-            conley_metric="euclidean",
-            conley_cutoff_km=100.0,
-            vcov_type="conley",
-        )
-        df = pd.DataFrame(
-            {
-                "unit": ["A", "A"],
-                "time": [0, 1],
-                "y": [1.0, 2.0],
-                "D": [0, 1],
-                "lat": [0.0, 0.0],
-                "lon": [0.0, 0.0],
-                "w": [1.0, 1.0],
-                "psu": [0, 0],
-            }
-        )
-        with pytest.raises(NotImplementedError, match="Wave E.2"):
-            est.fit(
-                df,
-                outcome="y",
-                unit="unit",
-                time="time",
-                treatment="D",
-                survey_design=SurveyDesign(weights="w", psu="psu"),
-            )
-
 
 # =============================================================================
 # Step 3: Two-stage Gardner fit() integration
@@ -5681,6 +5644,938 @@ class TestSpilloverDiDWaveE1SurveyDesignEventStudy:
         np.testing.assert_allclose(res.att, _WAVE_E1_GOLDEN_ATT, rtol=1e-12, atol=1e-14)
         np.testing.assert_allclose(res.se, _WAVE_E1_GOLDEN_SE, rtol=1e-12, atol=1e-14)
         # Lock down DOF + n_psu (these should be deterministic across runners)
+        assert res.n_psu == 8
+        assert res.n_strata == 2
+        assert res.survey_metadata.df_survey == 6
+
+
+class TestSpilloverDiDWaveE2ConleySurveyDesign:
+    """Wave E.2 conley + survey via stratified-Conley sandwich on PSU totals.
+
+    Methodology anchor: Conley (1999) spatial-HAC composed with Gerber
+    (2026) Prop 1 Binder TSL (Wave E.1 foundation) and the Wave D Gardner
+    GMM correction. Verifies reduction semantics (bandwidth -> 0 ≡ Binder;
+    H=1 ≡ plain Conley on PSU totals), cross-stratum independence,
+    singleton-adjust FPC skip parity with Binder, and the saturation
+    NaN-fail.
+    """
+
+    _CUTOFF_KM = 1000.0  # large enough that within-stratum PSU pairs are inside
+
+    def _fit(self, df, **kwargs):
+        design = kwargs.pop("design", None)
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=0,
+            vcov_type="conley",
+            event_study=False,
+            **kwargs,
+        )
+        return est.fit(
+            df,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+
+    def test_a_no_survey_conley_path_matches_wave_d_golden(self):
+        """The `resolved_survey is None` branch of the new dispatch must
+        produce the SAME no-survey Conley SE as the pre-Wave-E.2 (Wave D)
+        Conley path. The Wave D path is `_compute_conley_meat(...)` with
+        no changes; the new dispatch only ADDS an `if resolved_survey is
+        not None` branch above the existing call. Pin the SE to a golden
+        captured on this fixture so any future refactor that disturbs the
+        no-survey path is caught by a behavioral test, not just by
+        determinism.
+        """
+        df = generate_butts_nonstaggered_dgp(seed=0)
+        res = self._fit(df)
+        # Wave D no-survey Conley golden captured on this fixture (seed=0,
+        # 2-period non-staggered Butts DGP, cutoff=1000 km, Bartlett kernel).
+        # These values reflect the pre-Wave-E.2 no-survey Conley path.
+        # The dispatch in `_compute_gmm_corrected_meat` only ADDS a new
+        # `if resolved_survey is not None` branch above the existing
+        # `_compute_conley_meat` call, so the `resolved_survey is None`
+        # path is bit-identical to Wave D; any future refactor that
+        # disturbs it must update these goldens deliberately.
+        _WAVE_D_NO_SURVEY_CONLEY_ATT = -0.07471658104745109
+        _WAVE_D_NO_SURVEY_CONLEY_SE = 0.0018453344099259904
+        np.testing.assert_allclose(res.att, _WAVE_D_NO_SURVEY_CONLEY_ATT, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(res.se, _WAVE_D_NO_SURVEY_CONLEY_SE, rtol=1e-12, atol=1e-14)
+        assert np.isfinite(res.se) and res.se > 0
+
+    def test_a2_no_survey_conley_path_routes_through_wave_d_helper(self):
+        """Structural anchor: a no-survey conley fit invokes the Wave D
+        `_compute_conley_meat` helper directly, NOT the Wave E.2
+        `_compute_stratified_conley_meat` orchestrator. Pins the dispatch
+        branch in `_compute_gmm_corrected_meat` (no leak into the new
+        path when `resolved_survey is None`).
+        """
+        from unittest.mock import patch
+
+        df = generate_butts_nonstaggered_dgp(seed=2)
+        with patch("diff_diff.two_stage._compute_stratified_conley_meat") as mock_panel_aware:
+            self._fit(df)
+            assert not mock_panel_aware.called, (
+                "No-survey conley fit must NOT call _compute_stratified_conley_meat "
+                "(the Wave E.2 panel-aware survey path); it should route through "
+                "the Wave D _compute_conley_meat directly."
+            )
+
+    def test_b_panel_aware_per_period_sum_invariant(self):
+        """Panel-aware Wave E.2 meat == sum-across-periods of per-period
+        within-stratum Conley sandwich on per-period PSU totals.
+
+        Pure unit test on the orchestrator + helper composition: with T
+        periods of synthetic PSU-level data, ``_compute_stratified_conley_meat``'s
+        per-period loop must produce the same result as manually calling
+        the survey helper T times (once per period, on per-period PSU
+        totals) and summing. This pins the library's panel Conley contract
+        (``conley_lag_cutoff = 0`` means "within-period spatial only") on
+        the survey path — no cross-period spatial pairs leak through the
+        collapsed PSU totals.
+
+        Replaces the original "bandwidth → 0 reduces to Wave E.1 Binder"
+        claim, which only holds under T=1 (the cross-sectional limit).
+        SpilloverDiD's panel-only contract precludes a T=1 fit, so the
+        Wave E.1-equivalence claim is meaningful only on this synthetic
+        unit-test fixture.
+        """
+        from diff_diff.survey import (
+            ResolvedSurveyDesign,
+            _compute_stratified_conley_meat_from_psu_scores,
+        )
+        from diff_diff.two_stage import _compute_stratified_conley_meat
+
+        rng = np.random.default_rng(31)
+        # 4 PSUs × 2 periods × 3 obs per PSU-period = 24 obs.
+        n_obs, T, G, p_2 = 24, 2, 4, 3
+        obs_per_psu_period = 3
+        psu_id = np.repeat(np.arange(G), obs_per_psu_period * T)
+        time_arr = np.tile(np.repeat(np.arange(T), obs_per_psu_period), G)
+        Psi = rng.standard_normal((n_obs, p_2))
+        psu_centroids = np.array([[40.0, -120.0], [40.1, -120.0], [40.2, -120.0], [40.3, -120.0]])
+        coords = psu_centroids[psu_id]
+        psu_strata = np.array([0, 0, 1, 1])  # 2 PSUs per stratum
+        fpc_per_psu = np.full(G, 20.0)
+        resolved = ResolvedSurveyDesign(
+            weights=np.ones(n_obs),
+            weight_type="pweight",
+            strata=np.repeat(psu_strata, obs_per_psu_period * T),
+            psu=psu_id,
+            fpc=np.full(n_obs, 20.0),
+            n_strata=2,
+            n_psu=4,
+            lonely_psu="remove",
+        )
+        # Orchestrator (panel-aware).
+        meat = _compute_stratified_conley_meat(
+            Psi,
+            conley_coords=coords,
+            conley_cutoff_km=0.30,
+            conley_metric="euclidean",
+            conley_kernel="bartlett",
+            resolved_survey=resolved,
+            conley_time=time_arr,
+        )
+        # Hand: aggregate Psi to PSU WITHIN each period, run the survey
+        # helper per period, sum.
+        expected = np.zeros((p_2, p_2))
+        for t in range(T):
+            period_mask = time_arr == t
+            Psi_t = Psi[period_mask]
+            psu_id_t = psu_id[period_mask]
+            S_psu_t = np.zeros((G, p_2))
+            for g in range(G):
+                S_psu_t[g] = Psi_t[psu_id_t == g].sum(axis=0)
+            meat_t, _, _ = _compute_stratified_conley_meat_from_psu_scores(
+                S_psu_t,
+                psu_strata,
+                psu_centroids,
+                cutoff=0.30,
+                metric="euclidean",
+                kernel="bartlett",
+                fpc_per_psu=fpc_per_psu,
+            )
+            expected += meat_t
+        np.testing.assert_allclose(meat, expected, rtol=1e-12, atol=1e-14)
+        # Sanity: a time-collapsed naive computation (the OLD pre-R2 design)
+        # would DIFFER from the panel-aware meat on the same inputs.
+        S_psu_collapsed = np.zeros((G, p_2))
+        for g in range(G):
+            S_psu_collapsed[g] = Psi[psu_id == g].sum(axis=0)
+        meat_collapsed, _, _ = _compute_stratified_conley_meat_from_psu_scores(
+            S_psu_collapsed,
+            psu_strata,
+            psu_centroids,
+            cutoff=0.30,
+            metric="euclidean",
+            kernel="bartlett",
+            fpc_per_psu=fpc_per_psu,
+        )
+        # Differs by the cross-period off-diagonal mass (the panel-aware
+        # contract drops these by construction).
+        assert not np.allclose(meat, meat_collapsed, rtol=1e-3, atol=1e-3)
+
+    def test_c_hand_computation_methodology_anchor(self):
+        """Hand-compute the stratified-Conley meat formula on synthetic
+        PSU-level inputs and assert parity with the new survey helper.
+
+        Mirrors `_scratch/wave_e2_smoke.py` Chunk 1 methodology anchor.
+        """
+        from diff_diff.survey import _compute_stratified_conley_meat_from_psu_scores
+
+        rng = np.random.default_rng(7)
+        G, k = 8, 3
+        psu_strata = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+        psu_coords = np.array(
+            [
+                [40.00, -120.0],
+                [40.10, -120.0],
+                [40.20, -120.0],
+                [40.30, -120.0],
+                [40.05, -120.0],
+                [40.15, -120.0],
+                [40.25, -120.0],
+                [40.35, -120.0],
+            ]
+        )
+        psu_scores = rng.standard_normal((G, k))
+        fpc = np.full(G, 20.0)
+        cutoff = 0.30
+
+        meat, var_ok, _ = _compute_stratified_conley_meat_from_psu_scores(
+            psu_scores,
+            psu_strata,
+            psu_coords,
+            cutoff=cutoff,
+            metric="euclidean",
+            kernel="bartlett",
+            fpc_per_psu=fpc,
+            lonely_psu="remove",
+        )
+        assert var_ok
+
+        # Hand: per stratum, demean, apply Bartlett K on PSU coords,
+        # FPC-scale, sum across strata.
+        expected = np.zeros((k, k))
+        for h in [0, 1]:
+            mask = psu_strata == h
+            s_h = psu_scores[mask]
+            c_h = psu_coords[mask]
+            n_h = s_h.shape[0]
+            centered = s_h - s_h.mean(axis=0, keepdims=True)
+            d = np.sqrt(((c_h[:, None, :] - c_h[None, :, :]) ** 2).sum(axis=2))
+            K = np.maximum(0.0, 1.0 - d / cutoff)
+            M_h = centered.T @ K @ centered
+            f_h = n_h / fpc[mask][0]
+            M_h *= (1.0 - f_h) * n_h / (n_h - 1)
+            expected += M_h
+        np.testing.assert_allclose(meat, expected, rtol=1e-12, atol=1e-14)
+
+    def test_d_single_stratum_reduces_to_plain_conley_on_psu_totals(self):
+        """H = 1 stratum, FPC = inf: reduces to ordinary Conley sandwich
+        on PSU totals (modulo the n/(n-1) finite-sample scale).
+        """
+        from diff_diff.conley import _compute_conley_meat
+        from diff_diff.survey import _compute_stratified_conley_meat_from_psu_scores
+
+        rng = np.random.default_rng(11)
+        G = 8
+        psu_strata = np.zeros(G, dtype=int)
+        psu_coords = np.array(
+            [
+                [40.00, -120.0],
+                [40.10, -120.0],
+                [40.20, -120.0],
+                [40.30, -120.0],
+                [40.05, -120.0],
+                [40.15, -120.0],
+                [40.25, -120.0],
+                [40.35, -120.0],
+            ]
+        )
+        psu_scores = rng.standard_normal((G, 3))
+        cutoff = 0.30
+
+        meat, _, _ = _compute_stratified_conley_meat_from_psu_scores(
+            psu_scores,
+            psu_strata,
+            psu_coords,
+            cutoff=cutoff,
+            metric="euclidean",
+            kernel="bartlett",
+        )
+        # Plain Conley sandwich on PSU totals (no FPC). n/(n-1) scale
+        # comes from the survey helper's adjustment; FPC term is 1.
+        centered = psu_scores - psu_scores.mean(axis=0, keepdims=True)
+        plain = _compute_conley_meat(centered, psu_coords, cutoff, "euclidean", "bartlett")
+        plain *= G / (G - 1)
+        np.testing.assert_allclose(meat, plain, rtol=1e-12, atol=1e-14)
+
+    def test_e_cross_stratum_independence_invariant(self):
+        """Cross-stratum kernel weights are exactly zero by sampling design.
+
+        Pure unit test on the new survey helper: full meat ≡ partition-then-sum
+        when each partition is fit as a separate single-stratum call. Uses
+        interleaved cross-stratum centroids so cross-stratum pairs are
+        CLOSER in km than within-stratum pairs — any kernel leak across
+        strata would produce a large numerical difference.
+        """
+        from diff_diff.survey import _compute_stratified_conley_meat_from_psu_scores
+
+        rng = np.random.default_rng(13)
+        G, k = 8, 3
+        psu_strata = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+        # Interleaved: stratum 0 at lats 40.00/40.10/40.20/40.30; stratum 1
+        # at 40.05/40.15/40.25/40.35. Cross-stratum nearest pair = 0.05 vs
+        # within-stratum nearest = 0.10 — kernel would weight them DOUBLE
+        # if it leaked.
+        psu_coords = np.array(
+            [
+                [40.00, -120.0],
+                [40.10, -120.0],
+                [40.20, -120.0],
+                [40.30, -120.0],
+                [40.05, -120.0],
+                [40.15, -120.0],
+                [40.25, -120.0],
+                [40.35, -120.0],
+            ]
+        )
+        psu_scores = rng.standard_normal((G, k))
+        fpc = np.full(G, 20.0)
+        cutoff = 0.30
+
+        meat_full, _, _ = _compute_stratified_conley_meat_from_psu_scores(
+            psu_scores,
+            psu_strata,
+            psu_coords,
+            cutoff=cutoff,
+            metric="euclidean",
+            kernel="bartlett",
+            fpc_per_psu=fpc,
+        )
+        partitioned = np.zeros((k, k))
+        for h in [0, 1]:
+            mask = psu_strata == h
+            sub_strata = np.zeros(mask.sum(), dtype=int)
+            part_meat, _, _ = _compute_stratified_conley_meat_from_psu_scores(
+                psu_scores[mask],
+                sub_strata,
+                psu_coords[mask],
+                cutoff=cutoff,
+                metric="euclidean",
+                kernel="bartlett",
+                fpc_per_psu=fpc[mask],
+            )
+            partitioned += part_meat
+        np.testing.assert_allclose(meat_full, partitioned, rtol=1e-12, atol=1e-14)
+
+    def test_f_lonely_psu_modes_accepted(self):
+        """All three lonely_psu modes flow through the conley+survey path."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=14)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        df_s.loc[df_s["stratum"] == 0, "psu"] = 0  # collapse stratum 0 to a singleton PSU
+        for mode in ("remove", "certainty", "adjust"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                design = SurveyDesign(
+                    weights="w",
+                    strata="stratum",
+                    psu="psu",
+                    fpc="N_h",
+                    lonely_psu=mode,
+                )
+                res = self._fit(df_s, design=design)
+                if np.isfinite(res.se):
+                    assert res.se >= 0
+                else:
+                    assert np.isnan(res.t_stat) and np.isnan(res.p_value)
+
+    def test_f2_singleton_adjust_fpc_skip_parity_binder_vs_conley(self):
+        """Binder helper and Conley helper produce bit-identical output on
+        a singleton stratum with lonely_psu="adjust".
+
+        Load-bearing: pins the Chunk 2 `continue`-skip-FPC pattern. Without
+        the `continue`, the Conley helper would divide by `n_h - 1 = 0` on
+        the singleton stratum and the meat would NaN-propagate while
+        Binder's meat stays finite. With the kernel reducing to identity
+        on a singleton (K = [[K(0)]] = [[1.0]]) the two outputs MUST match.
+        """
+        from diff_diff.survey import (
+            _compute_stratified_conley_meat_from_psu_scores,
+            _compute_stratified_meat_from_psu_scores,
+        )
+
+        rng = np.random.default_rng(15)
+        # 5 PSUs: 1 in stratum 0 (singleton), 4 in stratum 1.
+        psu_scores = rng.standard_normal((5, 3))
+        psu_strata = np.array([0, 1, 1, 1, 1])
+        psu_coords = np.array(
+            [
+                [40.0, -120.0],
+                [40.1, -120.0],
+                [40.2, -120.0],
+                [40.3, -120.0],
+                [40.4, -120.0],
+            ]
+        )
+        fpc = np.full(5, 20.0)
+        binder_meat, _, _ = _compute_stratified_meat_from_psu_scores(
+            psu_scores,
+            psu_strata,
+            fpc_per_psu=fpc,
+            lonely_psu="adjust",
+        )
+        conley_meat, _, _ = _compute_stratified_conley_meat_from_psu_scores(
+            psu_scores,
+            psu_strata,
+            psu_coords,
+            cutoff=1e-10,
+            metric="euclidean",
+            kernel="bartlett",
+            fpc_per_psu=fpc,
+            lonely_psu="adjust",
+        )
+        # Conley with bandwidth -> 0 collapses K to identity in EVERY stratum,
+        # so the entire meat (singleton + multi-PSU stratum) reduces to Binder.
+        np.testing.assert_allclose(conley_meat, binder_meat, rtol=1e-12, atol=1e-14)
+        # And both are finite (the singleton FPC skip prevents divide-by-zero).
+        assert np.all(np.isfinite(conley_meat))
+
+    def test_g_fpc_large_matches_no_fpc(self):
+        """Very-large FPC (1-f_h ≈ 1) produces SE close to the no-FPC path."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=16)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=1e9)
+        design_fpc_large = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        design_no_fpc = SurveyDesign(weights="w", strata="stratum", psu="psu")
+        res_large = self._fit(df_s, design=design_fpc_large)
+        res_no = self._fit(df_s, design=design_no_fpc)
+        np.testing.assert_allclose(res_large.se, res_no.se, rtol=1e-6)
+
+    def test_h_fpc_equals_n_zeros_stratum(self):
+        """FPC = n_h per stratum makes (1-f_h) = 0; meat is zero, SE = 0."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=17)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=4.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        res = self._fit(df_s, design=design)
+        np.testing.assert_allclose(res.se, 0.0, atol=1e-14)
+
+    def test_i_saturated_design_nan_fails(self):
+        """All-singleton strata + lonely_psu='remove' -> df_survey = 0 ->
+        NaN meat + UserWarning matching 'Wave E.2 stratified-Conley'.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=18)
+        df_s = df.copy()
+        df_s["w"] = 1.0
+        units_sorted = sorted(df_s["unit"].unique())
+        unit_to_idx = {u: idx for idx, u in enumerate(units_sorted)}
+        df_s["psu"] = df_s["unit"].map(unit_to_idx)
+        df_s["stratum"] = df_s["unit"].map(unit_to_idx)  # H = n_units; every stratum singleton
+        df_s["N_h"] = 20.0
+        design = SurveyDesign(
+            weights="w",
+            strata="stratum",
+            psu="psu",
+            fpc="N_h",
+            lonely_psu="remove",
+        )
+        with pytest.warns(UserWarning, match="Wave E.2 stratified-Conley"):
+            res = self._fit(df_s, design=design)
+        assert np.isnan(res.se)
+        assert np.isnan(res.t_stat)
+        assert np.isnan(res.p_value)
+
+    def test_j0_panel_conley_lag_cutoff_rejected_under_survey(self):
+        """vcov_type='conley' + conley_lag_cutoff > 0 + survey_design raises
+        NotImplementedError upfront. Wave E.2 ships cross-sectional only;
+        the panel-block decomposition (within-unit serial Bartlett HAC over
+        time) would need PSU-by-time scores rather than the collapsed PSU
+        totals. Tracked as a Wave E.2 follow-up in TODO.md.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=180)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=2,  # panel-block path
+            vcov_type="conley",
+        )
+        with pytest.raises(NotImplementedError, match="conley_lag_cutoff > 0"):
+            est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    def test_j_replicate_weights_rejection_inherits_wave_e1(self):
+        """Replicate-weight variance still raises NotImplementedError under
+        conley+survey (inherits Wave E.1 gate). SurveyDesign requires
+        replicate_weights to be set WITHOUT strata/psu/fpc (they encode
+        the design implicitly).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=19)
+        df_s = df.copy()
+        df_s["w"] = 1.0
+        # Add 10 replicate-weight columns; must be constant within units
+        # (panel survey constraint).
+        rng = np.random.default_rng(19)
+        units = sorted(df_s["unit"].unique())
+        for r in range(10):
+            rep_by_unit = dict(zip(units, rng.uniform(0.5, 2.0, size=len(units))))
+            df_s[f"rep_{r}"] = df_s["unit"].map(rep_by_unit)
+        design = SurveyDesign(
+            weights="w",
+            replicate_weights=[f"rep_{r}" for r in range(10)],
+            replicate_method="JK1",
+        )
+        with pytest.raises(NotImplementedError, match="(?i)replicate|follow-up"):
+            self._fit(df_s, design=design)
+
+    def test_k_non_pweight_rejection_inherits_wave_e1(self):
+        """Non-pweight weight_type still raises ValueError under conley+survey
+        (inherits Wave E.1 gate).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=20)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(
+            weights="w",
+            strata="stratum",
+            psu="psu",
+            fpc="N_h",
+            weight_type="aweight",
+        )
+        with pytest.raises((NotImplementedError, ValueError), match="(?i)pweight|aweight"):
+            self._fit(df_s, design=design)
+
+    def test_l_cluster_plus_conley_plus_survey_warn_and_use_psu(self):
+        """cluster=<col> + conley + survey with different cluster vs PSU ->
+        UserWarning fires; PSU wins (mirrors Wave E.1 warn-and-use-PSU).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=21)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Inject a coarser cluster column distinct from PSU (1 cluster
+        # per unit). The warn-and-use-PSU path requires that cluster and
+        # PSU are NOT identical groupings.
+        units_sorted = sorted(df_s["unit"].unique())
+        unit_to_cluster = {u: idx // 2 for idx, u in enumerate(units_sorted)}
+        df_s["my_cluster"] = df_s["unit"].map(unit_to_cluster)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with pytest.warns(UserWarning, match="(?i)cluster"):
+            res = self._fit(df_s, design=design, cluster="my_cluster")
+        assert np.isfinite(res.se) and res.se > 0
+
+    def test_m_fit_idempotency_under_conley_survey(self):
+        """clone() + repeat fit produces identical results; survey state
+        not mutated on fit() (per feedback_fit_does_not_mutate_config).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=22)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=0,
+            vcov_type="conley",
+        )
+        res_1 = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        # Second fit on the SAME estimator instance (idempotency).
+        res_2 = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert res_1.coefficients == res_2.coefficients
+        np.testing.assert_array_equal(res_1.vcov, res_2.vcov)
+        assert res_1.n_psu == res_2.n_psu
+        assert res_1.n_strata == res_2.n_strata
+
+    def test_n0_no_psu_weights_only_survey_design(self):
+        """`SurveyDesign(weights=...)` without explicit PSU — each obs is
+        its own pseudo-PSU. Panel-aware path must re-index PSUs WITHIN
+        each period (not pad zeros across the full panel) or the centering
+        leaks off-period spurious structure into the spatial meat.
+
+        Regression for the R3 P0 fix.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=240)
+        df_s = df.copy()
+        df_s["w"] = 1.0
+        design = SurveyDesign(weights="w")
+        res = self._fit(df_s, design=design)
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+
+    def test_n1_no_psu_strata_only_survey_design(self):
+        """`SurveyDesign(weights=..., strata=...)` without explicit PSU —
+        each obs is its own pseudo-PSU under stratified sampling. Same
+        per-period re-indexing requirement as test_n0.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=241)
+        df_s = df.copy()
+        df_s["w"] = 1.0
+        units_sorted = sorted(df_s["unit"].unique())
+        unit_to_stratum = {u: idx % 2 for idx, u in enumerate(units_sorted)}
+        df_s["stratum"] = df_s["unit"].map(unit_to_stratum)
+        design = SurveyDesign(weights="w", strata="stratum")
+        res = self._fit(df_s, design=design)
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+
+    def test_b2_explicit_psu_centroid_panel_constant_under_finite_mask(self):
+        """When a PSU contains multiple units at DIFFERENT coordinates
+        (simulating a finite_mask drop that varies coverage across
+        periods), the orchestrator must use PANEL-CONSTANT centroids
+        (mean across all obs in PSU, regardless of period) — NOT
+        per-period centroids. This matches the documented Wave E.2
+        contract "centroid_g = mean over i in PSU g of conley_coords[i]"
+        at REGISTRY.md and prevents support-sample-dependent kernel
+        weights.
+
+        Pure unit test on the orchestrator + helper composition with
+        synthetic per-obs inputs.
+        """
+        from diff_diff.survey import (
+            ResolvedSurveyDesign,
+            _compute_stratified_conley_meat_from_psu_scores,
+        )
+        from diff_diff.two_stage import _compute_stratified_conley_meat
+
+        rng = np.random.default_rng(331)
+        # 2 strata × 2 PSUs × 1 obs per PSU-period = 8 obs.
+        # PSU 0 obs coords differ across periods (simulating finite_mask
+        # variation): period 0 at [40.0, 0]; period 1 at [42.0, 0].
+        # PSU 1/2/3 have constant coords across periods.
+        n, p_2 = 8, 3
+        Psi = rng.standard_normal((n, p_2))
+        psu_id = np.array([0, 1, 2, 3, 0, 1, 2, 3])  # PSUs alternate per period
+        time_arr = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+        # Coords vary across periods for PSU 0 only.
+        coords = np.array(
+            [
+                [40.0, 0.0],  # PSU 0, period 0
+                [40.5, 0.0],  # PSU 1, period 0
+                [50.0, 0.0],  # PSU 2, period 0
+                [50.5, 0.0],  # PSU 3, period 0
+                [42.0, 0.0],  # PSU 0, period 1 — DIFFERENT coord
+                [40.5, 0.0],  # PSU 1, period 1
+                [50.0, 0.0],  # PSU 2, period 1
+                [50.5, 0.0],  # PSU 3, period 1
+            ]
+        )
+        psu_strata_obs = np.array([0, 0, 1, 1, 0, 0, 1, 1])
+        resolved = ResolvedSurveyDesign(
+            weights=np.ones(n),
+            weight_type="pweight",
+            strata=psu_strata_obs,
+            psu=psu_id,
+            fpc=None,
+            n_strata=2,
+            n_psu=4,
+            lonely_psu="remove",
+        )
+        meat_panel = _compute_stratified_conley_meat(
+            Psi,
+            conley_coords=coords,
+            conley_cutoff_km=5.0,
+            conley_metric="euclidean",
+            conley_kernel="bartlett",
+            resolved_survey=resolved,
+            conley_time=time_arr,
+        )
+        # Hand calculation using PANEL-CONSTANT centroids (the contract).
+        # PSU 0 centroid = mean([40.0, 0], [42.0, 0]) = [41.0, 0].
+        # Other PSUs have constant coords → centroid equals that coord.
+        panel_centroids = np.array([[41.0, 0.0], [40.5, 0.0], [50.0, 0.0], [50.5, 0.0]])
+        # Per-period PSU totals (each PSU appears once per period in this
+        # fixture, so the PSU total per period IS the single obs's Psi).
+        psu_strata = np.array([0, 0, 1, 1])
+        expected = np.zeros((p_2, p_2))
+        for t in [0, 1]:
+            mask = time_arr == t
+            Psi_t = Psi[mask]
+            psu_id_t = psu_id[mask]
+            S_psu_t = np.zeros((4, p_2))
+            for g in range(4):
+                rows = psu_id_t == g
+                if rows.any():
+                    S_psu_t[g] = Psi_t[rows].sum(axis=0)
+            meat_t, _, _ = _compute_stratified_conley_meat_from_psu_scores(
+                S_psu_t,
+                psu_strata,
+                panel_centroids,  # panel-constant — same across periods
+                cutoff=5.0,
+                metric="euclidean",
+                kernel="bartlett",
+            )
+            expected += meat_t
+        np.testing.assert_allclose(meat_panel, expected, rtol=1e-12, atol=1e-14)
+        # Counter-check: per-period centroids (the OLD pre-fix design)
+        # would give a different meat for PSU 0 because the centroid
+        # used in period 1 (42.0) differs from the one used in period 0
+        # (40.0). Verify the orchestrator does NOT match that buggy
+        # construction.
+        buggy_expected = np.zeros((p_2, p_2))
+        period_centroids = {
+            0: np.array([[40.0, 0.0], [40.5, 0.0], [50.0, 0.0], [50.5, 0.0]]),
+            1: np.array([[42.0, 0.0], [40.5, 0.0], [50.0, 0.0], [50.5, 0.0]]),
+        }
+        for t in [0, 1]:
+            mask = time_arr == t
+            Psi_t = Psi[mask]
+            psu_id_t = psu_id[mask]
+            S_psu_t = np.zeros((4, p_2))
+            for g in range(4):
+                rows = psu_id_t == g
+                if rows.any():
+                    S_psu_t[g] = Psi_t[rows].sum(axis=0)
+            meat_t, _, _ = _compute_stratified_conley_meat_from_psu_scores(
+                S_psu_t,
+                psu_strata,
+                period_centroids[t],  # per-period (buggy)
+                cutoff=5.0,
+                metric="euclidean",
+                kernel="bartlett",
+            )
+            buggy_expected += meat_t
+        # The buggy construction MUST differ measurably from the
+        # panel-constant orchestrator output.
+        assert not np.allclose(
+            meat_panel, buggy_expected, rtol=1e-3, atol=1e-3
+        ), "orchestrator unexpectedly matches per-period (buggy) centroid construction"
+
+    def test_n2_no_psu_per_period_reindex_unit_invariant(self):
+        """Direct unit test on the orchestrator: the no-PSU per-period
+        re-indexing must NOT mix off-period rows into the kernel. With
+        synthetic data where obs 0/1 are in period 0 (close in km) and
+        obs 2/3 are in period 1 (far away), the meat must reflect
+        ONLY within-period spatial pairs.
+        """
+        from diff_diff.survey import (
+            ResolvedSurveyDesign,
+            _compute_stratified_conley_meat_from_psu_scores,
+        )
+        from diff_diff.two_stage import _compute_stratified_conley_meat
+
+        rng = np.random.default_rng(243)
+        n, p_2 = 4, 2
+        Psi = rng.standard_normal((n, p_2))
+        # Period 0: obs 0, 1 at lat 40.00 / 40.01 (close in km).
+        # Period 1: obs 2, 3 at lat 50.00 / 50.01 (far from period-0 obs).
+        coords = np.array([[40.00, 0.0], [40.01, 0.0], [50.00, 0.0], [50.01, 0.0]])
+        time_arr = np.array([0, 0, 1, 1])
+        strata_arr = np.array([0, 0, 1, 1])
+        resolved = ResolvedSurveyDesign(
+            weights=np.ones(n),
+            weight_type="pweight",
+            strata=strata_arr,
+            psu=None,  # implicit per-obs pseudo-PSU
+            fpc=None,
+            n_strata=2,
+            n_psu=n,
+            lonely_psu="remove",
+        )
+        meat_panel = _compute_stratified_conley_meat(
+            Psi,
+            conley_coords=coords,
+            conley_cutoff_km=0.05,
+            conley_metric="euclidean",
+            conley_kernel="bartlett",
+            resolved_survey=resolved,
+            conley_time=time_arr,
+        )
+        # Hand: per-period only on active rows.
+        meat_p0, _, _ = _compute_stratified_conley_meat_from_psu_scores(
+            Psi[:2],
+            np.array([0, 0]),
+            coords[:2],
+            cutoff=0.05,
+            metric="euclidean",
+            kernel="bartlett",
+        )
+        meat_p1, _, _ = _compute_stratified_conley_meat_from_psu_scores(
+            Psi[2:],
+            np.array([0, 0]),
+            coords[2:],
+            cutoff=0.05,
+            metric="euclidean",
+            kernel="bartlett",
+        )
+        np.testing.assert_allclose(meat_panel, meat_p0 + meat_p1, rtol=1e-12, atol=1e-14)
+
+    def test_n_finite_mask_survey_array_subsetting(self):
+        """finite_mask drops baseline-treated rows; survey metadata
+        reflects the SUBSET sample, not the original.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=23)
+        # Pin a unit to always-treated (g = period 0); finite_mask will
+        # drop its rows from stage 2.
+        first_unit = sorted(df["unit"].unique())[0]
+        df.loc[df["unit"] == first_unit, "first_treat"] = 0
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = self._fit(df_s, design=design)
+        # Survey metadata reflects subset (post-finite_mask), not the full panel.
+        assert res.survey_metadata is not None
+        assert res.n_obs <= len(df_s)  # at least the always-treated unit's rows dropped
+
+
+class TestSpilloverDiDWaveE2ConleySurveyDesignEventStudy:
+    """Event-study branch + conley + survey, both is_staggered branches."""
+
+    _CUTOFF_KM = 1000.0
+
+    def test_o_event_study_conley_survey_is_staggered_true(self):
+        """Full plumbing end-to-end on the staggered event-study path."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=24)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=0,
+            vcov_type="conley",
+            event_study=True,
+            horizon_max=2,
+        )
+        res = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        # Event-study + spillover finite end-to-end
+        assert np.isfinite(res.att) and np.isfinite(res.se) and res.se > 0
+        # spillover_effects populated (non-empty)
+        assert res.spillover_effects is not None
+        # df_survey lookup uses the survey branch
+        assert res.survey_metadata is not None
+        assert res.survey_metadata.df_survey == 6
+
+    def test_p_event_study_conley_survey_is_staggered_false(self):
+        """The non-staggered branch of the event-study path also works
+        (mirrors `feedback_cohort_loop_trigger_cache_both_branches`).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=25)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=0,
+            vcov_type="conley",
+            event_study=True,
+            horizon_max=1,
+        )
+        res = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert np.isfinite(res.att) and np.isfinite(res.se) and res.se > 0
+        assert res.survey_metadata is not None
+
+    def test_r_drift_goldens(self):
+        """Pinned ATT + SE on a fixed-seed conley+survey fit.
+
+        Drift goldens captured on initial Wave E.2 implementation
+        (seed=999, standard 2-strata x 4-PSU augmentation, cutoff=1000km).
+        `assert_allclose` tolerance acknowledges PSU-aggregation BLAS
+        reduction order variation across CI runners.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=999)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=0,
+            vcov_type="conley",
+        )
+        res = est.fit(
+            df_s,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        # Goldens — pinned on initial Wave E.2 implementation (seed=999,
+        # 2-strata x 4-PSU augmentation, cutoff=1000km). ATT is invariant
+        # to vcov_type, so it matches the Wave E.1 binder golden exactly.
+        # SE is Wave E.2-specific (stratified-Conley sandwich on PSU totals).
+        _WAVE_E2_GOLDEN_ATT = -0.07749624543132044
+        _WAVE_E2_GOLDEN_SE = 0.0006771937420330884
+        np.testing.assert_allclose(res.att, _WAVE_E2_GOLDEN_ATT, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(res.se, _WAVE_E2_GOLDEN_SE, rtol=1e-12, atol=1e-14)
+        # Lock down DOF + n_psu (deterministic).
         assert res.n_psu == 8
         assert res.n_strata == 2
         assert res.survey_metadata.df_survey == 6

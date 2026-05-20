@@ -1898,6 +1898,160 @@ def _compute_stratified_meat_from_psu_scores(
     return meat, _variance_computed, legitimate_zero_count
 
 
+def _compute_stratified_conley_meat_from_psu_scores(
+    psu_scores: np.ndarray,
+    psu_strata: np.ndarray,
+    psu_coords: np.ndarray,
+    *,
+    cutoff: float,
+    metric,
+    kernel: str,
+    fpc_per_psu: "Optional[np.ndarray]" = None,
+    lonely_psu: str = "remove",
+) -> Tuple[np.ndarray, bool, int]:
+    """Wave E.2 stratified-Conley meat on PSU-aggregated scores.
+
+    Composes Conley (1999) spatial-HAC with Gerber (2026, arXiv:2605.04124)
+    Proposition 1 Binder TSL (the Wave E.1 foundation) and the Wave D
+    Gardner GMM first-stage uncertainty correction (Butts 2021 ss3.1 +
+    Gardner 2022 ss4). Used by SpilloverDiD's Wave E.2 GMM sandwich when
+    ``vcov_type="conley"`` is combined with ``survey_design=``.
+
+    Per-stratum loop: demean PSU scores within the stratum, apply the
+    cross-sectional Conley kernel between PSU centroids in that stratum,
+    scale by the Binder finite-population correction
+    ``(1 - f_h) * n_h/(n_h-1)``. Cross-stratum kernel weights are zero by
+    sampling design (strata are exact independence partitions); total meat
+    is the sum across strata.
+
+    Parameters
+    ----------
+    psu_scores : np.ndarray
+        Score matrix of shape (G, k) — one row per PSU.
+    psu_strata : np.ndarray
+        Stratum assignment per PSU, shape (G,).
+    psu_coords : np.ndarray
+        Per-PSU spatial centroid coordinates, shape (G, 2). Typically the
+        mean of per-observation ``conley_coords`` within each PSU.
+    cutoff : float
+        Conley spatial-HAC bandwidth in the same units as ``psu_coords``
+        (km when ``metric="haversine"``).
+    metric : str or callable
+        Distance metric; ``"haversine"`` / ``"euclidean"`` / callable per
+        :mod:`diff_diff.conley` (``ConleyMetric``).
+    kernel : str
+        Spatial kernel: ``"bartlett"`` or ``"uniform"``.
+    fpc_per_psu : np.ndarray, optional
+        FPC population size per PSU, shape (G,). All PSUs in the same
+        stratum should share the same FPC value (first occurrence used).
+    lonely_psu : str
+        How to handle singleton strata: ``"remove"``, ``"certainty"``, or
+        ``"adjust"``. Matches the existing
+        :func:`_compute_stratified_meat_from_psu_scores` behaviour exactly,
+        including the ``"adjust"`` branch's ``continue`` that skips FPC
+        scaling (with ``n_h=1`` the scale ``n_h/(n_h-1)`` would divide by
+        zero).
+
+    Returns
+    -------
+    meat : np.ndarray
+        Meat matrix of shape (k, k).
+    variance_computed : bool
+        Whether any actual variance computation happened.
+    legitimate_zero_count : int
+        Number of strata that legitimately contribute zero variance.
+
+    Notes
+    -----
+    Reduction semantics (load-bearing for tests):
+
+    - bandwidth -> 0 (Bartlett: ``K(d/tiny) = 0`` for ``d > 0`` and
+      ``K(0) = 1`` on the diagonal so K is the identity matrix): the
+      within-stratum sandwich ``sum_{j,k} K_jk c_j c_k' = sum_j c_j c_j'
+      = centered.T @ centered``, which is precisely Binder's formula at
+      :func:`_compute_stratified_meat_from_psu_scores`.
+    - Single stratum (H = 1, FPC = inf): reduces to ordinary Conley
+      sandwich on PSU totals via :func:`diff_diff.conley._compute_conley_meat`.
+
+    No reference software combines all three ingredients (Conley
+    spatial-HAC + Binder TSL + Gardner GMM correction) on a two-stage
+    influence function.
+    """
+    from diff_diff.conley import _compute_conley_meat
+
+    if psu_scores.ndim == 1:
+        psu_scores = psu_scores[:, np.newaxis]
+    k = psu_scores.shape[1]
+    meat = np.zeros((k, k))
+
+    unique_strata = np.unique(psu_strata)
+    _variance_computed = False
+    legitimate_zero_count = 0
+
+    _global_psu_mean = None
+    if lonely_psu == "adjust":
+        _global_psu_mean = psu_scores.mean(axis=0, keepdims=True)
+
+    for h in unique_strata:
+        mask_h = psu_strata == h
+        scores_h = psu_scores[mask_h]
+        coords_h = psu_coords[mask_h]
+        n_psu_h = scores_h.shape[0]
+
+        if n_psu_h < 2:
+            if lonely_psu == "remove":
+                continue
+            elif lonely_psu == "certainty":
+                legitimate_zero_count += 1
+                continue
+            elif lonely_psu == "adjust":
+                # Degenerate one-PSU kernel K = [[K(0)]] = [[1.0]] for both
+                # Bartlett and uniform; equivalent to centered.T @ centered.
+                # MUST `continue` to skip the FPC block below — with n_h = 1
+                # the scale n_h/(n_h-1) divides by zero. Mirrors the Binder
+                # helper's singleton-adjust branch exactly.
+                centered = scores_h - _global_psu_mean
+                with np.errstate(invalid="ignore", over="ignore"):
+                    meat += centered.T @ centered
+                _variance_computed = True
+                continue
+
+        f_h = 0.0
+        if fpc_per_psu is not None:
+            N_h = fpc_per_psu[mask_h][0]
+            if N_h < n_psu_h:
+                raise ValueError(
+                    f"FPC ({N_h}) is less than the number of PSUs "
+                    f"({n_psu_h}) in stratum. FPC must be >= n_PSU."
+                )
+            f_h = n_psu_h / N_h
+            if f_h >= 1.0:
+                legitimate_zero_count += 1
+
+        psu_mean_h = scores_h.mean(axis=0, keepdims=True)
+        centered = scores_h - psu_mean_h
+
+        # Within-stratum Conley sandwich on PSU-centered scores. Pass
+        # ``cluster_ids=None`` explicitly: after PSU aggregation every PSU
+        # is its own cluster, so a cluster product kernel would zero all
+        # cross-PSU pairs. See Wave E.2 plan Chunk 3 step 4.
+        conley_meat_h = _compute_conley_meat(
+            centered,
+            coords_h,
+            cutoff,
+            metric,
+            kernel,
+            cluster_ids=None,
+        )
+
+        adjustment = (1.0 - f_h) * (n_psu_h / (n_psu_h - 1))
+        with np.errstate(invalid="ignore", over="ignore"):
+            meat += adjustment * conley_meat_h
+        _variance_computed = True
+
+    return meat, _variance_computed, legitimate_zero_count
+
+
 def compute_survey_vcov(
     X: np.ndarray,
     residuals: np.ndarray,
