@@ -3641,7 +3641,22 @@ class LinearRegression:
             effective_df = self.survey_df_
         elif self._bm_dof is not None and 0 <= index < len(self._bm_dof):
             bm_val = self._bm_dof[index]
-            effective_df = None if (not np.isfinite(bm_val)) else float(bm_val)
+            if not np.isfinite(bm_val):
+                # NaN BM DOF means the noise-floor guard fired (typically a
+                # high-leverage FE-dummy contrast on weighted CR2-BM). Falling
+                # through to df=None would silently use the normal distribution
+                # and produce misleading p≈0 / zero-width CIs. Instead, return
+                # NaN inference fields for the affected coefficient.
+                return InferenceResult(
+                    coefficient=coef,
+                    se=se,
+                    t_stat=float("nan"),
+                    p_value=float("nan"),
+                    conf_int=(float("nan"), float("nan")),
+                    df=None,
+                    alpha=effective_alpha,
+                )
+            effective_df = float(bm_val)
         elif (
             hasattr(self, "survey_design")
             and self.survey_design is not None

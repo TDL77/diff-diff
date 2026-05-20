@@ -533,6 +533,73 @@ class TestWLSCR2FEDoFNoiseGuard:
         ), f"Expected 1 noise-floor UserWarning, got {len(noise_warnings)}"
 
 
+class TestLinearRegressionFENanGuardEndToEnd:
+    """Regression for R7 P0: NaN BM DOF from the noise-floor guard must
+    propagate to NaN inference fields in `LinearRegression.get_inference()`,
+    not fall through to normal-theory inference (which would silently emit
+    huge t-stats and zero-width CIs for the affected coefficients)."""
+
+    def test_did_absorbed_fe_lr_inference_nan_for_guarded_coefs(self, goldens):
+        from diff_diff.linalg import LinearRegression
+
+        d = goldens["weighted_did_absorbed_fe"]
+        n = len(d["y"])
+        unit_int = np.asarray(d["unit"])
+        period_int = np.asarray(d["period"])
+        treat_post = np.asarray(d["treat_post"])
+        y = np.asarray(d["y"])
+        w = np.asarray(d["weights"])
+        cluster = unit_int
+
+        cols = [np.ones(n), treat_post.astype(float)]
+        col_names = ["(Intercept)", "treat_post"]
+        for u in sorted(np.unique(unit_int))[1:]:
+            cols.append((unit_int == u).astype(float))
+            col_names.append(f"unit{u}")
+        for p in sorted(np.unique(period_int))[1:]:
+            cols.append((period_int == p).astype(float))
+            col_names.append(f"period{p}")
+        X = np.column_stack(cols)
+
+        lr = LinearRegression(
+            include_intercept=False,
+            vcov_type="hc2_bm",
+            cluster_ids=cluster,
+            weights=w,
+            weight_type="pweight",
+        )
+        lr.fit(X, y)
+
+        # Guarded coefficients: treated-unit dummies (unit2/3/4).
+        treated_unit_idx = [col_names.index(f"unit{u}") for u in [2, 3, 4]]
+        for i in treated_unit_idx:
+            inf_i = lr.get_inference(index=i)
+            assert np.isnan(inf_i.t_stat), (
+                f"NaN guard must produce NaN t_stat at index {i} ({col_names[i]}); "
+                f"got {inf_i.t_stat}"
+            )
+            assert np.isnan(
+                inf_i.p_value
+            ), f"NaN guard must produce NaN p_value at index {i}; got {inf_i.p_value}"
+            assert all(
+                np.isnan(b) for b in inf_i.conf_int
+            ), f"NaN guard must produce NaN conf_int at index {i}; got {inf_i.conf_int}"
+            # SE and coefficient remain valid (vcov matches at machine precision).
+            assert np.isfinite(inf_i.se) and inf_i.se > 0
+            assert np.isfinite(inf_i.coefficient)
+
+        # Non-guarded coefficients still emit finite inference.
+        non_guarded_idx = [i for i in range(X.shape[1]) if i not in treated_unit_idx]
+        for i in non_guarded_idx:
+            inf_i = lr.get_inference(index=i)
+            assert np.isfinite(inf_i.t_stat), (
+                f"Non-guarded coef index {i} ({col_names[i]}) should have finite t_stat; "
+                f"got {inf_i.t_stat}"
+            )
+            assert np.isfinite(inf_i.p_value)
+            assert all(np.isfinite(b) for b in inf_i.conf_int)
+
+
 class TestUnweightedRegressionStillBitEqual:
     """Regression safety: existing unweighted goldens must still match bit-equal."""
 
