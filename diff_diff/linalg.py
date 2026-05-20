@@ -1119,14 +1119,13 @@ def _validate_vcov_args(
         combined with a ``vcov_type`` that is one-way only (``classical``,
         ``hc2``).
     NotImplementedError
-        If ``vcov_type == "hc2_bm"`` is combined with ``weights`` AND
-        ``weight_type != "pweight"`` (``aweight`` or ``fweight``). The
-        clubSandwich WLS-CR2 port that lifted the prior weighted-CR2 gates
-        matches the ``pweight`` (sampling-weight) convention only; the
-        ``aweight`` (analytical / inverse-variance) and ``fweight``
-        (frequency-expanded) derivations are separate methodology tasks.
-        Use ``weight_type="pweight"`` or ``vcov_type="hc1"`` (CR1 supports
-        all three weight types) as a workaround.
+        If ``vcov_type == "conley"`` is combined with ``weights`` (the
+        Bertanha-Imbens 2014 weighted-Conley methodology is a separate
+        follow-up). NOT raised here for ``hc2_bm + weights``: that
+        weight-type contract is enforced downstream in
+        ``_compute_robust_vcov_numpy`` (which has access to ``weight_type``
+        and rejects ``aweight`` / ``fweight`` while routing ``pweight``
+        through the clubSandwich WLS-CR2 port).
     """
     if vcov_type not in _VALID_VCOV_TYPES:
         raise ValueError(
