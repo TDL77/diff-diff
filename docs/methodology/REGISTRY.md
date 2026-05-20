@@ -744,6 +744,25 @@ See `docs/methodology/continuous-did.md` Section 4 for full details.
 - **Boundary knots**: Knots are built once from all treated doses (global, not per-cell) to ensure a common basis across (g,t) cells for aggregation. Evaluation grid is clamped to training-dose boundary knots (`range(dose)`). R's `contdid` v0.1.0 has an inconsistency where `splines2::bSpline(dvals)` uses `range(dvals)` instead of `range(dose)`, which can produce extrapolation artifacts at dose grid extremes. Our approach avoids extrapolation and is methodologically sound.
 - **Note:** `bspline_derivative_design_matrix` previously swallowed `ValueError` from `scipy.interpolate.BSpline` in the per-basis derivative loop, leaving affected columns of the derivative design matrix as zero with no user-facing signal. It now aggregates the failed basis indices and emits ONE `UserWarning` naming them. Both ACRT point estimates and analytical/bootstrap inference read the same `dPsi` matrix (see `continuous_did.py:1026-1046` and the bootstrap ACRT path at `continuous_did.py:1524-1561`), so both are biased on a partial derivative-construction failure — the warning wording makes that explicit. The all-identical-knot degenerate case (single dose value) remains silently handled — derivatives there are mathematically zero. Axis-C finding #12 in the Phase 2 silent-failures audit.
 
+### Deviations from the paper / from R / library extensions
+
+*Note #1 codifies a deviation from R `contdid` v0.1.0's boundary-knot
+choice (library extension toward methodological soundness — avoids
+extrapolation that `contdid` exhibits). Notes #2-#4 codify library
+extensions with NO R correspondence — Phase 2 silent-failures audit
+fixes that surface previously silent behavior as `UserWarning` or
+`ValueError`; `contdid` v0.1.0 absorbs the same conditions without a
+signal. The original Edge Cases bullet (under § Edge Cases above) and
+the two `**Note:**` entries (under § Implementation Checklist below)
+remain in place — this Deviations block is the canonical AI-review
+surface per CLAUDE.md "Documenting Deviations (AI Review Compatibility)"
+labels.*
+
+1. **Deviation from R:** `range(dose)` vs `range(dvals)` boundary knots — the library uses `range(dose)` (training-dose range) for B-spline boundary knots; R's `contdid` v0.1.0 uses `range(dvals)` via `splines2::bSpline(dvals)`, which can produce extrapolation artifacts at dose-grid extremes. **Scope caveat:** R cross-language coverage therefore runs at **relative** tolerance bands across two surfaces: (a) **scalar parity with raw R `cont_did` / `pte_default`** at 1% relative on overall ATT for all 6 benchmarks and on overall ACRT for benchmarks 4-5; (b) **harmonized boundary-knot-normalized curve parity** with R-side ATT(d) / ACRT(d) reconstructed under `Boundary.knots = range(treated_doses)` (matching the library) on benchmarks 1-3 via the benchmark harness — `_run_r_contdid` does the R-side rebuild at `tests/test_methodology_continuous_did.py:333-367`, and `_compare_with_r` orchestrates the Python-vs-R comparison at `:395-459` — max ATT(d) at 1% and max ACRT(d) at 2%. Benchmark 6 is event-study, scalar `overall_att` only. NOT bit-exact (`atol=1e-8`) like HAD. Library extension toward methodological soundness (avoids extrapolation). Cross-references the § Edge Cases "Boundary knots" bullet above and `METHODOLOGY_REVIEW.md` § ContinuousDiD Deviations #1.
+2. **Note:** `bspline_derivative_design_matrix` derivative-failure `UserWarning` — Phase 2 axis-C #12 silent-failures audit fix. No R correspondence; `contdid` v0.1.0 does not implement an equivalent warning. Cross-references the § Edge Cases `**Note:**` bullet above (`bspline_derivative_design_matrix` entry) and `METHODOLOGY_REVIEW.md` § ContinuousDiD Deviations #2. Locked in `tests/test_continuous_did.py::TestBSplineDerivativeDegenerateBasis` (3 tests); source-level aggregate-warning block at `diff_diff/continuous_did_bspline.py:150-187`.
+3. **Note:** `+inf` → `0` never-treated recoding emits `UserWarning` reporting the affected row count; negative `first_treat` (including `-inf`) raises `ValueError`. Axis-E silent-coercion fix per Phase 2 audit. No R correspondence; `contdid` v0.1.0 silently absorbs `+inf` without a signal. Cross-references the § Implementation Checklist `**Note:**` below and `METHODOLOGY_REVIEW.md` § ContinuousDiD Deviations #3.
+4. **Note:** Zero-`first_treat` rows with nonzero `dose` are force-zeroed with `UserWarning` reporting the affected row count (axis-E silent-coercion). No R correspondence; `contdid` v0.1.0 has the same `first_treat = 0` → `D = 0` invariant but silently coerces without a warning. Cross-references the § Implementation Checklist `**Note:**` below and `METHODOLOGY_REVIEW.md` § ContinuousDiD Deviations #4.
+
 ### Implementation Checklist
 
 - [x] B-spline basis construction matching R's `splines2::bSpline` (global knots from all treated doses; boundary knots use training-dose range; see deviation note above)
