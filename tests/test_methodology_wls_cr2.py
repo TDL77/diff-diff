@@ -533,6 +533,106 @@ class TestWLSCR2FEDoFNoiseGuard:
         ), f"Expected 1 noise-floor UserWarning, got {len(noise_warnings)}"
 
 
+class TestWLSCR2SubpopulationInvariance:
+    """Regression for CI codex R8 P0 (round 2): weighted clustered CR2 must
+    be subpopulation-invariant on mixed-zero clusters. Previously, zero-weight
+    rows inside positive-weight clusters still entered the CR2 adjustment
+    matrices (H_gg, G_g, A_g, bias_term), silently changing vcov/DOF. The fix
+    physically filters `weights > 0` rows before building any per-cluster
+    matrix. This test pins parity between (a) computing on the full design
+    with zero-weight padding and (b) computing on the physically dropped
+    positive-weight subset."""
+
+    def test_per_coefficient_dof_invariant_to_zero_weight_padding(self, goldens):
+        """`_compute_cr2_bm` on (X, w) with mixed-zero padding rows must yield
+        identical vcov + per-coefficient DOF to running on (X_pos, w_pos)
+        with zero-weight rows physically removed."""
+        # Use a simple weighted clustered fixture.
+        rng = np.random.default_rng(401)
+        n_clusters, cluster_size = 5, 6
+        n_pos = n_clusters * cluster_size
+        X_pos = np.column_stack([np.ones(n_pos), rng.normal(size=n_pos), rng.normal(size=n_pos)])
+        y_pos = X_pos @ np.array([1.0, 0.5, 0.3]) + rng.normal(0, 0.5, n_pos)
+        w_pos = rng.uniform(0.5, 2.5, n_pos)
+        cluster_pos = np.repeat(np.arange(n_clusters), cluster_size)
+
+        # Pad with 8 zero-weight rows, sprinkled across existing clusters.
+        n_pad = 8
+        X_pad = rng.normal(size=(n_pad, 3))
+        X_pad[:, 0] = 1.0  # intercept
+        y_pad = rng.normal(size=n_pad)
+        w_pad = np.zeros(n_pad)
+        cluster_pad = rng.integers(0, n_clusters, size=n_pad)
+        # Interleave (shuffle order to verify it's not order-dependent).
+        order = rng.permutation(n_pos + n_pad)
+        X_full = np.vstack([X_pos, X_pad])[order]
+        y_full = np.concatenate([y_pos, y_pad])[order]
+        w_full = np.concatenate([w_pos, w_pad])[order]
+        cluster_full = np.concatenate([cluster_pos, cluster_pad])[order]
+
+        # Refit WLS on both designs. Bread is invariant to zero-weight rows.
+        bread = X_full.T @ (X_full * w_full[:, None])
+        coef = np.linalg.solve(bread, X_full.T @ (w_full * y_full))
+        resid_full = y_full - X_full @ coef
+        resid_pos = y_pos - X_pos @ coef
+        bread_pos = X_pos.T @ (X_pos * w_pos[:, None])
+        np.testing.assert_allclose(bread, bread_pos, atol=1e-12)
+
+        vcov_full, dof_full = _compute_cr2_bm(
+            X_full, resid_full, cluster_full, bread, weights=w_full
+        )
+        vcov_pos, dof_pos = _compute_cr2_bm(X_pos, resid_pos, cluster_pos, bread_pos, weights=w_pos)
+        np.testing.assert_allclose(
+            vcov_full,
+            vcov_pos,
+            atol=1e-12,
+            err_msg="vcov must be invariant to zero-weight padding rows",
+        )
+        np.testing.assert_allclose(
+            dof_full,
+            dof_pos,
+            atol=1e-12,
+            err_msg="DOF must be invariant to zero-weight padding rows",
+        )
+
+    def test_contrast_dof_invariant_to_zero_weight_padding(self, goldens):
+        """Same invariance for `_compute_cr2_bm_contrast_dof`."""
+        rng = np.random.default_rng(402)
+        n_clusters, cluster_size = 5, 6
+        n_pos = n_clusters * cluster_size
+        X_pos = np.column_stack([np.ones(n_pos), rng.normal(size=n_pos), rng.normal(size=n_pos)])
+        w_pos = rng.uniform(0.5, 2.5, n_pos)
+        cluster_pos = np.repeat(np.arange(n_clusters), cluster_size)
+
+        n_pad = 6
+        X_pad = rng.normal(size=(n_pad, 3))
+        X_pad[:, 0] = 1.0
+        w_pad = np.zeros(n_pad)
+        cluster_pad = rng.integers(0, n_clusters, size=n_pad)
+        order = rng.permutation(n_pos + n_pad)
+        X_full = np.vstack([X_pos, X_pad])[order]
+        w_full = np.concatenate([w_pos, w_pad])[order]
+        cluster_full = np.concatenate([cluster_pos, cluster_pad])[order]
+
+        bread = X_full.T @ (X_full * w_full[:, None])
+        bread_pos = X_pos.T @ (X_pos * w_pos[:, None])
+
+        # Compound contrast: average of x and z coefficients (indices 1 and 2).
+        contrasts = np.array([[0.0], [0.5], [0.5]])
+        dof_full = _compute_cr2_bm_contrast_dof(
+            X_full, cluster_full, bread, contrasts, weights=w_full
+        )
+        dof_pos = _compute_cr2_bm_contrast_dof(
+            X_pos, cluster_pos, bread_pos, contrasts, weights=w_pos
+        )
+        np.testing.assert_allclose(
+            dof_full,
+            dof_pos,
+            atol=1e-12,
+            err_msg="Contrast DOF must be invariant to zero-weight padding rows",
+        )
+
+
 class TestWLSCR2SingleContrastNoiseFloor:
     """Regression for CI codex R8 P2: the noise-floor NaN-guard must trigger
     on single-contrast calls to `_compute_cr2_bm_contrast_dof` too, not just

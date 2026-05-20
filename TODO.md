@@ -207,7 +207,7 @@ Ordered paydown view across the tables above. Tier A → D is by effort × risk,
 #### Tier C — Heavy / derivation required
 
 - HonestDiD Δ^RM ARP conditional/hybrid confidence sets (`honest_did.py`)
-- Weighted one-way Bell-McCaffrey + weighted CR2 Bell-McCaffrey (linalg derivations + R parity harness) (`linalg.py::_compute_bm_dof_from_contrasts`, `linalg.py::_compute_cr2_bm`)
+- ~~Weighted one-way Bell-McCaffrey + weighted CR2 Bell-McCaffrey~~ — LIFTED via the clubSandwich WLS-CR2 port (PR #475); see rows 109-110 above for the closed rows.
 - Multi-absorb weighted demeaning: alternating-projection iteration for N>1 absorb + weights (`estimators.py`)
 - ImputationDiD dense `(A0'A0).toarray()` OOM: alternative dense fallback or richer sparse strategy (`imputation.py:1531`)
 - HAD mass-point `vcov_type ∈ {hc2, hc2_bm}`: 2SLS-specific leverage derivation (`had.py::_fit_mass_point_2sls`)

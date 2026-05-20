@@ -1545,14 +1545,32 @@ def _compute_cr2_bm(
     n, k = X.shape
     cluster_ids_arr = np.asarray(cluster_ids)
     unique_clusters = np.unique(cluster_ids_arr)
-    # When weights are provided, count EFFECTIVE clusters (those with positive
-    # total weight). Zero-total-weight clusters contribute nothing to the
-    # sandwich (their scores are zero), but they can mask under-identification:
-    # a fit with only one effective cluster must raise rather than silently
-    # producing finite CR2 inference. Mirrors the CR1 zero-cluster handling
-    # downstream.
+    # When weights are provided, enforce subpopulation invariance: zero-weight
+    # rows must contribute nothing to the sandwich. The earlier "drop zero-
+    # total-weight clusters only" guard handled all-zero clusters but missed
+    # mixed-zero clusters (positive total weight, some zero-weight rows
+    # inside). In mixed-zero clusters, the zero-weight rows still entered the
+    # CR2 adjustment matrices (H_gg, G_g, A_g, bias_term) on the row side,
+    # silently changing SE/DOF — contradicting the linalg contract that
+    # zero-weight rows are inert. Fix: physically filter to `weights > 0`
+    # rows before all per-cluster computations. CI codex flagged this as P0
+    # on PR #475 round 2.
     if weights is not None:
         weights_arr = np.asarray(weights, dtype=np.float64)
+        positive_mask = weights_arr > 0
+        if not np.all(positive_mask):
+            X = X[positive_mask]
+            residuals = residuals[positive_mask]
+            cluster_ids_arr = cluster_ids_arr[positive_mask]
+            weights_arr = weights_arr[positive_mask]
+            weights = weights_arr  # Rebind for downstream w_scale/W_norm logic
+            n = X.shape[0]
+            # bread_matrix is invariant to zero-weight row removal: the caller
+            # computes `X.T @ (X * w[:, None])`, and zero-weight rows contribute
+            # zero to that sum. So bread_matrix passed in is already equivalent
+            # to bread_matrix on the filtered design. No rebuild needed.
+            # Recount unique clusters after filtering.
+            unique_clusters = np.unique(cluster_ids_arr)
         eff_clusters = np.array(
             [g for g in unique_clusters if float(np.sum(weights_arr[cluster_ids_arr == g])) > 0]
         )
@@ -1948,11 +1966,21 @@ def _compute_cr2_bm_contrast_dof(
     n, k = X.shape
     cluster_ids_arr = np.asarray(cluster_ids)
     unique_clusters = np.unique(cluster_ids_arr)
-    # Same effective-cluster check as `_compute_cr2_bm`: drop zero-total-weight
-    # clusters so under-identified subpopulation fits raise rather than silently
-    # producing finite CR2/DOF output.
+    # Subpopulation invariance: physically filter `weights > 0` rows before
+    # building per-cluster matrices. Mirrors the same fix in `_compute_cr2_bm`
+    # (CI codex P0 on PR #475 round 2). Zero-weight rows must be inert; the
+    # caller's bread_matrix = X.T @ (X * w[:, None]) is invariant to their
+    # removal, so no bread rebuild is needed.
     if weights is not None:
         weights_arr_eff = np.asarray(weights, dtype=np.float64)
+        positive_mask = weights_arr_eff > 0
+        if not np.all(positive_mask):
+            X = X[positive_mask]
+            cluster_ids_arr = cluster_ids_arr[positive_mask]
+            weights_arr_eff = weights_arr_eff[positive_mask]
+            weights = weights_arr_eff
+            n = X.shape[0]
+            unique_clusters = np.unique(cluster_ids_arr)
         eff_clusters = np.array(
             [g for g in unique_clusters if float(np.sum(weights_arr_eff[cluster_ids_arr == g])) > 0]
         )
