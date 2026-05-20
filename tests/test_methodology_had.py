@@ -20,8 +20,13 @@ Equation walk-through:
 - Theorem 4 (QUG):     T_lambda = (lambda + E_1) / E_2 limit law, lambda=0
                          under H_0: d_lower = 0
 - Eq. 18 / (Algorithm): joint Stute pre-trends + homogeneity
-                         (mean-independence variant; Eq. 18 detrending
-                         deferred per REGISTRY checklist)
+                         (mean-independence and linearity nulls).
+                         The trends_lin=True linear-trend-detrended
+                         variant is shipped in the library (R-parity
+                         locked against DIDHAD::did_had(trends_lin=TRUE)
+                         in tests/test_did_had_parity.py) but is
+                         OUT OF SCOPE for this methodology file (no
+                         coverage duplication).
 - Eq. 29 / Theorem 7:  T_hr = sqrt(G) (sigma2_lin - sigma2_diff) / sigma2_W
 
 See:
@@ -701,9 +706,23 @@ class TestHADJointStute:
     The library ships the mean-independence variant in
     ``joint_pretrends_test`` (residuals from OLS Y_t - Y_base ~ 1) and
     the linearity (homogeneity) variant in ``joint_homogeneity_test``
-    (residuals from OLS Y_t - Y_base ~ 1 + D). The Eq. 18
-    linear-trend-detrended variant is deferred per REGISTRY (Phase 4
-    follow-up); this class targets the shipped mean-independence variant.
+    (residuals from OLS Y_t - Y_base ~ 1 + D).
+
+    **Coverage scope of this class:** H0 fail-to-reject is exercised
+    for both ``joint_pretrends_test`` (mean-independence null) and
+    ``joint_homogeneity_test`` (linearity null) on a linear-DGP panel
+    where D is independent of pre-Y; H1 rejection is demonstrated on
+    ``joint_homogeneity_test`` only, via a nonlinear (D + D^2) post-
+    period DGP. An H1 violating-pretrends test for
+    ``joint_pretrends_test`` is not added here (a synthetic
+    correlated-D-vs-pre-Y DGP would re-verify the bootstrap
+    calibration covered by ``test_had_pretests.py``).
+
+    The ``trends_lin=True`` Eq. 17 / Eq. 18 linear-trend-detrended
+    variant is SHIPPED in the library and R-parity-locked against
+    ``DIDHAD::did_had(..., trends_lin=TRUE)`` in
+    ``tests/test_did_had_parity.py`` (3 DGPs x 5 method combos at
+    ``atol=1e-8``). It is OUT OF SCOPE for this methodology file.
     """
 
     def _build_multi_period_panel(
