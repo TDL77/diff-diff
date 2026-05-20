@@ -702,7 +702,7 @@ and covariate-adjusted specifications.)
 - [x] `nprobust` (Calonico-Cattaneo-Farrell) port at machine precision (`atol=1e-14`) — `tests/test_nprobust_port.py` (7 classes spanning kernel constants, QR-based `(X'X)^{-1}`, three-stage MSE-DPI bandwidth, clustered variance, weighted local-linear, single-eval-point parity)
 - [x] Bandwidth selector (CCF MSE-DPI) at 1% tolerance — `tests/test_bandwidth_selector.py` (8 classes covering public-API wrapper, stage diagnostics)
 - [x] Survey support: pweight + strata/PSU/FPC via TSL on the continuous and mass-point paths; PSU-level Mammen wild bootstrap on the Stute family; closed-form weighted variance components on Yatchew (Phase 4.5 A/B/C; QUG-under-survey permanently deferred per Phase 4.5 C0)
-- [x] Tutorials T21 (`docs/tutorials/21_had_pretest_workflow.ipynb`, 16 drift tests) + T22 (`docs/tutorials/22_had_survey_design.ipynb`, 28 drift tests across groups A-G); plus T20 (`docs/tutorials/20_had_brand_campaign.ipynb`) drift test
+- [x] Tutorials T21 (`docs/tutorials/21_had_pretest_workflow.ipynb`, 17 drift tests) + T22 (`docs/tutorials/22_had_survey_design.ipynb`, 32 drift tests across groups A-G); plus T20 (`docs/tutorials/20_had_brand_campaign.ipynb`, 14 drift tests)
 - [x] Assumption 5/6 non-testability documented in `HeterogeneousAdoptionDiD` class docstring + `qug_test`/`stute_test`/`yatchew_hr_test`/`did_had_pretest_workflow` Notes blocks; reinforced by a fit-time `UserWarning` emitted from the outer `HeterogeneousAdoptionDiD.fit()` dispatch on the overall and event-study paths when the resolved design is Design 1 family (search `diff_diff/had.py` for "---- Assumption 5/6 warning on Design 1 paths ----")
 
 **Test Coverage:**

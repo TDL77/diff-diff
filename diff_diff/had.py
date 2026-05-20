@@ -2617,11 +2617,16 @@ class HeterogeneousAdoptionDiD:
     estimates as full point identification. The available pre-tests
     (:func:`diff_diff.qug_test`, :func:`diff_diff.stute_test`,
     :func:`diff_diff.yatchew_hr_test`) verify ADJACENT identifying
-    assumptions (Assumption 4 boundary density; Assumption 7
-    mean-independence pre-trends; Assumption 8 linearity / homogeneity)
-    and do NOT and CANNOT test Assumptions 5 or 6 directly. T21 (HAD
-    pretest workflow tutorial) shows the verdict-language convention
-    that surfaces this caveat to end users.
+    conditions: QUG tests the Theorem 4 / Design 1' support-infimum
+    null ``d_lower = 0`` — adjacent evidence on the ``d_lower = 0``
+    clause of Assumption 4 only, NOT a test of the full Assumption 4
+    statement (which also covers boundary-density positivity,
+    conditional-mean smoothness, conditional-variance regularity, and
+    bandwidth conditions); Assumption 7 mean-independence pre-trends
+    via Stute; Assumption 8 linearity / homogeneity via Yatchew. None
+    of these test Assumptions 5 or 6 directly. T21 (HAD pretest
+    workflow tutorial) shows the verdict-language convention that
+    surfaces this caveat to end users.
 
     **Diagnostics coverage.** ``HeterogeneousAdoptionDiDResults.bandwidth_diagnostics``
     and ``.bias_corrected_fit`` are populated only on the continuous

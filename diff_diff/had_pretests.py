@@ -1349,9 +1349,13 @@ def qug_test(
 
     Notes
     -----
-    **Scope (what this test does NOT cover).** ``qug_test`` targets paper
-    Assumption 4 (positive density at the boundary, i.e. ``d_lower = 0``).
-    It does NOT and CANNOT test Assumptions 5 and 6 from the same paper
+    **Scope (what this test does NOT cover).** ``qug_test`` tests the
+    Theorem 4 / Design 1' support-infimum null ``H_0: d_lower = 0``. It
+    does not validate the full Assumption 4 (Assumption 4 also requires
+    positive boundary density, twice-differentiable conditional-mean,
+    bounded continuous conditional-variance, and bandwidth regularity —
+    QUG is adjacent evidence on the ``d_lower = 0`` clause only). It
+    does NOT and CANNOT test Assumptions 5 and 6 from the same paper
     (Section 3.1.2), which are required for sign identification (A5) and
     point identification (A6) of ``WAS_{d_lower}`` on the Design 1 family
     (``d_lower > 0``). Assumptions 5 and 6 are statements about
@@ -4584,11 +4588,14 @@ def did_had_pretest_workflow(
     Notes
     -----
     **Scope (what this composite workflow does NOT cover).** The
-    component pretests target paper Assumption 4 (QUG: boundary
-    density), Assumption 7 (joint Stute pre-trends: mean-independence of
-    placebo first-differences from dose), and Assumption 8
-    (Yatchew / joint homogeneity: linearity of treatment effects in
-    dose). The workflow does NOT and CANNOT test Assumptions 5 and 6
+    component pretests target the Theorem 4 / Design 1' support-infimum
+    null (QUG: ``d_lower = 0``, adjacent evidence on the ``d_lower = 0``
+    clause of Assumption 4 only — does not validate boundary density,
+    conditional-mean smoothness, or variance regularity), Assumption 7
+    (joint Stute pre-trends: mean-independence of placebo first-
+    differences from dose), and Assumption 8 (Yatchew / joint
+    homogeneity: linearity of treatment effects in dose). The workflow
+    does NOT and CANNOT test Assumptions 5 and 6
     from de Chaisemartin et al. (2026) Section 3.1.2, which are required
     for sign / point identification of ``WAS_{d_lower}`` on the Design 1
     family (``d_lower > 0``). Assumptions 5/6 are non-testable via
