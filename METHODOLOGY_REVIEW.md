@@ -58,7 +58,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 |-----------|--------|---------------------|--------|-------------|
 | ContinuousDiD | `continuous_did.py` | `contdid` v0.1.0 | **In Progress** | — |
 | ChaisemartinDHaultfoeuille (DCDH) | `chaisemartin_dhaultfoeuille.py` | `DIDmultiplegtDYN` | **In Progress** | — |
-| HeterogeneousAdoptionDiD (HAD) | `had.py`, `had_pretests.py` | (paper-direct; `nprobust` for bandwidth) | **Complete** | 2026-05-20 |
+| HeterogeneousAdoptionDiD (HAD) | `had.py`, `had_pretests.py` | `chaisemartin::did_had` (`Credible-Answers/did_had` v2.0.0); `nprobust` for bandwidth | **Complete** | 2026-05-20 |
 | TROP | `trop.py`, `trop_local.py`, `trop_global.py` | (forthcoming; paper-author reference implementation) | **In Progress** | — |
 
 ### Triple-Difference Estimators
@@ -687,7 +687,7 @@ and covariate-adjusted specifications.)
 |-------|-------|
 | Module | `had.py`, `had_pretests.py` |
 | Primary Reference | de Chaisemartin, Ciccia, D'Haultfœuille & Knau (2026), *Difference-in-Differences Estimators When No Unit Remains Untreated*, arXiv:2405.04465v6 |
-| R Reference | None (paper-direct implementation); `nprobust` (Calonico-Cattaneo-Farrell) used for bandwidth selection only |
+| R Reference | `chaisemartin::did_had` (`Credible-Answers/did_had` v2.0.0, SHA `edc09197`) — R-parity-locked at `atol=1e-8` on 3 DGPs × 5 method combos via `tests/test_did_had_parity.py`; `nprobust` (Calonico-Cattaneo-Farrell) v0.5.0 used as auxiliary reference for bandwidth selection only (machine-precision port at `atol=1e-14`) |
 | Status | **Complete** |
 | Last Review | 2026-05-20 |
 
