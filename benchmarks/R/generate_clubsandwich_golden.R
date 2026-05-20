@@ -603,10 +603,13 @@ output$weighted_singletons_present <- list(
 )
 
 # ---- Scenario: weighted_did_absorbed_fe -------------------------------------
-# DiD-style integration: 8 units x 4 periods, treat_post + unit + period FE,
-# analytics weights varying by unit. Pins DiD(vcov_type="hc2_bm",
-# absorb=["unit","period"], cluster="unit", survey_design=SurveyDesign(
-# weights="w")).
+# DiD-style analytical CR2 design-matrix parity fixture: 8 units x 4 periods,
+# treat_post + unit + period FE, analytics weights varying by unit. Pins the
+# clubSandwich WLS-CR2 analytical surface (compute_robust_vcov / solve_ols /
+# LinearRegression direct callers) on a DiD-shaped design. NOTE: this is NOT
+# a public-estimator `DifferenceInDifferences(survey_design=...)` parity
+# fixture — estimator-level survey designs route through the TSL survey
+# variance path, which takes precedence over the analytical CR2 sandwich.
 set.seed(50500)
 d_did_w <- make_did_panel(n_units = 8, n_periods = 4, treatment_period = 2,
                           seed = 50501)
@@ -633,10 +636,13 @@ output$weighted_did_absorbed_fe <- list(
 )
 
 # ---- Scenario: weighted_mpd_avg_att_dof -------------------------------------
-# MPD-style integration: 15 units x 4 periods, MPD parameterization with
-# analytics weights + cluster=unit. Compound contrast = post-period-average
-# ATT. Pins MPD(vcov_type="hc2_bm", cluster="unit", survey_design=
-# SurveyDesign(weights="w")) avg_att DOF.
+# MPD-style analytical CR2 contrast-DOF parity fixture: 15 units x 4 periods,
+# MPD parameterization with analytics weights + cluster=unit. Compound
+# contrast = post-period-average ATT. Pins the clubSandwich `Wald_test(test=
+# "HTZ")$df_denom` against `_compute_cr2_bm_contrast_dof(weights=)` on an
+# MPD-shaped design. NOTE: like `weighted_did_absorbed_fe`, this fixture
+# targets the analytical surface only — estimator-level
+# `MultiPeriodDiD(survey_design=...)` paths use TSL.
 set.seed(50600)
 d_mpd_w <- make_mpd_panel(n_total = 15, units_per_cohort = 5, n_periods = 4,
                           seed = 50601)
