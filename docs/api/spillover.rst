@@ -243,10 +243,6 @@ and planned follow-up enhancements:
 
   Restrictions:
 
-  - ``vcov_type="conley" + survey_design=`` raises
-    ``NotImplementedError``; Wave E.2 (planned) will add the Conley × survey
-    product-kernel synthesis with within-stratum Conley sandwich on PSU
-    totals.
   - Replicate-weight variance (BRR / Fay / JK1 / JKn / SDR) raises
     ``NotImplementedError``; per Gerber (2026) Appendix A, the
     IF-reweighting shortcut does not apply because ``gamma_hat`` is
@@ -266,6 +262,70 @@ and planned follow-up enhancements:
     centering reflect the reduced fit sample rather than the full
     domain design. See the REGISTRY note for details and the Wave E.3
     follow-up tracked in ``TODO.md``.
+- **Survey-design integration (Wave E.2 — Conley × survey via
+  stratified-Conley sandwich on PSU totals).** SHIPPED in Wave E.2.
+  ``vcov_type="conley" + survey_design=`` is now supported via a
+  per-stratum Conley sandwich applied to PSU-aggregated Wave D Gardner
+  GMM influence functions.
+
+  .. note::
+
+     Wave E.2 composes Conley (1999) spatial-HAC with Gerber (2026,
+     arXiv:2605.04124) Proposition 1 Binder TSL (the Wave E.1 foundation)
+     and the Wave D Gardner GMM first-stage uncertainty correction
+     (Butts 2021 §3.1 + Gardner 2022 §4) applied to SpilloverDiD's
+     ring-indicator stage-2 design. The composition is **panel-aware** —
+     it preserves the library's existing ``conley_lag_cutoff = 0``
+     semantic ("within-period spatial only, exclude cross-period pairs")
+     by looping over periods and aggregating Psi to PSU totals WITHIN
+     each period (not over the whole panel). For each period ``t``,
+     ``S_psu_t[g] = sum_{i in PSU g, time t} psi_i``; per-PSU centroids
+     are panel-constant (mean of per-observation ``conley_coords``);
+     for each stratum the within-stratum sandwich is
+     ``M_h_t = (1 - f_h) * n_h/(n_h-1) * sum_{j,k in PSUs_h}
+     K(d(centroid_j, centroid_k) / cutoff) *
+     (S_psu_t[j] - S_bar_h_t)(S_psu_t[k] - S_bar_h_t)'``, where K is the
+     Bartlett kernel (SpilloverDiD currently exposes Bartlett only and
+     hardcodes it at the fit-call site; the survey helper's ``kernel``
+     parameter can also take ``"uniform"``, but exposing that on the
+     SpilloverDiD constructor is a separate follow-up). Cross-stratum
+     kernel weights are exactly zero by sampling design (strata are
+     exact independence partitions). Total meat is ``sum_t sum_h M_h_t``.
+     Cross-period spatial pairs are excluded by construction. No
+     reference software combines all three ingredients on a two-stage
+     influence function.
+
+  Reduction semantics:
+
+  - Per-period sum invariant: ``sum_t`` of per-period within-stratum
+    stratified-Conley sandwiches on per-period PSU totals. Pinned at
+    ``tests/test_spillover.py::TestSpilloverDiDWaveE2ConleySurveyDesign::test_b_panel_aware_per_period_sum_invariant``
+    (pure unit test on the orchestrator + helper composition).
+  - Single stratum (H = 1, FPC = inf): reduces to ``sum_t`` plain
+    Conley sandwich on per-period PSU totals (NOT on time-collapsed
+    PSU totals — the per-period loop preserves ``lag_cutoff = 0``
+    semantics).
+  - All PSUs singleton + ``lonely_psu="remove"``: ``df_survey = 0`` and
+    the stratified-Conley meat NaN-fails (matches Wave E.1 saturation
+    behaviour, with ``UserWarning`` template "Wave E.2 stratified-Conley
+    sandwich: df_survey = 0...").
+
+  Restrictions:
+
+  - Replicate-weight variance (BRR / Fay / JK1 / JKn / SDR) raises
+    ``NotImplementedError`` (inherits Wave E.1 gate; per-replicate refit
+    is separate follow-up scope).
+  - ``cluster=<col> + survey_design.psu + vcov_type="conley"``:
+    ``cluster=<col>`` is coerced to PSU per Wave E.1's warn-and-use-PSU
+    pattern; the Conley cluster product kernel becomes a no-op after
+    PSU aggregation.
+  - The LinearRegression-side ``vcov_type="conley" + survey_design=``
+    gate at ``diff_diff/linalg.py`` is a separate Bertanha-Imbens 2014
+    weighted-Conley roadmap (not Wave E).
+  - DiagnosticReport routing for ``SpilloverDiDResults(vcov_type="conley",
+    survey_design=)`` is queued for a follow-up (the
+    ``_APPLICABILITY`` / ``_PT_METHOD`` wiring must register the new
+    combination first).
 - **Count-of-treated-in-ring** — only the "nearest-treated ring"
   specification is implemented. The "count" form re-introduces
   functional-form dependence (paper Section 3.2 end) and is queued.
