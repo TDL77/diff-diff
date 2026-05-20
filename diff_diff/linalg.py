@@ -1949,29 +1949,42 @@ def _compute_bm_dof_from_contrasts(
 ) -> np.ndarray:
     """Per-contrast Bell-McCaffrey (Imbens-Kolesar 2016) Satterthwaite DOF.
 
-    For each column ``c`` of ``contrasts`` (shape ``(k, m)``), define
-    ``q = X (X'WX)^{-1} c`` (length ``n``). Under a homoskedastic null, the
-    HC2 variance estimator for ``c' beta`` has a weighted-chi-squared
-    distribution; matching mean and variance via Satterthwaite gives
+    Two code paths depending on ``weights``:
+
+    **Unweighted** (``weights is None``): uses the simple Pustejovsky-Tipton
+    (2018) Theorem 1 form
 
         DOF(c) = (sum_i q(i)^2)^2 / sum_{i, k} a(i) a(k) M_{ik}^2
 
-    where ``M = I - H`` and ``a(i) = q(i)^2 / (1 - h_ii)``. Using the idempotent
-    identity ``M^2 = M``, ``trace(B) = sum_i q(i)^2`` matches the numerator.
+    where ``q = X (X'X)^{-1} c``, ``M = I - H``, ``a(i) = q(i)^2 / (1 - h_ii)``.
+    Using the idempotent identity ``M^2 = M``, ``trace(B) = sum_i q(i)^2``
+    matches the numerator. Allocates an ``(n, n)`` temporary for ``M`` so the
+    cost is ``O(n^2 k)`` for the hat build plus ``O(n^2 m)`` for the per-
+    contrast sums. Practical for ``n < 10_000``; larger designs should switch
+    to a scores-based formulation (tracked in TODO.md).
 
-    Allocates an ``(n, n)`` temporary for ``M`` so the cost is ``O(n^2 k)`` for
-    the hat build plus ``O(n^2 m)`` for the per-contrast sums. Practical for
-    ``n < 10_000``; larger designs should switch to a scores-based formulation
-    (tracked in TODO.md).
+    **Weighted** (``weights is not None``): dispatches to the clubSandwich
+    singleton-cluster CR2 reduction (each observation is its own cluster)
+    via :func:`_compute_cr2_bm_contrast_dof`. The simple formula above is
+    only correct in the unweighted case — empirically it diverges from
+    ``clubSandwich::vcovCR(cluster=1:n, type="CR2") + coef_test(test=
+    "Satterthwaite")$df_Satt`` by ~6% on heteroskedastic weights. The
+    P_array form matches clubSandwich at ``atol=1e-10`` (see the WLS-CR2
+    section in ``docs/methodology/REGISTRY.md``). Only ``weight_type=
+    "pweight"`` is supported; ``aweight`` / ``fweight`` are rejected by
+    ``_compute_robust_vcov_numpy`` upstream of this helper.
 
     Parameters
     ----------
     X : ndarray of shape (n, k)
     bread_matrix : ndarray of shape (k, k) == (X'WX) or (X'X)
-    h_diag : ndarray of shape (n,), hat-matrix diagonals (already weighted)
+    h_diag : ndarray of shape (n,), hat-matrix diagonals (already weighted).
+        Used only on the unweighted path; the weighted dispatch builds its
+        own per-cluster `H_gg` blocks via :func:`_compute_cr2_bm`.
     contrasts : ndarray of shape (k, m). Pass ``np.eye(k)`` for per-coefficient DOF.
-    weights : optional weights (shape ``(n,)``) used to build the weighted hat
-        matrix. When ``None``, unweighted.
+    weights : optional weights (shape ``(n,)``). When ``None``, uses the
+        simple ``(tr B)^2 / tr(B^2)`` formula. When provided, dispatches to
+        the clubSandwich singleton-cluster CR2 P_array form.
 
     Returns
     -------
