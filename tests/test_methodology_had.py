@@ -39,7 +39,9 @@ Companion files (NOT duplicated here):
 
 Class structure:
 
-- ``TestHADTheorem1Design1Prime`` — Eq. 3 + Theorem 1 (WAS = E[delta_Y] / E[D])
+- ``TestHADTheorem1Design1Prime`` — Eq. 3 + Theorem 1 (Design 1' boundary-
+  subtracted identification; tests both the simple zero-boundary DGP and a
+  nonzero-boundary-intercept DGP)
 - ``TestHADTheorem3MassPoint`` — Eq. 11 + Theorem 3 (WAS_{d_lower} via 2SLS sample-average)
 - ``TestHADTheorem4QUG`` — Theorem 4 (QUG null test, limit law Exp(1)/Exp(1))
 - ``TestHADTheorem7YatchewHR`` — Eq. 29 + Theorem 7 (heteroskedasticity-robust linearity)

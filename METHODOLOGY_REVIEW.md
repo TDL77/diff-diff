@@ -706,12 +706,12 @@ and covariate-adjusted specifications.)
 - [x] Assumption 5/6 non-testability documented in `HeterogeneousAdoptionDiD` class docstring + `qug_test`/`stute_test`/`yatchew_hr_test`/`did_had_pretest_workflow` Notes blocks; reinforced by a fit-time `UserWarning` emitted from the outer `HeterogeneousAdoptionDiD.fit()` dispatch on the overall and event-study paths when the resolved design is Design 1 family (search `diff_diff/had.py` for "---- Assumption 5/6 warning on Design 1 paths ----")
 
 **Test Coverage:**
-- 34 methodology tests in `tests/test_methodology_had.py` (this PR)
+- 35 methodology tests in `tests/test_methodology_had.py` (this PR)
 - ~1,137 implementation-detail tests across `tests/test_had.py`, `tests/test_had_pretests.py`, `tests/test_had_mc.py`, `tests/test_had_dual_knob_deprecation.py`
 - 5 R-direct parity tests at `atol=1e-8` in `tests/test_did_had_parity.py`
 - ~46 + ~44 nprobust port + bias-corrected port tests
 - ~45 bandwidth selector tests
-- 16 + 28 tutorial drift tests (T21 + T22), plus T20 drift coverage
+- 17 + 32 tutorial drift tests (T21 + T22), plus 14 T20 drift tests
 
 **Corrections Made:**
 1. **Phase 4.5 B sup-t bootstrap (PR #432, 2026-05-14):** introduced the gated simultaneous-band bootstrap on the weighted event-study path with the explicit `cband=True` + `aggregate="event_study"` + `weights= or survey_design=` gate.
