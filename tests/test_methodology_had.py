@@ -274,16 +274,20 @@ class TestHADTheorem1Design1Prime:
         assert result.design == "continuous_at_zero"
         assert result.d_lower == pytest.approx(0.0, abs=1e-12)
 
-    def test_eq3_normal_pivot_coverage(self) -> None:
+    @pytest.mark.slow
+    def test_eq3_normal_pivot_coverage(self, ci_params) -> None:
         """Eq. 8 + Theorem 1: bias-corrected CI 95% coverage at G=1000.
 
-        Run n_replicates=200 fits on the Design 1' DGP, collect
-        (att_hat - WAS_true) / se_hat, assert empirical 95% coverage
-        of WAS_true exceeds 0.85 (matching paper Table 1's documented
-        under-coverage band at G=100-500).
+        Run n_replicates fits on the Design 1' DGP (gated by
+        ``ci_params.bootstrap(200, min_n=25)`` so constrained CI can
+        downshift the replication count while preserving the
+        code-path coverage), collect (att_hat - WAS_true) / se_hat,
+        assert empirical 95% coverage of WAS_true exceeds 0.85
+        (matching paper Table 1's documented under-coverage band at
+        G=100-500).
         """
         was_true = 0.3
-        n_reps = 200
+        n_reps = ci_params.bootstrap(200, min_n=25)
         ats = []
         ses = []
         for idx in range(n_reps):
@@ -301,10 +305,16 @@ class TestHADTheorem1Design1Prime:
         z = (ats[valid] - was_true) / ses[valid]
         # CCT bias-corrected CI is normal-pivot at z_{1-alpha/2} = 1.96.
         coverage = float(np.mean(np.abs(z) <= 1.96))
-        # Paper Table 1: under-coverage at small G (89% at G=100, 95% at
-        # G=2500). At G=1000 we expect ~0.90-0.95. Use ample tolerance
-        # band to absorb MC noise at n_reps=200.
-        assert coverage >= 0.85, f"empirical coverage {coverage:.3f} below 0.85"
+        # Paper Table 1 documents under-coverage at small G (89% at
+        # G=100, 95% at G=2500); at G=1000 we expect ~0.90-0.95.
+        # MC standard error on coverage is sqrt(0.95*0.05/n_reps), so
+        # the floor must absorb a few standard errors of slack at
+        # reduced n. Full n=200: 0.85; reduced n=25: 0.65 (~6 SE below
+        # 0.95).
+        coverage_floor = 0.85 if n_reps >= 100 else 0.65
+        assert coverage >= coverage_floor, (
+            f"empirical coverage {coverage:.3f} below {coverage_floor} " f"(n_reps={n_reps})"
+        )
 
     def test_zero_dose_units_dont_break_fit(self) -> None:
         """A continuous-at-zero panel with mass at exactly d=0 still fits."""
@@ -487,20 +497,25 @@ class TestHADTheorem4QUG:
     + the tie-break and zero-dose conventions.
     """
 
-    def test_theorem4_limit_law_distributional_match(self) -> None:
+    @pytest.mark.slow
+    def test_theorem4_limit_law_distributional_match(self, ci_params) -> None:
         """Empirical CDF of T converges to F(t) = t/(1+t) at G=2000.
 
-        Monte Carlo: n_draws=5000 draws of T from a Uniform(0,1) dose
-        DGP (under H_0: d_lower = 0). Compare empirical CDF to
-        ``F(t) = t / (1 + t)`` via Kolmogorov-Smirnov.
+        Monte Carlo (gated by ``ci_params.bootstrap(5000, min_n=200)``):
+        draw T from a Uniform(0,1) dose DGP (under H_0: d_lower = 0)
+        and compare empirical CDF to ``F(t) = t / (1 + t)`` via
+        Kolmogorov-Smirnov.
 
         Tolerance: KS-stat <= 0.05. Rationale: KS critical at n=5000,
         alpha=0.05 is ~1.36/sqrt(5000) = 0.0192; 0.05 provides ~2.6x
         margin to absorb heavy upper-tail truncation under
         T_lambda = (E_1) / E_2 (Cauchy-like tails — needs more samples
         for empirical-CDF stability in the upper percentiles).
+        Reduced replication count under ``ci_params.bootstrap`` still
+        exercises the same code path; pure-Python CI runs at n=200 and
+        full runs at 5000.
         """
-        n_draws = 5000
+        n_draws = ci_params.bootstrap(5000, min_n=200)
         G_per_draw = 2000
         t_stats = np.empty(n_draws)
         for idx in range(n_draws):
@@ -512,7 +527,14 @@ class TestHADTheorem4QUG:
         assert valid.sum() >= 0.99 * n_draws
         # Compare to closed-form F(t) = t/(1+t).
         ks_stat, _ = stats.kstest(t_stats[valid], lambda t: t / (1.0 + t))
-        assert ks_stat <= 0.05, f"KS stat {ks_stat:.4f} exceeds 0.05 tolerance"
+        # KS critical at n=5000, alpha=0.05 is ~0.0192; at n=200 it's
+        # ~0.096. Conditional tolerance per `ci_params.bootstrap` /
+        # `feedback_bootstrap_drift_tests_need_backend_tolerance`: 0.05
+        # at full n, 0.15 at reduced n.
+        ks_tol = 0.05 if n_draws >= 1000 else 0.15
+        assert (
+            ks_stat <= ks_tol
+        ), f"KS stat {ks_stat:.4f} exceeds {ks_tol} tolerance (n_draws={n_draws})"
 
     def test_theorem4_p_value_closed_form_precision(self) -> None:
         """Asymptotic p-value ``1/(1+T)`` at machine precision."""
@@ -603,15 +625,18 @@ class TestHADTheorem7YatchewHR:
     the paper-literal form, and this class locks that convention.
     """
 
-    def test_eq29_standard_normal_limit_under_linearity(self) -> None:
+    @pytest.mark.slow
+    def test_eq29_standard_normal_limit_under_linearity(self, ci_params) -> None:
         """T_hr converges to N(0,1) under H_0 (linearity) at G=2000.
 
-        DGP: dy = a + b * d + N(0, sigma). Run n_replicates=200 draws,
-        assert empirical KS-stat vs N(0,1) <= 0.10. KS critical at n=200
-        is ~1.36/sqrt(200) = 0.096; 0.10 provides slim 1.04x margin so
-        seed-pinning matters.
+        DGP: dy = a + b * d + N(0, sigma). Run n_reps draws (gated by
+        ``ci_params.bootstrap(200, min_n=25)`` so constrained CI can
+        downshift), assert empirical KS-stat vs N(0,1) below an n-
+        dependent tolerance. KS critical at n=200, alpha=0.05 is
+        ~1.36/sqrt(200) = 0.096; at n=25 it's ~0.272. Conditional
+        tolerance: 0.15 at full n, 0.35 at reduced n.
         """
-        n_reps = 200
+        n_reps = ci_params.bootstrap(200, min_n=25)
         G = 2000
         t_stats = np.empty(n_reps)
         for idx in range(n_reps):
@@ -623,7 +648,14 @@ class TestHADTheorem7YatchewHR:
         # All draws should be finite (no ties on Uniform).
         assert np.all(np.isfinite(t_stats))
         ks_stat, _ = stats.kstest(t_stats, "norm")
-        assert ks_stat <= 0.10, f"KS stat {ks_stat:.4f} exceeds 0.10 tolerance"
+        # KS critical at n=200, alpha=0.05 is ~0.096; at n=25 it's ~0.272.
+        # Full-n run: 0.10 (slim margin, validated locally on the pinned
+        # seed sequence); reduced-n CI: 0.35 (safety band over the
+        # asymptotic critical at min_n).
+        ks_tol = 0.10 if n_reps >= 100 else 0.35
+        assert (
+            ks_stat <= ks_tol
+        ), f"KS stat {ks_stat:.4f} exceeds {ks_tol} tolerance (n_reps={n_reps})"
 
     def test_eq29_normalizer_2G_not_2Gminus1(self) -> None:
         """Locks the paper-literal sigma2_diff normalizer = 2G (NOT 2(G-1)).
