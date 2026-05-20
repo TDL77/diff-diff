@@ -355,6 +355,113 @@ class TestWLSCR2ZeroWeightClusterRejection:
         assert np.all(np.isfinite(dof)) and np.all(dof > 0)
 
 
+class TestLinearRegressionWeightedClusterHC2BM:
+    """Regression for the R2 P0: `LinearRegression(vcov_type="hc2_bm")` on a
+    weighted clustered fit must report Satterthwaite DOF via `_bm_dof`, not
+    fall back to `n - k`. The previous skip in `fit()` left `_bm_dof = None`
+    on the weighted-cluster branch, so `get_inference()` silently used the
+    generic DOF and produced anti-conservative p-values / CIs."""
+
+    def test_lr_weighted_cluster_hc2_bm_df_matches_helper(self):
+        """`LinearRegression.get_inference()` df must match
+        `compute_robust_vcov(..., return_dof=True)` DOF, not `n - k`."""
+        from diff_diff.linalg import LinearRegression, compute_robust_vcov
+
+        rng = np.random.default_rng(301)
+        n = 40
+        X = np.column_stack([np.ones(n), rng.normal(size=n), rng.normal(size=n)])
+        cluster_ids = np.arange(n) % 8  # 8 clusters
+        y = X @ np.array([1.0, 0.5, 0.3]) + rng.normal(0, 0.5, n)
+        w = rng.uniform(0.5, 2.0, n)
+
+        # Helper-level: directly compute the Satterthwaite DOF
+        coef = np.linalg.solve(X.T @ (X * w[:, None]), X.T @ (w * y))
+        resid = y - X @ coef
+        _, helper_dof = compute_robust_vcov(
+            X,
+            resid,
+            cluster_ids=cluster_ids,
+            vcov_type="hc2_bm",
+            weights=w,
+            weight_type="pweight",
+            return_dof=True,
+        )
+
+        # Public surface: fit through LinearRegression. weights/cluster live
+        # on the constructor (not fit()), and the constructor needs
+        # include_intercept=False because X already has an intercept column.
+        lr = LinearRegression(
+            include_intercept=False,
+            vcov_type="hc2_bm",
+            cluster_ids=cluster_ids,
+            weights=w,
+            weight_type="pweight",
+        )
+        lr.fit(X, y)
+        # The Satterthwaite DOF must be threaded into get_inference(), NOT the
+        # n-k fallback. Helper DOF should be small (cluster-driven); fallback
+        # would be ~37 (n - k = 40 - 3).
+        # _bm_dof is the internal attribute populated by fit() and consumed by
+        # get_inference(); also check per-coefficient inference for thread.
+        assert lr._bm_dof is not None, (
+            "LinearRegression must populate _bm_dof on weighted-cluster path "
+            "(previous code skipped this branch)"
+        )
+        np.testing.assert_allclose(
+            lr._bm_dof,
+            helper_dof,
+            atol=1e-10,
+            err_msg="_bm_dof must match helper Satterthwaite DOF",
+        )
+        # Sanity: cluster-driven DOF should be much smaller than n - k.
+        assert np.all(np.asarray(lr._bm_dof) < n - X.shape[1]), (
+            f"Expected cluster-driven Satterthwaite DOF << n-k={n - X.shape[1]}, "
+            f"got {lr._bm_dof}"
+        )
+        # End-to-end: get_inference for each coefficient yields the right df.
+        for i in range(X.shape[1]):
+            inf_i = lr.get_inference(index=i)
+            assert (
+                inf_i.df == lr._bm_dof[i]
+            ), f"get_inference(index={i}).df should equal _bm_dof[{i}]"
+
+    def test_lr_weighted_oneway_hc2_bm_df_matches_helper(self):
+        """One-way weighted HC2-BM via LinearRegression must also thread DOF."""
+        from diff_diff.linalg import LinearRegression, compute_robust_vcov
+
+        rng = np.random.default_rng(302)
+        n = 25
+        X = np.column_stack([np.ones(n), rng.normal(size=n), rng.normal(size=n)])
+        y = X @ np.array([1.0, 0.5, 0.3]) + rng.normal(0, 0.5, n)
+        w = rng.uniform(0.5, 2.0, n)
+
+        coef = np.linalg.solve(X.T @ (X * w[:, None]), X.T @ (w * y))
+        resid = y - X @ coef
+        _, helper_dof = compute_robust_vcov(
+            X,
+            resid,
+            vcov_type="hc2_bm",
+            weights=w,
+            weight_type="pweight",
+            return_dof=True,
+        )
+
+        lr = LinearRegression(
+            include_intercept=False,
+            vcov_type="hc2_bm",
+            weights=w,
+            weight_type="pweight",
+        )
+        lr.fit(X, y)
+        assert lr._bm_dof is not None
+        np.testing.assert_allclose(
+            lr._bm_dof,
+            helper_dof,
+            atol=1e-10,
+            err_msg="One-way LinearRegression _bm_dof must match helper Satterthwaite DOF",
+        )
+
+
 class TestUnweightedRegressionStillBitEqual:
     """Regression safety: existing unweighted goldens must still match bit-equal."""
 

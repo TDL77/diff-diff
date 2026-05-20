@@ -1263,8 +1263,9 @@ def compute_robust_vcov(
       Pustejovsky-Tipton (2018) CR2 Bell-McCaffrey cluster-robust estimator
       (matches R ``clubSandwich::vcovCR(..., type="CR2")``). Required by the
       Pierce-Schott (2016) TWFE application in de Chaisemartin et al. (2026)
-      with ``G=103``. Weighted clustered CR2 is the Phase 2+ follow-up and
-      raises ``NotImplementedError``.
+      with ``G=103``. **Weighted hc2_bm** (both one-way and clustered) is
+      supported for ``weight_type="pweight"`` only via the clubSandwich
+      WLS-CR2 port; ``aweight`` and ``fweight`` raise ``NotImplementedError``.
     - ``"conley"``: spatial HAC sandwich (Conley 1999 Eq 4.2). Requires
       ``conley_coords`` (n×2 array) and ``conley_cutoff_km`` (positive
       bandwidth). Two operating modes: cross-sectional (default) and panel
@@ -2850,11 +2851,13 @@ class LinearRegression:
         two conflict (e.g. ``robust=False, vcov_type="hc2"``), in which
         case ``__init__`` raises. See :func:`solve_ols` for the per-family
         semantics and unsupported combinations. For ``"hc2_bm"``: when
-        ``cluster_ids`` is provided, dispatches to CR2 Bell-McCaffrey; with
-        ``weights``, raises ``NotImplementedError`` (the BM DOF path is
-        currently inconsistent with the WLS transform). On top of the
-        sandwich, the class stores per-coefficient BM Satterthwaite DOF
-        (``self._bm_dof``) and threads it into ``get_inference``.
+        ``cluster_ids`` is provided, dispatches to CR2 Bell-McCaffrey;
+        with ``weights`` (one-way or clustered) dispatches to the
+        clubSandwich WLS-CR2 port — supported for
+        ``weight_type="pweight"`` only (``aweight`` / ``fweight`` raise
+        ``NotImplementedError``). On top of the sandwich, the class
+        stores per-coefficient BM Satterthwaite DOF (``self._bm_dof``)
+        and threads it into ``get_inference``.
 
         For ``"conley"`` (Conley 1999 spatial-HAC) two operating modes are
         supported on the `LinearRegression` / `compute_robust_vcov` surface:
@@ -3171,15 +3174,16 @@ class LinearRegression:
                 conley_lag_cutoff=self.conley_lag_cutoff,
             )
             # For hc2_bm, compute per-coefficient Bell-McCaffrey DOF. Both
-            # the one-way HC2+BM case and the cluster CR2 case are supported;
-            # the weighted cluster path (guarded in compute_robust_vcov) is
-            # Phase 2+ and is skipped here (falls through to self._bm_dof = None).
+            # the one-way HC2+BM case and the cluster CR2 case are supported,
+            # including the weighted clustered CR2 path via the clubSandwich
+            # WLS-CR2 port. The dispatcher already rejects non-pweight weight
+            # types for hc2_bm + weights, so reaching this block guarantees
+            # `_compute_cr2_bm` returns a finite per-coefficient DOF.
             if (
                 _fit_vcov_type == "hc2_bm"
                 and not _use_survey_vcov
                 and vcov is not None
                 and not np.all(np.isnan(coefficients))
-                and not (effective_cluster_ids is not None and _fit_weights is not None)
             ):
                 # Identified columns for DOF (rank-deficient case sets NaN coefs).
                 nan_mask = np.isnan(coefficients)
