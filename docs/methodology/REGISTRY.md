@@ -975,7 +975,77 @@ Interaction-weighted estimator:
 where weights ŵ_{g,e} = n_{g,e} / Σ_g n_{g,e} (sample share of cohort g at event-time e).
 
 *Standard errors:*
-- Default: Cluster-robust at unit level
+- Default: Cluster-robust HC1 at unit level (`vcov_type="hc1"`)
+- `vcov_type ∈ {"classical","hc1","hc2","hc2_bm"}` supported as of Phase 1b
+  PR 1/8 (mirrors the DiD/MPD/TWFE chain established in Phase 1a):
+  - `"hc1"` (default): Eicker-Huber-White HC1 with cluster-at-unit default.
+    Auto-clusters at unit unless an explicit `cluster=` is passed.
+  - `"classical"`: homoskedastic OLS standard errors. Auto-cluster is
+    dropped (one-way only). Routes through the full-dummy saturated
+    design (see Implementation note below) for R-parity.
+  - `"hc2"`: HC2 leverage correction. Auto-cluster is dropped (one-way
+    only); the linalg validator rejects `hc2 + cluster_ids`. Routes
+    through full-dummy.
+  - `"hc2_bm"`: HC2 + Bell-McCaffrey CR2 Satterthwaite DOF for
+    cluster-robust inference. Auto-cluster fires at unit (or explicit
+    `cluster=`); routes through full-dummy. R-parity matches
+    `clubSandwich::vcovCR(..., type="CR2")` + `coef_test()$df_Satt` at
+    atol=1e-10.
+  - `"conley"`: rejected at `__init__` (deferred; would require
+    threading `conley_coords` / `conley_cutoff_km` / ... through
+    `_fit_saturated_regression`).
+- **Note (Phase 1b auto-route):** When `vcov_type ∈ {"classical","hc2",
+  "hc2_bm"}`, `_fit_saturated_regression` bypasses the within-transform
+  path and builds the full-dummy saturated design `[intercept +
+  cohort × event-time interactions + covariates + unit_dummies +
+  time_dummies]` directly. The FWL theorem preserves cohort coefficients
+  and residuals but does NOT preserve the hat matrix, so HC2 leverage
+  and Bell-McCaffrey Satterthwaite DOF must be computed on the full FE
+  projection (matches `lm() + sandwich::vcovHC` / `clubSandwich::vcovCR`).
+  Classical SE also routes through full-dummy so the `(n-k)` finite-
+  sample correction matches R's `lm()` interpretation at atol=1e-10.
+  `hc1` stays on the within-transform path (cluster-robust HC1 doesn't
+  depend on the hat matrix); matches `fixest::sunab()` event-study
+  aggregates closely (see deviation note below).
+- **Note (Phase 1b aggregated BM contrast DOF):** Under
+  `vcov_type="hc2_bm"`, the user-facing aggregated inference
+  (`event_study_effects[e]['p_value']`/`['conf_int']`,
+  `overall_p_value`/`overall_conf_int`) uses CR2 Bell-McCaffrey
+  Satterthwaite DOF per contrast — not the normal distribution.
+  Per-event-time contrast `c_e[full_idx(g,e)] = w_{g,e}` (IW weight)
+  and overall ATT contrast `c_overall[full_idx(g,e)] = w_e × w_{g,e}`
+  are passed to `_compute_cr2_bm_contrast_dof` (the helper PR #465
+  added for MultiPeriodDiD's post-period-average DOF). The resulting
+  per-contrast DOF threads into `safe_inference(..., df=<contrast_dof>)`.
+  Matches `clubSandwich::Wald_test(constraints=matrix(c, 1),
+  test="HTZ")$df_denom` at atol=1e-10 (pinned in
+  `tests/test_methodology_sun_abraham.py`). Cohort-level coefficients
+  separately get per-coefficient BM DOF via
+  `LinearRegression.get_inference()` inside `_fit_saturated_regression`.
+  If the linalg helper fails (rank-deficient design, singular bread),
+  the aggregated inference falls back to the shared analytical df with
+  an explicit `UserWarning`.
+- **Deviation from R (HC1 finite-sample correction):** SA's
+  within-transform HC1 SE differs from `fixest::sunab(cluster=~unit)`
+  by ~1-2% on typical panel sizes. fixest's correction counts the
+  absorbed unit + time FE in the effective parameter count
+  (`n / (n - k_total)`) whereas SA's `solve_ols` counts only the
+  within-transformed design columns (`n / (n - k_dm)`). The IW
+  aggregation step is otherwise identical. Tracked as a follow-up
+  (harmonizing the correction or documenting it as an intentional
+  difference).
+- Survey designs (`survey_design=`) + `vcov_type ∈ {"classical","hc2",
+  "hc2_bm"}` are rejected at fit-time: the survey-design Taylor Series
+  Linearization (or replicate-weight refit) variance overrides the
+  analytical sandwich family, so the requested HC2/HC2-BM/classical
+  family would be silently discarded. Additionally, the auto-cluster
+  guard for one-way families (classical/hc2) would drop the unit
+  auto-cluster before survey-PSU injection, downgrading the panel
+  structure from unit-level to per-observation PSUs. Mirrors the
+  TWFE Gate 1 + replicate-weight gate from PR #469 and the
+  `linalg.py::_validate_vcov_args` `hc2_bm + weights` gate. Use
+  `vcov_type="hc1"` (default) for survey designs; the survey TSL
+  machinery computes the design-aware SE on the within-transform path.
 - Delta method for aggregated coefficients
 - Optional: Pairs bootstrap for robustness
 
@@ -999,9 +1069,21 @@ where weights ŵ_{g,e} = n_{g,e} / Σ_g n_{g,e} (sample share of cohort g at eve
   - **Note**: Defensive enhancement matching CallawaySantAnna behavior; R's `fixest::sunab()` may produce Inf/NaN without warning
 - Inference distribution:
   - Cohort-level p-values: t-distribution (via `LinearRegression.get_inference()`)
-  - Aggregated event study and overall ATT p-values: normal distribution (via `compute_p_value()`)
-  - This is asymptotically equivalent and standard for delta-method-aggregated quantities
-  - **Deviation from R**: R's fixest uses t-distribution at all levels; aggregated p-values may differ slightly for small samples
+  - Aggregated event study and overall ATT p-values:
+    - Under `vcov_type="hc2_bm"`: t-distribution with CR2 Bell-McCaffrey
+      contrast DOF per aggregated effect (see "Phase 1b aggregated BM
+      contrast DOF" Note above). Matches `clubSandwich::Wald_test(
+      test="HTZ")$df_denom`.
+    - Under `vcov_type ∈ {"classical","hc1","hc2"}` (no replicate-weight
+      survey): normal distribution (via `compute_p_value()`), which is
+      asymptotically equivalent and standard for delta-method-aggregated
+      quantities.
+    - Under replicate-weight survey: t-distribution with replicate-derived
+      DOF (`survey_metadata.df_survey`).
+  - **Deviation from R**: R's fixest uses t-distribution at all levels
+    under `vcov_type ∈ {"classical","hc1","hc2"}`; aggregated p-values
+    may differ slightly for small samples on those families. The
+    `hc2_bm` aggregated path matches clubSandwich exactly.
 
 **Reference implementation(s):**
 - R: `fixest::sunab()` (Laurent Bergé's implementation)
