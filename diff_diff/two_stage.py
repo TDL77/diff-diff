@@ -125,9 +125,20 @@ def _compute_gmm_corrected_meat(
       TSL has its own ``(1-f_h) * n_h/(n_h-1)`` correction).
     - ``vcov_type="cluster"``: ``cluster_ids`` IS the PSU (via upstream
       ``_inject_cluster_as_psu``); identical to the HC1+survey branch.
-    - ``vcov_type="conley"``: raises ``NotImplementedError``. Wave E.2
-      (planned) will compose Conley spatial-HAC with within-stratum
-      Conley sandwich on PSU totals.
+    - ``vcov_type="conley"`` (cross-sectional only — ``conley_lag_cutoff = 0``):
+      Wave E.2 stratified-Conley sandwich on PSU totals via
+      :func:`_compute_stratified_conley_meat`. Aggregates Psi to PSU
+      totals + derives per-PSU centroids as the mean of per-obs
+      ``conley_coords``; for each stratum applies the Conley kernel
+      between PSU centroids scaled by ``(1 - f_h) * n_h/(n_h-1)``.
+      Cross-stratum kernel weights are zero by sampling design.
+    - ``vcov_type="conley"`` with ``conley_lag_cutoff > 0`` (panel-block
+      Conley): raises ``NotImplementedError`` upstream at
+      ``SpilloverDiD.fit``. The panel-block decomposition would need to
+      compose the within-unit serial Bartlett HAC with the within-stratum
+      cross-PSU spatial kernel on PSU-by-time scores rather than the
+      collapsed PSU totals; out of Wave E.2 scope and tracked as a
+      follow-up in ``TODO.md``.
 
     **`gamma_hat` solve** (mirror of `TwoStageDiD._compute_gmm_variance`
     pattern at `two_stage.py:1886-1917`): factorize ``X_10' W X_10`` via
@@ -212,16 +223,10 @@ def _compute_gmm_corrected_meat(
             cluster_ids=cluster_ids,
         )
 
-    # Wave E.1: reject the conley × survey composition. Wave E.2 (planned)
-    # will add the within-stratum Conley sandwich on PSU totals.
-    if vcov_type == "conley" and resolved_survey is not None:
-        raise NotImplementedError(
-            "SpilloverDiD does not yet support vcov_type='conley' combined "
-            "with survey_design=. Wave E.2 (planned) will compose Conley "
-            "spatial-HAC with within-stratum Conley sandwich on PSU totals; "
-            "see TODO.md for the planned PR. For now, use vcov_type='hc1' "
-            "(+ cluster=<col> for CR1) with survey_design=."
-        )
+    # Wave E.2 (this PR): conley × survey is now supported via the
+    # stratified-Conley sandwich on PSU totals. Dispatch happens inside
+    # the vcov_type == "conley" branch below (Wave E.1 already routed
+    # hc1 / cluster + survey to the Binder TSL helper).
 
     # 1. gamma_hat = (X_10' W X_10)^{-1} (X_1' W X_2). Mirror the existing
     #    TwoStageDiD method at two_stage.py:1886-1917 — sparse_factorized
@@ -358,19 +363,37 @@ def _compute_gmm_corrected_meat(
                 "_compute_gmm_corrected_meat: vcov_type='conley' requires "
                 "conley_coords, conley_cutoff_km, and conley_metric."
             )
-        # Delegate to the shared kernel-application helper. No finite-sample
-        # multiplier on the Conley path (matches conleyreg / Wave B convention).
-        meat = _compute_conley_meat(
-            Psi,
-            conley_coords,
-            conley_cutoff_km,
-            conley_metric,
-            conley_kernel,
-            time=conley_time,
-            unit=conley_unit,
-            lag_cutoff=conley_lag_cutoff,
-            cluster_ids=cluster_ids,
-        )
+        if resolved_survey is not None:
+            # Wave E.2: stratified-Conley sandwich on PSU totals. cluster_ids
+            # is intentionally NOT threaded through — after PSU aggregation
+            # every PSU is its own cluster, so a cluster product kernel
+            # would zero all cross-PSU pairs. Wave E.1's
+            # _resolve_effective_cluster path already coerced any
+            # user-supplied cluster=<col> into PSU upstream.
+            meat = _compute_stratified_conley_meat(
+                Psi,
+                conley_coords=np.asarray(conley_coords, dtype=np.float64),
+                conley_cutoff_km=conley_cutoff_km,
+                conley_metric=conley_metric,
+                conley_kernel=conley_kernel,
+                resolved_survey=resolved_survey,
+                conley_time=conley_time,  # panel-aware per-period sandwich
+            )
+        else:
+            # Wave D no-survey Conley path UNCHANGED — bit-identical fallback.
+            # No finite-sample multiplier on the Conley path (matches conleyreg
+            # / Wave B convention).
+            meat = _compute_conley_meat(
+                Psi,
+                conley_coords,
+                conley_cutoff_km,
+                conley_metric,
+                conley_kernel,
+                time=conley_time,
+                unit=conley_unit,
+                lag_cutoff=conley_lag_cutoff,
+                cluster_ids=cluster_ids,
+            )
     else:
         raise ValueError(
             f"_compute_gmm_corrected_meat: vcov_type must be one of "
@@ -503,6 +526,263 @@ def _compute_binder_tsl_meat(
     if not _variance_computed and _legit_zero == 0:
         warnings.warn(
             "SpilloverDiD Wave E.1 survey sandwich: df_survey = 0 "
+            "(all strata removed by lonely_psu='remove' on single-PSU "
+            "strata; no PSU contributed to the meat). Returning NaN meat "
+            "so downstream inference NaN-propagates.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return np.full((p_2, p_2), np.nan)
+
+    return meat
+
+
+def _compute_stratified_conley_meat(
+    Psi: np.ndarray,
+    *,
+    conley_coords: np.ndarray,
+    conley_cutoff_km: float,
+    conley_metric,
+    conley_kernel: str,
+    resolved_survey: "ResolvedSurveyDesign",
+    conley_time: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Wave E.2 panel-aware stratified-Conley meat on PSU-by-time scores.
+
+    Composes Conley (1999) spatial-HAC with Gerber (2026, arXiv:2605.04124)
+    Proposition 1 Binder TSL (the Wave E.1 foundation) and the Wave D
+    Gardner GMM first-stage uncertainty correction (Butts 2021 ss3.1 +
+    Gardner 2022 ss4) applied to SpilloverDiD's ring-indicator stage-2
+    design. No reference software combines all three ingredients on a
+    two-stage influence function.
+
+    **Panel-aware composition (preserves the library's panel Conley
+    contract):** for each period ``t``, aggregate per-obs Psi to PSU
+    totals WITHIN that period (``S_psu_t[g] = sum_{i in PSU g, time t}
+    Psi[i]``); derive each PSU's spatial centroid as the mean of
+    per-observation ``conley_coords`` (panel-constant — PSU is a sampling
+    unit with fixed location); apply the per-stratum Conley sandwich on
+    ``S_psu_t`` via
+    :func:`diff_diff.survey._compute_stratified_conley_meat_from_psu_scores`
+    (Binder FPC factor ``(1 - f_h) * n_h/(n_h-1)``); sum across periods.
+    Cross-period spatial pairs are excluded by construction, matching the
+    library's existing ``conley_lag_cutoff = 0`` semantic ("within-period
+    spatial only") at :func:`diff_diff.conley._compute_conley_meat`.
+    Cross-stratum kernel weights are zero by sampling design (strata are
+    exact independence partitions).
+
+    Parameters
+    ----------
+    Psi : np.ndarray of shape (n, p_2)
+        Per-obs Wave D Gardner GMM influence-function scores (already
+        Hajek-weighted via the Wave E.1 upstream eps multiplication).
+    conley_coords : np.ndarray of shape (n, 2)
+        Per-observation lat/lon (or generic 2D coordinates). Already
+        validated finite upstream at ``spillover.py:_validate_spillover_inputs``;
+        no defensive finiteness check on derived PSU centroids.
+    conley_cutoff_km : float
+        Conley spatial-HAC bandwidth in km (haversine) or the
+        coord units (euclidean / callable).
+    conley_metric : ConleyMetric
+        ``"haversine"`` / ``"euclidean"`` / callable, per
+        :mod:`diff_diff.conley`.
+    conley_kernel : str
+        ``"bartlett"`` or ``"uniform"``.
+    resolved_survey : ResolvedSurveyDesign
+        ``.psu`` may be None; when absent, each observation is treated as
+        its own singleton PSU (matches the implicit-PSU convention of
+        :class:`ResolvedSurveyDesign` no-PSU branches). ``.strata`` and
+        ``.fpc`` are optional; absent strata synthesize a single stratum.
+    conley_time : np.ndarray of shape (n,), optional
+        Per-observation period label. When None, all observations are
+        treated as a single period (T = 1; the per-period loop reduces to
+        one iteration on the full Psi, which is the cross-sectional
+        Wave E.2 design). When provided (the standard SpilloverDiD case),
+        the per-period loop preserves the within-period spatial semantic.
+
+    Returns
+    -------
+    meat : np.ndarray of shape (p_2, p_2)
+        Wave E.2 panel-aware stratified-Conley meat
+        (``sum_t meat_t`` where ``meat_t`` is the within-stratum Conley
+        sandwich on the period-``t`` PSU totals).
+
+    Notes
+    -----
+    ``cluster_ids`` is intentionally not accepted: after PSU aggregation
+    every PSU is its own cluster, so threading a cluster product kernel
+    into the inner :func:`_compute_stratified_conley_meat_from_psu_scores`
+    would zero all cross-PSU pairs (``1{cluster_j == cluster_k}`` = 0 for
+    j != k). The Wave E.1 ``_resolve_effective_cluster`` path already
+    collapsed any user-supplied ``cluster=<col>`` into PSU upstream.
+
+    NaN-fails (with ``UserWarning``) when the inner survey helper
+    returns ``(False, 0)`` for every period — i.e. no stratum contributed
+    variance and none was a legitimate zero across any period. Mirrors the
+    Wave E.1 Binder TSL saturation behavior; departs from TwoStageDiD's
+    silent NaN-VCV at ``two_stage.py:2003-2005`` per
+    ``feedback_no_silent_failures``.
+
+    Reductions:
+
+    - ``T = 1`` (single period or ``conley_time is None``): single-pass
+      stratified-Conley sandwich on the full PSU totals (the original
+      cross-sectional Wave E.2 design).
+    - ``H = 1`` stratum, ``FPC = inf``: reduces to ``sum_t`` plain
+      Conley sandwich on per-period PSU totals.
+    - Bandwidth -> 0 (``K = I``): reduces to ``sum_t`` per-period
+      within-stratum HC sandwich on PSU totals (NOT Wave E.1 Binder,
+      which is over time-collapsed PSU totals).
+
+    Out of scope (deferred follow-up, tracked in TODO.md):
+
+    - ``conley_lag_cutoff > 0`` panel-block: the within-PSU serial
+      Bartlett HAC over time would compose with the spatial sandwich
+      here. Rejected upfront at ``SpilloverDiD.fit``.
+    """
+    from diff_diff.survey import _compute_stratified_conley_meat_from_psu_scores
+
+    p_2 = Psi.shape[1]
+    n_obs = Psi.shape[0]
+    coords_arr = np.asarray(conley_coords, dtype=np.float64)
+
+    # No-PSU fallback: each obs is its own singleton PSU. Matches Wave E.1
+    # Binder TSL convention at _compute_binder_tsl_meat L450-451.
+    if resolved_survey.psu is None:
+        psu_arr: np.ndarray = np.arange(n_obs, dtype=np.int64)
+    else:
+        psu_arr = np.asarray(resolved_survey.psu)
+    strata_arr_full = (
+        np.asarray(resolved_survey.strata) if resolved_survey.strata is not None else None
+    )
+    fpc_arr_full = (
+        np.asarray(resolved_survey.fpc, dtype=np.float64)
+        if resolved_survey.fpc is not None
+        else None
+    )
+
+    # Panel-constant PSU centroids for explicit-PSU layouts (R4 P1 fix).
+    # The Wave E.2 registry / api contract specifies
+    # ``centroid_g = mean over i in PSU g of conley_coords[i]`` (panel-wide,
+    # not per-period). For a PSU containing multiple units at different
+    # coordinates with finite_mask dropping different members across
+    # periods, per-period recomputation would silently shift the spatial
+    # kernel weights — that would be a documented-contract violation.
+    # Compute once on the full active sample so each period's helper call
+    # sees the SAME centroid for the same PSU.
+    #
+    # For implicit-PSU (pseudo-PSU = obs index), every pseudo-PSU appears
+    # in exactly one period, so the per-period slice naturally produces
+    # the obs's own coordinate as that pseudo-PSU's centroid — no precompute
+    # needed. The dictionary stays None on that branch.
+    coord_dim = coords_arr.shape[1]
+    psu_value_to_centroid: Optional[dict] = None
+    if resolved_survey.psu is not None:
+        unique_psus_full, _, psu_indices_full = np.unique(
+            psu_arr, return_index=True, return_inverse=True
+        )
+        G_full = len(unique_psus_full)
+        psu_coord_sums_full = np.zeros((G_full, coord_dim))
+        for d in range(coord_dim):
+            np.add.at(psu_coord_sums_full[:, d], psu_indices_full, coords_arr[:, d])
+        psu_counts_full = np.bincount(psu_indices_full, minlength=G_full).astype(np.float64)
+        psu_centroids_full = psu_coord_sums_full / psu_counts_full[:, None]
+        psu_value_to_centroid = {unique_psus_full[g]: psu_centroids_full[g] for g in range(G_full)}
+
+    # Per-period loop: preserves the library's "within-period spatial only"
+    # contract for conley_lag_cutoff = 0. PSU set, centroids, strata, and
+    # FPC are re-built from the ACTIVE rows in each period (not from the
+    # full panel) so implicit-PSU layouts (`resolved_survey.psu is None`,
+    # i.e. one pseudo-PSU per observation) don't drag off-period
+    # zero-padded entries into the kernel via centering. For explicit-PSU
+    # balanced-panel layouts the per-period centroids equal the
+    # panel-constant centroids (obs coords are time-invariant), so this
+    # re-indexing is bit-identical to the prior naive panel-wide PSU
+    # mapping on that branch.
+    if conley_time is None:
+        # Treat all obs as one period (cross-sectional fallback).
+        time_arr = np.zeros(n_obs, dtype=np.int64)
+    else:
+        time_arr = np.asarray(conley_time)
+    unique_times = np.unique(time_arr)
+
+    # Saturation guard for unstratified single-PSU on the FULL panel.
+    # The per-period helper invocation will also NaN-fail when no period
+    # contributes variance, but this front-door check matches Wave E.1's
+    # ergonomic "df_survey is undefined" message for the panel-level
+    # degenerate case.
+    if strata_arr_full is None and len(np.unique(psu_arr)) < 2:
+        G_total = len(np.unique(psu_arr))
+        warnings.warn(
+            "SpilloverDiD Wave E.2 stratified-Conley sandwich: df_survey is "
+            f"undefined (single PSU, no strata; G={G_total}). Returning NaN "
+            "meat so downstream inference NaN-propagates.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return np.full((p_2, p_2), np.nan)
+
+    meat = np.zeros((p_2, p_2))
+    _variance_computed = False
+    _legit_zero = 0
+    for t in unique_times:
+        period_mask = time_arr == t
+        Psi_t = Psi[period_mask]
+        psu_arr_t = psu_arr[period_mask]
+        coords_arr_t = coords_arr[period_mask]
+        unique_psus_t, first_idx_t, psu_indices_t = np.unique(
+            psu_arr_t, return_index=True, return_inverse=True
+        )
+        G_t = len(unique_psus_t)
+
+        # Per-period PSU totals.
+        S_psu_t = np.zeros((G_t, p_2))
+        for j in range(p_2):
+            np.add.at(S_psu_t[:, j], psu_indices_t, Psi_t[:, j])
+
+        # Per-period PSU centroids: panel-constant for explicit-PSU
+        # (look up from the precomputed dict to match the documented
+        # ``centroid_g = mean over i in PSU g of conley_coords[i]``
+        # panel-wide contract); per-period mean for implicit-PSU
+        # (pseudo-PSU = obs, each appears in exactly one period, so the
+        # per-period mean IS the obs's own coord).
+        if psu_value_to_centroid is not None:
+            psu_centroids_t = np.array([psu_value_to_centroid[v] for v in unique_psus_t])
+        else:
+            psu_coord_sums_t = np.zeros((G_t, coord_dim))
+            for d in range(coord_dim):
+                np.add.at(psu_coord_sums_t[:, d], psu_indices_t, coords_arr_t[:, d])
+            psu_counts_t = np.bincount(psu_indices_t, minlength=G_t).astype(np.float64)
+            psu_centroids_t = psu_coord_sums_t / psu_counts_t[:, None]
+
+        # Per-period strata + fpc.
+        if strata_arr_full is not None:
+            psu_strata_t = strata_arr_full[period_mask][first_idx_t]
+        else:
+            psu_strata_t = np.zeros(G_t, dtype=int)
+        psu_fpc_t: Optional[np.ndarray] = None
+        if fpc_arr_full is not None:
+            psu_fpc_t = fpc_arr_full[period_mask][first_idx_t]
+
+        # Stratified Conley sandwich for period t.
+        meat_t, var_t, legit_zero_t = _compute_stratified_conley_meat_from_psu_scores(
+            psu_scores=S_psu_t,
+            psu_strata=psu_strata_t,
+            psu_coords=psu_centroids_t,
+            cutoff=conley_cutoff_km,
+            metric=conley_metric,
+            kernel=conley_kernel,
+            fpc_per_psu=psu_fpc_t,
+            lonely_psu=resolved_survey.lonely_psu,
+        )
+        meat += meat_t
+        _variance_computed = _variance_computed or var_t
+        _legit_zero += legit_zero_t
+
+    # Wave E.2 survey-saturated NaN-fail per `feedback_no_silent_failures`.
+    if not _variance_computed and _legit_zero == 0:
+        warnings.warn(
+            "SpilloverDiD Wave E.2 stratified-Conley sandwich: df_survey = 0 "
             "(all strata removed by lonely_psu='remove' on single-PSU "
             "strata; no PSU contributed to the meat). Returning NaN meat "
             "so downstream inference NaN-propagates.",

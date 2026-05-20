@@ -2190,22 +2190,43 @@ class SpilloverDiD:
         heteroskedasticity-robust SE with the GMM correction.
         """
         # Wave E.1: lift the Wave B/C/D upfront survey_design rejection.
-        # The full resolution block (pweight gate, replicate gate, unit-constant
+        # Wave E.2 (this PR): conley × survey is now supported via a
+        # stratified-Conley sandwich on PSU totals (composition of Conley
+        # 1999 + Gerber 2026 Prop 1 Binder TSL + Wave D Gardner GMM). The
+        # full resolution block (pweight gate, replicate gate, unit-constant
         # check, cluster-vs-PSU warn) runs AFTER `_validate_spillover_inputs`
         # below so it sees the panel columns the validator guarantees.
         #
-        # The conley × survey composition is genuinely novel methodology
-        # (no reference software combines spatial-HAC + Binder TSL on a
-        # two-stage IF) and ships separately as Wave E.2. Reject upfront so
-        # users get the pointer without waiting through stage 1 / 2 work.
-        if survey_design is not None and self.vcov_type == "conley":
+        # Wave E.2 scope-limit (upfront, before resolution / panel work):
+        # the panel-block Conley HAC (`conley_lag_cutoff > 0`) is NOT
+        # composed with the survey path in this PR. The stratified-Conley
+        # helper applies a cross-sectional kernel on PSU-aggregated totals;
+        # composing the within-unit serial Bartlett HAC with the within-
+        # stratum cross-PSU spatial kernel requires carrying PSU-by-time
+        # scores into the meat construction, which is a separate Wave E.x
+        # follow-up tracked in TODO.md. Reject upfront with a clear pointer
+        # so users running `survey_design=` + `conley_lag_cutoff > 0` get
+        # the error before stage-1 / 2 work (per `feedback_no_silent_failures`).
+        if (
+            survey_design is not None
+            and self.vcov_type == "conley"
+            and self.conley_lag_cutoff is not None
+            and self.conley_lag_cutoff > 0
+        ):
             raise NotImplementedError(
-                "SpilloverDiD does not yet support vcov_type='conley' "
-                "combined with survey_design=. Wave E.2 (planned) will "
-                "compose Conley spatial-HAC with within-stratum Conley "
-                "sandwich on PSU totals; see TODO.md for the planned PR. "
-                "For Wave E.1, use vcov_type='hc1' (with optional "
-                "cluster=<col> for CR1) plus survey_design=."
+                "SpilloverDiD(vcov_type='conley', conley_lag_cutoff > 0) "
+                "combined with survey_design= is not supported in Wave E.2. "
+                "The Wave E.2 stratified-Conley sandwich aggregates Psi to "
+                "PSU totals before applying the cross-sectional Conley "
+                "kernel; the panel-block decomposition (within-unit serial "
+                "Bartlett HAC over time) would require carrying PSU-by-time "
+                "scores and composing the serial kernel with the within-"
+                "stratum cross-PSU spatial kernel. This composition is "
+                "queued as a follow-up (see TODO.md). For Wave E.2, use "
+                "conley_lag_cutoff=0 (cross-sectional Conley) with "
+                "survey_design=, or use survey_design= with "
+                "vcov_type='hc1' (+ cluster=<col> for CR1) for the full "
+                "Wave E.1 path."
             )
         # Validate `anticipation` up front: must be a non-negative integer.
         # Accepting fractional or negative values would silently shift
