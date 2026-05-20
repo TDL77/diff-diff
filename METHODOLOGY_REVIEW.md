@@ -706,7 +706,7 @@ and covariate-adjusted specifications.)
 - [x] Assumption 5/6 non-testability documented in `HeterogeneousAdoptionDiD` class docstring + `qug_test`/`stute_test`/`yatchew_hr_test`/`did_had_pretest_workflow` Notes blocks; reinforced by a fit-time `UserWarning` emitted from the outer `HeterogeneousAdoptionDiD.fit()` dispatch on the overall and event-study paths when the resolved design is Design 1 family (search `diff_diff/had.py` for "---- Assumption 5/6 warning on Design 1 paths ----")
 
 **Test Coverage:**
-- 35 methodology tests in `tests/test_methodology_had.py` (this PR)
+- 36 methodology tests in `tests/test_methodology_had.py` (this PR)
 - ~1,137 implementation-detail tests across `tests/test_had.py`, `tests/test_had_pretests.py`, `tests/test_had_mc.py`, `tests/test_had_dual_knob_deprecation.py`
 - 5 R-direct parity tests at `atol=1e-8` in `tests/test_did_had_parity.py`
 - ~46 + ~44 nprobust port + bias-corrected port tests

@@ -155,13 +155,17 @@ def _fit_overall(panel: pd.DataFrame, **kwargs) -> HeterogeneousAdoptionDiDResul
     """Fit HAD with `aggregate="overall"` and return the result."""
     est = HeterogeneousAdoptionDiD(**kwargs)
     with warnings.catch_warnings():
-        # The Design 1 family (mass_point / continuous_near_d_lower)
-        # emits a UserWarning about Assumption 5/6 non-testability; filter
-        # so test output isn't dominated by warning noise. The warning is
-        # itself covered by ``TestHADDeviations``.
+        # The Design 1 family (mass_point / continuous_near_d_lower) emits
+        # a UserWarning about Assumption 5/6 non-testability; filter so
+        # test output isn't dominated by warning noise. The warning IS
+        # locked elsewhere by
+        # ``TestHADDeviations::test_assumption_5_6_userwarning_fires_on_design_1_family``,
+        # which uses ``pytest.warns(UserWarning, match=r"Assumption [56]")``
+        # on a mass-point fit to assert the warning fires (so this helper
+        # suppression doesn't mask a regression).
         warnings.filterwarnings(
             "ignore",
-            message=r".*(Assumption|continuous_near_d_lower|mass_point).*",
+            message=r".*Assumption [56].*",
             category=UserWarning,
         )
         result = est.fit(
@@ -1135,9 +1139,54 @@ class TestHADDeviations:
             )
         # Should produce a valid event-study result (no raise).
         assert isinstance(result, HeterogeneousAdoptionDiDEventStudyResults)
-        # Earlier cohort dropped; never-treated + last cohort kept.
-        # n_units reflects the auto-filter.
-        assert result.n_units < G  # earlier cohort was dropped
+        # Paper Appendix B.2: filter keeps LAST cohort + never-treated;
+        # drops earlier-cohort units. With G=600 and 3 equal-sized cohorts
+        # (third=200 each), kept count = 200 never-treated + 200 last
+        # cohort = 400. Earlier cohort (first_treat=2) is the 200 dropped
+        # units. Lock the exact partition rather than a soft inequality.
+        assert result.n_units == 400
+        # Cross-check the actual retained first_treat values: never-treated
+        # (0) plus the last cohort (3) only — NO earlier cohort (2).
+        retained_first_treat = set(
+            panel.loc[panel["unit"].isin(panel["unit"].unique()), "first_treat"].unique()
+        )
+        # Sanity on the panel itself.
+        assert retained_first_treat == {0, 2, 3}
+        # And via the result's reported filter metadata (the auto-filter
+        # records kept/dropped cohorts; n_units is the kept count).
+        assert result.n_units + 200 == G  # 200 earlier-cohort dropped
+
+    def test_assumption_5_6_userwarning_fires_on_design_1_family(self) -> None:
+        """Design 1 family (continuous_near_d_lower / mass_point) emits the
+        Assumption 5/6 non-testability ``UserWarning`` at fit time.
+
+        Locks the documentation-closure claim: the
+        ``HeterogeneousAdoptionDiD`` class docstring's "Non-testable
+        assumptions" Notes block + the paper-review L192 closure both
+        cite a fit-time warning at the "---- Assumption 5/6 warning on
+        Design 1 paths ----" block. Without this regression test the
+        warning could silently regress and the docs would still claim
+        the surface exists.
+        """
+        rng = np.random.default_rng(_BASE_SEED_DEVIATIONS + 6)
+        # Mass-point DGP triggers the Design 1 path -> warning fires.
+        panel = _make_two_period_panel(
+            rng,
+            G=500,
+            dose_dist="mass_point_d_lower_uniform",
+            was_true=0.3,
+            sigma=0.1,
+            d_lower=1.0,
+        )
+        est = HeterogeneousAdoptionDiD(design="auto")
+        with pytest.warns(UserWarning, match=r"Assumption [56]"):
+            est.fit(
+                panel,
+                outcome_col="outcome",
+                dose_col="dose",
+                time_col="period",
+                unit_col="unit",
+            )
 
     def test_safe_inference_no_partial_nan_on_degenerate_panel(self) -> None:
         """safe_inference contract: no partial-NaN state on a degenerate panel.
