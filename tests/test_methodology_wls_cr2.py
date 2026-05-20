@@ -215,6 +215,146 @@ class TestWLSCR2ContrastDOF:
         )
 
 
+class TestWLSCR2WeightTypeRejection:
+    """The clubSandwich WLS-CR2 port matches `pweight` only. Other weight types
+    must raise NotImplementedError rather than silently producing wrong inference.
+    Addresses Codex P0 finding (weight_type contract gap)."""
+
+    def test_aweight_clustered_hc2_bm_rejects(self):
+        rng = np.random.default_rng(101)
+        n, k = 30, 3
+        X = np.column_stack([np.ones(n), rng.normal(size=(n, k - 1))])
+        y = X @ np.array([1.0, 0.5, 0.3]) + rng.normal(0, 0.5, n)
+        w = rng.uniform(0.5, 2.0, n)
+        cluster_ids = np.arange(n) % 5
+        from diff_diff.linalg import compute_robust_vcov
+
+        with pytest.raises(NotImplementedError, match="pweight"):
+            compute_robust_vcov(
+                X,
+                y - X @ np.linalg.solve(X.T @ (X * w[:, None]), X.T @ (w * y)),
+                cluster_ids=cluster_ids,
+                vcov_type="hc2_bm",
+                weights=w,
+                weight_type="aweight",
+            )
+
+    def test_fweight_clustered_hc2_bm_rejects(self):
+        rng = np.random.default_rng(102)
+        n, k = 30, 3
+        X = np.column_stack([np.ones(n), rng.normal(size=(n, k - 1))])
+        y = X @ np.array([1.0, 0.5, 0.3]) + rng.normal(0, 0.5, n)
+        w = rng.integers(1, 4, size=n).astype(np.float64)
+        cluster_ids = np.arange(n) % 5
+        from diff_diff.linalg import compute_robust_vcov
+
+        with pytest.raises(NotImplementedError, match="pweight"):
+            compute_robust_vcov(
+                X,
+                y - X @ np.linalg.solve(X.T @ (X * w[:, None]), X.T @ (w * y)),
+                cluster_ids=cluster_ids,
+                vcov_type="hc2_bm",
+                weights=w,
+                weight_type="fweight",
+            )
+
+    def test_aweight_one_way_hc2_bm_rejects(self):
+        rng = np.random.default_rng(103)
+        n, k = 30, 3
+        X = np.column_stack([np.ones(n), rng.normal(size=(n, k - 1))])
+        y = X @ np.array([1.0, 0.5, 0.3]) + rng.normal(0, 0.5, n)
+        w = rng.uniform(0.5, 2.0, n)
+        from diff_diff.linalg import compute_robust_vcov
+
+        with pytest.raises(NotImplementedError, match="pweight"):
+            compute_robust_vcov(
+                X,
+                y - X @ np.linalg.solve(X.T @ (X * w[:, None]), X.T @ (w * y)),
+                vcov_type="hc2_bm",
+                weights=w,
+                weight_type="aweight",
+            )
+
+    def test_pweight_clustered_hc2_bm_accepted(self):
+        """pweight (the matching convention) must NOT raise."""
+        rng = np.random.default_rng(104)
+        n, k = 30, 3
+        X = np.column_stack([np.ones(n), rng.normal(size=(n, k - 1))])
+        y = X @ np.array([1.0, 0.5, 0.3]) + rng.normal(0, 0.5, n)
+        w = rng.uniform(0.5, 2.0, n)
+        cluster_ids = np.arange(n) % 5
+        from diff_diff.linalg import compute_robust_vcov
+
+        vcov, dof = compute_robust_vcov(
+            X,
+            y - X @ np.linalg.solve(X.T @ (X * w[:, None]), X.T @ (w * y)),
+            cluster_ids=cluster_ids,
+            vcov_type="hc2_bm",
+            weights=w,
+            weight_type="pweight",
+            return_dof=True,
+        )
+        assert np.all(np.isfinite(vcov)) and np.all(np.diag(vcov) > 0)
+        assert np.all(np.isfinite(dof)) and np.all(dof > 0)
+
+
+class TestWLSCR2ZeroWeightClusterRejection:
+    """Zero-total-weight clusters (subpopulation-style padding) must NOT pass
+    the `G>=2` check when only one effective cluster remains. Addresses Codex
+    P1 finding."""
+
+    def test_clustered_with_one_zero_weight_cluster_raises(self):
+        """A weighted CR2 fit where one cluster has all-zero weights and only
+        one other cluster has positive weight must raise."""
+        rng = np.random.default_rng(201)
+        n = 20
+        X = np.column_stack([np.ones(n), rng.normal(size=n), rng.normal(size=n)])
+        y = X @ np.array([1.0, 0.5, 0.3]) + rng.normal(0, 0.5, n)
+        # Two clusters: 0 (positive weight) and 1 (all-zero weight).
+        cluster_ids = np.array([0] * 10 + [1] * 10)
+        w = np.concatenate([np.ones(10), np.zeros(10)])  # only cluster 0 has weight
+        bread = X.T @ (X * w[:, None])
+        # `bread_inv` would be rank-deficient if all-zero rows reduce design,
+        # but we can ensure positive bread by adding a third tiny-weight cluster.
+        cluster_ids = np.array([0] * 10 + [1] * 10)
+        # Reformulate: 2 unique clusters but only 1 has positive total weight
+        # (cluster 1 has w=0 for all its members).
+        coef = np.linalg.solve(bread, X.T @ (w * y))
+        resid = y - X @ coef
+        with pytest.raises(ValueError, match="positive total weight"):
+            _compute_cr2_bm(X, resid, cluster_ids, bread, weights=w)
+
+    def test_contrast_dof_clustered_with_one_zero_weight_cluster_raises(self):
+        """Same check for the contrast-DOF helper."""
+        rng = np.random.default_rng(202)
+        n = 20
+        X = np.column_stack([np.ones(n), rng.normal(size=n), rng.normal(size=n)])
+        X @ np.array([1.0, 0.5, 0.3]) + rng.normal(0, 0.5, n)
+        cluster_ids = np.array([0] * 10 + [1] * 10)
+        w = np.concatenate([np.ones(10), np.zeros(10)])
+        bread = X.T @ (X * w[:, None])
+        contrasts = np.eye(X.shape[1])
+        with pytest.raises(ValueError, match="positive total weight"):
+            _compute_cr2_bm_contrast_dof(X, cluster_ids, bread, contrasts, weights=w)
+
+    def test_clustered_zero_weight_cluster_drops_silently_when_eff_clusters_remain(self):
+        """A zero-weight cluster amongst multiple positive-weight clusters
+        should be silently dropped (its scores contribute zero anyway). No raise."""
+        rng = np.random.default_rng(203)
+        # 4 clusters, last one zero-weight; should silently drop and use 3.
+        cluster_ids = np.array([0] * 5 + [1] * 5 + [2] * 5 + [3] * 5)
+        n = len(cluster_ids)
+        X = np.column_stack([np.ones(n), rng.normal(size=n), rng.normal(size=n)])
+        y = X @ np.array([1.0, 0.5, 0.3]) + rng.normal(0, 0.5, n)
+        w = np.concatenate([np.ones(5), np.ones(5) * 1.5, np.ones(5) * 0.8, np.zeros(5)])
+        bread = X.T @ (X * w[:, None])
+        coef = np.linalg.solve(bread, X.T @ (w * y))
+        resid = y - X @ coef
+        vcov, dof = _compute_cr2_bm(X, resid, cluster_ids, bread, weights=w)
+        assert np.all(np.isfinite(vcov)) and np.all(np.diag(vcov) > 0)
+        assert np.all(np.isfinite(dof)) and np.all(dof > 0)
+
+
 class TestUnweightedRegressionStillBitEqual:
     """Regression safety: existing unweighted goldens must still match bit-equal."""
 

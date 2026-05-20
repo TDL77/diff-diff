@@ -538,10 +538,11 @@ def solve_ols(
           ``cluster_ids`` (use ``"hc2_bm"`` for clustered Bell-McCaffrey).
         - ``"hc2_bm"``: HC2 + Imbens-Kolesar (2016) Satterthwaite DOF one-way;
           Pustejovsky-Tipton (2018) CR2 Bell-McCaffrey with ``cluster_ids``.
-          **Not supported with weights** (either one-way or clustered):
-          raises ``NotImplementedError`` because the BM DOF helper is
-          inconsistent with ``solve_ols``'s WLS transform. Tracked in
-          ``TODO.md``.
+          With ``weights``, dispatches to the clubSandwich WLS-CR2 port —
+          supported for ``weight_type="pweight"`` only. ``aweight`` and
+          ``fweight`` raise ``NotImplementedError`` (port matches the
+          ``pweight`` convention only; aweight/fweight derivations are a
+          separate methodology task).
         - ``"conley"``: Conley (1999) spatial-HAC sandwich. Requires
           ``conley_coords`` (n × 2 array) and ``conley_cutoff_km`` (positive
           bandwidth, no default per Conley 1999 Section 5's sensitivity-grid
@@ -1118,13 +1119,14 @@ def _validate_vcov_args(
         combined with a ``vcov_type`` that is one-way only (``classical``,
         ``hc2``).
     NotImplementedError
-        If ``vcov_type == "hc2_bm"`` is combined with ``weights`` (with OR
-        without ``cluster_ids``). The weighted Bell-McCaffrey DOF requires
-        re-deriving the Satterthwaite ratio on the WLS-transformed design
-        ``X* = sqrt(w) X`` to match ``solve_ols``'s residual convention;
-        until that derivation is in place, the path raises rather than
-        shipping silently-inconsistent small-sample p-values. Tracked in
-        ``TODO.md``.
+        If ``vcov_type == "hc2_bm"`` is combined with ``weights`` AND
+        ``weight_type != "pweight"`` (``aweight`` or ``fweight``). The
+        clubSandwich WLS-CR2 port that lifted the prior weighted-CR2 gates
+        matches the ``pweight`` (sampling-weight) convention only; the
+        ``aweight`` (analytical / inverse-variance) and ``fweight``
+        (frequency-expanded) derivations are separate methodology tasks.
+        Use ``weight_type="pweight"`` or ``vcov_type="hc1"`` (CR1 supports
+        all three weight types) as a workaround.
     """
     if vcov_type not in _VALID_VCOV_TYPES:
         raise ValueError(
@@ -1284,9 +1286,12 @@ def compute_robust_vcov(
         OLS residuals.
     cluster_ids : ndarray of shape (n,), optional
         Cluster identifiers. Valid with ``vcov_type="hc1"`` (dispatches to CR1)
-        and ``vcov_type="hc2_bm"`` (dispatches to CR2 Bell-McCaffrey).
+        and ``vcov_type="hc2_bm"`` (dispatches to CR2 Bell-McCaffrey, including
+        the weighted-CR2 clubSandwich port for ``weight_type="pweight"``).
         Combining with ``classical`` or ``hc2`` raises ``ValueError``.
-        Combining with ``hc2_bm`` AND ``weights`` raises ``NotImplementedError``.
+        Combining ``hc2_bm`` with ``weights`` and ``weight_type ∈ {"aweight",
+        "fweight"}`` raises ``NotImplementedError`` — the port matches the
+        ``pweight`` convention only.
     weights : ndarray of shape (n,), optional
         Observation weights. If provided, computes weighted sandwich estimator.
     weight_type : str, default "pweight"
@@ -1540,6 +1545,24 @@ def _compute_cr2_bm(
     n, k = X.shape
     cluster_ids_arr = np.asarray(cluster_ids)
     unique_clusters = np.unique(cluster_ids_arr)
+    # When weights are provided, count EFFECTIVE clusters (those with positive
+    # total weight). Zero-total-weight clusters contribute nothing to the
+    # sandwich (their scores are zero), but they can mask under-identification:
+    # a fit with only one effective cluster must raise rather than silently
+    # producing finite CR2 inference. Mirrors the CR1 zero-cluster handling
+    # downstream.
+    if weights is not None:
+        weights_arr = np.asarray(weights, dtype=np.float64)
+        eff_clusters = np.array(
+            [g for g in unique_clusters if float(np.sum(weights_arr[cluster_ids_arr == g])) > 0]
+        )
+        if len(eff_clusters) < 2:
+            raise ValueError(
+                f"Need at least 2 clusters with positive total weight for "
+                f"cluster-robust SEs, got {len(eff_clusters)} effective "
+                f"clusters out of {len(unique_clusters)} unique."
+            )
+        unique_clusters = eff_clusters
     G = len(unique_clusters)
     if G < 2:
         raise ValueError(f"Need at least 2 clusters for cluster-robust SEs, got {G}")
@@ -1843,6 +1866,21 @@ def _compute_cr2_bm_contrast_dof(
     n, k = X.shape
     cluster_ids_arr = np.asarray(cluster_ids)
     unique_clusters = np.unique(cluster_ids_arr)
+    # Same effective-cluster check as `_compute_cr2_bm`: drop zero-total-weight
+    # clusters so under-identified subpopulation fits raise rather than silently
+    # producing finite CR2/DOF output.
+    if weights is not None:
+        weights_arr_eff = np.asarray(weights, dtype=np.float64)
+        eff_clusters = np.array(
+            [g for g in unique_clusters if float(np.sum(weights_arr_eff[cluster_ids_arr == g])) > 0]
+        )
+        if len(eff_clusters) < 2:
+            raise ValueError(
+                f"Need at least 2 clusters with positive total weight for "
+                f"cluster-robust SEs, got {len(eff_clusters)} effective "
+                f"clusters out of {len(unique_clusters)} unique."
+            )
+        unique_clusters = eff_clusters
     if len(unique_clusters) < 2:
         raise ValueError(
             f"Need at least 2 clusters for cluster-robust SEs, got " f"{len(unique_clusters)}"
@@ -2126,6 +2164,22 @@ def _compute_robust_vcov_numpy(
     # CR2 Bell-McCaffrey cluster-robust (vcov_type="hc2_bm" + cluster).
     # ------------------------------------------------------------------
     if vcov_type == "hc2_bm" and cluster_ids is not None:
+        # The clubSandwich WLS-CR2 port matches the `pweight` (sampling-weight)
+        # convention only. clubSandwich's algebra puts `w` directly into the
+        # score (s_g = X_g' diag(W) A_g u_g), producing meat = sum w_g² ...
+        # — exactly diff-diff's `pweight` convention. `aweight` (analytical /
+        # inverse-variance) and `fweight` (frequency-expanded) require
+        # different CR2 derivations that are not in this port. Reject loudly.
+        if weights is not None and weight_type != "pweight":
+            raise NotImplementedError(
+                f"vcov_type='hc2_bm' with weight_type={weight_type!r} is not "
+                "supported. The clubSandwich WLS-CR2 port matches the "
+                "'pweight' (sampling-weight) convention only. For analytical "
+                "('aweight') or frequency ('fweight') weights with CR2 "
+                "Bell-McCaffrey, the derivation is a separate methodology "
+                "task. Use weight_type='pweight' or vcov_type='hc1' "
+                "(CR1 supports all three weight types)."
+            )
         vcov_cr2, dof_cr2 = _compute_cr2_bm(
             X, residuals, cluster_ids, bread_matrix, weights=weights
         )
@@ -2148,6 +2202,16 @@ def _compute_robust_vcov_numpy(
         # hc2_bm through the singleton-cluster CR2 path so vcov and DOF are
         # consistent (both use the clubSandwich algebra).
         if vcov_type == "hc2_bm" and weights is not None:
+            # Same `weight_type` gating as the cluster-CR2 branch above:
+            # only pweight matches clubSandwich's WLS-CR2 algebra.
+            if weight_type != "pweight":
+                raise NotImplementedError(
+                    f"vcov_type='hc2_bm' with weight_type={weight_type!r} is "
+                    "not supported. The clubSandwich WLS-CR2 port matches "
+                    "the 'pweight' (sampling-weight) convention only. Use "
+                    "weight_type='pweight' or vcov_type='hc1' (CR1 supports "
+                    "all three weight types)."
+                )
             vcov_cr2, dof_cr2 = _compute_cr2_bm(
                 X, residuals, np.arange(n), bread_matrix, weights=weights
             )
