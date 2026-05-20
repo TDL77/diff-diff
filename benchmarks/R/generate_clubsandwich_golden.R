@@ -23,6 +23,7 @@ suppressPackageStartupMessages({
   library(jsonlite)
 })
 
+stopifnot(packageVersion("clubSandwich") >= "0.7.0")
 set.seed(20260420)
 
 # --- Three deterministic datasets ---------------------------------------------
@@ -468,12 +469,236 @@ output$sun_abraham_two_cohort <- list(
   dof_bm_contrast_overall_unit = unname(sa_dof_bm_overall_unit)
 )
 
+# =============================================================================
+# Weighted scenarios (clubSandwich WLS-CR2 port)
+# =============================================================================
+# Pin diff-diff's weighted CR2-BM port against clubSandwich's specific WLS-CR2
+# algebra (R/CR-adjustments.R::CR2 + R/get_arrays.R::get_GH + coef_test.R).
+# Verified algorithm uses W (not sqrt(W)) in the hat matrix, W^2 in the bias
+# correction term, and unweighted residuals in the score construction.
+
+# ---- Scenario: weighted_one_way_no_cluster ----------------------------------
+# 12 observations, single "cluster" via vcovCR(cluster=1:n, type="CR2") for the
+# one-way HC2-BM reduction. Heteroskedastic weights.
+set.seed(50100)
+d_w_oneway <- data.frame(
+  x = c(-1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, -0.8, 0.3, 1.2, -1.2),
+  z = c(0.2, -0.3, 0.5, -0.1, 0.4, -0.5, 0.6, -0.2, 0.1, -0.4, 0.3, 0.5)
+)
+d_w_oneway$y <- 1 + 0.5 * d_w_oneway$x + 0.3 * d_w_oneway$z +
+  rnorm(nrow(d_w_oneway), sd = 0.5)
+w_oneway <- c(0.5, 0.5, 1, 1, 1.5, 1.5, 2, 2, 2.5, 2.5, 3, 3)
+fit_w_oneway <- lm(y ~ x + z, data = d_w_oneway, weights = w_oneway)
+vcov_w_oneway <- vcovCR(fit_w_oneway,
+                        cluster = seq_len(nrow(d_w_oneway)), type = "CR2")
+ct_w_oneway <- coef_test(fit_w_oneway, vcov = vcov_w_oneway)
+output$weighted_one_way_no_cluster <- list(
+  x = d_w_oneway$x,
+  z = d_w_oneway$z,
+  y = d_w_oneway$y,
+  weights = w_oneway,
+  coef = as.numeric(coef(fit_w_oneway)),
+  coef_names = names(coef(fit_w_oneway)),
+  vcov_hc2_bm = as.numeric(vcov_w_oneway),
+  vcov_hc2_bm_shape = dim(vcov_w_oneway),
+  dof_bm_one_way = as.numeric(ct_w_oneway$df_Satt),
+  se_hc2_bm = as.numeric(ct_w_oneway$SE)
+)
+
+# ---- Scenario: weighted_balanced_clusters -----------------------------------
+# 20 observations, 4 clusters of 5; weights vary within and across clusters.
+set.seed(50200)
+n_w_bal <- 20
+cluster_w_bal <- rep(1:4, each = 5)
+d_w_bal <- data.frame(
+  cluster = cluster_w_bal,
+  x = rnorm(n_w_bal),
+  z = rnorm(n_w_bal)
+)
+d_w_bal$y <- 1 + 0.5 * d_w_bal$x + 0.3 * d_w_bal$z + rnorm(n_w_bal, sd = 0.5)
+w_bal <- runif(n_w_bal, min = 0.5, max = 3.0)
+fit_w_bal <- lm(y ~ x + z, data = d_w_bal, weights = w_bal)
+vcov_w_bal <- vcovCR(fit_w_bal, cluster = d_w_bal$cluster, type = "CR2")
+ct_w_bal <- coef_test(fit_w_bal, vcov = vcov_w_bal)
+output$weighted_balanced_clusters <- list(
+  x = d_w_bal$x,
+  z = d_w_bal$z,
+  y = d_w_bal$y,
+  weights = w_bal,
+  cluster = d_w_bal$cluster,
+  coef = as.numeric(coef(fit_w_bal)),
+  coef_names = names(coef(fit_w_bal)),
+  vcov_cr2 = as.numeric(vcov_w_bal),
+  vcov_cr2_shape = dim(vcov_w_bal),
+  dof_bm = as.numeric(ct_w_bal$df_Satt),
+  se_cr2 = as.numeric(ct_w_bal$SE)
+)
+
+# ---- Scenario: weighted_unbalanced_clusters ---------------------------------
+# 52 observations, 8 clusters of sizes 3-10. Heteroskedastic weights.
+set.seed(50300)
+cluster_sizes_unbal <- c(3, 4, 5, 6, 7, 8, 9, 10)
+cluster_w_unbal <- rep(1:8, times = cluster_sizes_unbal)
+n_w_unbal <- length(cluster_w_unbal)
+d_w_unbal <- data.frame(
+  cluster = cluster_w_unbal,
+  x = rnorm(n_w_unbal),
+  z = rnorm(n_w_unbal)
+)
+shock_unbal <- rnorm(8, sd = 0.3)
+d_w_unbal$y <- 1 + 0.5 * d_w_unbal$x + 0.3 * d_w_unbal$z +
+  shock_unbal[d_w_unbal$cluster] + rnorm(n_w_unbal, sd = 0.4)
+w_unbal <- runif(n_w_unbal, min = 0.3, max = 3.0)
+fit_w_unbal <- lm(y ~ x + z, data = d_w_unbal, weights = w_unbal)
+vcov_w_unbal <- vcovCR(fit_w_unbal, cluster = d_w_unbal$cluster, type = "CR2")
+ct_w_unbal <- coef_test(fit_w_unbal, vcov = vcov_w_unbal)
+output$weighted_unbalanced_clusters <- list(
+  x = d_w_unbal$x,
+  z = d_w_unbal$z,
+  y = d_w_unbal$y,
+  weights = w_unbal,
+  cluster = d_w_unbal$cluster,
+  coef = as.numeric(coef(fit_w_unbal)),
+  coef_names = names(coef(fit_w_unbal)),
+  vcov_cr2 = as.numeric(vcov_w_unbal),
+  vcov_cr2_shape = dim(vcov_w_unbal),
+  dof_bm = as.numeric(ct_w_unbal$df_Satt),
+  se_cr2 = as.numeric(ct_w_unbal$SE),
+  cluster_sizes = as.numeric(table(d_w_unbal$cluster))
+)
+
+# ---- Scenario: weighted_singletons_present ----------------------------------
+# Adversarial: prior PT2018 transform-once derivation hit ~30% gap on
+# singleton-cluster scenarios. Verifies the clubSandwich port handles this.
+set.seed(50400)
+cluster_sizes_sing <- c(1, 1, 2, 3, 4, 5, 6, 6, 4, 3)
+cluster_w_sing <- rep(1:10, times = cluster_sizes_sing)
+n_w_sing <- length(cluster_w_sing)
+d_w_sing <- data.frame(
+  cluster = cluster_w_sing,
+  x = rnorm(n_w_sing),
+  z = rnorm(n_w_sing)
+)
+shock_sing <- rnorm(10, sd = 0.3)
+d_w_sing$y <- 1 + 0.5 * d_w_sing$x + 0.3 * d_w_sing$z +
+  shock_sing[d_w_sing$cluster] + rnorm(n_w_sing, sd = 0.4)
+w_sing <- runif(n_w_sing, min = 0.3, max = 3.0)
+fit_w_sing <- lm(y ~ x + z, data = d_w_sing, weights = w_sing)
+vcov_w_sing <- vcovCR(fit_w_sing, cluster = d_w_sing$cluster, type = "CR2")
+ct_w_sing <- coef_test(fit_w_sing, vcov = vcov_w_sing)
+output$weighted_singletons_present <- list(
+  x = d_w_sing$x,
+  z = d_w_sing$z,
+  y = d_w_sing$y,
+  weights = w_sing,
+  cluster = d_w_sing$cluster,
+  coef = as.numeric(coef(fit_w_sing)),
+  coef_names = names(coef(fit_w_sing)),
+  vcov_cr2 = as.numeric(vcov_w_sing),
+  vcov_cr2_shape = dim(vcov_w_sing),
+  dof_bm = as.numeric(ct_w_sing$df_Satt),
+  dof_per_coef = as.numeric(ct_w_sing$df_Satt),
+  se_cr2 = as.numeric(ct_w_sing$SE),
+  cluster_sizes = as.numeric(table(d_w_sing$cluster))
+)
+
+# ---- Scenario: weighted_did_absorbed_fe -------------------------------------
+# DiD-style integration: 8 units x 4 periods, treat_post + unit + period FE,
+# analytics weights varying by unit. Pins DiD(vcov_type="hc2_bm",
+# absorb=["unit","period"], cluster="unit", survey_design=SurveyDesign(
+# weights="w")).
+set.seed(50500)
+d_did_w <- make_did_panel(n_units = 8, n_periods = 4, treatment_period = 2,
+                          seed = 50501)
+# Unit-level weight (stratum-like): vary by unit, constant within unit-period.
+unit_w_did <- runif(8, min = 0.5, max = 2.5)
+d_did_w$weights <- unit_w_did[d_did_w$unit_int]
+fit_did_w <- lm(y ~ treat_post + unit + period, data = d_did_w,
+                weights = d_did_w$weights)
+vcov_did_w_cr2 <- vcovCR(fit_did_w, cluster = d_did_w$unit_int, type = "CR2")
+ct_did_w_cr2 <- coef_test(fit_did_w, vcov = vcov_did_w_cr2)
+output$weighted_did_absorbed_fe <- list(
+  unit = d_did_w$unit_int,
+  period = d_did_w$period_int,
+  treated = d_did_w$treated,
+  post = d_did_w$post,
+  treat_post = d_did_w$treat_post,
+  y = d_did_w$y,
+  weights = d_did_w$weights,
+  coef = as.numeric(coef(fit_did_w)),
+  coef_names = names(coef(fit_did_w)),
+  vcov_cr2 = as.numeric(vcov_did_w_cr2),
+  vcov_cr2_shape = dim(vcov_did_w_cr2),
+  dof_cr2 = as.numeric(ct_did_w_cr2$df_Satt)
+)
+
+# ---- Scenario: weighted_mpd_avg_att_dof -------------------------------------
+# MPD-style integration: 15 units x 4 periods, MPD parameterization with
+# analytics weights + cluster=unit. Compound contrast = post-period-average
+# ATT. Pins MPD(vcov_type="hc2_bm", cluster="unit", survey_design=
+# SurveyDesign(weights="w")) avg_att DOF.
+set.seed(50600)
+d_mpd_w <- make_mpd_panel(n_total = 15, units_per_cohort = 5, n_periods = 4,
+                          seed = 50601)
+d_mpd_w$period_f <- relevel(factor(d_mpd_w$period), ref = "1")
+for (p in 2:4) {
+  d_mpd_w[[paste0("treated_period_", p)]] <-
+    d_mpd_w$treated * (d_mpd_w$period == p)
+}
+unit_w_mpd <- runif(15, min = 0.5, max = 2.5)
+d_mpd_w$weights <- unit_w_mpd[d_mpd_w$unit]
+fit_mpd_w <- lm(y ~ treated + period_f +
+                    treated_period_2 + treated_period_3 + treated_period_4 +
+                    factor(unit),
+                data = d_mpd_w, weights = d_mpd_w$weights)
+vcov_mpd_w_cr2 <- vcovCR(fit_mpd_w, cluster = d_mpd_w$unit, type = "CR2")
+ct_mpd_w_cr2 <- coef_test(fit_mpd_w, vcov = vcov_mpd_w_cr2)
+# Compound contrast: post-period-average over treated_period_{2,3,4}.
+all_coef_names_w <- names(coef(fit_mpd_w))
+n_coef_w <- length(all_coef_names_w)
+c_avg_vec_w <- setNames(rep(0, n_coef_w), all_coef_names_w)
+post_names_w <- c("treated_period_2", "treated_period_3", "treated_period_4")
+c_avg_vec_w[post_names_w] <- 1 / length(post_names_w)
+finite_mask_w <- !is.na(coef(fit_mpd_w))
+c_avg_kept_w <- c_avg_vec_w[finite_mask_w]
+dof_avg_w <- Wald_test(
+  fit_mpd_w,
+  constraints = matrix(c_avg_kept_w, 1),
+  vcov = vcov_mpd_w_cr2,
+  test = "HTZ"
+)$df_denom
+output$weighted_mpd_avg_att_dof <- list(
+  unit = d_mpd_w$unit,
+  period = d_mpd_w$period,
+  treated = d_mpd_w$treated,
+  y = d_mpd_w$y,
+  weights = d_mpd_w$weights,
+  cluster = d_mpd_w$unit,
+  coef = as.numeric(coef(fit_mpd_w)),
+  coef_names = all_coef_names_w,
+  finite_coef_names = all_coef_names_w[finite_mask_w],
+  vcov_cr2 = as.numeric(vcov_mpd_w_cr2),
+  vcov_cr2_shape = dim(vcov_mpd_w_cr2),
+  dof_per_coef = as.numeric(ct_mpd_w_cr2$df_Satt),
+  c_avg = as.numeric(c_avg_kept_w),
+  dof_avg = unname(dof_avg_w),
+  post_interaction_names = post_names_w,
+  reference_period = 1L,
+  n_post_periods = length(post_names_w)
+)
+
 output$meta <- list(
   source = "clubSandwich",
   clubSandwich_version = as.character(packageVersion("clubSandwich")),
   R_version = R.version.string,
   generated_at = format(Sys.time(), tz = "UTC", usetz = TRUE),
-  note = "CR2 Bell-McCaffrey cluster-robust parity target for diff_diff._compute_cr2_bm"
+  note = paste0(
+    "CR2 Bell-McCaffrey cluster-robust parity target for ",
+    "diff_diff._compute_cr2_bm. Unweighted scenarios pin against ",
+    "_compute_cr2_bm / _compute_bm_dof_oneway; weighted scenarios pin ",
+    "the clubSandwich WLS-CR2 port (W not sqrt(W), W^2 bias term, ",
+    "unweighted residuals)."
+  )
 )
 
 out_path <- file.path("benchmarks", "data", "clubsandwich_cr2_golden.json")
