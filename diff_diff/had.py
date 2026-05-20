@@ -2595,6 +2595,34 @@ class HeterogeneousAdoptionDiD:
 
     Notes
     -----
+    **Non-testable assumptions (paper Section 3.1.2).** Point identification
+    of ``WAS_{d_lower}`` on the Design 1 family
+    (``continuous_near_d_lower`` and ``mass_point``) requires Assumption 6
+    in addition to parallel trends; sign identification requires
+    Assumption 5. Neither is testable via pre-trends:
+
+    - Assumption 5 (sign identification): the boundary slope-ratio
+      ``lim_{d down d_lower} E(TE_2 | D_2 <= d) / WAS < E(D_2) / d_lower``
+      relates the conditional expectation near the boundary to the
+      overall WAS; it cannot be inferred from pre-period outcome
+      trajectories alone.
+    - Assumption 6 (point identification): the counterfactual-mean
+      alignment ``lim_{d down d_lower} E[Y_2(d_lower) - Y_2(0) | D_2 <= d]
+      = E[Y_2(d_lower) - Y_2(0)]`` is a statement about an unobserved
+      counterfactual at the support infimum.
+
+    The fit() method emits a ``UserWarning`` whenever ``resolved_design``
+    is on the Design 1 family (``continuous_near_d_lower`` or
+    ``mass_point``) so users are not silently led to interpret point
+    estimates as full point identification. The available pre-tests
+    (:func:`diff_diff.qug_test`, :func:`diff_diff.stute_test`,
+    :func:`diff_diff.yatchew_hr_test`) verify ADJACENT identifying
+    assumptions (Assumption 4 boundary density; Assumption 7
+    mean-independence pre-trends; Assumption 8 linearity / homogeneity)
+    and do NOT and CANNOT test Assumptions 5 or 6 directly. T21 (HAD
+    pretest workflow tutorial) shows the verdict-language convention
+    that surfaces this caveat to end users.
+
     **Diagnostics coverage.** ``HeterogeneousAdoptionDiDResults.bandwidth_diagnostics``
     and ``.bias_corrected_fit`` are populated only on the continuous
     paths; both are ``None`` on the mass-point path (which is parametric

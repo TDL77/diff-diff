@@ -1349,6 +1349,18 @@ def qug_test(
 
     Notes
     -----
+    **Scope (what this test does NOT cover).** ``qug_test`` targets paper
+    Assumption 4 (positive density at the boundary, i.e. ``d_lower = 0``).
+    It does NOT and CANNOT test Assumptions 5 and 6 from the same paper
+    (Section 3.1.2), which are required for sign identification (A5) and
+    point identification (A6) of ``WAS_{d_lower}`` on the Design 1 family
+    (``d_lower > 0``). Assumptions 5 and 6 are statements about
+    conditional expectations near the support boundary and about
+    counterfactual-mean alignment respectively; they are non-testable via
+    pre-trends. See :class:`HeterogeneousAdoptionDiD` class docstring
+    Notes for the full statement and T21 (HAD pretest workflow tutorial)
+    for the verdict-language convention that surfaces this gap.
+
     Tie-break: when ``D_{(1)} == D_{(2)}`` the statistic is undefined.
     The test returns ``t_stat=NaN, p_value=NaN, reject=False`` with a
     ``UserWarning`` rather than raising.
@@ -1636,6 +1648,18 @@ def stute_test(
 
     Notes
     -----
+    **Scope (what this test does NOT cover).** ``stute_test`` targets
+    paper Assumption 8 (mean-independence of treatment effects /
+    pre-trends linearity, depending on the residual definition). It does
+    NOT and CANNOT test Assumptions 5 and 6 from de Chaisemartin et al.
+    (2026) Section 3.1.2, which are required for sign / point
+    identification of ``WAS_{d_lower}`` on the Design 1 family
+    (``d_lower > 0``). Assumptions 5/6 are non-testable via pre-trends
+    (boundary-conditional expectations and counterfactual-mean alignment
+    statements). See :class:`HeterogeneousAdoptionDiD` class docstring
+    Notes for the full statement and T21 for the verdict-language
+    convention that surfaces this gap to end users.
+
     Sample-size gate: below ``G = 10`` the CvM statistic is not
     well-calibrated. In that case the function emits ``UserWarning`` and
     returns all-NaN inference rather than raising.
@@ -2112,6 +2136,17 @@ def yatchew_hr_test(
 
     Notes
     -----
+    **Scope (what this test does NOT cover).** ``yatchew_hr_test`` targets
+    paper Assumption 8 (linearity of ``E[ΔY | D_2]`` in ``D_2``, or
+    mean-independence depending on ``residual_form``). It does NOT and
+    CANNOT test Assumptions 5 and 6 from de Chaisemartin et al. (2026)
+    Section 3.1.2, which are required for sign / point identification of
+    ``WAS_{d_lower}`` on the Design 1 family (``d_lower > 0``).
+    Assumptions 5/6 are non-testable via pre-trends. See
+    :class:`HeterogeneousAdoptionDiD` class docstring Notes for the full
+    statement and T21 for the verdict-language convention that surfaces
+    this gap to end users.
+
     Sample-size gate: below ``G = 3`` the difference-variance estimator
     is undefined; the function emits ``UserWarning`` and returns NaN
     rather than raising.
@@ -4548,6 +4583,22 @@ def did_had_pretest_workflow(
 
     Notes
     -----
+    **Scope (what this composite workflow does NOT cover).** The
+    component pretests target paper Assumption 4 (QUG: boundary
+    density), Assumption 7 (joint Stute pre-trends: mean-independence of
+    placebo first-differences from dose), and Assumption 8
+    (Yatchew / joint homogeneity: linearity of treatment effects in
+    dose). The workflow does NOT and CANNOT test Assumptions 5 and 6
+    from de Chaisemartin et al. (2026) Section 3.1.2, which are required
+    for sign / point identification of ``WAS_{d_lower}`` on the Design 1
+    family (``d_lower > 0``). Assumptions 5/6 are non-testable via
+    pre-trends. The composite verdict surfaces this gap explicitly via
+    its ``"Assumption 7 gap"`` (when QUG defers) and via the
+    ``HeterogeneousAdoptionDiD.fit()`` fit-time ``UserWarning`` (which
+    fires whenever the resolved design is Design 1 family). T21 (HAD
+    pretest workflow tutorial) shows the recommended user-facing
+    verdict-language convention.
+
     Survey/weighted data (Phase 4.5 C): under ``survey=`` or ``weights=``,
     the workflow:
 
