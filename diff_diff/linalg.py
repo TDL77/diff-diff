@@ -1641,7 +1641,14 @@ def _compute_cr2_bm(
         dof_vec = _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, M_U, np.eye(k))
     else:
         dof_vec = _cr2_bm_dof_inner_weighted(
-            X, A_g_matrices, cluster_idx, M_U, MUWTWUM, W_norm, np.eye(k)
+            X,
+            A_g_matrices,
+            cluster_idx,
+            M_U,
+            MUWTWUM,
+            W_norm,
+            np.eye(k),
+            w_scale=w_scale,
         )
 
     return vcov, dof_vec
@@ -1720,6 +1727,7 @@ def _cr2_bm_dof_inner_weighted(
     MUWTWUM: np.ndarray,
     W_norm: np.ndarray,
     contrasts: np.ndarray,
+    w_scale: float = 1.0,
 ) -> np.ndarray:
     """Per-contrast Satterthwaite DOF for WLS-CR2 via clubSandwich's P_array form.
 
@@ -1755,26 +1763,39 @@ def _cr2_bm_dof_inner_weighted(
     unique_clusters = list(cluster_idx.keys())
     len(unique_clusters)
 
-    # "Square-root" factors L such that L @ L.T equals the target matrix. We
-    # use a symmetric eigendecomposition with Moore-Penrose handling rather
-    # than Cholesky so rank-deficient designs (e.g., MultiPeriodDiD's
-    # full-dummy unit + period interaction designs after collinearity-drop)
-    # don't trigger LinAlgError. Equivalent to chol(...) when the matrix is
-    # PD; for rank-deficient cases, zero eigenvalues below `_TOL` are floored
-    # to zero, matching clubSandwich's behavior under R's `chol2inv(chol(...))`
-    # rank-handling.
+    # "Square-root" factors L such that L @ L.T equals the target matrix.
+    # Try Cholesky first (matches clubSandwich's `t(chol(...))` exactly when
+    # the matrix is PD — important for full-dummy FE designs where eigh-based
+    # symmetric square roots disagree with chol on off-diagonal H-array terms
+    # by enough to materially shift Satterthwaite DOF on high-leverage
+    # coefficients). Fall back to a symmetric-eigendecomposition pseudo-
+    # square-root only on rank-deficient designs (where chol raises), so the
+    # MultiPeriodDiD-style full-dummy designs that exposed the original
+    # singular-bread case still proceed.
     _TOL = 1e-10
 
-    def _sym_sqrt(M):
+    def _factor_psd(M):
         sym = 0.5 * (M + M.T)
-        eigvals, eigvecs = np.linalg.eigh(sym)
-        sqrt_eig = np.where(eigvals > _TOL, np.sqrt(np.maximum(eigvals, _TOL)), 0.0)
-        return eigvecs * sqrt_eig[np.newaxis, :]
+        try:
+            return np.linalg.cholesky(sym)
+        except np.linalg.LinAlgError:
+            eigvals, eigvecs = np.linalg.eigh(sym)
+            sqrt_eig = np.where(eigvals > _TOL, np.sqrt(np.maximum(eigvals, _TOL)), 0.0)
+            return eigvecs * sqrt_eig[np.newaxis, :]
 
-    M_U_ct = _sym_sqrt(bread_inv)
-    Omega_ct = _sym_sqrt(MUWTWUM)
+    M_U_ct = _factor_psd(bread_inv)
+    Omega_ct = _factor_psd(MUWTWUM)
 
     # Per-cluster (k × k) H-array slices and (k × n_g) G slices.
+    # Use clubSandwich's exact operation ordering: ME_g = M @ E_g where M is
+    # the UN-normalized bread inverse `(X' W_orig X)^{-1} = bread_inv / w_scale`,
+    # NOT `M_U_norm = bread_inv` (the normalized form). w_scale cancels in
+    # the final DOF ratio mathematically, but using the wrong M-convention
+    # shifts the float64 roundoff floor on high-leverage contrasts (e.g.,
+    # full-dummy FE coefficients) enough to produce 15-30% DOF discrepancies
+    # vs `clubSandwich::vcovCR + coef_test()$df_Satt`. Match R's exact
+    # operation ordering to reproduce R's roundoff structure.
+    M_unnorm = bread_inv / w_scale  # R's "M" = (X' W_orig X)^{-1}
     H1_list: List[np.ndarray] = []
     H2_list: List[np.ndarray] = []
     H3_list: List[np.ndarray] = []
@@ -1787,7 +1808,8 @@ def _cr2_bm_dof_inner_weighted(
 
         # E_g = X_g.T @ diag(W_g) @ A_g  (k × n_g)
         E_g = (X_g.T * W_g_diag[np.newaxis, :]) @ A_g
-        ME_g = bread_inv @ E_g  # (k × n_g)
+        # R's ME_g uses M = bread_inv_unnormalized = bread_inv / w_scale.
+        ME_g = M_unnorm @ E_g  # (k × n_g)
 
         MEU_g = ME_g @ X_g  # (k × k)
         MEF_g = ME_g @ (W_g_diag[:, np.newaxis] * X_g)  # (k × k)
@@ -1798,7 +1820,12 @@ def _cr2_bm_dof_inner_weighted(
         G_list.append(ME_g)  # (k × n_g)
 
     # For each contrast c, build P (J × J) and compute df_satt.
+    # Also retain (tr P, ||P||²_F, max(|P|)) per contrast so we can detect
+    # noise-floor degeneracies and NaN-guard them in a second pass.
     dof_vec = np.empty(m)
+    tr_P_arr = np.empty(m)
+    sum_P_sq_arr = np.empty(m)
+    max_abs_P_arr = np.empty(m)
     for j in range(m):
         c = contrasts[:, j]  # (k,)
         # Precompute c-projections: (J,)-indexed length-k vectors
@@ -1816,7 +1843,43 @@ def _cr2_bm_dof_inner_weighted(
 
         tr_P = float(np.trace(P))
         sum_P_sq = float(np.sum(P * P))
+        max_abs_P = float(np.max(np.abs(P))) if P.size else 0.0
+        tr_P_arr[j] = tr_P
+        sum_P_sq_arr[j] = sum_P_sq
+        max_abs_P_arr[j] = max_abs_P
         dof_vec[j] = (tr_P * tr_P) / sum_P_sq if sum_P_sq > 0 else np.nan
+
+    # Noise-floor NaN-guard. The Satterthwaite DOF formula `(tr P)² / sum(P²)`
+    # is scale-invariant, so if a coefficient's P matrix is dominated by
+    # float64 accumulation noise (`max(|P|)` is many orders of magnitude
+    # smaller than the largest contrast's `max(|P|)`), the DOF computed from
+    # noise/noise is unreliable and varies across BLAS implementations by
+    # 15-30%. Detection: a contrast's max(|P|) below `1e-10 ×` the largest
+    # contrast's max(|P|) signals the noise regime. R's clubSandwich gives
+    # different specific values in this regime due to its own BLAS reduction
+    # order; we return NaN with a warning rather than ship arbitrarily-
+    # different small-sample DOF on the user-facing surface.
+    if m > 1:
+        max_P_overall = float(np.max(max_abs_P_arr))
+        if max_P_overall > 0:
+            noise_floor = 1e-10 * max_P_overall
+            degenerate = max_abs_P_arr < noise_floor
+            n_degenerate = int(np.sum(degenerate))
+            if n_degenerate > 0:
+                dof_vec[degenerate] = np.nan
+                warnings.warn(
+                    f"Satterthwaite DOF for {n_degenerate} of {m} contrast(s) "
+                    f"is at the float64 noise floor (max|P| < 1e-10 × "
+                    f"max|P|_overall); reporting NaN. This typically affects "
+                    f"high-leverage FE-dummy coefficients whose contrast "
+                    f"vector projects to near-zero on the design — the "
+                    f"resulting DOF varies across BLAS implementations and is "
+                    f"unreliable. The coefficient SEs remain valid; only the "
+                    f"Satterthwaite DOF (and any t-test or CI that depends on "
+                    f"it) is suppressed.",
+                    UserWarning,
+                    stacklevel=3,
+                )
 
     return dof_vec
 
@@ -1937,7 +2000,9 @@ def _compute_cr2_bm_contrast_dof(
         H = X @ M_U @ X.T
         M = np.eye(n) - H
         return _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, M_U, contrasts)
-    return _cr2_bm_dof_inner_weighted(X, A_g_matrices, cluster_idx, M_U, MUWTWUM, W_norm, contrasts)
+    return _cr2_bm_dof_inner_weighted(
+        X, A_g_matrices, cluster_idx, M_U, MUWTWUM, W_norm, contrasts, w_scale=w_scale
+    )
 
 
 def _compute_bm_dof_from_contrasts(

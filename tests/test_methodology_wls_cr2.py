@@ -462,6 +462,77 @@ class TestLinearRegressionWeightedClusterHC2BM:
         )
 
 
+class TestWLSCR2FEDoFNoiseGuard:
+    """Regression for R6 P1: weighted CR2-BM Satterthwaite DOF for high-
+    leverage FE-dummy contrasts (where the contrast vector projects to
+    near-zero on the design) is at the float64 noise floor and disagrees
+    with R's clubSandwich by 15-30% due to BLAS reduction-order differences.
+    The mitigation is to detect the noise floor and return NaN with a
+    UserWarning rather than ship arbitrarily-different small-sample DOF.
+
+    Other (non-noise-floor) coefficients still match clubSandwich exactly.
+    """
+
+    def test_did_absorbed_fe_nan_guards_treated_unit_dummies(self, goldens):
+        """The weighted_did_absorbed_fe scenario: treated-unit dummies are at
+        the noise floor (vcov is fine, but DOF formula is noise/noise). NaN-
+        guard fires; non-noise-floor coefs still match R."""
+        import warnings
+
+        d = goldens["weighted_did_absorbed_fe"]
+        n = len(d["y"])
+        unit_int = np.asarray(d["unit"])
+        period_int = np.asarray(d["period"])
+        treat_post = np.asarray(d["treat_post"])
+        y = np.asarray(d["y"])
+        w = np.asarray(d["weights"])
+        cluster = unit_int
+
+        cols = [np.ones(n), treat_post.astype(float)]
+        col_names = ["(Intercept)", "treat_post"]
+        for u in sorted(np.unique(unit_int))[1:]:
+            cols.append((unit_int == u).astype(float))
+            col_names.append(f"unit{u}")
+        for p in sorted(np.unique(period_int))[1:]:
+            cols.append((period_int == p).astype(float))
+            col_names.append(f"period{p}")
+        X = np.column_stack(cols)
+
+        bread = X.T @ (X * w[:, None])
+        coef = np.linalg.solve(bread, X.T @ (w * y))
+        resid = y - X @ coef
+
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            vcov, dof = _compute_cr2_bm(X, resid, cluster, bread, weights=w)
+
+        # VCOV matches R at machine precision.
+        r_vcov = np.asarray(d["vcov_cr2"]).reshape(d["vcov_cr2_shape"])
+        np.testing.assert_allclose(vcov, r_vcov, atol=1e-10)
+
+        # DOF: non-noise-floor coefs match R at 1e-10; treated-unit dummies
+        # (unit2/3/4 — indices 2, 3, 4 in column ordering) are NaN.
+        r_dof = np.asarray(d["dof_cr2"])
+        nan_mask = np.isnan(dof)
+        # The 3 treated-unit dummies should be flagged as noise-floor.
+        treated_unit_idx = [col_names.index(f"unit{u}") for u in [2, 3, 4]]
+        for idx in treated_unit_idx:
+            assert nan_mask[idx], f"Expected NaN at noise-floor index {idx} ({col_names[idx]})"
+        # All other coefs match R exactly.
+        finite_idx = ~nan_mask
+        np.testing.assert_allclose(
+            dof[finite_idx],
+            r_dof[finite_idx],
+            atol=1e-10,
+            err_msg="Non-noise-floor coefficients must match clubSandwich at atol=1e-10",
+        )
+        # Warning fired.
+        noise_warnings = [w for w in ws if "noise floor" in str(w.message)]
+        assert (
+            len(noise_warnings) == 1
+        ), f"Expected 1 noise-floor UserWarning, got {len(noise_warnings)}"
+
+
 class TestUnweightedRegressionStillBitEqual:
     """Regression safety: existing unweighted goldens must still match bit-equal."""
 
