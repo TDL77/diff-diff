@@ -2859,13 +2859,22 @@ class HeterogeneousAdoptionDiD:
         first_treat_col : str or None
             Optional first-treatment column (the period at which each
             unit first receives treatment; ``0`` for never-treated).
-            Required on the event-study path when the panel has more
-            than two distinct first-treat values (staggered timing):
-            the estimator auto-filters to the last-treatment cohort
-            with a ``UserWarning`` per paper Appendix B.2 prescription.
             For common-adoption panels the column is optional; when
             omitted, the event-study path infers the first-treatment
-            period ``F`` from the dose invariant.
+            period ``F`` from the dose invariant. **Staggered-timing
+            contract (HAD Appendix B.2):**
+
+            - **`first_treat_col` supplied + multiple cohorts detected**:
+              auto-filter to the last-treatment cohort + never-treated
+              units with a ``UserWarning`` naming kept / dropped counts.
+            - **`first_treat_col` omitted + multiple distinct first-
+              positive-dose cohorts inferred from the dose path**: the
+              estimator FAIL-CLOSES with ``ValueError`` directing the
+              user to either pass ``first_treat_col`` (activates the
+              auto-filter) or use :class:`ChaisemartinDHaultfoeuille`
+              (``did_multiplegt_dyn``) for full staggered support. See
+              REGISTRY § "Library extension: Staggered-timing fail-
+              closed" for the rationale on raising vs. warning.
         aggregate : {"overall", "event_study"}
             ``"overall"`` (default): returns a single-period
             :class:`HeterogeneousAdoptionDiDResults` (Phase 2a). Requires
@@ -2875,8 +2884,11 @@ class HeterogeneousAdoptionDiD:
             event-time WAS estimates on the multi-period panel (paper
             Appendix B.2). Requires more than two time periods. Pointwise
             CIs per horizon; joint cross-horizon covariance is deferred
-            to a follow-up PR. Staggered-timing panels are auto-filtered
-            to the last-treatment cohort with a ``UserWarning``.
+            to a follow-up PR. Staggered-timing panels: see the
+            ``first_treat_col`` contract above (auto-filter to last
+            cohort + never-treated with ``UserWarning`` when supplied;
+            fail-closed ``ValueError`` when omitted on a staggered
+            panel).
         survey_design : SurveyDesign or None, keyword-only
             Survey design (sampling weights + optional strata / PSU / FPC)
             for design-based inference. Supported on ALL design × aggregate

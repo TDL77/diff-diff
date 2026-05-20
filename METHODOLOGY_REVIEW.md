@@ -703,7 +703,7 @@ and covariate-adjusted specifications.)
 - [x] Bandwidth selector (CCF MSE-DPI) at 1% tolerance — `tests/test_bandwidth_selector.py` (8 classes covering public-API wrapper, stage diagnostics)
 - [x] Survey support: pweight + strata/PSU/FPC via TSL on the continuous and mass-point paths; PSU-level Mammen wild bootstrap on the Stute family; closed-form weighted variance components on Yatchew (Phase 4.5 A/B/C; QUG-under-survey permanently deferred per Phase 4.5 C0)
 - [x] Tutorials T21 (`docs/tutorials/21_had_pretest_workflow.ipynb`, 16 drift tests) + T22 (`docs/tutorials/22_had_survey_design.ipynb`, 28 drift tests across groups A-G); plus T20 (`docs/tutorials/20_had_brand_campaign.ipynb`) drift test
-- [x] Assumption 5/6 non-testability documented in `HeterogeneousAdoptionDiD` class docstring + `qug_test`/`stute_test`/`yatchew_hr_test`/`did_had_pretest_workflow` Notes blocks; reinforced by fit-time `UserWarning` at `diff_diff/had.py:3372-3390` on Design 1 family paths
+- [x] Assumption 5/6 non-testability documented in `HeterogeneousAdoptionDiD` class docstring + `qug_test`/`stute_test`/`yatchew_hr_test`/`did_had_pretest_workflow` Notes blocks; reinforced by fit-time `UserWarning` in `diff_diff/had.py::_fit_continuous` / `_fit_mass_point_2sls` ("---- Assumption 5/6 warning on Design 1 paths ----" block) on Design 1 family paths
 
 **Test Coverage:**
 - 34 methodology tests in `tests/test_methodology_had.py` (this PR)

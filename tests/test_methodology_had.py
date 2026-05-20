@@ -838,33 +838,72 @@ class TestHADDeviations:
     5. ``safe_inference`` joint NaN invariant on degenerate inputs.
     """
 
-    def test_equal_weighting_invariant_under_cell_size_perturbation(self) -> None:
-        """WAS is invariant under purely-cell-size reweighting (equal-weight lock).
+    def test_equal_weighting_is_per_row_not_per_dose_cell(self) -> None:
+        """Per-row equal weighting: selective region replication shifts att.
 
-        Construct two panels: (A) Uniform(0, 1) dose, G=1000 units; (B)
-        same dose grid but with cell-1 units repeated 5x (simulating
-        cell-size up-weighting of low-dose cells). Equal-weighting
-        means both should give the SAME WAS estimate up to MC noise.
-        Cell-size weighting would skew B's WAS toward the low-dose
-        cells.
+        The library uses per-row equal weighting (`w_g = 1`) on the
+        continuous path. A cell-size-weighting counterfactual would
+        rescale per-observation weights by inverse cell density, so
+        replicating a dose region would shrink each per-row weight and
+        leave the att invariant.
+
+        Under per-row equal weighting on a NONLINEAR DGP, replicating
+        one dose region shifts the empirical distribution and the att
+        moves with it. This test probes the deviation directly:
+
+        DGP: ΔY = 0.5 * D + 1.0 * D². Population WAS depends on
+        ``E[D²] / E[D]``; replicating low-D units shrinks this ratio,
+        so att shifts downward.
+
+        Under cell-size weighting (counterfactual): both panels would
+        give approximately the same att because the per-cell aggregate
+        weight is preserved across the replication.
         """
-        rng_a = np.random.default_rng(_BASE_SEED_DEVIATIONS + 0)
-        panel_a = _make_two_period_panel(
-            rng_a, G=1000, dose_dist="uniform_0_1", was_true=0.3, sigma=0.05
-        )
+        rng = np.random.default_rng(_BASE_SEED_DEVIATIONS + 0)
+        G = 1500
+        d_post = rng.uniform(0.0, 1.0, G)
+        # Nonlinear DGP: linear-plus-quadratic.
+        delta_y = 0.5 * d_post + 1.0 * d_post**2 + 0.05 * rng.standard_normal(G)
+        units = np.repeat(np.arange(G), 2)
+        periods = np.tile([1, 2], G)
+        dose = np.column_stack([np.zeros(G), d_post]).ravel()
+        outcome = np.column_stack([np.zeros(G), delta_y]).ravel()
+        panel_a = pd.DataFrame({"unit": units, "period": periods, "dose": dose, "outcome": outcome})
         result_a = _fit_overall(panel_a, design="auto")
-        # Build B by replicating panel_a 2x — equal-weight: same WAS;
-        # cell-size weight: smaller variance only.
-        # Use a fresh unit numbering for the replicated half.
+
+        # Build B by selectively replicating ONLY the low-D units
+        # (D <= 0.15) 4x extra. This shifts the empirical distribution
+        # toward the boundary, reducing E[D²]/E[D].
+        post_a = panel_a[panel_a["period"] == 2]
+        low_d_units = post_a.loc[post_a["dose"] <= 0.15, "unit"].values
+        n_reps = 4
+        extra_panels = []
         max_unit = int(panel_a["unit"].max())
-        panel_b_extra = panel_a.copy()
-        panel_b_extra["unit"] = panel_b_extra["unit"] + (max_unit + 1)
-        panel_b = pd.concat([panel_a, panel_b_extra], ignore_index=True)
+        for r in range(1, n_reps + 1):
+            extra = panel_a[panel_a["unit"].isin(low_d_units)].copy()
+            extra["unit"] = extra["unit"] + max_unit * r + r
+            extra_panels.append(extra)
+        panel_b = pd.concat([panel_a] + extra_panels, ignore_index=True)
         result_b = _fit_overall(panel_b, design="auto")
-        # Under equal-weighting, doubling-up should give the same point
-        # estimate (modulo bandwidth-selector re-evaluation at G=2000 vs
-        # G=1000).
-        assert abs(result_a.att - result_b.att) < 5.0 * max(result_a.se, result_b.se)
+
+        # Verify the shift: on a nonlinear DGP with per-row equal
+        # weighting, panel B's att should differ from panel A's by
+        # MORE than MC noise. Bound the expected shift size from below
+        # by ~1.5 * max(se) — large enough to reject the no-shift null
+        # (cell-size-weighting counterfactual) but small enough to
+        # tolerate stochastic variation in the boundary intercept.
+        shift = abs(result_b.att - result_a.att)
+        max_se = max(result_a.se, result_b.se)
+        assert shift > 1.5 * max_se, (
+            f"selective low-D replication did not shift att enough "
+            f"(shift={shift:.4f}, max_se={max_se:.4f}); "
+            f"cell-size-weighting counterfactual would predict shift ~ 0"
+        )
+        # And the shift goes DOWN (cell-size weighting would predict shift = 0;
+        # equal weighting on this DGP predicts att_B < att_A because the
+        # nonlinear DGP's WAS depends on mean(D²)/mean(D), and replicating
+        # low-D units reduces this ratio).
+        assert result_b.att < result_a.att
 
     def test_sup_t_bootstrap_skipped_when_cband_false(self) -> None:
         """``cband=False`` on weighted event-study disables sup-t bootstrap.
