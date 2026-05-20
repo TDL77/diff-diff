@@ -1349,6 +1349,22 @@ def qug_test(
 
     Notes
     -----
+    **Scope (what this test does NOT cover).** ``qug_test`` tests the
+    Theorem 4 / Design 1' support-infimum null ``H_0: d_lower = 0``. It
+    does not validate the full Assumption 4 (Assumption 4 also requires
+    positive boundary density, twice-differentiable conditional-mean,
+    bounded continuous conditional-variance, and bandwidth regularity —
+    QUG is adjacent evidence on the ``d_lower = 0`` clause only). It
+    does NOT and CANNOT test Assumptions 5 and 6 from the same paper
+    (Section 3.1.2), which are required for sign identification (A5) and
+    point identification (A6) of ``WAS_{d_lower}`` on the Design 1 family
+    (``d_lower > 0``). Assumptions 5 and 6 are statements about
+    conditional expectations near the support boundary and about
+    counterfactual-mean alignment respectively; they are non-testable via
+    pre-trends. See :class:`HeterogeneousAdoptionDiD` class docstring
+    Notes for the full statement and T21 (HAD pretest workflow tutorial)
+    for the verdict-language convention that surfaces this gap.
+
     Tie-break: when ``D_{(1)} == D_{(2)}`` the statistic is undefined.
     The test returns ``t_stat=NaN, p_value=NaN, reject=False`` with a
     ``UserWarning`` rather than raising.
@@ -1636,6 +1652,23 @@ def stute_test(
 
     Notes
     -----
+    **Scope (what this test does NOT cover).** ``stute_test`` targets
+    paper Assumption 8 (linearity of ``E[ΔY | D_2]`` in ``D_2``) — the
+    raw helper always fits ``dy ~ 1 + d`` and tests the linearity null;
+    it does NOT target Assumption 7 mean-independence pre-trends on its
+    own. For Assumption 7 mean-independence (residuals from intercept-
+    only ``dy ~ 1``), use :func:`joint_pretrends_test` (which routes
+    ``null_form="mean_independence"`` into the joint CvM core). It does
+    NOT and CANNOT test Assumptions 5 and 6 from de Chaisemartin et al.
+    (2026) Section 3.1.2, which are required for sign / point
+    identification of ``WAS_{d_lower}`` on the Design 1 family
+    (``d_lower > 0``). Assumptions 5/6 are non-testable via pre-trends
+    (boundary-conditional expectations and counterfactual-mean alignment
+    statements); they are surfaced by the Design 1 fit-time
+    ``UserWarning`` and by T21 tutorial prose, NOT by the workflow
+    verdict string. See :class:`HeterogeneousAdoptionDiD` class
+    docstring Notes for the full statement.
+
     Sample-size gate: below ``G = 10`` the CvM statistic is not
     well-calibrated. In that case the function emits ``UserWarning`` and
     returns all-NaN inference rather than raising.
@@ -2112,6 +2145,20 @@ def yatchew_hr_test(
 
     Notes
     -----
+    **Scope (what this test does NOT cover).** ``yatchew_hr_test`` targets
+    paper Assumption 8 (linearity of ``E[ΔY | D_2]`` in ``D_2``) under
+    ``null="linearity"`` (default); ``null="mean_independence"`` swaps
+    the residual definition to intercept-only ``dy ~ 1`` for R parity
+    with ``YatchewTest::yatchew_test(order=0)`` on pre-trend placebos.
+    It does NOT and CANNOT test Assumptions 5 and 6 from de
+    Chaisemartin et al. (2026) Section 3.1.2, which are required for
+    sign / point identification of ``WAS_{d_lower}`` on the Design 1
+    family (``d_lower > 0``). Assumptions 5/6 are non-testable via
+    pre-trends; they are surfaced by the Design 1 fit-time
+    ``UserWarning`` and by T21 tutorial prose, NOT by the workflow
+    verdict string. See :class:`HeterogeneousAdoptionDiD` class
+    docstring Notes for the full statement.
+
     Sample-size gate: below ``G = 3`` the difference-variance estimator
     is undefined; the function emits ``UserWarning`` and returns NaN
     rather than raising.
@@ -4548,6 +4595,27 @@ def did_had_pretest_workflow(
 
     Notes
     -----
+    **Scope (what this composite workflow does NOT cover).** The
+    component pretests target the Theorem 4 / Design 1' support-infimum
+    null (QUG: ``d_lower = 0``, adjacent evidence on the ``d_lower = 0``
+    clause of Assumption 4 only — does not validate boundary density,
+    conditional-mean smoothness, or variance regularity), Assumption 7
+    (joint Stute pre-trends: mean-independence of placebo first-
+    differences from dose), and Assumption 8 (Yatchew / joint
+    homogeneity: linearity of treatment effects in dose). The workflow
+    does NOT and CANNOT test Assumptions 5 and 6
+    from de Chaisemartin et al. (2026) Section 3.1.2, which are required
+    for sign / point identification of ``WAS_{d_lower}`` on the Design 1
+    family (``d_lower > 0``). Assumptions 5/6 are non-testable via
+    pre-trends. The composite verdict string does NOT mention
+    Assumptions 5 or 6 — it only flags the Assumption 7 step-2 gap on
+    the two-period ``aggregate="overall"`` path. The Assumption 5/6
+    caveat is surfaced separately by (a) the
+    ``HeterogeneousAdoptionDiD.fit()`` fit-time ``UserWarning`` (which
+    fires whenever the resolved design is Design 1 family —
+    ``continuous_near_d_lower`` or ``mass_point``) and (b) T21 (HAD
+    pretest workflow tutorial) tutorial prose.
+
     Survey/weighted data (Phase 4.5 C): under ``survey=`` or ``weights=``,
     the workflow:
 

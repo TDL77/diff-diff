@@ -24,7 +24,7 @@ A **Complete** entry has a documented review pass against the primary academic s
 
 The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
 
-**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures (e.g., DCDH has a methodology file, R parity, and a companion-paper review for the 2026 universal-rollout extension; HAD has its primary-source paper review and R parity but no dedicated methodology file; ContinuousDiD has the methodology file but no paper review); others have only the REGISTRY entry and unit tests (e.g., PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
+**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures (e.g., DCDH has a methodology file, R parity, and a companion-paper review for the 2026 universal-rollout extension; ContinuousDiD has the methodology file but no paper review); others have only the REGISTRY entry and unit tests (e.g., PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
 
 **Not Started** entries have neither a tracker walk-through nor an REGISTRY.md section. This tracker no longer carries any Not Started rows; new estimators are expected to enter as In Progress when their REGISTRY entry lands.
 
@@ -58,7 +58,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 |-----------|--------|---------------------|--------|-------------|
 | ContinuousDiD | `continuous_did.py` | `contdid` v0.1.0 | **In Progress** | — |
 | ChaisemartinDHaultfoeuille (DCDH) | `chaisemartin_dhaultfoeuille.py` | `DIDmultiplegtDYN` | **In Progress** | — |
-| HeterogeneousAdoptionDiD (HAD) | `had.py`, `had_pretests.py` | (paper-direct; `nprobust` for bandwidth) | **In Progress** | — |
+| HeterogeneousAdoptionDiD (HAD) | `had.py`, `had_pretests.py` | `chaisemartin::did_had` (`Credible-Answers/did_had` v2.0.0); `nprobust` for bandwidth | **Complete** | 2026-05-20 |
 | TROP | `trop.py`, `trop_local.py`, `trop_global.py` | (forthcoming; paper-author reference implementation) | **In Progress** | — |
 
 ### Triple-Difference Estimators
@@ -687,22 +687,51 @@ and covariate-adjusted specifications.)
 |-------|-------|
 | Module | `had.py`, `had_pretests.py` |
 | Primary Reference | de Chaisemartin, Ciccia, D'Haultfœuille & Knau (2026), *Difference-in-Differences Estimators When No Unit Remains Untreated*, arXiv:2405.04465v6 |
-| R Reference | None (paper-direct implementation); `nprobust` (Calonico-Cattaneo-Farrell) used for bandwidth selection only |
-| Status | **In Progress** |
-| Last Review | — |
+| R Reference | `chaisemartin::did_had` (`Credible-Answers/did_had` v2.0.0, SHA `edc09197`) — R-parity-locked at `atol=1e-8` on 3 DGPs × 5 method combos via `tests/test_did_had_parity.py`; `nprobust` (Calonico-Cattaneo-Farrell) v0.5.0 used as auxiliary reference for bandwidth selection only (machine-precision port at `atol=1e-14`) |
+| Status | **Complete** |
+| Last Review | 2026-05-20 |
 
-**Documentation in place:**
-- REGISTRY.md section: `## HeterogeneousAdoptionDiD` (~330 lines covering Phases 1a-5: Epanechnikov/triangular/uniform kernels, HC2+Bell-McCaffrey, CR2 Imbens-Kolesar Satterthwaite DOF, Calonico-Cattaneo-Farrell MSE-DPI bandwidth, bias-corrected local-linear, three design paths — continuous_at_zero / continuous_near_d_lower / mass_point — multi-period event-study via Appendix B.2, three pretest helpers `qug_test` / `stute_test` / `yatchew_hr_test`, composite `did_had_pretest_workflow`, survey support including PSU-level Mammen wild bootstrap for Stute family)
-- **Paper review on file**: shares `dechaisemartin-2026-review.md` with DCDH (universal-rollout coverage)
-- Implementation: comprehensive coverage in `tests/test_had.py` (HAD estimator) and `tests/test_had_pretests.py` (`qug_test` / `stute_test` / `yatchew_hr_test` and the composite workflow); Monte-Carlo coverage in `tests/test_had_mc.py`; dual-knob deprecation in `tests/test_had_dual_knob_deprecation.py`
-- Bandwidth port: `tests/test_bandwidth_selector.py` (public-API wrapper, HAD configuration) and `tests/test_nprobust_port.py` (full `lprobust` / `lpbwselect_mse_dpi` port surface); bias-corrected `lprobust` parity in `tests/test_bias_corrected_lprobust.py`
-- R parity: 5 R-direct parity tests in `tests/test_did_had_parity.py`; `nprobust` golden fixtures in `benchmarks/data/nprobust_*_golden.json` validated at `0.0000%` relative error
-- Two dedicated tutorials: T21 (`docs/tutorials/21_had_pretest_workflow.ipynb`) and T22 (`docs/tutorials/22_had_survey_design.ipynb`) with companion `tests/test_t21_had_pretest_workflow_drift.py` and `tests/test_t22_had_survey_design_drift.py` drift-test files
+**Verified Components:**
+- [x] Eq. 3 / Theorem 1 (Design 1' WAS identification: `WAS = [E(ΔY) − lim_{d↓0} E(ΔY | D ≤ d)] / E(D)`, the boundary-subtracted form; the library estimates the boundary intercept via bias-corrected local linear and computes `att = (mean(ΔY) − τ_bc) / mean(D)`) — `tests/test_methodology_had.py::TestHADTheorem1Design1Prime` (7 tests including MC recovery on the simple `ΔY = β·D + ε` DGP, MC recovery on a NONZERO-BOUNDARY-INTERCEPT DGP `ΔY = c + β·D + ε` with `c != 0` to exercise the `mean(ΔY) − τ_bc` subtraction explicitly, and N(0,1) coverage at `n_replicates=200`, G=1000)
+- [x] Eq. 7 (local-linear with bias-corrected CI) — covered by `tests/test_bias_corrected_lprobust.py` (44 tests, hand-derived R reference at `atol=1e-12`) and `tests/test_nprobust_port.py` (~46 tests, machine-precision port at `atol=1e-14`)
+- [x] Eq. 11 / Theorem 3 (`WAS_{d_lower}` under Assumption 6, mass-point path) — `tests/test_methodology_had.py::TestHADTheorem3MassPoint` (5 tests including Wald-IV closed-form equivalence at `atol=1e-9`)
+- [x] Theorem 4 (QUG null test, limit law `T_λ = (λ + E_1) / E_2` under Exp(1)/Exp(1)) — `tests/test_methodology_had.py::TestHADTheorem4QUG` (6 tests; MC distributional match against closed-form `F(t) = t/(1+t)` at KS-stat ≤ 0.05, n_draws=5000)
+- [x] Eq. 29 / Theorem 7 (Yatchew-HR linearity test, paper-literal `σ²_diff = 1/(2G)` normalization) — `tests/test_methodology_had.py::TestHADTheorem7YatchewHR` (6 tests; standard-normal limit, normalization lock, both `null="linearity"` and `null="mean_independence"` modes)
+- [x] Eq. 18 joint Stute pre-trends + homogeneity (sum-of-CvMs + shared-η Mammen wild bootstrap; both mean-independence and linearity nulls) — `tests/test_methodology_had.py::TestHADJointStute` (5 tests). Coverage scope: H0 fail-to-reject on `joint_pretrends_test` (mean-independence) and `joint_homogeneity_test` (linearity); H1 rejection demonstrated on `joint_homogeneity_test` via a nonlinear DGP. **Out of scope for the new methodology file:** the `trends_lin=True` linear-trend-detrended variant is SHIPPED in the library (R-parity locked against `DIDHAD::did_had(..., trends_lin=TRUE)` v2.0.0; see REGISTRY § "Note (Phase 4 — Eq 17 / Eq 18 linear-trend detrending shipped)" and `tests/test_did_had_parity.py`) but its methodology-walk-through tests are NOT duplicated in `test_methodology_had.py`. Pierce-Schott NUMERICAL replication against the published p=0.51 anchor on the LBD-restricted panel is the waived item (REGISTRY Deviations Note #3).
+- [x] R parity (`chaisemartin::did_had`) at `atol=1e-8` on 3 DGPs × 5 method combos (bit-exact, `rtol=0`) — `tests/test_did_had_parity.py::TestPointSEParity` + `TestYatchewParity` (5 direct parity tests; YatchewTest closed-form parity at `atol=1e-10`)
+- [x] `nprobust` (Calonico-Cattaneo-Farrell) port at machine precision (`atol=1e-14`) — `tests/test_nprobust_port.py` (7 classes spanning kernel constants, QR-based `(X'X)^{-1}`, three-stage MSE-DPI bandwidth, clustered variance, weighted local-linear, single-eval-point parity)
+- [x] Bandwidth selector (CCF MSE-DPI) at 1% tolerance — `tests/test_bandwidth_selector.py` (8 classes covering public-API wrapper, stage diagnostics)
+- [x] Survey support: pweight + strata/PSU/FPC via TSL on the continuous and mass-point paths; PSU-level Mammen wild bootstrap on the Stute family; closed-form weighted variance components on Yatchew (Phase 4.5 A/B/C; QUG-under-survey permanently deferred per Phase 4.5 C0)
+- [x] Tutorials T21 (`docs/tutorials/21_had_pretest_workflow.ipynb`, 17 drift tests) + T22 (`docs/tutorials/22_had_survey_design.ipynb`, 32 drift tests across groups A-G); plus T20 (`docs/tutorials/20_had_brand_campaign.ipynb`, 14 drift tests)
+- [x] Assumption 5/6 non-testability documented in `HeterogeneousAdoptionDiD` class docstring + `qug_test`/`stute_test`/`yatchew_hr_test`/`did_had_pretest_workflow` Notes blocks; reinforced by a fit-time `UserWarning` emitted from the outer `HeterogeneousAdoptionDiD.fit()` dispatch on the overall and event-study paths when the resolved design is Design 1 family (search `diff_diff/had.py` for "---- Assumption 5/6 warning on Design 1 paths ----")
 
-**Outstanding for promotion:**
-- Dedicated `tests/test_methodology_had.py` (versus the existing implementation-detail-heavy `test_had.py`) with paper-equation-numbered Verified Components walk-through (Equations 3, 7, 11, 18, 29 for Theorems 1, 3, 4, 7)
-- Documented deviations: equal-vs-cell-size weighting conventions; HAD sup-t bootstrap behavior when not gated by `cband=True` and `aggregate="event_study"`
-- Resolution / waiver for the four unchecked Phase-4 items (Pierce-Schott 2016 Figure 2 replication, Table 1 coverage-rate reproduction, Assumption 5/6 non-testability documentation, staggered-timing warning that redirects to DCDH)
+**Test Coverage:**
+- 36 methodology tests in `tests/test_methodology_had.py` (3 are `@pytest.mark.slow` + gated by `ci_params.bootstrap(...)`: Theorem 1 N(0,1) coverage at `n_reps=200`/`min_n=25`, Theorem 4 QUG limit-law KS at `n_draws=5000`/`min_n=200`, and Theorem 7 Yatchew-HR standard-normal KS at `n_reps=200`/`min_n=25` — each carries an n-conditional tolerance band per `feedback_bootstrap_drift_tests_need_backend_tolerance`) (this PR)
+- ~1,137 implementation-detail tests across `tests/test_had.py`, `tests/test_had_pretests.py`, `tests/test_had_mc.py`, `tests/test_had_dual_knob_deprecation.py`
+- 5 R-direct parity tests at `atol=1e-8` in `tests/test_did_had_parity.py`
+- ~46 + ~44 nprobust port + bias-corrected port tests
+- ~45 bandwidth selector tests
+- 17 + 32 tutorial drift tests (T21 + T22), plus 14 T20 drift tests
+
+**Corrections Made:**
+1. **Phase 4.5 B sup-t bootstrap (PR #432, 2026-05-14):** introduced the gated simultaneous-band bootstrap on the weighted event-study path with the explicit `cband=True` + `aggregate="event_study"` + `weights= or survey_design=` gate.
+2. **Phase 4.5 C survey support for linearity family (PR #432):** PSU-level Mammen wild bootstrap for Stute + closed-form weighted variance for Yatchew. Replaced an earlier `NotImplementedError` stub.
+3. **HAD survey-design API consolidation (PR #439, 2026-05-15):** unified `survey_design=` kwarg across all 8 HAD surfaces; `survey=` / `weights=` become deprecated aliases for one minor cycle.
+4. **Tracker-promotion docstring hardening (this PR, 2026-05-20):** added explicit "Non-testable assumptions (paper Section 3.1.2)" Notes block to the `HeterogeneousAdoptionDiD` class docstring + "Scope (what this test does NOT cover)" clauses to `qug_test` / `stute_test` / `yatchew_hr_test` / `did_had_pretest_workflow` Notes sections. Boxed the REGISTRY HAD Implementation Checklist closures for Phase-4 items (Pierce-Schott Figure 2 + Table 1 coverage waivers, Assumption 5/6 non-testability docs, staggered-timing fail-closed `ValueError`).
+
+**Deviations from the paper / from R / library extensions:**
+1. **Equal-weighting on the continuous path** (paper does not prescribe a unit-weighting scheme; library uses per-unit `w_g = 1` matching `_nprobust_port.lprobust`'s default, NOT cell-size weights). Locked in `tests/test_methodology_had.py::TestHADDeviations::test_equal_weighting_is_per_row_not_per_dose_cell` (probes the deviation via selective low-dose-region replication on a nonlinear DGP: per-row equal weighting predicts the att shifts; cell-size weighting predicts invariance).
+2. **Sup-t bootstrap gating** — runs only when `aggregate="event_study"` AND `(weights= or survey_design= supplied)` AND `cband=True`. Unweighted event-study bit-exactly preserves pre-Phase 4.5 B output. Locked in `TestHADDeviations::test_sup_t_bootstrap_skipped_*`.
+3. **Pierce-Schott Figure 2 replication waived** — R parity at `atol=1e-8` is a stronger anchor; paper Section 5.2 self-acknowledges NP estimators are too noisy on LBD-restricted PNTR data. See REGISTRY Deviations § "Pierce-Schott (2016) Figure 2 replication harness deferred" for the full scope-caveat statement.
+4. **Table 1 coverage-rate reproduction waived** — same R-parity-is-stronger rationale; R parity locks point estimate + SE + CI bounds bit-exactly, coverage-rate MC would re-verify the CCF asymptotic coverage already pinned. Paper Table 1 (89% / 93% / 95% under-coverage at G=100 / 500 / 2500) documents the asymptotic gap that BOTH R and Python inherit.
+5. **Staggered-timing fail-closed `ValueError`** at `diff_diff/had.py:1511` (paper prescribes "Warn"; library raises). Library extension toward stricter safety — `UserWarning` would let the silent-misuse bug class through. Locked in `TestHADDeviations::test_staggered_timing_fail_closed_value_error`.
+6. **Eq. 18 linear-trend-detrended joint Stute SHIPPED** (PR #389) and R-parity-locked against `DIDHAD::did_had(..., trends_lin=TRUE)` v2.0.0 in `tests/test_did_had_parity.py` (3 DGPs × 5 method combos at `atol=1e-8`). The `tests/test_methodology_had.py::TestHADJointStute` walkthrough deliberately covers only the un-detrended mean-independence and linearity variants (no coverage duplication with the R-parity surface). The Pierce-Schott (2016) NUMERICAL replication against the published p=0.51 anchor on the LBD-restricted PNTR panel is what's waived (Deviations Note #3).
+
+**Outstanding Concerns:**
+- Module split (`had.py` ~4593 LoC, `had_pretests.py` ~4951 LoC) — tracked in TODO.md as tech debt, not a methodology gap.
+- Bandwidth selector multi-eval, cross-horizon covariance on joint event-study — tracked as Phase follow-ups in TODO.md.
+- Replicate-weight designs (BRR / Fay / JK1 / JKn / SDR) on HAD continuous path remain `NotImplementedError` (Phase 4.5 D follow-up).
+- `covariates=` kwarg with Theorem 6 multivariate-covariate extension not implemented; currently a Python `TypeError` (kwarg absent from the `fit()` signature). Adding an explicit `**kwargs`-trap with `NotImplementedError` and a Theorem 6 pointer is tracked as a Low-priority follow-up in TODO.md.
 
 ---
 

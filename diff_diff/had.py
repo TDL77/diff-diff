@@ -2595,6 +2595,50 @@ class HeterogeneousAdoptionDiD:
 
     Notes
     -----
+    **Non-testable assumptions (paper Section 3.1.2).** Point identification
+    of ``WAS_{d_lower}`` on the Design 1 family
+    (``continuous_near_d_lower`` and ``mass_point``) requires Assumption 6
+    in addition to parallel trends; sign identification requires
+    Assumption 5. Neither is testable via pre-trends:
+
+    - Assumption 5 (sign identification): the boundary slope-ratio
+      ``lim_{d down d_lower} E(TE_2 | D_2 <= d) / WAS < E(D_2) / d_lower``
+      relates the conditional expectation near the boundary to the
+      overall WAS; it cannot be inferred from pre-period outcome
+      trajectories alone.
+    - Assumption 6 (point identification): the counterfactual-mean
+      alignment ``lim_{d down d_lower} E[Y_2(d_lower) - Y_2(0) | D_2 <= d]
+      = E[Y_2(d_lower) - Y_2(0)]`` is a statement about an unobserved
+      counterfactual at the support infimum.
+
+    The fit() method emits a ``UserWarning`` whenever ``resolved_design``
+    is on the Design 1 family (``continuous_near_d_lower`` or
+    ``mass_point``) so users are not silently led to interpret point
+    estimates as full point identification. The available pre-tests
+    verify ADJACENT identifying conditions:
+
+    - :func:`diff_diff.qug_test`: Theorem 4 / Design 1' support-infimum
+      null ``d_lower = 0`` (adjacent evidence on the ``d_lower = 0``
+      clause of Assumption 4 only, NOT a test of the full Assumption 4
+      statement which also covers boundary-density positivity,
+      conditional-mean smoothness, conditional-variance regularity, and
+      bandwidth conditions).
+    - :func:`diff_diff.stute_test` / :func:`diff_diff.yatchew_hr_test`:
+      Assumption 8 linearity of ``E[ΔY | D_2]`` in ``D_2`` (residuals
+      from ``dy ~ 1 + d``).
+    - :func:`diff_diff.joint_pretrends_test`: Assumption 7
+      mean-independence pre-trends across multi-period placebos
+      (intercept-only residual form via ``null_form="mean_independence"``;
+      the raw ``stute_test`` / ``yatchew_hr_test`` helpers do NOT cover
+      Assumption 7 on their own).
+
+    None of these test Assumptions 5 or 6 directly. The Assumption 5/6
+    non-testability caveat is surfaced by the Design 1 fit-time
+    ``UserWarning`` and by T21 (HAD pretest workflow tutorial) prose,
+    NOT by the composite workflow verdict string (which only flags the
+    Assumption 7 step-2 gap on the two-period ``aggregate="overall"``
+    path).
+
     **Diagnostics coverage.** ``HeterogeneousAdoptionDiDResults.bandwidth_diagnostics``
     and ``.bias_corrected_fit`` are populated only on the continuous
     paths; both are ``None`` on the mass-point path (which is parametric
@@ -2831,13 +2875,22 @@ class HeterogeneousAdoptionDiD:
         first_treat_col : str or None
             Optional first-treatment column (the period at which each
             unit first receives treatment; ``0`` for never-treated).
-            Required on the event-study path when the panel has more
-            than two distinct first-treat values (staggered timing):
-            the estimator auto-filters to the last-treatment cohort
-            with a ``UserWarning`` per paper Appendix B.2 prescription.
             For common-adoption panels the column is optional; when
             omitted, the event-study path infers the first-treatment
-            period ``F`` from the dose invariant.
+            period ``F`` from the dose invariant. **Staggered-timing
+            contract (HAD Appendix B.2):**
+
+            - **`first_treat_col` supplied + multiple cohorts detected**:
+              auto-filter to the last-treatment cohort + never-treated
+              units with a ``UserWarning`` naming kept / dropped counts.
+            - **`first_treat_col` omitted + multiple distinct first-
+              positive-dose cohorts inferred from the dose path**: the
+              estimator FAIL-CLOSES with ``ValueError`` directing the
+              user to either pass ``first_treat_col`` (activates the
+              auto-filter) or use :class:`ChaisemartinDHaultfoeuille`
+              (``did_multiplegt_dyn``) for full staggered support. See
+              REGISTRY § "Library extension: Staggered-timing fail-
+              closed" for the rationale on raising vs. warning.
         aggregate : {"overall", "event_study"}
             ``"overall"`` (default): returns a single-period
             :class:`HeterogeneousAdoptionDiDResults` (Phase 2a). Requires
@@ -2847,8 +2900,11 @@ class HeterogeneousAdoptionDiD:
             event-time WAS estimates on the multi-period panel (paper
             Appendix B.2). Requires more than two time periods. Pointwise
             CIs per horizon; joint cross-horizon covariance is deferred
-            to a follow-up PR. Staggered-timing panels are auto-filtered
-            to the last-treatment cohort with a ``UserWarning``.
+            to a follow-up PR. Staggered-timing panels: see the
+            ``first_treat_col`` contract above (auto-filter to last
+            cohort + never-treated with ``UserWarning`` when supplied;
+            fail-closed ``ValueError`` when omitted on a staggered
+            panel).
         survey_design : SurveyDesign or None, keyword-only
             Survey design (sampling weights + optional strata / PSU / FPC)
             for design-based inference. Supported on ALL design × aggregate
