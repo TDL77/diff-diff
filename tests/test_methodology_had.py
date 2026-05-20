@@ -999,7 +999,9 @@ class TestHADDeviations:
         """``cband=False`` on weighted event-study disables sup-t bootstrap.
 
         With ``cband=False``, the simultaneous-band machinery doesn't
-        run; ``cband_low`` / ``cband_high`` should be all-NaN.
+        run; the result class's ``cband_low`` / ``cband_high`` fields
+        (typed ``Optional[np.ndarray]``) stay ``None`` rather than
+        being populated with a band.
         """
         rng = np.random.default_rng(_BASE_SEED_DEVIATIONS + 1)
         panel = self._make_event_study_panel(rng, G=200)
@@ -1137,12 +1139,15 @@ class TestHADDeviations:
         # n_units reflects the auto-filter.
         assert result.n_units < G  # earlier cohort was dropped
 
-    def test_safe_inference_joint_nan_on_degenerate_panel(self) -> None:
-        """All inference fields jointly NaN on a panel with zero outcome variation.
+    def test_safe_inference_no_partial_nan_on_degenerate_panel(self) -> None:
+        """safe_inference contract: no partial-NaN state on a degenerate panel.
 
-        On a constant-outcome panel (all delta_Y = 0, no noise), the SE
-        is zero or undefined, and ``safe_inference()`` NaNs out
-        ``t_stat``, ``p_value``, ``conf_int`` jointly.
+        On a constant-outcome panel (all delta_Y = 0, no noise), the
+        att/se/t_stat/p_value/conf_int fields must EITHER all be
+        finite (degenerate path not triggered at this seed/G) OR all
+        be NaN (degenerate path triggered) — never a mix. Locks the
+        ``safe_inference()`` invariant that downstream inference fields
+        move jointly with ``se``.
         """
         rng = np.random.default_rng(_BASE_SEED_DEVIATIONS + 5)
         panel = _make_two_period_panel(
