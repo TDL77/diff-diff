@@ -2615,18 +2615,29 @@ class HeterogeneousAdoptionDiD:
     is on the Design 1 family (``continuous_near_d_lower`` or
     ``mass_point``) so users are not silently led to interpret point
     estimates as full point identification. The available pre-tests
-    (:func:`diff_diff.qug_test`, :func:`diff_diff.stute_test`,
-    :func:`diff_diff.yatchew_hr_test`) verify ADJACENT identifying
-    conditions: QUG tests the Theorem 4 / Design 1' support-infimum
-    null ``d_lower = 0`` — adjacent evidence on the ``d_lower = 0``
-    clause of Assumption 4 only, NOT a test of the full Assumption 4
-    statement (which also covers boundary-density positivity,
-    conditional-mean smoothness, conditional-variance regularity, and
-    bandwidth conditions); Assumption 7 mean-independence pre-trends
-    via Stute; Assumption 8 linearity / homogeneity via Yatchew. None
-    of these test Assumptions 5 or 6 directly. T21 (HAD pretest
-    workflow tutorial) shows the verdict-language convention that
-    surfaces this caveat to end users.
+    verify ADJACENT identifying conditions:
+
+    - :func:`diff_diff.qug_test`: Theorem 4 / Design 1' support-infimum
+      null ``d_lower = 0`` (adjacent evidence on the ``d_lower = 0``
+      clause of Assumption 4 only, NOT a test of the full Assumption 4
+      statement which also covers boundary-density positivity,
+      conditional-mean smoothness, conditional-variance regularity, and
+      bandwidth conditions).
+    - :func:`diff_diff.stute_test` / :func:`diff_diff.yatchew_hr_test`:
+      Assumption 8 linearity of ``E[ΔY | D_2]`` in ``D_2`` (residuals
+      from ``dy ~ 1 + d``).
+    - :func:`diff_diff.joint_pretrends_test`: Assumption 7
+      mean-independence pre-trends across multi-period placebos
+      (intercept-only residual form via ``null_form="mean_independence"``;
+      the raw ``stute_test`` / ``yatchew_hr_test`` helpers do NOT cover
+      Assumption 7 on their own).
+
+    None of these test Assumptions 5 or 6 directly. The Assumption 5/6
+    non-testability caveat is surfaced by the Design 1 fit-time
+    ``UserWarning`` and by T21 (HAD pretest workflow tutorial) prose,
+    NOT by the composite workflow verdict string (which only flags the
+    Assumption 7 step-2 gap on the two-period ``aggregate="overall"``
+    path).
 
     **Diagnostics coverage.** ``HeterogeneousAdoptionDiDResults.bandwidth_diagnostics``
     and ``.bias_corrected_fit`` are populated only on the continuous

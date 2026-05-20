@@ -1653,16 +1653,21 @@ def stute_test(
     Notes
     -----
     **Scope (what this test does NOT cover).** ``stute_test`` targets
-    paper Assumption 8 (mean-independence of treatment effects /
-    pre-trends linearity, depending on the residual definition). It does
+    paper Assumption 8 (linearity of ``E[ΔY | D_2]`` in ``D_2``) — the
+    raw helper always fits ``dy ~ 1 + d`` and tests the linearity null;
+    it does NOT target Assumption 7 mean-independence pre-trends on its
+    own. For Assumption 7 mean-independence (residuals from intercept-
+    only ``dy ~ 1``), use :func:`joint_pretrends_test` (which routes
+    ``null_form="mean_independence"`` into the joint CvM core). It does
     NOT and CANNOT test Assumptions 5 and 6 from de Chaisemartin et al.
     (2026) Section 3.1.2, which are required for sign / point
     identification of ``WAS_{d_lower}`` on the Design 1 family
     (``d_lower > 0``). Assumptions 5/6 are non-testable via pre-trends
     (boundary-conditional expectations and counterfactual-mean alignment
-    statements). See :class:`HeterogeneousAdoptionDiD` class docstring
-    Notes for the full statement and T21 for the verdict-language
-    convention that surfaces this gap to end users.
+    statements); they are surfaced by the Design 1 fit-time
+    ``UserWarning`` and by T21 tutorial prose, NOT by the workflow
+    verdict string. See :class:`HeterogeneousAdoptionDiD` class
+    docstring Notes for the full statement.
 
     Sample-size gate: below ``G = 10`` the CvM statistic is not
     well-calibrated. In that case the function emits ``UserWarning`` and
@@ -2141,15 +2146,18 @@ def yatchew_hr_test(
     Notes
     -----
     **Scope (what this test does NOT cover).** ``yatchew_hr_test`` targets
-    paper Assumption 8 (linearity of ``E[ΔY | D_2]`` in ``D_2``, or
-    mean-independence depending on ``residual_form``). It does NOT and
-    CANNOT test Assumptions 5 and 6 from de Chaisemartin et al. (2026)
-    Section 3.1.2, which are required for sign / point identification of
-    ``WAS_{d_lower}`` on the Design 1 family (``d_lower > 0``).
-    Assumptions 5/6 are non-testable via pre-trends. See
-    :class:`HeterogeneousAdoptionDiD` class docstring Notes for the full
-    statement and T21 for the verdict-language convention that surfaces
-    this gap to end users.
+    paper Assumption 8 (linearity of ``E[ΔY | D_2]`` in ``D_2``) under
+    ``null="linearity"`` (default); ``null="mean_independence"`` swaps
+    the residual definition to intercept-only ``dy ~ 1`` for R parity
+    with ``YatchewTest::yatchew_test(order=0)`` on pre-trend placebos.
+    It does NOT and CANNOT test Assumptions 5 and 6 from de
+    Chaisemartin et al. (2026) Section 3.1.2, which are required for
+    sign / point identification of ``WAS_{d_lower}`` on the Design 1
+    family (``d_lower > 0``). Assumptions 5/6 are non-testable via
+    pre-trends; they are surfaced by the Design 1 fit-time
+    ``UserWarning`` and by T21 tutorial prose, NOT by the workflow
+    verdict string. See :class:`HeterogeneousAdoptionDiD` class
+    docstring Notes for the full statement.
 
     Sample-size gate: below ``G = 3`` the difference-variance estimator
     is undefined; the function emits ``UserWarning`` and returns NaN
@@ -4599,12 +4607,14 @@ def did_had_pretest_workflow(
     from de Chaisemartin et al. (2026) Section 3.1.2, which are required
     for sign / point identification of ``WAS_{d_lower}`` on the Design 1
     family (``d_lower > 0``). Assumptions 5/6 are non-testable via
-    pre-trends. The composite verdict surfaces this gap explicitly via
-    its ``"Assumption 7 gap"`` (when QUG defers) and via the
+    pre-trends. The composite verdict string does NOT mention
+    Assumptions 5 or 6 — it only flags the Assumption 7 step-2 gap on
+    the two-period ``aggregate="overall"`` path. The Assumption 5/6
+    caveat is surfaced separately by (a) the
     ``HeterogeneousAdoptionDiD.fit()`` fit-time ``UserWarning`` (which
-    fires whenever the resolved design is Design 1 family). T21 (HAD
-    pretest workflow tutorial) shows the recommended user-facing
-    verdict-language convention.
+    fires whenever the resolved design is Design 1 family —
+    ``continuous_near_d_lower`` or ``mass_point``) and (b) T21 (HAD
+    pretest workflow tutorial) tutorial prose.
 
     Survey/weighted data (Phase 4.5 C): under ``survey=`` or ``weights=``,
     the workflow:
