@@ -1859,27 +1859,46 @@ def _cr2_bm_dof_inner_weighted(
     # different specific values in this regime due to its own BLAS reduction
     # order; we return NaN with a warning rather than ship arbitrarily-
     # different small-sample DOF on the user-facing surface.
+    # The noise-floor detector has two criteria, applied union-wise:
+    #   1. Batch-relative: a contrast's max(|P|) < 1e-10 × the largest contrast's
+    #      max(|P|). Useful when computing per-coefficient DOF for an entire design
+    #      (`contrasts=np.eye(k)`) — a single noise-floor coefficient stands out.
+    #   2. Absolute (single-contrast safe): max(|P|) < eps_floor based on the
+    #      bread matrix scale. Necessary because batch-relative reduces to
+    #      max|P| < 1e-10 × max|P| (i.e. False) for a single contrast, leaving
+    #      direct `_compute_cr2_bm_contrast_dof(...)` callers (e.g., MPD avg_att)
+    #      unprotected. Threshold: `(EPS × n × k × bread_inv_scale)²` covers the
+    #      worst-case dgemm accumulation roundoff floor for `H1/H2/H3 @ contrast`
+    #      products. CI codex flagged this as P2 (R8 round); regression test in
+    #      tests/test_methodology_wls_cr2.py::TestWLSCR2FEDoFNoiseGuard.
+    _EPS = np.finfo(np.float64).eps
+    n_obs, k_X = X.shape
+    bread_inv_scale = float(np.max(np.abs(bread_inv))) if bread_inv.size else 1.0
+    abs_noise_floor = (_EPS * n_obs * k_X * max(bread_inv_scale, 1.0)) ** 2
+
     if m > 1:
         max_P_overall = float(np.max(max_abs_P_arr))
-        if max_P_overall > 0:
-            noise_floor = 1e-10 * max_P_overall
-            degenerate = max_abs_P_arr < noise_floor
-            n_degenerate = int(np.sum(degenerate))
-            if n_degenerate > 0:
-                dof_vec[degenerate] = np.nan
-                warnings.warn(
-                    f"Satterthwaite DOF for {n_degenerate} of {m} contrast(s) "
-                    f"is at the float64 noise floor (max|P| < 1e-10 × "
-                    f"max|P|_overall); reporting NaN. This typically affects "
-                    f"high-leverage FE-dummy coefficients whose contrast "
-                    f"vector projects to near-zero on the design — the "
-                    f"resulting DOF varies across BLAS implementations and is "
-                    f"unreliable. The coefficient SEs remain valid; only the "
-                    f"Satterthwaite DOF (and any t-test or CI that depends on "
-                    f"it) is suppressed.",
-                    UserWarning,
-                    stacklevel=3,
-                )
+        relative_floor = 1e-10 * max_P_overall if max_P_overall > 0 else 0.0
+    else:
+        relative_floor = 0.0
+    noise_floor = max(relative_floor, abs_noise_floor)
+    degenerate = max_abs_P_arr < noise_floor
+    n_degenerate = int(np.sum(degenerate))
+    if n_degenerate > 0:
+        dof_vec[degenerate] = np.nan
+        warnings.warn(
+            f"Satterthwaite DOF for {n_degenerate} of {m} contrast(s) "
+            f"is at the float64 noise floor (max|P| < noise_floor = "
+            f"max({relative_floor:.3e}, {abs_noise_floor:.3e})); reporting "
+            f"NaN. This typically affects high-leverage FE-dummy "
+            f"coefficients whose contrast vector projects to near-zero on "
+            f"the design — the resulting DOF varies across BLAS "
+            f"implementations and is unreliable. The coefficient SEs "
+            f"remain valid; only the Satterthwaite DOF (and any t-test or "
+            f"CI that depends on it) is suppressed.",
+            UserWarning,
+            stacklevel=3,
+        )
 
     return dof_vec
 

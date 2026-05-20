@@ -533,6 +533,96 @@ class TestWLSCR2FEDoFNoiseGuard:
         ), f"Expected 1 noise-floor UserWarning, got {len(noise_warnings)}"
 
 
+class TestWLSCR2SingleContrastNoiseFloor:
+    """Regression for CI codex R8 P2: the noise-floor NaN-guard must trigger
+    on single-contrast calls to `_compute_cr2_bm_contrast_dof` too, not just
+    batched per-coefficient calls. The earlier batch-relative-only criterion
+    couldn't catch single contrasts because `max|P|_overall == contrast's own
+    scale` for m=1. The absolute (eps × n × k × bread_scale)² floor closes
+    the gap."""
+
+    def test_single_fe_dummy_contrast_triggers_nan_guard(self, goldens):
+        """A direct single-contrast call for a high-leverage FE-dummy unit
+        dummy must return NaN, not a BLAS-dependent finite DOF."""
+        import warnings
+
+        d = goldens["weighted_did_absorbed_fe"]
+        n = len(d["y"])
+        unit_int = np.asarray(d["unit"])
+        period_int = np.asarray(d["period"])
+        treat_post = np.asarray(d["treat_post"])
+        np.asarray(d["y"])
+        w = np.asarray(d["weights"])
+        cluster = unit_int
+
+        cols = [np.ones(n), treat_post.astype(float)]
+        col_names = ["(Intercept)", "treat_post"]
+        for u in sorted(np.unique(unit_int))[1:]:
+            cols.append((unit_int == u).astype(float))
+            col_names.append(f"unit{u}")
+        for p in sorted(np.unique(period_int))[1:]:
+            cols.append((period_int == p).astype(float))
+            col_names.append(f"period{p}")
+        X = np.column_stack(cols)
+        bread = X.T @ (X * w[:, None])
+
+        # Single contrast = unit2 dummy (the noise-floor case from the
+        # weighted_did_absorbed_fe fixture).
+        unit2_idx = col_names.index("unit2")
+        c_unit2 = np.zeros(X.shape[1])
+        c_unit2[unit2_idx] = 1.0
+        contrasts = c_unit2[:, None]  # (k, 1) — single contrast
+
+        with warnings.catch_warnings(record=True) as ws:
+            warnings.simplefilter("always")
+            dof = _compute_cr2_bm_contrast_dof(X, cluster, bread, contrasts, weights=w)
+        assert np.isnan(dof[0]), (
+            "Single weighted FE-dummy contrast must trigger absolute noise-"
+            "floor guard; got finite DOF instead."
+        )
+        noise_warnings = [w for w in ws if "noise floor" in str(w.message)]
+        assert (
+            len(noise_warnings) == 1
+        ), f"Expected 1 noise-floor UserWarning, got {len(noise_warnings)}"
+
+    def test_single_non_noise_contrast_returns_finite_dof(self, goldens):
+        """Sanity check: a single contrast that's NOT at the noise floor
+        (e.g., treat_post) must return finite DOF, not NaN."""
+        d = goldens["weighted_did_absorbed_fe"]
+        n = len(d["y"])
+        unit_int = np.asarray(d["unit"])
+        period_int = np.asarray(d["period"])
+        treat_post = np.asarray(d["treat_post"])
+        np.asarray(d["y"])
+        w = np.asarray(d["weights"])
+        cluster = unit_int
+
+        cols = [np.ones(n), treat_post.astype(float)]
+        col_names = ["(Intercept)", "treat_post"]
+        for u in sorted(np.unique(unit_int))[1:]:
+            cols.append((unit_int == u).astype(float))
+            col_names.append(f"unit{u}")
+        for p in sorted(np.unique(period_int))[1:]:
+            cols.append((period_int == p).astype(float))
+            col_names.append(f"period{p}")
+        X = np.column_stack(cols)
+        bread = X.T @ (X * w[:, None])
+
+        # Single contrast = treat_post (NOT a noise-floor contrast).
+        treat_post_idx = col_names.index("treat_post")
+        c_treat = np.zeros(X.shape[1])
+        c_treat[treat_post_idx] = 1.0
+        contrasts = c_treat[:, None]
+
+        dof = _compute_cr2_bm_contrast_dof(X, cluster, bread, contrasts, weights=w)
+        assert np.isfinite(dof[0]) and dof[0] > 0, (
+            f"Single non-noise contrast should return finite positive DOF; " f"got {dof[0]}"
+        )
+        # Sanity: should match R's df_satt for treat_post (3.754) at atol=1e-10.
+        r_dof_treat_post = float(np.asarray(d["dof_cr2"])[treat_post_idx])
+        np.testing.assert_allclose(dof[0], r_dof_treat_post, atol=1e-10)
+
+
 class TestLinearRegressionFENanGuardEndToEnd:
     """Regression for R7 P0: NaN BM DOF from the noise-floor guard must
     propagate to NaN inference fields in `LinearRegression.get_inference()`,
