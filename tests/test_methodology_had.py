@@ -5,7 +5,16 @@ Targets de Chaisemartin, Ciccia, D'Haultfoeuille & Knau (2026) arXiv:2405.04465v
 
 Equation walk-through:
 
-- Eq. 3  / Theorem 1: Design 1' WAS = E[delta_Y] / E[D]
+- Eq. 3  / Theorem 1: Design 1' WAS = [E(delta_Y) - lim_{d down 0} E(delta_Y | D <= d)] / E(D).
+                         The library estimates the boundary intercept via
+                         bias-corrected local-linear (Phase 1c) and computes
+                         ``att = (mean(delta_Y) - tau_bc) / mean(D)``; the
+                         test class exercises both the simple-DGP case
+                         (boundary intercept ~ 0) AND a nonzero-boundary-
+                         intercept case (``delta_Y = c + beta*D + eps`` with
+                         ``c != 0``) so the ``mean(delta_Y) - tau_bc``
+                         subtraction is verified, not just the
+                         ``tau_bc ~ 0`` special case.
 - Eq. 7  / (Algorithm): local-linear estimator with bias-corrected CI
 - Eq. 11 / Theorem 3:  WAS_{d_lower} under Assumption 6 (mass-point path)
 - Theorem 4 (QUG):     T_lambda = (lambda + E_1) / E_2 limit law, lambda=0
@@ -80,13 +89,23 @@ def _make_two_period_panel(
     was_true: float,
     sigma: float = 0.1,
     d_lower: float = 0.0,
+    boundary_intercept: float = 0.0,
 ) -> pd.DataFrame:
     """Build a balanced two-period HAD panel.
 
     Period 1: D = 0 for all units (HAD pre-period contract).
     Period 2: D drawn from ``dose_dist`` on ``[d_lower, ...]``; outcome
-    delta = was_true * D + N(0, sigma) so the population WAS equals
-    ``was_true`` on the linear DGP.
+    delta = boundary_intercept + was_true * D + N(0, sigma).
+
+    Population WAS = was_true regardless of ``boundary_intercept``,
+    because Eq. 3 / Theorem 1 subtracts off the boundary limit:
+    ``WAS = (E[ΔY] - lim_{d↓0} E[ΔY | D ≤ d]) / E[D]
+          = (boundary_intercept + was_true * E[D] - boundary_intercept) / E[D]
+          = was_true``.
+    Setting ``boundary_intercept != 0`` makes the library's
+    ``att = (mean(ΔY) - τ_bc) / mean(D)`` actually exercise the
+    ``τ_bc`` subtraction term (otherwise τ_bc ~ 0 and the test only
+    verifies the ``mean(ΔY) / mean(D)`` ratio).
     """
     if dose_dist == "uniform_0_1":
         d_post = rng.uniform(0.0, 1.0, G)
@@ -106,7 +125,7 @@ def _make_two_period_panel(
     else:  # pragma: no cover - test scaffolding
         raise ValueError(f"unknown dose_dist={dose_dist!r}")
 
-    delta_y = was_true * d_post + sigma * rng.standard_normal(G)
+    delta_y = boundary_intercept + was_true * d_post + sigma * rng.standard_normal(G)
     y_pre = np.zeros(G)
     y_post = y_pre + delta_y
 
@@ -155,25 +174,37 @@ def _fit_overall(panel: pd.DataFrame, **kwargs) -> HeterogeneousAdoptionDiDResul
 
 
 class TestHADTheorem1Design1Prime:
-    """Eq. 3 + Theorem 1: Design 1' identification of WAS = E[delta_Y] / E[D].
+    """Eq. 3 + Theorem 1: Design 1' identification of WAS.
 
-    Paper Section 3.1.2 / Theorem 1 establishes that under Assumptions 1-4
-    and ``d_lower = 0``, the WAS is point-identified by the boundary
-    intercept of E[delta_Y | D_2 = d] at d = 0 divided by E[D_2]:
+    Paper Section 3.1.2 / Theorem 1 (boundary-subtracted form):
 
         WAS = ( E[delta_Y] - lim_{d down 0} E[delta_Y | D_2 <= d] ) / E[D_2]
 
     The library implements this via :func:`bias_corrected_local_linear`
     (Phase 1c) composed into ``HeterogeneousAdoptionDiD._fit_continuous``
-    on the ``continuous_at_zero`` design path. This class exercises the
-    full ``fit`` -> ``_fit_continuous`` -> CCF-bias-corrected pipeline.
+    on the ``continuous_at_zero`` design path:
+
+        att = ( mean(delta_Y) - tau_bc ) / mean(D)
+
+    where ``tau_bc`` is the bias-corrected local-linear estimate of the
+    boundary intercept ``lim_{d down 0} E[delta_Y | D_2 <= d]``.
+
+    This class exercises BOTH the simple case (boundary intercept ~ 0,
+    where ``tau_bc`` is a small noise term) AND a NONZERO-boundary-
+    intercept case (``delta_Y = c + beta*D + eps`` with ``c != 0``),
+    so the ``mean(delta_Y) - tau_bc`` subtraction logic is verified
+    rather than just the ``tau_bc ~ 0`` special case.
     """
 
     def test_eq3_was_recovery_uniform_dose(self) -> None:
         """Eq. 3: WAS recovered on Uniform(0,1) DGP within MC error.
 
         DGP: D ~ Uniform(0, 1), delta_y = 0.3 * D + N(0, 0.1).
-        Population WAS = 0.3.
+        Population WAS = 0.3. Boundary intercept ~ 0 so the
+        ``mean(delta_Y) - tau_bc`` subtraction reduces to
+        ``mean(delta_Y)``; see ``test_eq3_was_recovery_nonzero_boundary``
+        below for the nonzero-boundary case that explicitly exercises
+        the subtraction term.
         """
         rng = np.random.default_rng(_BASE_SEED_THEOREM1 + 0)
         panel = _make_two_period_panel(
@@ -185,6 +216,44 @@ class TestHADTheorem1Design1Prime:
         assert np.isfinite(result.att)
         assert np.isfinite(result.se)
         assert abs(result.att - 0.3) < 3.0 * result.se
+
+    def test_eq3_was_recovery_nonzero_boundary_intercept(self) -> None:
+        """Eq. 3: WAS recovered when boundary intercept c != 0.
+
+        DGP: delta_y = 0.2 + 0.3 * D + N(0, 0.1). The boundary intercept
+        is ``c = 0.2`` (constant additive component to delta_Y),
+        so the library's
+
+            tau_bc -> 0.2 (estimating ``lim_{d down 0} E[delta_Y | D <= d]``)
+            mean(delta_Y) -> 0.2 + 0.3 * 0.5 = 0.35
+            att = (0.35 - 0.2) / 0.5 = 0.30 = WAS_true
+
+        verifies the ``mean(delta_Y) - tau_bc`` subtraction explicitly.
+        Were the library to compute ``mean(delta_Y) / mean(D)`` without
+        the boundary subtraction, the recovered att would be 0.70 (= 0.35
+        / 0.5), so a non-trivial ``c != 0`` immediately distinguishes
+        the two formulas.
+        """
+        rng = np.random.default_rng(_BASE_SEED_THEOREM1 + 10)
+        panel = _make_two_period_panel(
+            rng,
+            G=2000,
+            dose_dist="uniform_0_1",
+            was_true=0.3,
+            sigma=0.1,
+            boundary_intercept=0.2,
+        )
+        result = _fit_overall(panel, design="auto")
+        assert result.design == "continuous_at_zero"
+        # Population WAS = 0.3; boundary intercept c = 0.2 must be
+        # subtracted via tau_bc. MC band ~ +/- 3 * se covers truth.
+        assert np.isfinite(result.att)
+        assert np.isfinite(result.se)
+        assert abs(result.att - 0.3) < 3.0 * result.se
+        # Guard against the regression-to-no-subtraction failure mode:
+        # the wrong formula ``mean(delta_Y) / mean(D)`` would give
+        # att ~ 0.7, far outside the 3-sigma band.
+        assert abs(result.att - 0.7) > 5.0 * result.se
 
     def test_design_autodetect_lands_on_continuous_at_zero(self) -> None:
         """Design auto-detect picks continuous_at_zero when d.min() ~ 0."""
