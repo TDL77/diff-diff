@@ -1140,21 +1140,18 @@ class TestHADDeviations:
         # Should produce a valid event-study result (no raise).
         assert isinstance(result, HeterogeneousAdoptionDiDEventStudyResults)
         # Paper Appendix B.2: filter keeps LAST cohort + never-treated;
-        # drops earlier-cohort units. With G=600 and 3 equal-sized cohorts
-        # (third=200 each), kept count = 200 never-treated + 200 last
-        # cohort = 400. Earlier cohort (first_treat=2) is the 200 dropped
-        # units. Lock the exact partition rather than a soft inequality.
+        # drops earlier-cohort units. With G=600 and 3 equal-sized
+        # cohorts (third=200 each), kept count = 200 never-treated +
+        # 200 last cohort = 400. The earlier cohort (first_treat=2) is
+        # the 200 dropped units. Lock the exact partition via the
+        # result's filter_info metadata (the canonical source of truth
+        # for what the auto-filter actually did, NOT the input panel).
         assert result.n_units == 400
-        # Cross-check the actual retained first_treat values: never-treated
-        # (0) plus the last cohort (3) only — NO earlier cohort (2).
-        retained_first_treat = set(
-            panel.loc[panel["unit"].isin(panel["unit"].unique()), "first_treat"].unique()
-        )
-        # Sanity on the panel itself.
-        assert retained_first_treat == {0, 2, 3}
-        # And via the result's reported filter metadata (the auto-filter
-        # records kept/dropped cohorts; n_units is the kept count).
-        assert result.n_units + 200 == G  # 200 earlier-cohort dropped
+        assert result.filter_info is not None
+        assert result.filter_info["F_last"] == 3
+        assert result.filter_info["n_kept"] == 400
+        assert result.filter_info["n_dropped"] == 200
+        assert result.filter_info["dropped_cohorts"] == [2]
 
     def test_assumption_5_6_userwarning_fires_on_design_1_family(self) -> None:
         """Design 1 family (continuous_near_d_lower / mass_point) emits the
