@@ -2009,11 +2009,24 @@ class TestWooldridgeVcovType:
         # Overall ATT inference: finite end-to-end.
         assert np.isfinite(res.overall_t_stat)
         assert np.isfinite(res.overall_p_value)
-        # Aggregate("event"): finite p-values across event-time bins
-        res.aggregate("event")
+        # All three aggregations (group/calendar/event) must produce finite
+        # inference on identified contrasts under the reduced-design BM path.
+        for agg_type in ("group", "calendar", "event"):
+            res.aggregate(agg_type)
         assert res.event_study_effects is not None
         for k, eff in res.event_study_effects.items():
             assert np.isfinite(eff["t_stat"]), f"event k={k} t_stat NaN — aggregate BM DOF on reduced design regressed"
+            assert np.isfinite(eff["p_value"])
+        assert res.group_effects is not None
+        for g, eff in res.group_effects.items():
+            assert np.isfinite(eff["t_stat"]), f"group g={g} t_stat NaN — aggregate BM DOF on reduced design regressed"
+            assert np.isfinite(eff["p_value"])
+        assert res.calendar_effects is not None
+        # Calendar entries with at least one identified treated cell should
+        # have finite BM inference; entirely-pre-treatment calendar periods
+        # are absent from calendar_effects (their cells aren't post-treatment).
+        for t, eff in res.calendar_effects.items():
+            assert np.isfinite(eff["t_stat"]), f"calendar t={t} t_stat NaN — aggregate BM DOF on reduced design regressed"
             assert np.isfinite(eff["p_value"])
 
     def test_hc2_bm_handles_rank_deficient_with_unit_invariant_exovar(self):
@@ -2042,11 +2055,14 @@ class TestWooldridgeVcovType:
             assert np.isfinite(eff["p_value"])
         assert np.isfinite(res.overall_t_stat)
         assert np.isfinite(res.overall_p_value)
-        # Group + event aggregates should also produce finite inference
-        for agg_type in ("group", "event"):
+        # Group + calendar + event aggregates should all produce finite
+        # inference under the reduced-design BM path.
+        for agg_type in ("group", "calendar", "event"):
             res.aggregate(agg_type)
         for g, eff in (res.group_effects or {}).items():
             assert np.isfinite(eff["t_stat"]), f"group g={g} t_stat NaN under rank-deficient exovar"
+        for t, eff in (res.calendar_effects or {}).items():
+            assert np.isfinite(eff["t_stat"]), f"calendar t={t} t_stat NaN under rank-deficient exovar"
         for k, eff in (res.event_study_effects or {}).items():
             assert np.isfinite(eff["t_stat"]), f"event k={k} t_stat NaN under rank-deficient exovar"
 
