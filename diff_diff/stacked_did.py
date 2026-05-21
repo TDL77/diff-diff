@@ -550,14 +550,18 @@ class StackedDiD:
             # Only build contrasts whose target column is identified; if a
             # delta_h column itself was dropped, that event-time will get
             # NaN inference (left to safe_inference's df=None path).
+            # Per CI codex R1 P3: skip per-event contrast DOFs when the
+            # event-study surface is not user-visible (aggregate != "event_study").
+            # The overall ATT contrast still gets computed below.
             es_keys: List[int] = []
             es_cols_full: List[np.ndarray] = []
-            for h in event_times:
-                if h in interaction_indices and _identified[interaction_indices[h]]:
-                    c = np.zeros(k_design)
-                    c[interaction_indices[h]] = 1.0
-                    es_keys.append(h)
-                    es_cols_full.append(c)
+            if aggregate == "event_study":
+                for h in event_times:
+                    if h in interaction_indices and _identified[interaction_indices[h]]:
+                        c = np.zeros(k_design)
+                        c[interaction_indices[h]] = 1.0
+                        es_keys.append(h)
+                        es_cols_full.append(c)
             # Overall ATT contrast: average of post-period delta_h columns
             # (the same 1/K * ones contrast used for overall_se below). Only
             # construct if ALL post-period delta_h are identified — otherwise

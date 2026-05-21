@@ -176,6 +176,28 @@ class StackedDiDResults:
             "",
         ]
 
+        # Variance family label (per CI codex R1 P2): surface the analytical
+        # vcov_type when the survey path didn't override. Mirrors the shared
+        # `_format_vcov_label` helper from results.py used by DiD/MPD/TWFE.
+        # Suppress under survey_metadata since the survey block above already
+        # reports the inference source.
+        if self.survey_metadata is None and self.vcov_type:
+            from diff_diff.results import _format_vcov_label
+
+            # StackedDiD is intrinsically clustered; the cluster name is
+            # either "unit" or "unit_subexp" (config-time, not stored
+            # explicitly on results — derive from the stacked data if
+            # available, else fall back to generic label).
+            label = _format_vcov_label(
+                self.vcov_type,
+                cluster_name=None,  # cluster identity is config; print plain label
+                n_clusters=None,
+                n_obs=self.n_stacked_obs,
+            )
+            if label is not None:
+                lines.append(f"{'Variance:':<30} {label:>50}")
+                lines.append("")
+
         # Add survey design info
         if self.survey_metadata is not None:
             sm = self.survey_metadata
