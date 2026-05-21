@@ -708,10 +708,26 @@ class StackedDiD:
                         _survey_df = _n_valid_rep_sd - 1 if _n_valid_rep_sd > 1 else 0
                         if survey_metadata is not None:
                             survey_metadata.df_survey = _survey_df if _survey_df > 0 else None
-                # Use BM contrast DOF for hc2_bm when available; falls back
-                # to survey DOF (None ⇒ normal distribution) otherwise.
-                _df_eff = _bm_contrast_dof_per_event.get(h, _survey_df)
-                t_stat, p_value, conf_int = safe_inference(effect, se, alpha=self.alpha, df=_df_eff)
+                # Use BM contrast DOF for hc2_bm. Fail-closed: when the
+                # hc2_bm contract is in effect but BM DOF is unavailable (helper
+                # failed OR noise-floor NaN guard fired), emit all-NaN inference
+                # rather than fall back to normal-theory CIs/p-values. Mirrors
+                # the fix in LinearRegression.get_inference() from PR #475 R7
+                # (linalg.py:3689-3706). Without this, safe_inference(df=NaN)
+                # would pass df comparison >= 0 (NaN < 0 is False) and emit
+                # finite t_stat with NaN p/CI — silent wrong inference.
+                _is_hc2bm_path = self.vcov_type == "hc2_bm" and not _uses_replicate_sd
+                _bm_df = _bm_contrast_dof_per_event.get(h)
+                if _is_hc2bm_path and (_bm_df is None or not np.isfinite(_bm_df)):
+                    # BM DOF unavailable on hc2_bm path: NaN-out inference.
+                    t_stat = float("nan")
+                    p_value = float("nan")
+                    conf_int = (float("nan"), float("nan"))
+                else:
+                    _df_eff = _bm_df if _bm_df is not None else _survey_df
+                    t_stat, p_value, conf_int = safe_inference(
+                        effect, se, alpha=self.alpha, df=_df_eff
+                    )
                 n_obs_h = int(np.sum((et_vals == h) & (d_vals == 1)))
                 event_study_effects[h] = {
                     "effect": effect,
@@ -753,14 +769,27 @@ class StackedDiD:
                     survey_metadata.df_survey = (
                         _survey_df_overall if _survey_df_overall > 0 else None
                     )
-        # Use BM contrast DOF for overall ATT (hc2_bm) when available;
-        # falls back to survey DOF (None ⇒ normal) otherwise.
-        _df_overall_eff = (
-            _bm_contrast_dof_overall if _bm_contrast_dof_overall is not None else _survey_df_overall
-        )
-        overall_t, overall_p, overall_ci = safe_inference(
-            overall_att, overall_se, alpha=self.alpha, df=_df_overall_eff
-        )
+        # Use BM contrast DOF for overall ATT (hc2_bm). Fail-closed: when
+        # the hc2_bm contract is in effect but BM DOF is unavailable, emit
+        # all-NaN inference (per the LinearRegression.get_inference pattern
+        # from PR #475 R7). Without this, normal-theory fallback would
+        # silently produce wrong p-values/CIs on the overall_* surface.
+        _is_hc2bm_path_overall = self.vcov_type == "hc2_bm" and not _uses_replicate_sd
+        if _is_hc2bm_path_overall and (
+            _bm_contrast_dof_overall is None or not np.isfinite(_bm_contrast_dof_overall)
+        ):
+            overall_t = float("nan")
+            overall_p = float("nan")
+            overall_ci = (float("nan"), float("nan"))
+        else:
+            _df_overall_eff = (
+                _bm_contrast_dof_overall
+                if _bm_contrast_dof_overall is not None
+                else _survey_df_overall
+            )
+            overall_t, overall_p, overall_ci = safe_inference(
+                overall_att, overall_se, alpha=self.alpha, df=_df_overall_eff
+            )
 
         # ---- Construct results ----
         self.results_ = StackedDiDResults(

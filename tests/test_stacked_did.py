@@ -1353,3 +1353,104 @@ class TestStackedDiDVcovType:
             f"Overall ATT CI must use t(BM DOF) under hc2_bm; got t_crit="
             f"{overall_t_crit}, expected > z_0.975={z_975}"
         )
+
+    def test_hc2_bm_nan_dof_fails_closed_with_all_nan_inference(self, staggered_data, monkeypatch):
+        """Per local codex R3 P1: when BM contrast DOF returns NaN (noise-
+        floor guard fires from PR #475), StackedDiD must emit all-NaN
+        inference fields on the affected contrast — NOT mixed finite-t /
+        NaN-p (which would happen if NaN df flowed through safe_inference)
+        and NOT normal-theory fallback (which would silently produce wrong
+        small-sample CIs).
+
+        Forces NaN DOF by monkeypatching `_compute_cr2_bm_contrast_dof` to
+        return a NaN-only vector. Verifies that:
+          - All event_study_effects entries on the hc2_bm path have NaN
+            t_stat, p_value, conf_int.
+          - overall_* fields are all NaN.
+          - effect and se themselves remain finite (only inference is
+            suppressed, mirroring the LinearRegression.get_inference
+            pattern from PR #475 R7).
+        """
+
+        def _fake_contrast_dof(*args, **kwargs):
+            # Match the m-dimensional output shape expected by callers.
+            n_contrasts = args[3].shape[1] if len(args) >= 4 else kwargs["contrasts"].shape[1]
+            return np.full(n_contrasts, np.nan)
+
+        # Patch the import inside stacked_did's module namespace + the
+        # source module (in case of dynamic re-import).
+        from diff_diff import linalg as _linalg_mod
+
+        monkeypatch.setattr(_linalg_mod, "_compute_cr2_bm_contrast_dof", _fake_contrast_dof)
+
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm")
+        res = est.fit(
+            staggered_data,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            aggregate="event_study",
+        )
+        # All event_study_effects (except the ref period) should have NaN
+        # inference but finite effect+se.
+        for h, eff in res.event_study_effects.items():
+            if h == -1:
+                continue  # ref period: SE=0 by construction
+            assert np.isfinite(eff["effect"]), f"effect at h={h} should be finite"
+            assert np.isfinite(eff["se"]) and eff["se"] > 0, f"se at h={h} should be finite > 0"
+            assert np.isnan(eff["t_stat"]), (
+                f"t_stat at h={h} must be NaN when BM DOF NaN-guarded; "
+                f"got {eff['t_stat']} (silent wrong inference)"
+            )
+            assert np.isnan(eff["p_value"]), f"p_value at h={h} must be NaN; got {eff['p_value']}"
+            assert all(
+                np.isnan(b) for b in eff["conf_int"]
+            ), f"conf_int at h={h} must be all-NaN; got {eff['conf_int']}"
+        # Overall ATT: same fail-closed expectation
+        assert np.isfinite(res.overall_att) and np.isfinite(res.overall_se)
+        assert np.isnan(
+            res.overall_t_stat
+        ), f"overall_t_stat must be NaN under NaN DOF; got {res.overall_t_stat}"
+        assert np.isnan(res.overall_p_value)
+        assert all(np.isnan(b) for b in res.overall_conf_int)
+
+    def test_hc2_bm_helper_raises_fails_closed_with_all_nan_inference(
+        self, staggered_data, monkeypatch
+    ):
+        """Per local codex R3 P1: when `_compute_cr2_bm_contrast_dof` raises
+        (e.g., genuine singularity on the identified design), the estimator
+        must emit all-NaN inference rather than fall back to normal-theory
+        CIs/p-values."""
+        from diff_diff import linalg as _linalg_mod
+
+        def _fake_raises(*args, **kwargs):
+            raise np.linalg.LinAlgError("forced linalg failure for test")
+
+        monkeypatch.setattr(_linalg_mod, "_compute_cr2_bm_contrast_dof", _fake_raises)
+
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = est.fit(
+                staggered_data,
+                outcome="outcome",
+                unit="unit",
+                time="period",
+                first_treat="first_treat",
+                aggregate="event_study",
+            )
+        # Warning fired (informational that DOF was unavailable)
+        warning_msgs = [str(w.message) for w in caught]
+        assert any(
+            "Bell-McCaffrey contrast DOF" in m for m in warning_msgs
+        ), f"Should warn on helper failure; got: {warning_msgs}"
+        # Inference NaN-closed for all event-study + overall
+        for h, eff in res.event_study_effects.items():
+            if h == -1:
+                continue
+            assert np.isnan(eff["t_stat"]) and np.isnan(
+                eff["p_value"]
+            ), f"event_time h={h} inference must NaN-close, not fall back to normal"
+        assert np.isnan(res.overall_t_stat), "overall_t_stat must NaN-close on helper failure"
+        assert np.isnan(res.overall_p_value)
