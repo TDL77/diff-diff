@@ -88,8 +88,16 @@ class WooldridgeDiDResults:
     _bm_artifacts: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[Tuple[Any, Any], int]]] = field(
         default=None, repr=False
     )
-    """(X_full, cluster_ids, bread_matrix, gt_coef_index_map) for hc2_bm; enables
-    lazy BM contrast-DOF computation in aggregate()."""
+    """(X_red, cluster_ids, bread_red, coef_idx_map) for hc2_bm; enables
+    lazy BM contrast-DOF computation in aggregate().
+
+    ``X_red`` / ``bread_red`` are the REDUCED (kept-column) design and bread
+    matrix produced by ``_fit_ols`` after rank-deficient column drops — the
+    same subspace ``solve_ols`` returned non-NaN coefficients in.
+    ``coef_idx_map`` maps each ``(g, t)`` cell present in
+    ``group_time_effects`` to its column index in ``X_red``. Storing reduced
+    artifacts avoids the singular full-design bread that
+    ``_compute_cr2_bm_contrast_dof`` would otherwise reject."""
 
     # ------------------------------------------------------------------ #
     # Public methods                                                      #
@@ -139,8 +147,12 @@ class WooldridgeDiDResults:
         ) -> Dict[Any, float]:
             if self.vcov_type != "hc2_bm" or self._bm_artifacts is None:
                 return {}
-            X_full, cluster_ids_full, bread_matrix, coef_idx_map = self._bm_artifacts
-            n_total = X_full.shape[1]
+            # ``X_red`` / ``bread_red`` are the REDUCED kept-column artifacts
+            # from ``_fit_ols`` (post rank-deficient drops). ``coef_idx_map``
+            # maps (g, t) → column index in ``X_red``. See
+            # ``_bm_artifacts`` docstring above for the rationale.
+            X_red, cluster_ids_full, bread_red, coef_idx_map = self._bm_artifacts
+            n_red = X_red.shape[1]
             contrast_cols: List[np.ndarray] = []
             agg_keys: List[Any] = []
             for agg_key, cells in cells_by_key.items():
@@ -149,7 +161,7 @@ class WooldridgeDiDResults:
                 w_total = sum(weights.get(c, 0) for c in cells)
                 if w_total == 0:
                     continue
-                col = np.zeros(n_total)
+                col = np.zeros(n_red)
                 contributed = False
                 for c in cells:
                     if c not in coef_idx_map:
@@ -168,7 +180,7 @@ class WooldridgeDiDResults:
             dof_map: Dict[Any, float] = {}
             try:
                 dof_vec = _compute_cr2_bm_contrast_dof(
-                    X_full, cluster_ids_full, bread_matrix, contrasts_matrix
+                    X_red, cluster_ids_full, bread_red, contrasts_matrix
                 )
                 for i, k in enumerate(agg_keys):
                     candidate = float(dof_vec[i])
