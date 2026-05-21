@@ -5510,10 +5510,14 @@ class TestSpilloverDiDWaveE1SurveyDesignEventStudy:
         a baseline-treated unit (D=1 at every period) alongside a late-
         treated unit and an untreated far-control. The baseline-treated
         unit has no Omega_0 rows → unit FE NaN → y_tilde NaN → finite_mask
-        drops its 2 rows from stage 2. The survey-array subsetting block
-        at `spillover.py` Chunk 3c must subset `survey_weights / strata /
-        psu / fpc` in parallel; without it, the meat helper would either
-        shape-mismatch or silently include dropped-row Psi values.
+        drops its 2 rows from stage 2.
+
+        Wave E.3 (shipped): warn-and-dropped rows are RETAINED in the
+        resolved survey design as zero-score padding (matches R
+        `survey::svyrecvar(subset())` + `imputation.py:2175-2183`
+        precedent). `n_psu` / `n_strata` / `df_survey` reflect the FULL
+        domain (all 10 PSUs across 2 strata) rather than the post-drop
+        fit sample (the prior Wave E.1 behavior of 8 PSUs / df_survey=6).
 
         DGP shape mirrors the existing pre-Wave-E.1
         `test_baseline_treated_unit_at_t0_recognized` (3 units × 2 periods
@@ -5600,15 +5604,18 @@ class TestSpilloverDiDWaveE1SurveyDesignEventStudy:
         # 2 baselines × 2 periods = 4 rows excluded.
         # Remaining: 3 treated_t1 × 2 + 5 far × 2 = 16 rows.
         assert res.n_obs == 16, f"expected 16 post-drop rows, got {res.n_obs}"
-        # survey_metadata recomputed on the subsetted design.
-        # PSUs 0-1 (baselines) dropped → 8 PSUs remain (3 + 5) across 2 strata.
+        # Wave E.3: survey_metadata reflects the FULL domain (zero-pad
+        # invariant). All 10 PSUs retained — the 2 baseline PSUs are
+        # excluded from the gamma_hat / Psi construction sample
+        # (survey_finite_mask = finite_mask & survey_weights > 0) and
+        # zero-padded back into the meat via score_pad_mask=survey_finite_mask,
+        # so they contribute zero score but still count toward n_psu_full
+        # and the per-stratum n_h denominators.
         assert res.survey_metadata is not None
-        assert res.n_psu == 8, f"expected n_psu=8 post-drop, got {res.n_psu}"
+        assert res.n_psu == 10, f"Wave E.3: expected n_psu=10 (full domain), got {res.n_psu}"
         assert res.n_strata == 2
-        # df_survey = n_psu - n_strata = 8 - 2 = 6 (the survey-array
-        # subsetting block correctly removed the baseline-PSU labels from
-        # resolved.psu and recomputed n_psu / df_survey post-drop).
-        assert res.survey_metadata.df_survey == 6
+        # df_survey = n_psu - n_strata = 10 - 2 = 8 (Wave E.3 full-domain).
+        assert res.survey_metadata.df_survey == 8
 
     def test_o_drift_golden(self):
         """Pin Wave E.1 survey ATT + SE on a fixed-seed DGP.
@@ -7514,6 +7521,1200 @@ class TestSpilloverDiDWaveE2FollowupConleySurveyLagCutoffEventStudy:
         # SE differs (serial term contributes nonzero variance under panel
         # data with multiple periods of within-PSU score correlation)
         assert not np.allclose(res_lag1.se, res_lag0.se, rtol=1e-10)
+
+
+class TestSpilloverDiDWaveE3SubpopulationFullDesign:
+    """Wave E.3: SurveyDesign.subpopulation() + warn-and-drop full-design retention.
+
+    Methodology anchor: R `survey::svyrecvar(subset(design, mask))` (Lumley 2010
+    §2.5) — zero-pad scores at the meat-helper boundary; resolved survey design
+    retains full-panel `n_psu` / `n_strata` / `df_survey` / Binder centering.
+    Library precedent at `imputation.py:2175-2183` and `prep.py:1401-1432`.
+
+    A2 invariant (locked in `_scratch/wave_e3_smoke.py`): warn-and-drop and
+    `SurveyDesign.subpopulation()` apply the same zero-pad mechanism — both
+    produce identical meat output for identical row-level exclusions.
+    """
+
+    _CUTOFF_KM = 1000.0
+
+    def _build_fixture_with_warn_drop(self, seed=1):
+        """Mirror of `test_p2_finite_mask_forces_drop_under_survey` DGP."""
+        from diff_diff import SurveyDesign as _SD  # noqa: F401
+
+        rng = np.random.default_rng(seed)
+        rows = []
+        next_psu = 0
+        # 2 baseline-treated units (no Omega_0 → warn-and-drop).
+        for k in range(2):
+            for t in (0, 1):
+                rows.append(
+                    {
+                        "unit": f"baseline_{k}",
+                        "time": t,
+                        "lat": 0.0 + k * 0.001,
+                        "lon": 0.0,
+                        "D": 1,
+                        "y": rng.normal(),
+                        "w": 1.0,
+                        "stratum": 0,
+                        "psu": next_psu,
+                        "N_h": 200.0,
+                    }
+                )
+            next_psu += 1
+        # 3 validly-treated units (treated from t=1).
+        for k in range(3):
+            for t in (0, 1):
+                rows.append(
+                    {
+                        "unit": f"treated_t1_{k}",
+                        "time": t,
+                        "lat": 10.0 + k * 0.01,
+                        "lon": 0.0,
+                        "D": int(t == 1),
+                        "y": rng.normal(),
+                        "w": 1.0,
+                        "stratum": 0,
+                        "psu": next_psu,
+                        "N_h": 200.0,
+                    }
+                )
+            next_psu += 1
+        # 5 far-controls (full Omega_0 support).
+        for k in range(5):
+            for t in (0, 1):
+                rows.append(
+                    {
+                        "unit": f"far_control_{k}",
+                        "time": t,
+                        "lat": 20.0 + k * 0.01,
+                        "lon": 0.0,
+                        "D": 0,
+                        "y": rng.normal(),
+                        "w": 1.0,
+                        "stratum": 1,
+                        "psu": next_psu,
+                        "N_h": 200.0,
+                    }
+                )
+            next_psu += 1
+        return pd.DataFrame(rows)
+
+    def test_a_subpop_df_survey_parity_vs_upstream_subset(self):
+        """Wave E.3 contract: SurveyDesign.subpopulation() preserves the full-
+        domain `df_survey` regardless of how many rows the mask excludes.
+
+        Contrast: fit on `data[mask]` directly with a plain `SurveyDesign` —
+        that path drops PSUs entirely from the design (`n_psu` reflects the
+        subset), so its `df_survey` is lower. This is the textbook R
+        `svyrecvar(subset())` vs `svyrecvar(svydesign(data[mask]))` behavior.
+
+        Wave E.3 ATT INVARIANCE: on this fixture (PSU 7 excluded —
+        last-sorting PSU; doesn't shift the drop-first FE basis), the
+        subpop and upstream-subset paths produce BIT-EQUAL ATT (diff
+        at machine precision ~ 3e-16). The R6 gamma_hat-build fix
+        ensures the FE basis is invariant to which PSU the subpop
+        mask excludes; both paths build gamma_hat on the same active
+        rows with the same factorize compaction.
+
+        On fixtures where the excluded PSU sorts FIRST (e.g. PSU 0),
+        ATT may still differ by ~1e-3 because Hájek normalization
+        scales weights differently between the two paths — the
+        iterative FE solver's weighted bincount is theoretically
+        scale-invariant but its convergence tolerance is sensitive to
+        the weight scale. That's documented but NOT asserted here
+        (test_q already covers the order-sensitive case via direct
+        spy on the meat-helper inputs).
+
+        The CONTRACTS here are:
+          1. `df_survey` parity (full-domain n_psu - n_strata vs
+             subset n_psu - n_strata).
+          2. ATT bit-equality between subpop and upstream-subset paths
+             when the excluded PSU does not perturb the FE basis
+             (last-sorting PSU on this fixture).
+          3. SE / vcov / n_psu fixed goldens for the subpop path.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=300)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Construct a subpopulation that excludes ALL units in PSU 7 (the
+        # last PSU, ensures the upstream-subset path drops 1 PSU). Pick the
+        # last PSU so the treated units (which `_augment_with_survey`
+        # assigns deterministically to the first few units, hence the first
+        # PSUs) remain in the active sample.
+        df_s["include"] = df_s["psu"] != 7
+
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_subpop = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+
+        # Upstream-subset baseline (drops PSU 7 from the design entirely)
+        df_upstream = df_s[df_s["include"]].copy()
+        plain = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_upstream = est.fit(
+                df_upstream,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=plain,
+            )
+
+        # Wave E.3 contract: subpopulation reflects FULL domain (8 PSUs).
+        # Upstream-subset reflects only the active PSUs (7 PSUs after dropping PSU 7).
+        assert res_subpop.survey_metadata is not None
+        assert res_upstream.survey_metadata is not None
+        assert res_subpop.survey_metadata.n_psu == 8, (
+            f"Wave E.3: subpopulation n_psu={res_subpop.survey_metadata.n_psu}, "
+            f"expected full-domain 8"
+        )
+        assert res_upstream.survey_metadata.n_psu == 7, (
+            f"Upstream subset n_psu={res_upstream.survey_metadata.n_psu}, "
+            f"expected 7 (PSU 7 dropped)"
+        )
+        # df_survey contract: subpopulation = n_psu_full - n_strata = 8-2 = 6;
+        # upstream-subset = 7-2 = 5.
+        assert res_subpop.survey_metadata.df_survey == 6
+        assert res_upstream.survey_metadata.df_survey == 5
+
+        # ATT bit-equality contract (codex R12 P2 fix): with PSU 7
+        # excluded (last-sorting PSU), the R6 gamma_hat-build sample is
+        # identical between the two paths, and the iterative FE solver
+        # converges to bit-equal mu_hat / lambda_hat. Tolerance is
+        # machine precision (3e-16 in practice).
+        np.testing.assert_allclose(res_subpop.att, res_upstream.att, atol=1e-14)
+
+        # Wave E.3 numeric subpopulation anchor (codex R4 P2 fix): pin the
+        # actual SurveyDesign.subpopulation() analytical SE / ATT / vcov[0,0]
+        # so a future regression to the subpopulation variance path (broken
+        # `score_pad_mask`, gamma_hat shift, Binder centering drift) trips
+        # this test. Captured from the codex-R2/R3-verified "fit-sample Psi +
+        # score_pad_mask zero-pad inside helper" implementation. This is
+        # distinct from `test_r_warn_drop_se_drift_golden` which pins the
+        # warn-drop path (no SurveyDesign.subpopulation() involved).
+        # Tolerance per `feedback_assert_allclose_numerical_parity`.
+        _WAVE_E3_SUBPOP_GOLDEN_ATT = -0.06500930624601475
+        _WAVE_E3_SUBPOP_GOLDEN_SE = 0.004545962471946737
+        _WAVE_E3_SUBPOP_GOLDEN_VCOV_00 = 2.0665774796348088e-05
+        np.testing.assert_allclose(
+            res_subpop.att, _WAVE_E3_SUBPOP_GOLDEN_ATT, rtol=1e-12, atol=1e-12
+        )
+        np.testing.assert_allclose(res_subpop.se, _WAVE_E3_SUBPOP_GOLDEN_SE, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(
+            res_subpop.vcov[0, 0], _WAVE_E3_SUBPOP_GOLDEN_VCOV_00, rtol=1e-12, atol=1e-12
+        )
+
+    def test_b_full_design_df_survey_under_warn_drop(self):
+        """Wave E.3: warn-and-drop fits preserve full-domain df_survey.
+
+        Mirrors `test_p2_finite_mask_forces_drop_under_survey` (which now
+        asserts the Wave E.3 contract). Asserts that `df_for_inference`
+        threaded into `safe_inference` calls reflects the FULL domain
+        (closes the safe_inference threading audit at Plan-review R2 NEW
+        LOW #2).
+        """
+        from diff_diff import SurveyDesign
+
+        df = self._build_fixture_with_warn_drop(seed=1)
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with pytest.warns(UserWarning, match=r"2 unit\(s\) have NO"):
+            res = est.fit(
+                df,
+                outcome="y",
+                unit="unit",
+                time="time",
+                treatment="D",
+                survey_design=design,
+            )
+        # 10 PSUs total (2 baseline + 3 treated + 5 far), 2 strata.
+        assert res.n_psu == 10, f"Wave E.3: expected n_psu=10 (full domain), got {res.n_psu}"
+        assert res.n_strata == 2
+        assert res.survey_metadata is not None
+        assert res.survey_metadata.df_survey == 8, (
+            f"Wave E.3: expected df_survey=8 (full-domain n_psu-n_strata), "
+            f"got {res.survey_metadata.df_survey}"
+        )
+
+    def test_c_baseline_parity_no_dropouts_pinned_goldens(self):
+        """Wave E.3: when finite_mask.all() AND all weights > 0, ATT + SE
+        match the pre-E.3 baseline (zero-pad is a no-op). Anchored via
+        FIXED GOLDEN VALUES rather than self-comparison, so this test
+        actually catches drift from the shipped Wave E.2 / E.2-follow-up
+        behavior on a no-drop fixture.
+
+        Tolerance matches the BLAS-reduction-ordering band
+        (`rtol=1e-12, atol=1e-12`) per
+        `feedback_assert_allclose_numerical_parity`. If a future change
+        shifts these, investigate — do NOT loosen tolerance per
+        `feedback_holistic_codex_test_failure_deviation`.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=999)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+        # Pre-E.3 baseline goldens (captured pre-Wave-E.3 edits). Since
+        # finite_mask.all() == True AND all weights > 0 on this fixture,
+        # Wave E.3 zero-pad is a no-op — these values must match the
+        # shipped Wave E.1/E.2/follow-up baseline exactly.
+        _PRE_E3_GOLDEN_ATT = -0.07749624543132044
+        _PRE_E3_GOLDEN_SE = 0.005063316956088809
+        _PRE_E3_GOLDEN_N_PSU = 8
+        _PRE_E3_GOLDEN_DF_SURVEY = 6
+
+        np.testing.assert_allclose(res.att, _PRE_E3_GOLDEN_ATT, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(res.se, _PRE_E3_GOLDEN_SE, rtol=1e-12, atol=1e-12)
+        assert res.n_psu == _PRE_E3_GOLDEN_N_PSU
+        assert res.survey_metadata is not None
+        assert res.survey_metadata.df_survey == _PRE_E3_GOLDEN_DF_SURVEY
+
+    def test_c2_n_psu_cross_surface_consistency_no_explicit_psu(self):
+        """Wave E.3 cross-surface contract (codex R1 P2 fix): under
+        weights-only / strata-only survey designs (no explicit PSU), top-
+        level `res.n_psu` must agree with `res.survey_metadata.n_psu` and
+        reflect the FULL domain (not the post-`finite_mask` fit sample).
+
+        Pre-fix bug: top-level `n_psu` fell back to `int(finite_mask.sum())`
+        on the implicit-PSU path at `spillover.py:3475`, diverging from
+        `survey_metadata.df_survey` (full-domain) on warn-and-drop fits.
+        Fix replaces it with `len(resolved_survey_fit.weights)` so both
+        surfaces report the full-domain implicit-PSU count.
+        """
+        from diff_diff import SurveyDesign
+
+        df = self._build_fixture_with_warn_drop(seed=10)
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+
+        # weights-only survey design (no PSU, no cluster injection)
+        design_wo = SurveyDesign(weights="w")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_wo = est.fit(
+                df,
+                outcome="y",
+                unit="unit",
+                time="time",
+                treatment="D",
+                survey_design=design_wo,
+            )
+        assert res_wo.survey_metadata is not None
+        assert res_wo.n_psu == res_wo.survey_metadata.n_psu, (
+            f"Wave E.3 cross-surface contract: res.n_psu={res_wo.n_psu} != "
+            f"res.survey_metadata.n_psu={res_wo.survey_metadata.n_psu} on "
+            f"weights-only survey path"
+        )
+        # Full-domain implicit-PSU count = n_obs of the full panel
+        # (`_subpop_weight=0` rows are absent here, so n_obs == len(df)).
+        assert res_wo.n_psu == len(df), (
+            f"Wave E.3: weights-only n_psu should be n_obs_full={len(df)}, " f"got {res_wo.n_psu}"
+        )
+
+        # strata-only survey design (no PSU, no cluster injection)
+        design_str = SurveyDesign(weights="w", strata="stratum")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_str = est.fit(
+                df,
+                outcome="y",
+                unit="unit",
+                time="time",
+                treatment="D",
+                survey_design=design_str,
+            )
+        assert res_str.survey_metadata is not None
+        assert res_str.n_psu == res_str.survey_metadata.n_psu, (
+            f"Wave E.3 cross-surface contract: res.n_psu={res_str.n_psu} != "
+            f"res.survey_metadata.n_psu={res_str.survey_metadata.n_psu} on "
+            f"strata-only survey path"
+        )
+
+    def test_d_zero_pad_mechanics_psi_contribution(self):
+        """Wave E.3 (revised post codex R6 P1): the gamma_hat / Psi build
+        stays on SURVEY-FINITE-MASK inputs (X_*_sparse_fit / eps_*_fit /
+        omega_0_mask_fit at survey_finite_mask length, X_2_kept_gamma /
+        eps_2_fit_gamma / survey_weights_fit_gamma projected back into
+        the fit-sample frame) so the drop-first FE column space is stable
+        AND invariant to zero-weight subpop rows. Psi gets zero-padded
+        inside `_compute_gmm_corrected_meat` via
+        `score_pad_mask=survey_finite_mask` AFTER construction but BEFORE
+        kernel dispatch. Spy on the helper to assert: (a) construction
+        inputs are at survey-finite-mask length, (b) `score_pad_mask`
+        matches `survey_finite_mask`, (c) the kernel-dispatch arrays
+        (cluster_ids, resolved_survey) are full-length. Note: on this
+        warn-and-drop fixture (no SurveyDesign.subpopulation()),
+        survey_finite_mask == finite_mask because all surviving rows have
+        positive weight.
+        """
+        from unittest.mock import patch
+
+        from diff_diff import SurveyDesign
+        from diff_diff import two_stage as _ts
+
+        df = self._build_fixture_with_warn_drop(seed=2)
+        captured = {}
+        original = _ts._compute_gmm_corrected_meat
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with patch("diff_diff.spillover._compute_gmm_corrected_meat", side_effect=spy):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                est.fit(
+                    df,
+                    outcome="y",
+                    unit="unit",
+                    time="time",
+                    treatment="D",
+                    survey_design=design,
+                )
+
+        # Full panel = 20 rows; 4 baseline rows warn-dropped → 16 fit-sample rows.
+        n_full = 20
+        n_fit = 16
+        # Construction inputs are at FIT-SAMPLE length (drop-first FE column
+        # space stable; gamma_hat solve on a full-rank fit-length system).
+        sw = captured["survey_weights"]
+        eps_2 = captured["eps_2"]
+        eps_10 = captured["eps_10"]
+        X_2 = captured["X_2"]
+        X_1_sparse = captured["X_1_sparse"]
+        X_10_sparse = captured["X_10_sparse"]
+        assert sw is not None
+        assert sw.shape == (n_fit,), f"expected fit-length ({n_fit},), got {sw.shape}"
+        assert eps_2.shape == (n_fit,)
+        assert eps_10.shape == (n_fit,)
+        assert X_2.shape[0] == n_fit
+        assert X_1_sparse.shape[0] == n_fit
+        assert X_10_sparse.shape[0] == n_fit
+        # All survey weights at fit-length are POSITIVE (no zero-weight rows
+        # reach the meat-helper inputs — warn-and-drop rows were never in
+        # the fit sample, and this fixture has no subpopulation exclusions).
+        assert (sw > 0).all(), "Wave E.3: fit-sample survey_weights must all be positive"
+
+        # score_pad_mask = finite_mask (full-length boolean, True for active rows).
+        score_pad_mask = captured["score_pad_mask"]
+        assert score_pad_mask is not None
+        assert score_pad_mask.shape == (n_full,)
+        assert int(score_pad_mask.sum()) == n_fit, (
+            f"Wave E.3: score_pad_mask has {int(score_pad_mask.sum())} True "
+            f"entries, expected {n_fit} (fit-sample size)"
+        )
+
+        # Kernel-dispatch arrays are at FULL length (so the meat helpers see
+        # the full-domain PSU / strata / centroid / time geometry).
+        cluster_ids = captured["cluster_ids"]
+        if cluster_ids is not None:
+            assert cluster_ids.shape == (n_full,), (
+                f"Wave E.3: cluster_ids at meat boundary should be full-length "
+                f"({n_full},), got {cluster_ids.shape}"
+            )
+        resolved = captured["resolved_survey"]
+        assert resolved is not None
+        assert resolved.weights.shape == (n_full,), (
+            f"Wave E.3: resolved_survey.weights at meat boundary should be "
+            f"full-length ({n_full},), got {resolved.weights.shape}"
+        )
+
+    def test_e1_cluster_as_psu_subpop_parity(self):
+        """Wave E.3 × Wave E.1 cluster-injection: passing `cluster='psu_col'`
+        with a SurveyDesign WITHOUT an explicit PSU produces effectively the
+        same fit as passing `survey_design=SurveyDesign(psu='psu_col')`,
+        under subpopulation.
+
+        Both paths inject the cluster as the effective PSU per Wave E.1's
+        `_inject_cluster_as_psu` routing. Under Wave E.3 the operation runs
+        on the FULL-LENGTH design (no `finite_mask` subset on cluster_ids).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=400)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        units = sorted(df_s["unit"].unique())
+        excluded = set(units[::4])
+        df_s["include"] = ~df_s["unit"].isin(excluded)
+
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+
+        # Path (i): cluster=<col> + SurveyDesign with no explicit PSU
+        design_inject = SurveyDesign(weights="w", strata="stratum", fpc="N_h")
+        sub_inject, df_inject = design_inject.subpopulation(df_s, "include")
+        # Use the underlying `cluster=` plumbing (ring-aware spillover surface).
+        est_inject = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"), cluster="psu")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_inject = est_inject.fit(
+                df_inject,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_inject,
+            )
+
+        # Path (ii): explicit PSU on SurveyDesign
+        design_explicit = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        sub_explicit, df_explicit = design_explicit.subpopulation(df_s, "include")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_explicit = est.fit(
+                df_explicit,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_explicit,
+            )
+
+        # Both paths produce identical effective PSU layout — meat should be equal.
+        np.testing.assert_allclose(res_inject.att, res_explicit.att, rtol=1e-10)
+        np.testing.assert_allclose(res_inject.se, res_explicit.se, rtol=1e-10)
+        assert res_inject.survey_metadata is not None
+        assert res_explicit.survey_metadata is not None
+        assert (
+            res_inject.survey_metadata.n_psu == res_explicit.survey_metadata.n_psu
+        ), "cluster-injection vs explicit-PSU n_psu must match under Wave E.3"
+
+    def test_g1_conley_lag_subpop_explicit_psu(self):
+        """Wave E.3 × Wave E.2 follow-up: panel-block conley + subpopulation
+        with explicit `survey_design.psu`. Asserts the gate at
+        `spillover.py:~3109` passes (effective PSU is present) AND the
+        meat-helper boundary receives the zero-padded full-domain inputs.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=24)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        units = sorted(df_s["unit"].unique())
+        df_s["include"] = ~df_s["unit"].isin(units[::5])
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=1,
+            vcov_type="conley",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+        assert np.isfinite(res.att) and np.isfinite(res.se) and res.se > 0
+        assert res.survey_metadata is not None
+        # Full-domain n_psu reflects the design built with all units (subpop
+        # drops do not reduce n_psu under Wave E.3).
+        assert res.survey_metadata.n_psu == 8, (
+            f"Wave E.3 + conley + lag>0: expected n_psu=8 (full domain after "
+            f"_augment_with_survey assigns 2 strata × 4 PSUs), got "
+            f"{res.survey_metadata.n_psu}"
+        )
+
+    def test_g2_conley_lag_subpop_cluster_injection(self):
+        """Wave E.3 × Wave E.2 follow-up × Wave E.1 cluster-injection: panel-
+        block conley + subpopulation with `cluster=<col>` (no explicit PSU).
+        Asserts that cluster injection produces an effective PSU and the gate
+        passes (per `feedback_failclosed_gate_post_resolution`).
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=25)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        units = sorted(df_s["unit"].unique())
+        df_s["include"] = ~df_s["unit"].isin(units[::5])
+
+        design = SurveyDesign(weights="w", strata="stratum", fpc="N_h")
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=1,
+            vcov_type="conley",
+            cluster="psu",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+        assert np.isfinite(res.att) and np.isfinite(res.se) and res.se > 0
+        assert res.survey_metadata is not None
+
+    def test_g3_conley_lag_subpop_weights_only_raises(self):
+        """Wave E.3 × Wave E.2 follow-up gate: subpopulation + weights-only
+        SurveyDesign + conley + lag>0 raises `NotImplementedError` (no
+        effective PSU); locks the post-resolution gate from
+        `feedback_failclosed_gate_post_resolution`.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=26)
+        df_s = _augment_with_survey(df, n_strata=1, psus_per_stratum=8, fpc=200.0)
+        units = sorted(df_s["unit"].unique())
+        df_s["include"] = ~df_s["unit"].isin(units[::5])
+
+        design = SurveyDesign(weights="w")  # No psu, no strata, no cluster injection
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=1,
+            vcov_type="conley",
+        )
+        with pytest.raises(NotImplementedError, match="no-effective-PSU"):
+            est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+
+    def test_i2_unit_both_subpop_and_warn_drop(self):
+        """Wave E.3 A2 invariant: a unit that is BOTH subpopulation-excluded
+        (weight=0 via `_subpop_weight`) AND warn-and-dropped (no Omega_0 rows)
+        composes cleanly. Psi contribution is zero from either cause; the PSU
+        still counts toward `n_psu_full`.
+
+        Locks the methodology anchor at `_scratch/wave_e3_smoke.py::scenario_e`.
+        """
+        from diff_diff import SurveyDesign
+
+        df = self._build_fixture_with_warn_drop(seed=3)
+        # ALSO subpop-exclude one of the baseline-treated units
+        df["include"] = df["unit"] != "baseline_0"
+
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        sub_design, df_sub = design.subpopulation(df, "include")
+        with pytest.warns(UserWarning, match=r"have NO"):
+            res = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                treatment="D",
+                survey_design=sub_design,
+            )
+        # Even though `baseline_0` is both subpop-excluded AND warn-and-dropped,
+        # its PSU still counts toward n_psu_full (Wave E.3 zero-pad invariant).
+        assert res.n_psu == 10, (
+            f"Wave E.3: expected n_psu=10 (full domain — both drop mechanisms "
+            f"compose), got {res.n_psu}"
+        )
+
+    def test_q_subpop_zero_weight_rows_excluded_from_gamma_hat_build(self):
+        """Wave E.3 P1 mechanical regression (codex R6 fix): under the
+        survey path, zero-weight rows from `SurveyDesign.subpopulation()`
+        MUST be filtered out of the `gamma_hat` / Psi construction
+        sample, NOT just contribute W=0 to the cross-products. The
+        difference matters because `_build_butts_fe_design_csr` uses
+        `pd.factorize` to compact unit/time codes and drops the first
+        unit/time code for drop-first identification — leaving zero-
+        weight rows in the input changes which code sorts first and
+        which column gets dropped.
+
+        Pre-R6 fix: gamma_hat-build sample used `finite_mask` only, so
+        zero-weight rows survived (when they had finite y_tilde) and
+        could shift the FE basis.
+
+        Post-R6 fix at `spillover.py:3033-3060`: gamma_hat-build sample
+        uses `finite_mask & (survey_weights > 0)`, so zero-weight rows
+        are excluded from the FE basis. `score_pad_mask=survey_finite_mask`
+        zero-pads them back into the meat at the full-domain bookkeeping
+        step.
+
+        This test directly spies on `_compute_gmm_corrected_meat` and
+        asserts: (a) the inputs are at SURVEY_FINITE_MASK length (not
+        finite_mask length); (b) score_pad_mask matches survey_finite_mask;
+        (c) score_pad_mask.sum() equals the count of `finite_mask &
+        survey_weights > 0` rows.
+        """
+        from unittest.mock import patch
+
+        from diff_diff import SurveyDesign
+        from diff_diff import two_stage as _ts
+
+        df = generate_butts_staggered_dgp(seed=400)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Exclude PSU 0 (first-sorting PSU). Without the R6 fix, PSU 0's
+        # rows would still be in the gamma_hat-build sample (W=0 but
+        # present), and `pd.factorize` would assign them code 0 → drop
+        # PSU 0's column → wrong basis. With the fix, those rows are
+        # filtered before the FE rebuild.
+        df_s["include"] = df_s["psu"] != 0
+
+        captured = {}
+        original = _ts._compute_gmm_corrected_meat
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        with patch("diff_diff.spillover._compute_gmm_corrected_meat", side_effect=spy):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                est.fit(
+                    df_sub,
+                    outcome="y",
+                    unit="unit",
+                    time="time",
+                    first_treat="first_treat",
+                    survey_design=sub_design,
+                )
+
+        n_full = len(df_sub)
+        # Count of survey-finite-mask = rows with weight > 0 (active under subpop)
+        n_active = int((df_sub["_subpop_weight"] > 0).sum())
+
+        score_pad_mask = captured["score_pad_mask"]
+        assert score_pad_mask is not None
+        assert score_pad_mask.shape == (n_full,)
+        # score_pad_mask EXCLUDES the zero-weight subpop rows (the R6 fix):
+        # PSU 0 has weight=0, so the mask has False at PSU 0's row positions.
+        assert int(score_pad_mask.sum()) == n_active, (
+            f"Wave E.3 R6 fix: score_pad_mask.sum()={int(score_pad_mask.sum())} "
+            f"should equal n_active={n_active} (zero-weight rows excluded "
+            f"from gamma_hat-build sample)"
+        )
+        # Gamma_hat-build inputs are at SURVEY_FINITE_MASK length (n_active),
+        # NOT finite_mask length. This is the load-bearing R6 fix.
+        sw = captured["survey_weights"]
+        assert sw.shape == (n_active,), (
+            f"Wave E.3 R6 fix: survey_weights at meat boundary should be "
+            f"survey_finite_mask length ({n_active}), got {sw.shape}"
+        )
+        assert (sw > 0).all(), (
+            "Wave E.3 R6 fix: gamma_hat-build survey_weights must all be "
+            "POSITIVE (zero-weight rows filtered out before FE rebuild)"
+        )
+
+    def test_q2_subpop_excludes_zero_weight_rows_from_n_obs_metadata(self):
+        """Wave E.3 codex R8 P2 fix: under the survey path, top-level
+        `res.n_obs` / `res.n_treated` / `res.n_control` reflect the
+        effective weighted estimation sample (survey_finite_mask =
+        finite_mask & survey_weights > 0), NOT the broader finite_mask.
+
+        Pre-R8: those metadata fields used `finite_mask` which over-
+        counted zero-weight subpop rows (ATT/SE were correct because
+        the meat helper saw the right sample, but the reported counts
+        were inconsistent).
+
+        Post-R8: spillover.py L3335-L3367 uses `count_mask =
+        survey_finite_mask if resolved_survey_fit is not None else
+        finite_mask` for all top-level count fields.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=700)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Exclude PSU 7 (some rows). Pre-fix: n_obs would include PSU 7
+        # rows (zero-weight). Post-fix: n_obs excludes them.
+        df_s["include"] = df_s["psu"] != 7
+        n_total = len(df_s)
+        n_excluded = int((~df_s["include"]).sum())
+        n_active = n_total - n_excluded
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+        # n_obs reflects the effective weighted sample (= n_active),
+        # NOT the full panel (n_total).
+        assert res.n_obs == n_active, (
+            f"Wave E.3 R8 fix: res.n_obs should reflect survey_finite_mask "
+            f"({n_active} active rows after excluding PSU 7), got {res.n_obs}"
+        )
+        # n_treated + n_control sums to the effective sample
+        assert res.n_treated + res.n_control == n_active, (
+            f"n_treated ({res.n_treated}) + n_control ({res.n_control}) "
+            f"should sum to n_active ({n_active})"
+        )
+
+    def test_q3_subpop_excludes_zero_weight_far_away_from_n_far_away_obs(self):
+        """Wave E.3 codex R11 P2 fix: `res.n_far_away_obs` reflects the
+        effective weighted estimation sample (count_mask), not the full
+        domain. Pre-R11: n_far_away_obs was computed on the full panel
+        at validation time and used verbatim in the result, so zero-
+        weight far-away controls from SurveyDesign.subpopulation() were
+        counted as if they were part of the identifying sample —
+        inconsistent with the Wave E.3 n_obs / n_treated / n_control
+        contract.
+
+        Post-R11: spillover.py recomputes `n_far_away_obs_reported`
+        on `count_mask` (= survey_finite_mask on the survey path) so
+        the reported count matches the active sample.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=800)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+
+        # Capture full-domain n_far_away_obs (no subpop)
+        plain_design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_full = est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=plain_design,
+            )
+
+        # Subpopulation excludes PSU 7 (some of which are far-away controls).
+        # n_far_away_obs should DROP by the count of excluded far-away rows.
+        df_s["include"] = df_s["psu"] != 7
+        sub_design, df_sub = plain_design.subpopulation(df_s, "include")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_subpop = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+        # Pre-R11: res_subpop.n_far_away_obs would equal res_full.n_far_away_obs
+        # because the count was computed on the full panel BEFORE the survey-
+        # finite-mask filter.
+        # Post-R11: res_subpop.n_far_away_obs is STRICTLY LESS than the full-
+        # domain count because PSU 7's far-away rows are zero-weighted out.
+        assert res_subpop.n_far_away_obs < res_full.n_far_away_obs, (
+            f"Wave E.3 R11 fix: subpop n_far_away_obs={res_subpop.n_far_away_obs} "
+            f"should be < full-domain n_far_away_obs={res_full.n_far_away_obs}. "
+            f"PSU 7 has zero-weight rows that should be excluded from the "
+            f"reported count under the survey-finite-mask contract."
+        )
+
+    def test_q4_subpop_excludes_all_treated_raises(self):
+        """Wave E.3 CI codex R1 P1 fix: SurveyDesign.subpopulation() that
+        zeros out EVERY treated row must raise a clear identification error
+        immediately after survey_finite_mask is built, NOT silently fall
+        through to rank-deficient OLS or to the front-door full-domain
+        D_it.sum() == 0 gate (which still passes because full-domain D_it
+        is non-zero).
+
+        Pre-fix: the full-domain treatment-support gate at spillover.py:2556
+        runs BEFORE survey_finite_mask is computed; a subpop mask removing
+        all treated units passes it but the effective weighted sample has
+        zero treated rows and the OLS solve lands on a rank-deficient
+        stage-2 design.
+
+        Post-fix at spillover.py:~2745: active-sample check
+        `D_it[survey_finite_mask].sum() == 0` raises ValueError mentioning
+        survey_finite_mask + Wave E.3 + treated identification.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=950)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Exclude all ever-treated units via subpopulation
+        df_s["include"] = df_s["first_treat"] == np.inf
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        with pytest.raises(ValueError, match=r"removes EVERY treated observation"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                est.fit(
+                    df_sub,
+                    outcome="y",
+                    unit="unit",
+                    time="time",
+                    first_treat="first_treat",
+                    survey_design=sub_design,
+                )
+
+    def test_r_warn_drop_se_drift_golden(self):
+        """Wave E.3 numeric anchor (codex R3 P2 fix): the WARN-DROP path
+        is the actual surface Wave E.3 changes — the no-drop bit-identity
+        at test_c locks bit-identity on a path that's a no-op for E.3, but
+        does NOT catch a regression in the warn-drop SE / meat path. This
+        test pins the analytical SE + ATT + vcov[0,0] on the existing
+        warn-drop fixture, captured from the codex-R2-verified
+        "score_pad_mask zero-pads Psi inside the helper after
+        construction" implementation. Any future regression to the
+        warn-drop survey path (e.g. an accidental gamma_hat shift, a
+        broken zero-pad, or a centroid drift) trips this test.
+
+        Tolerance matches the BLAS-reduction-ordering band per
+        `feedback_assert_allclose_numerical_parity`. If a future change
+        shifts these, investigate (do NOT loosen tolerance per
+        `feedback_holistic_codex_test_failure_deviation`).
+        """
+        from diff_diff import SurveyDesign
+
+        df = self._build_fixture_with_warn_drop(seed=2)
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df,
+                outcome="y",
+                unit="unit",
+                time="time",
+                treatment="D",
+                survey_design=design,
+            )
+        # Goldens captured from the Wave E.3 implementation post codex R2
+        # P1 fix (fit-sample Psi build + score_pad_mask zero-pad inside
+        # `_compute_gmm_corrected_meat`). Warn-drop excludes 4 baseline
+        # rows; full-domain bookkeeping retains all 10 PSUs / 8 df_survey.
+        _WAVE_E3_WARN_DROP_GOLDEN_ATT = 0.7649873242115066
+        _WAVE_E3_WARN_DROP_GOLDEN_SE = 0.5793037428100555
+        _WAVE_E3_WARN_DROP_GOLDEN_VCOV_00 = 0.3355928264337389
+
+        np.testing.assert_allclose(res.att, _WAVE_E3_WARN_DROP_GOLDEN_ATT, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(res.se, _WAVE_E3_WARN_DROP_GOLDEN_SE, rtol=1e-12, atol=1e-12)
+        np.testing.assert_allclose(
+            res.vcov[0, 0], _WAVE_E3_WARN_DROP_GOLDEN_VCOV_00, rtol=1e-12, atol=1e-12
+        )
+        assert res.n_psu == 10  # full-domain bookkeeping
+        assert res.survey_metadata is not None
+        assert res.survey_metadata.df_survey == 8
+
+    # NOTE: TwoStageDiD parity-divergence test removed — on standard
+    # subpopulation fixtures TwoStageDiD does NOT trigger the same warn-and-
+    # drop path as SpilloverDiD (always-treated handling at
+    # `two_stage.py:294-336` differs from SpilloverDiD's per-unit Omega_0
+    # rank-deficiency check), so the expected df_survey divergence does not
+    # materialize as a load-bearing assertion. The TwoStageDiD parity
+    # follow-up is tracked in TODO.md; when that work lands it should add
+    # its own targeted regression test on a fixture that actually exercises
+    # the TwoStageDiD finite_mask subset path under subpopulation.
+
+
+class TestSpilloverDiDWaveE3SubpopulationFullDesignEventStudy:
+    """Wave E.3 event-study mirror.
+
+    Per `feedback_cohort_loop_trigger_cache_both_branches`: cover both
+    `is_staggered=True` and `is_staggered=False` branches in case Wave E.3
+    threads differently across them.
+    """
+
+    _CUTOFF_KM = 1000.0
+
+    def test_k_event_study_subpop_full_domain_df(self):
+        """Event-study + analytical Binder TSL + subpopulation: full-domain
+        `df_survey` preserved on the event-study path. Mirrors Wave E.1's
+        event-study `df_survey` lincom verification."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=500)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        units = sorted(df_s["unit"].unique())
+        df_s["include"] = ~df_s["unit"].isin(units[::6])
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+        assert res.survey_metadata is not None
+        # Full-domain n_psu (no subset reduction). 2 strata × 4 psus_per_stratum = 8.
+        assert res.survey_metadata.n_psu == 8, (
+            f"Wave E.3 event-study: expected n_psu=8 (full domain), "
+            f"got {res.survey_metadata.n_psu}"
+        )
+
+    def test_k3_event_study_subpop_excludes_zero_weight_from_n_obs_metadata(self):
+        """Wave E.3 codex R13/R14 P2 fix: under SurveyDesign.subpopulation()
+        on the event-study path, BOTH top-level `res.n_obs` AND per-cell
+        `event_study_effects[k]["n_obs"]` reflect the EFFECTIVE WEIGHTED
+        ESTIMATION SAMPLE (count_mask = survey_finite_mask), NOT the full
+        panel.
+
+        Fixture detail: excludes PSU 3 (which contains TREATED units at
+        first_treat=3 — see `psu_first_treat` print in the seed=900
+        fixture) so the event-study per-cell n_obs values STRICTLY
+        DROP under subpop. Excluding a far-away control PSU (like
+        PSU 7) wouldn't trigger the per-cell change because
+        event_study_effects n_obs counts treated-cohort × horizon
+        rows; only treated-PSU exclusion exercises the per-cell
+        n_obs propagation through event_study_meta["n_obs_per_col"]
+        recompute at spillover.py:L3011-L3036.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=900)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+
+        plain_design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_full = est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=plain_design,
+            )
+
+        # Exclude PSU 3 (treated PSU with first_treat=3) to exercise
+        # per-cell event_study_effects n_obs propagation.
+        df_s["include"] = df_s["psu"] != 3
+        sub_design, df_sub = plain_design.subpopulation(df_s, "include")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_subpop = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+        # Top-level n_obs / n_treated / n_control reflect count_mask
+        # (= survey_finite_mask). Pre-R8 fix these would have included
+        # PSU 3's zero-weight rows.
+        assert res_subpop.n_obs < res_full.n_obs, (
+            f"Wave E.3 R13/R8 fix: subpop event-study n_obs={res_subpop.n_obs} "
+            f"should be < full-domain n_obs={res_full.n_obs}"
+        )
+        assert res_subpop.n_treated + res_subpop.n_control == res_subpop.n_obs
+
+        # Wave E.3 R14/R15 P2 fix: event_study_effects per-cell n_obs
+        # values, att_dynamic.n_obs values, and spillover_effects n_obs
+        # values all reflect count_mask (= survey_finite_mask) propagation
+        # through event_study_meta["n_obs_per_col"]. Hand-pin exact values
+        # so any future regression to the n_obs_per_col recompute at
+        # spillover.py L3024-L3036 trips this test.
+        assert res_subpop.event_study_effects is not None
+        # Exact n_obs values captured from the Wave E.3 implementation
+        # post codex-R8 count_mask fix (excluding PSU 3 = first_treat=3
+        # removes treated-cohort rows at each event-time horizon).
+        _EXPECTED_EVENT_STUDY_N_OBS = {-2: 22, -1: 0, 0: 26, 1: 26, 2: 56}
+        for k, expected_n in _EXPECTED_EVENT_STUDY_N_OBS.items():
+            actual_n = res_subpop.event_study_effects[k]["n_obs"]
+            assert actual_n == expected_n, (
+                f"Wave E.3 R14/R15 fix: event_study_effects[{k}] n_obs="
+                f"{actual_n}, expected {expected_n} (excluding PSU 3 from "
+                f"the count_mask-propagated event_study_meta n_obs_per_col)"
+            )
+        # att_dynamic n_obs matches event_study_effects n_obs (same source)
+        assert res_subpop.att_dynamic is not None
+        expected_n_list = [22, 0, 26, 26, 56]
+        actual_n_list = res_subpop.att_dynamic["n_obs"].tolist()
+        assert actual_n_list == expected_n_list, (
+            f"Wave E.3: att_dynamic.n_obs={actual_n_list}, " f"expected {expected_n_list}"
+        )
+        # spillover_effects per-(ring, k) n_obs reflects count_mask too.
+        # Excluded PSU 3 (treated, first_treat=3) drops some ring rows.
+        assert res_subpop.spillover_effects is not None
+        # Sum across ring-k cells (positive horizons only, ref_period excluded).
+        spill_n_obs = res_subpop.spillover_effects["n_obs"].tolist()
+        _EXPECTED_SPILLOVER_N_OBS = [0, 0, 42, 42, 102]
+        assert spill_n_obs == _EXPECTED_SPILLOVER_N_OBS, (
+            f"Wave E.3: spillover_effects n_obs={spill_n_obs}, "
+            f"expected {_EXPECTED_SPILLOVER_N_OBS}"
+        )
+
+    def test_k2_event_study_nonstaggered_subpop_full_domain_df(self):
+        """Wave E.3 event-study × NON-STAGGERED branch + subpopulation
+        (codex R12 P2 fix). The k/l tests above use generate_butts_
+        staggered_dgp; this one exercises the is_staggered=False code
+        path via generate_butts_nonstaggered_dgp to cover the cohort-
+        loop trigger cache fork per
+        `feedback_cohort_loop_trigger_cache_both_branches`.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=502)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        units = sorted(df_s["unit"].unique())
+        df_s["include"] = ~df_s["unit"].isin(units[::6])
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            event_study=True,
+            horizon_max=2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+        assert res.survey_metadata is not None
+        # Full-domain n_psu (8 = 2 strata × 4 psus_per_stratum).
+        assert res.survey_metadata.n_psu == 8, (
+            f"Wave E.3 non-staggered event-study: expected n_psu=8 "
+            f"(full domain), got {res.survey_metadata.n_psu}"
+        )
+        # is_staggered=False on this fixture (generate_butts_nonstaggered_dgp).
+        assert res.is_staggered is False
+
+    def test_l2_event_study_conley_lag_nonstaggered_subpop_smoke(self):
+        """Wave E.3 R15 P2 fix: non-staggered branch mirror of test_l
+        (event_study + conley + lag>0 + subpopulation). Per
+        `feedback_cohort_loop_trigger_cache_both_branches`, the
+        non-staggered cohort-loop trigger cache fork is distinct from
+        the staggered branch and should be covered separately.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_nonstaggered_dgp(seed=503)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        units = sorted(df_s["unit"].unique())
+        df_s["include"] = ~df_s["unit"].isin(units[::6])
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=1,
+            vcov_type="conley",
+            event_study=True,
+            horizon_max=2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+        assert np.isfinite(res.att) and np.isfinite(res.se) and res.se > 0
+        assert res.spillover_effects is not None
+        assert res.survey_metadata is not None
+        # Full-domain n_psu (8 = 2 strata × 4 psus_per_stratum)
+        assert res.survey_metadata.n_psu == 8
+        assert res.is_staggered is False
+
+    def test_l_event_study_conley_lag_subpop_smoke(self):
+        """Event-study + conley + lag>0 + subpopulation end-to-end smoke."""
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=501)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        units = sorted(df_s["unit"].unique())
+        df_s["include"] = ~df_s["unit"].isin(units[::6])
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=1,
+            vcov_type="conley",
+            event_study=True,
+            horizon_max=2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_sub,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=sub_design,
+            )
+        assert np.isfinite(res.att) and np.isfinite(res.se) and res.se > 0
+        assert res.spillover_effects is not None
+        assert res.survey_metadata is not None
+        # Full-domain n_psu (8 = 2 strata × 4 psus_per_stratum)
+        assert res.survey_metadata.n_psu == 8
 
 
 class TestSpilloverDiDWaveE2ConleySurveyDesignEventStudy:

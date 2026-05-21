@@ -206,6 +206,10 @@ Multi-Period and Staggered Adoption
 
   Primary source for the Bartlett serial-HAC kernel weights `1 - |t-s|/(L+1)` used in time-series and panel HAC variance estimators. Our ``diff_diff/conley.py`` panel-block path at L949-965 hardcodes this kernel for the within-unit serial component (mirrors R ``conleyreg::time_dist``); SpilloverDiD's Wave E.2 follow-up composes the same kernel weights with Binder/Gerber TSL + Wave D Gardner GMM correction for the panel-block survey case (``_compute_stratified_serial_bartlett_meat`` at ``diff_diff/two_stage.py``; see REGISTRY section "Variance (Wave E.2 follow-up)").
 
+- **Lumley, T. (2010).** *Complex Surveys: A Guide to Analysis Using R.* Hoboken, NJ: John Wiley & Sons. https://doi.org/10.1002/9780470580066
+
+  Authoritative reference for the R ``survey`` package. §2.5 "Domains and subpopulations" documents the ``svyrecvar(subset(design, mask))`` zero-pad convention: subpopulation analyses preserve the full survey design (strata / PSU / FPC) and treat out-of-domain observations as zero-score padding rows rather than physically subsetting the design. SpilloverDiD's Wave E.3 adopts this convention at the ``_compute_gmm_corrected_meat`` boundary, matching the existing in-library precedents at ``diff_diff/imputation.py:2175-2183`` (PreTrendsImputation lead regression) and ``diff_diff/prep.py:1401-1432`` (DCDH cell variance); see REGISTRY section "Variance (Wave E.3)".
+
 - **Wing, C., Freedman, S. M., & Hollingsworth, A. (2024).** "Stacked Difference-in-Differences." *NBER Working Paper* 32054. https://www.nber.org/papers/w32054
 
 - **Chen, X., Sant'Anna, P. H. C., & Xie, H. (2025).** "Efficient Difference-in-Differences and Event Study Estimators." *Working Paper*.

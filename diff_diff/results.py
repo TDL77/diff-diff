@@ -388,7 +388,16 @@ class SpilloverDiDResults(DiDResults):
     n_far_away_obs : int
         Number of observations with ``D_it = 0`` AND ``d_it > d_bar``;
         these observations identify the counterfactual trend (Butts
-        Assumption 5(ii)).
+        Assumption 5(ii)). Under Wave E.3, on the survey path this count
+        is reported on the EFFECTIVE WEIGHTED ESTIMATION SAMPLE
+        (``count_mask = survey_finite_mask`` = finite_mask AND
+        ``survey_weights > 0``), so zero-weight rows from
+        ``SurveyDesign.subpopulation()`` are excluded — matches the
+        Wave E.3 ``n_obs`` / ``n_treated`` / ``n_control`` contract.
+        The upstream ``_validate_far_away_exists`` gate still fires on
+        the FULL DOMAIN at fit-time (Assumption 5(ii) requires at
+        least one far-away identifying row); this metadata only
+        reports the count on the active sample.
     is_staggered : bool
         True if multiple distinct treatment-onset times were detected.
     event_study : bool

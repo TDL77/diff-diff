@@ -26,7 +26,6 @@ identification argument (Proposition 2.3 + Section 3.1 subsample logic).
 """
 
 import warnings
-from dataclasses import replace
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 import numpy as np
@@ -2577,7 +2576,13 @@ class SpilloverDiD:
         # contribute to the far-away identifying group. This matters for
         # all-eventually-treated staggered designs (no never-treated units).
         is_control_row_now = D_it == 0
-        n_far_away_obs = self._validate_far_away_exists(d_it_per_row, is_control_row_now)
+        # Validate far-away rows exist (Assumption 5(ii)). Discard the
+        # full-domain count return — Wave E.3 (codex R11 P2 fix)
+        # recomputes the REPORTED `n_far_away_obs` on the effective
+        # estimation sample (`count_mask`) at result-assembly time so
+        # the reported metadata matches n_obs / n_treated / n_control
+        # under SurveyDesign.subpopulation().
+        self._validate_far_away_exists(d_it_per_row, is_control_row_now)
 
         # Step 10: Butts Omega_0 mask = (D_it=0 AND S_it=0).
         omega_0_mask = (D_it == 0) & (S_it == 0)
@@ -2719,6 +2724,47 @@ class SpilloverDiD:
                 stacklevel=2,
             )
 
+        # Wave E.3 (codex R6 P1 fix): survey_finite_mask is the effective
+        # estimation mask under the survey path — it filters out BOTH
+        # warn-and-dropped rows (~finite_mask, NaN y_tilde) AND zero-
+        # weight subpop rows (~survey_weights > 0). Used downstream by:
+        #   - the gamma_hat / Psi construction sample (so the FE drop-
+        #     first basis is invariant to zero-weight subpop rows)
+        #   - score_pad_mask threaded into _compute_gmm_corrected_meat
+        #   - n_obs / n_treated / n_control / event_study_meta n_obs_per_col
+        #     metadata (so reported counts match the actual weighted sample)
+        # On the no-survey path, survey_finite_mask == finite_mask.
+        if survey_weights is not None:
+            survey_finite_mask = finite_mask & (survey_weights > 0)
+        else:
+            survey_finite_mask = finite_mask
+        n_nan_or_zero = int((~survey_finite_mask).sum())
+
+        # Wave E.3 (CI codex R1 P1 fix): the front-door D_it.sum() == 0 gate
+        # at L2556 runs on the FULL DOMAIN. Under SurveyDesign.subpopulation()
+        # the user can zero-out all treated rows (e.g. mask excludes every
+        # ever-treated unit), and the full-domain check still passes — but
+        # the effective estimating sample (survey_finite_mask) has zero
+        # treated observations and tau_total is unidentified. The downstream
+        # OLS solve would land on a rank-deficient stage-2 design and either
+        # NaN-fail silently or surface a generic rank-deficiency warning.
+        # Add an active-sample treatment-support check immediately after
+        # survey_finite_mask is built so users get a clear assumption-violation
+        # error on this edge case (matches the documented R svyrecvar(subset())
+        # convention: domain estimation requires the domain to contain
+        # identifying variation).
+        if resolved_survey is not None and int(D_it[survey_finite_mask].sum()) == 0:
+            raise ValueError(
+                "SurveyDesign.subpopulation() (or zero-weight survey design) "
+                "removes EVERY treated observation from the effective "
+                "estimating sample (survey_finite_mask = finite_mask & "
+                "survey_weights > 0). The Wave E.3 active-sample identification "
+                "support for tau_total requires at least one treated row to "
+                "remain in the weighted sample after the subpopulation filter. "
+                "Either expand the subpopulation mask to include treated units "
+                "or verify the survey weight column."
+            )
+
         # Step 13: build stage-2 design.
         ring_labels = [_ring_label(list(self.rings), j) for j in range(K)]
 
@@ -2821,18 +2867,28 @@ class SpilloverDiD:
         # Step 14: subset arrays to the estimation sample (finite y_tilde rows).
         # Apply to design, outcome, cluster ids, AND the Conley spatial/temporal
         # auxiliary arrays so the HC1/CR1/Conley sample-size adjustments use the
-        # correct n. Wave E.1 also subsets the survey-design arrays in parallel
-        # so the Binder TSL meat sees the post-finite_mask sample (mirrors
-        # `two_stage.py:567-601` pattern).
+        # correct n on the NO-SURVEY path.
+        #
+        # Wave E.3 (this PR): under the survey path, cluster_ids stays at FULL
+        # length so `_resolve_effective_cluster` / `_inject_cluster_as_psu`
+        # operate on the full-domain design and the meat-helper boundary sees
+        # full-length arrays (zero-pad invariant per R `survey::svyrecvar` +
+        # `imputation.py:2175-2183` precedent). Under no-survey, keep the
+        # historic finite_mask subset so downstream CR1 sample-size matches
+        # X_2_fit.
         cluster_ids_full = (
             np.asarray(data[self.cluster].values) if self.cluster is not None else None
         )
         if n_nan > 0:
             X_2_fit = X_2[finite_mask]
             y_tilde_fit = y_tilde[finite_mask]
-            cluster_ids_fit = (
-                cluster_ids_full[finite_mask] if cluster_ids_full is not None else None
-            )
+            if resolved_survey is not None:
+                # Wave E.3: keep full-length cluster_ids for the survey path.
+                cluster_ids_fit = cluster_ids_full
+            else:
+                cluster_ids_fit = (
+                    cluster_ids_full[finite_mask] if cluster_ids_full is not None else None
+                )
             time_vals_fit = np.asarray(time_vals)[finite_mask]
             unit_vals_fit = np.asarray(unit_vals)[finite_mask]
         else:
@@ -2842,58 +2898,50 @@ class SpilloverDiD:
             time_vals_fit = np.asarray(time_vals)
             unit_vals_fit = np.asarray(unit_vals)
 
-        # Wave E.1 parallel: subset survey_weights + resolved_survey arrays
-        # so PSU aggregation in `_compute_stratified_meat_from_psu_scores`
-        # sees aligned-length arrays. Other ResolvedSurveyDesign fields
-        # (lonely_psu, weight_type, replicate_method, etc.) propagate
-        # UNCHANGED through `replace()`. `replicate_weights` is included for
-        # symmetry with TwoStageDiD's pattern + forward-compat with the
-        # planned replicate follow-up; Wave E.1 rejects replicate variance
-        # upfront so this branch is a no-op in practice.
-        if resolved_survey is not None and n_nan > 0:
-            survey_weights_fit = survey_weights[finite_mask]
-            resolved_survey_fit = replace(
-                resolved_survey,
-                weights=resolved_survey.weights[finite_mask],
-                strata=(
-                    resolved_survey.strata[finite_mask]
-                    if resolved_survey.strata is not None
-                    else None
-                ),
-                psu=(resolved_survey.psu[finite_mask] if resolved_survey.psu is not None else None),
-                fpc=(resolved_survey.fpc[finite_mask] if resolved_survey.fpc is not None else None),
-                replicate_weights=(
-                    resolved_survey.replicate_weights[finite_mask]
-                    if resolved_survey.replicate_weights is not None
-                    else None
-                ),
-            )
-            # Recompute n_psu / n_strata + survey_metadata after subset
-            # (mirror two_stage.py:602-610).
-            resolved_survey_fit = replace(
-                resolved_survey_fit,
-                n_psu=(
-                    len(np.unique(resolved_survey_fit.psu))
-                    if resolved_survey_fit.psu is not None
-                    else 0
-                ),
-                n_strata=(
-                    len(np.unique(resolved_survey_fit.strata))
-                    if resolved_survey_fit.strata is not None
-                    else 0
-                ),
-            )
-            from diff_diff.survey import compute_survey_metadata
-
-            raw_w_fit = (
-                np.asarray(data[survey_design.weights].values, dtype=np.float64)[finite_mask]
-                if (survey_design is not None and getattr(survey_design, "weights", None))
-                else np.ones(int(finite_mask.sum()), dtype=np.float64)
-            )
-            survey_metadata = compute_survey_metadata(resolved_survey_fit, raw_w_fit)
+        # Wave E.3 (this PR): the resolved survey DESIGN is NOT subsetted via
+        # `finite_mask`. Per R `survey::svyrecvar(subset())` convention and the
+        # in-library precedents at `imputation.py:2175-2183` (PreTrendsImputation)
+        # and `prep.py:1401-1432` (DCDH cell variance), zero-weight rows from
+        # `SurveyDesign.subpopulation()` AND warn-and-dropped rows are kept in
+        # the design at full length. The resolved survey design retains full-
+        # panel length and full-design `n_psu` / `n_strata` / `df_survey` /
+        # Binder centering throughout, so the meat helpers see the full-domain
+        # PSU / strata geometry. The full-domain zero-pad invariant on the
+        # scores themselves is delivered downstream at the
+        # `_compute_gmm_corrected_meat` call site by passing
+        # `score_pad_mask=survey_finite_mask` (= finite_mask AND
+        # survey_weights > 0 under the survey path; see R6 P1 fix at
+        # L3033-L3083 below) — the helper builds Psi on the survey-finite-
+        # mask subset of inputs and zero-pads it to full panel length
+        # AFTER construction but BEFORE kernel dispatch. The R6 filter is
+        # critical for FE-basis invariance: `_build_butts_fe_design_csr`'s
+        # `pd.factorize` compaction would otherwise include zero-weight
+        # subpop rows in the first-appearance ordering and shift the
+        # drop-first column (matches the canonical R svyrecvar(subset())
+        # form exactly).
+        #
+        # `survey_weights_fit` IS finite_mask-subsetted because it is consumed
+        # by the stage-2 OLS solve (`solve_ols(X_2_fit, ..., weights=
+        # survey_weights_fit)`) which operates on the active sample (zero-
+        # weight rows are present here but contribute W=0 to the OLS cross-
+        # products, so the OLS coef is bit-equivalent to the survey-finite-
+        # mask path; preserves the pre-E.3 OLS contract). The meat helper
+        # receives `survey_weights_fit_gamma` (a further projection of
+        # survey_weights_fit onto the survey-finite-mask frame) for the
+        # gamma_hat / Psi build.
+        #
+        # Replaces the Wave E.1 design-subset block that mirrored the
+        # `two_stage.py:567-601` pattern. TwoStageDiD parity is a deferred
+        # follow-up (TODO.md).
+        if n_nan > 0:
+            survey_weights_fit = survey_weights[finite_mask] if survey_weights is not None else None
         else:
             survey_weights_fit = survey_weights
-            resolved_survey_fit = resolved_survey
+        resolved_survey_fit = resolved_survey
+        # `survey_metadata` was computed upstream by `_resolve_survey_for_fit`
+        # on the full-domain design and remains the value returned in
+        # `SpilloverDiDResults`. The cluster-injection branch below recomputes
+        # post-injection when `cluster=<col>` synthesizes the effective PSU.
 
         # Wave E.1 cluster-vs-PSU resolution (AFTER `_resolve_survey_for_fit`
         # so the warning text can reference actual PSU count). Two cases:
@@ -2928,11 +2976,14 @@ class SpilloverDiD:
                 if self.cluster is not None and resolved_survey.psu is None:
                     cluster_arr = np.asarray(effective_cluster_ids)
                     unit_arr_full = np.asarray(data[unit].values)
-                    # Subset cluster array to fit sample (already done above
-                    # in the n_nan > 0 block via cluster_ids_fit; here
-                    # effective_cluster_ids is the post-resolve PSU labels
-                    # which align with the fit sample's unit ordering).
-                    unit_arr_for_check = unit_arr_full[finite_mask] if n_nan > 0 else unit_arr_full
+                    # Wave E.3: cluster_arr and the validation unit array
+                    # are both full-length under the zero-pad invariant. The
+                    # within-unit-constancy contract is "cluster column does
+                    # not vary across periods for any unit" — validating on
+                    # the full panel surfaces violations even when the row
+                    # would later be warn-and-dropped (a stricter, safer
+                    # contract than the prior fit-sample-only check).
+                    unit_arr_for_check = unit_arr_full
                     # Validate within-unit constancy on the cluster column.
                     constancy_df = pd.DataFrame(
                         {"unit": unit_arr_for_check, "cluster": cluster_arr}
@@ -2973,10 +3024,12 @@ class SpilloverDiD:
                 # injected cluster labels.
                 from diff_diff.survey import compute_survey_metadata as _csm
 
+                # Wave E.3: full-length raw weights (no finite_mask subset).
+                # Matches the post-injection resolved_survey_fit length.
                 raw_w_for_meta = (
-                    np.asarray(data[survey_design.weights].values, dtype=np.float64)[finite_mask]
+                    np.asarray(data[survey_design.weights].values, dtype=np.float64)
                     if (survey_design is not None and getattr(survey_design, "weights", None))
-                    else np.ones(int(finite_mask.sum()), dtype=np.float64)
+                    else np.ones(len(data), dtype=np.float64)
                 )
                 survey_metadata = _csm(resolved_survey_fit, raw_w_for_meta)
 
@@ -2989,12 +3042,29 @@ class SpilloverDiD:
         # warn-and-drop fits. The post-mask counts reflect the actual
         # stage-2 estimation sample that solve_ols sees.
         if self.event_study and event_study_meta is not None:
-            event_study_meta["n_obs_per_col"] = (X_2_fit != 0).sum(axis=0).astype(np.int64)
+            # Wave E.3 (codex R8 P2 fix): on the survey path the effective
+            # sample for n_obs_per_col EXCLUDES zero-weight subpop rows
+            # (matches the count_mask used for n_obs / n_treated /
+            # n_control below). On no-survey path this is bit-identical
+            # to pre-E.3 since survey_weights_fit is None.
+            if survey_weights_fit is not None:
+                # Project survey_finite_mask back into the fit-sample (finite_mask) frame
+                survey_finite_in_fit = (
+                    survey_finite_mask[finite_mask] if n_nan > 0 else (survey_weights > 0)
+                )
+                X_2_fit_active = X_2_fit[survey_finite_in_fit]
+                event_study_meta["n_obs_per_col"] = (
+                    (X_2_fit_active != 0).sum(axis=0).astype(np.int64)
+                )
+            else:
+                event_study_meta["n_obs_per_col"] = (X_2_fit != 0).sum(axis=0).astype(np.int64)
             # Wave E.1: when survey weights are present, also compute per-column
             # survey-weight totals for the event-study scalar `att` lincom
             # aggregation. Using raw `n_obs_per_col` shares on weighted WLS
             # horizon coefficients targets the wrong estimand; the audited
             # composition is survey-weighted-totals as the lincom weights.
+            # Zero-weight rows contribute zero to the dot product so this
+            # is automatically consistent with the n_obs_per_col fix above.
             if survey_weights_fit is not None:
                 indicator_fit = (X_2_fit != 0).astype(np.float64)
                 event_study_meta["weight_sum_per_col"] = indicator_fit.T @ survey_weights_fit
@@ -3033,12 +3103,36 @@ class SpilloverDiD:
         beta_full = time_fe_arr[np.asarray(time_codes_full)]
         eps_10_full = np.where(omega_0_mask, y_full - alpha_full - beta_full, y_full)
 
-        # Subset stage-1 inputs to the fit sample (post-finite_mask).
-        if n_nan > 0:
-            eps_10_fit = eps_10_full[finite_mask]
-            unit_codes_fit = np.asarray(unit_codes_full)[finite_mask]
-            time_codes_fit = np.asarray(time_codes_full)[finite_mask]
-            omega_0_mask_fit = omega_0_mask[finite_mask]
+        # Subset stage-1 inputs to the fit sample for the gamma_hat/Psi
+        # build. The fit sample for gamma_hat construction is:
+        #   - finite_mask only (no NaN y_tilde rows) on the no-survey path
+        #   - finite_mask AND survey_weights > 0 on the survey path
+        #
+        # Wave E.3 (codex R6 P1 fix): subset the gamma_hat-construction
+        # fit-sample inputs by `survey_finite_mask` (= `finite_mask &
+        # (survey_weights > 0)` under the survey path; defined earlier
+        # alongside `finite_mask`). This excludes zero-weight subpop
+        # rows from `unit_codes_fit` / `time_codes_fit`. Once inside
+        # `_build_butts_fe_design_csr` the per-call `pd.factorize`
+        # compacts codes by first-appearance order — so whether a domain-
+        # excluded unit sorts first or last changes which column gets
+        # dropped under drop-first identification, and the resulting
+        # `gamma_hat` would no longer be invariant to subpop-excluded
+        # rows if we used `finite_mask` here. The cross-product
+        # `X_10' W X_10` would give those rows ZERO numeric contribution
+        # because W=0, but the COLUMN SPACE shifts and `gamma_hat`'s
+        # coefficient indexing shifts with it, perturbing `Psi` (and
+        # hence the SE) for reasons other than the documented full-
+        # design Binder/FPC bookkeeping. score_pad_mask is set to
+        # survey_finite_mask below so zero-weight rows are explicitly
+        # zero-padded back into the meat at the full-domain bookkeeping
+        # step (Wave E.3 contract — R svyrecvar(subset()) treats zero-
+        # weight rows as zero-score domain padding).
+        if n_nan_or_zero > 0:
+            eps_10_fit = eps_10_full[survey_finite_mask]
+            unit_codes_fit = np.asarray(unit_codes_full)[survey_finite_mask]
+            time_codes_fit = np.asarray(time_codes_full)[survey_finite_mask]
+            omega_0_mask_fit = omega_0_mask[survey_finite_mask]
         else:
             eps_10_fit = eps_10_full
             unit_codes_fit = np.asarray(unit_codes_full)
@@ -3059,9 +3153,44 @@ class SpilloverDiD:
             coef_kept = coef
         eps_2_fit = y_tilde_fit - X_2_kept @ coef_kept
 
+        # Wave E.3 (codex R6 P1 fix): subset the gamma_hat-construction
+        # arrays from finite_mask length down to survey_finite_mask length
+        # too. This excludes zero-weight subpop rows (which have W=0 so
+        # they contribute zero to the cross-products numerically, but
+        # without the explicit subset they would change the drop-first
+        # FE basis via `_build_butts_fe_design_csr`'s `pd.factorize`
+        # compaction).
+        if survey_weights is not None and n_nan_or_zero > n_nan:
+            # Project survey_finite_mask into the fit-sample (finite_mask)
+            # frame: True for fit-sample rows that ALSO have weight > 0.
+            survey_finite_in_fit = survey_finite_mask[finite_mask]
+            X_2_kept_gamma = X_2_kept[survey_finite_in_fit]
+            eps_2_fit_gamma = eps_2_fit[survey_finite_in_fit]
+            survey_weights_fit_gamma = survey_weights_fit[survey_finite_in_fit]
+        else:
+            X_2_kept_gamma = X_2_kept
+            eps_2_fit_gamma = eps_2_fit
+            survey_weights_fit_gamma = survey_weights_fit
+
         # Build stage-1 FE designs on the fit sample. Column space:
         # [unit_1, ..., unit_{U-1}, time_1, ..., time_{T-1}] (drop-first
         # identification, matches `TwoStageDiD._build_fe_design`).
+        #
+        # Wave E.3 (this PR): the stage-1 FE design + gamma_hat solve + Psi
+        # construction stays on the FIT SAMPLE (post-finite_mask) to keep
+        # the drop-first identification stable. `_build_butts_fe_design_csr`
+        # re-factorizes inputs via `pd.factorize` and drops the first unit
+        # / time code; if the dropped unit sorts first, the fit-length and
+        # full-length builds produce DIFFERENT column spaces (an all-zero
+        # X_10 column for the dropped unit in the full-length build →
+        # rank-deficient `X_10' W X_10` → lstsq fallback → different
+        # `gamma_hat`). The zero-pad invariant is preserved by zero-padding
+        # the constructed Psi inside `_compute_gmm_corrected_meat` AFTER
+        # the fit-sample gamma_hat / Psi build, NOT by rebuilding the FE
+        # design at full length. Mirrors the canonical R
+        # `survey::svyrecvar(subset())` / `imputation.py:2175-2183` pattern
+        # exactly (construct scores on the active sample first; zero-pad to
+        # full design at the variance step).
         X_1_sparse_fit, X_10_sparse_fit = _build_butts_fe_design_csr(
             unit_codes_fit,
             time_codes_fit,
@@ -3079,6 +3208,7 @@ class SpilloverDiD:
             _conley_unit_arg = unit_vals_fit
             _conley_lag_arg = self.conley_lag_cutoff
         else:
+            coord_array_full = None
             _conley_coords_arg = None
             _conley_cutoff_arg = None
             _conley_metric_arg = None
@@ -3155,28 +3285,76 @@ class SpilloverDiD:
         else:
             _wave_d_vcov_mode = "hc1"
 
+        # Wave E.3 (this PR — revised post codex R2 P1 + R6 P1): on the
+        # survey path, the gamma_hat / Psi construction runs on
+        # SURVEY-FINITE-MASK length (finite_mask AND survey_weights > 0)
+        # so the drop-first FE column space + stage-1 sparse factorization
+        # is INVARIANT to zero-weight subpop rows (codex R6 P1 fix). The
+        # full-domain zero-pad invariant is delivered by:
+        #   (1) passing the kernel-dispatch arrays (cluster_ids, conley_*,
+        #       resolved_survey) at FULL LENGTH so the meat helpers
+        #       (Binder TSL / stratified-Conley / serial Bartlett) see the
+        #       full-domain PSU / strata / centroid / time geometry, and
+        #   (2) threading `score_pad_mask=survey_finite_mask` so
+        #       `_compute_gmm_corrected_meat` zero-pads the
+        #       survey-finite-mask Psi to full panel length AFTER
+        #       construction but BEFORE kernel dispatch.
+        # Zero-weight rows (subpop-excluded) are zero-padded back at the
+        # meat boundary alongside warn-and-dropped rows — both are
+        # "domain padding" per R `survey::svyrecvar(subset())` semantics.
+        # This matches the canonical R svyrecvar(subset()) and
+        # `imputation.py:2175-2183` pattern exactly — Psi computed on the
+        # active sample, zero-padded for the variance step, full design
+        # retained for bookkeeping.
+        if resolved_survey_fit is not None:
+            # Kernel-dispatch arrays at FULL length under the survey path.
+            cluster_ids_for_meat = cluster_ids_fit  # full-length under Wave E.3
+            if self.vcov_type == "conley":
+                conley_coords_for_meat = coord_array_full  # full-length, never subsetted
+                conley_time_for_meat = np.asarray(time_vals)  # full panel
+                conley_unit_for_meat = np.asarray(unit_vals)  # full panel
+            else:
+                conley_coords_for_meat = None
+                conley_time_for_meat = None
+                conley_unit_for_meat = None
+            score_pad_mask_arg: Optional[np.ndarray] = survey_finite_mask
+        else:
+            # No-survey path: bit-identical to pre-E.3 (no zero-padding).
+            cluster_ids_for_meat = cluster_ids_fit
+            conley_coords_for_meat = _conley_coords_arg
+            conley_time_for_meat = _conley_time_arg
+            conley_unit_for_meat = _conley_unit_arg
+            score_pad_mask_arg = None
+
         # Compute the GMM-corrected meat (Psi' K Psi). Caller-side bread
         # sandwich below mirrors `TwoStageDiD._compute_gmm_variance`
         # at `two_stage.py:1763-1791`. Wave E.1 passes survey_weights +
         # resolved_survey kwargs; the helper routes to Binder TSL meat
-        # when both are non-None (hc1 / cluster modes).
+        # when both are non-None (hc1 / cluster modes). Wave E.3 adds
+        # `score_pad_mask` on the survey path so Psi is zero-padded inside
+        # the helper after construction (the gamma_hat / Psi build runs on
+        # the `X_2_kept_gamma` / `eps_2_fit_gamma` / `survey_weights_fit_gamma`
+        # arrays — survey-finite-mask subset of fit-sample inputs — plus
+        # `X_*_sparse_fit` / `eps_10_fit` which are already built on
+        # survey_finite_mask above).
         meat_kept = _compute_gmm_corrected_meat(
             X_1_sparse=X_1_sparse_fit,
             X_10_sparse=X_10_sparse_fit,
             eps_10=eps_10_fit,
-            X_2=X_2_kept,
-            eps_2=eps_2_fit,
+            X_2=X_2_kept_gamma,
+            eps_2=eps_2_fit_gamma,
             vcov_type=_wave_d_vcov_mode,
-            cluster_ids=cluster_ids_fit,
-            conley_coords=_conley_coords_arg,
+            cluster_ids=cluster_ids_for_meat,
+            conley_coords=conley_coords_for_meat,
             conley_cutoff_km=_conley_cutoff_arg,
             conley_metric=_conley_metric_arg,
             conley_kernel="bartlett",
-            conley_time=_conley_time_arg,
-            conley_unit=_conley_unit_arg,
+            conley_time=conley_time_for_meat,
+            conley_unit=conley_unit_for_meat,
             conley_lag_cutoff=_conley_lag_arg,
-            survey_weights=survey_weights_fit,
+            survey_weights=survey_weights_fit_gamma,
             resolved_survey=resolved_survey_fit,
+            score_pad_mask=score_pad_mask_arg,
         )
 
         # Bread sandwich: A_22^{-1} = (X_2' W X_2)^{-1} via `np.linalg.solve`
@@ -3223,7 +3401,16 @@ class SpilloverDiD:
         #  `ResolvedSurveyDesign.df_survey` at survey.py:619-627). The
         # Binder TSL meat is design-consistent; the OLS residual df is
         # no longer the right t-distribution DOF.
-        n_obs_eff = int(finite_mask.sum())
+        # Wave E.3 (codex R8 P2 fix): under the survey path, the effective
+        # estimation sample EXCLUDES zero-weight subpop rows because they
+        # are filtered out of the gamma_hat / Psi construction sample by
+        # the survey_finite_mask above. Report n_obs / n_treated / n_control
+        # / df_resid on that tighter sample so the metadata matches the
+        # actual weighted sample seen by the variance computation. On the
+        # no-survey path survey_finite_mask == finite_mask (bit-identical
+        # to pre-E.3).
+        count_mask = survey_finite_mask if resolved_survey_fit is not None else finite_mask
+        n_obs_eff = int(count_mask.sum())
         k_effective = int(np.isfinite(coef).sum())
         df_resid = n_obs_eff - k_effective
         if resolved_survey_fit is not None:
@@ -3343,8 +3530,23 @@ class SpilloverDiD:
 
         # Step 17: assemble SpilloverDiDResults. n_obs / n_treated / n_control
         # reflect the actual stage-2 estimation sample (after dropping NaN
-        # y_tilde rows), matching solve_ols's HC1/CR1 sample-size adjustments.
-        D_it_fit = D_it[finite_mask] if n_nan > 0 else D_it
+        # y_tilde rows AND, on the survey path, zero-weight subpop rows that
+        # were filtered from the gamma_hat / Psi construction per Wave E.3
+        # R6 P1 fix), matching solve_ols's HC1/CR1 sample-size adjustments
+        # AND the meat-helper's effective sample.
+        D_it_fit = D_it[count_mask] if int((~count_mask).sum()) > 0 else D_it
+        # Wave E.3 (codex R11 P2 fix): recompute n_far_away_obs on the
+        # effective estimation sample so it doesn't count zero-weight far-
+        # away controls from `SurveyDesign.subpopulation()`. The original
+        # `n_far_away_obs` (computed at L2579 on the full domain) is used
+        # to validate that at least one far-away identifying row exists
+        # — that gate already fired upstream. Under Wave E.3 the reported
+        # count should reflect the active weighted sample, matching the
+        # Wave E.3 contract for n_obs / n_treated / n_control / event-
+        # study n_obs_per_col above.
+        n_far_away_obs_reported = int(
+            (is_control_row_now & (d_it_per_row > self._effective_d_bar) & count_mask).sum()
+        )
 
         result = SpilloverDiDResults(
             att=tau_total,
@@ -3386,7 +3588,7 @@ class SpilloverDiD:
             ring_breakpoints=list(self.rings),
             d_bar=self._effective_d_bar,
             n_units_ever_in_ring=n_units_ever_in_ring,
-            n_far_away_obs=int(n_far_away_obs),
+            n_far_away_obs=n_far_away_obs_reported,
             is_staggered=is_staggered,
             event_study=self.event_study,
             stage1_n_obs=stage1_n_obs,
@@ -3403,16 +3605,24 @@ class SpilloverDiD:
             # `ResolvedSurveyDesign.df_survey`: when `psu is None` after
             # all injection steps (no `cluster=<col>` and no
             # `survey_design.psu`), each observation is its own singleton
-            # PSU and the reported count is `n_obs`. This keeps the
-            # top-level `n_psu` consistent with `survey_metadata.df_survey`
-            # so `summary()` / `to_dict()` are coherent on no-PSU survey
-            # fits.
+            # PSU and the reported count is `n_obs`.
+            #
+            # Wave E.3: under the zero-pad invariant the implicit-PSU
+            # count reflects the FULL domain (length of the resolved
+            # survey design's weights array), NOT the post-`finite_mask`
+            # fit sample. This keeps top-level `n_psu` consistent with
+            # `survey_metadata.n_psu` / `survey_metadata.df_survey` —
+            # which both reflect the full domain under Wave E.3 —
+            # avoiding the cross-surface inconsistency that previously
+            # surfaced on weights-only / strata-only survey fits with
+            # warn-and-drop (top-level n_psu would track the fit sample
+            # while df_survey tracked the full domain).
             survey_metadata=survey_metadata,
             n_psu=(
                 (
                     resolved_survey_fit.n_psu
                     if resolved_survey_fit.psu is not None
-                    else int(finite_mask.sum())
+                    else len(resolved_survey_fit.weights)
                 )
                 if resolved_survey_fit is not None
                 else None
