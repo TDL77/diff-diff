@@ -1492,7 +1492,7 @@ where `g(·)` is the link inverse (logistic or exp), `η_i` is the individual li
       ATT_overall = Σ_{(g,t): t≥g} n_{g,t} · ATT(g,t) / Σ_{(g,t): t≥g} n_{g,t}
 
   Cell weight `n_{g,t}` = count of obs in cohort g at time t in estimation sample.
-  - **Note:** Cell-level weighting (n_{g,t} observation counts) matches Stata `jwdid_estat` behavior. Differs from W2025 Eqs. 7.2-7.4 cohort-share weights that account for the number of post-treatment periods per cohort.
+  - **Note:** Cell-level weighting (n_{g,t} observation counts) matches Stata `jwdid_estat` behavior. Differs from W2025 Eqs. 7.2-7.4 cohort-share weights (simple-overall path) that account for the number of post-treatment periods per cohort, and also differs from W2025 Eq. 7.6 cohort-share-by-exposure weights `ω̂_{ge} = N_g / (N_q + ··· + N_{T-e})` (event-time path via `aggregate("event")`). Both `simple` and `event` aggregations reuse the same `_gt_weights` cell-count array, so the deviation applies uniformly across both paths. See `docs/methodology/papers/wooldridge-2025-review.md` § Deviations for context.
 
 - `group`: Weighted average across t for each cohort g
 - `calendar`: Weighted average across g for each calendar time t
