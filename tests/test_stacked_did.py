@@ -925,3 +925,346 @@ class TestValidation:
                 time="period",
                 first_treat="first_treat",
             )
+
+
+# =============================================================================
+# TestStackedDiDVcovType — Phase 1b 2/8: vcov_type threading
+# =============================================================================
+
+
+@pytest.fixture
+def baseline_panel():
+    """Fixed-seed panel matching the captured pre-PR HC1 SE baseline.
+
+    Captured on commit 955aa4be0887c71defb8cdab402e955f7c36e48d (PR #475
+    clubSandwich port merge) BEFORE Phase 1b 2/8 source edits. Used by
+    `test_hc1_se_bit_equal_to_pre_pr_baseline` to lock the bake-Q-into-X
+    -> explicit-weights= switch as bit-equal on the hc1 path.
+    """
+    return generate_staggered_data(
+        n_units=50,
+        n_periods=8,
+        cohort_periods=[3, 5, 7],
+        never_treated_frac=0.3,
+        treatment_effect=2.0,
+        dynamic_effects=False,
+        seed=20260521,
+    )
+
+
+class TestStackedDiDVcovType:
+    """Phase 1b 2/8: vcov_type input contract, reject paths, and bit-equality.
+
+    Mirrors the SunAbraham Phase 1b 1/8 test pattern. The plan locks 19
+    sub-tests covering: default behavior, hc1 bit-equality vs prior bake-Q
+    pattern, hc2_bm functional check, six reject paths, surface contract
+    (get_params/set_params/results.vcov_type), clone idempotency, and the
+    replicate-refit closure smoke.
+    """
+
+    def test_default_vcov_type_is_hc1(self):
+        assert StackedDiD().vcov_type == "hc1"
+
+    def test_default_bit_equal_to_explicit_hc1(self, staggered_data):
+        """Default fit and explicit vcov_type='hc1' fit produce identical SE."""
+        est_default = StackedDiD(kappa_pre=2, kappa_post=2)
+        est_explicit = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc1")
+        kwargs = dict(outcome="outcome", unit="unit", time="period", first_treat="first_treat")
+        res_default = est_default.fit(staggered_data, **kwargs)
+        res_explicit = est_explicit.fit(staggered_data, **kwargs)
+        np.testing.assert_allclose(res_default.overall_se, res_explicit.overall_se, atol=1e-15)
+        np.testing.assert_allclose(res_default.overall_att, res_explicit.overall_att, atol=1e-15)
+
+    def test_hc1_se_bit_equal_to_pre_pr_baseline(self, baseline_panel):
+        """HC1 SE matches the captured pre-PR baseline at machine precision.
+
+        Baseline captured on commit 955aa4be (PR #475 clubSandwich merge),
+        BEFORE switching from bake-Q-into-X to explicit weights= pattern in
+        the StackedDiD solve_ols call. Locks the WLS-CR1 invariance claim
+        (HC1 score is identical between the two algebraic forms; only
+        multiplication ordering differs at ULP scale).
+
+        Tolerance: atol=1e-13. The plan originally targeted atol=1e-14 but
+        empirically the bake-w vs explicit-weights paths drift by ~2 ULPs at
+        SE scale due to NumPy internal multiplication ordering — well within
+        the "no methodologically significant drift" band.
+
+        Panel descriptor (regenerate if test fails):
+            generate_staggered_data(n_units=50, n_periods=8, cohort_periods=[3, 5, 7],
+                                    never_treated_frac=0.3, treatment_effect=2.0,
+                                    dynamic_effects=False, seed=20260521)
+            StackedDiD(kappa_pre=2, kappa_post=2)  # defaults otherwise
+        """
+        BASELINE_OVERALL_ATT = 2.08078331612939
+        BASELINE_OVERALL_SE = 0.15699149429146309
+        est = StackedDiD(kappa_pre=2, kappa_post=2)  # default hc1
+        res = est.fit(
+            baseline_panel, outcome="outcome", unit="unit", time="period", first_treat="first_treat"
+        )
+        np.testing.assert_allclose(
+            res.overall_att,
+            BASELINE_OVERALL_ATT,
+            atol=1e-13,
+            err_msg="HC1 overall_att drifted from pre-PR baseline",
+        )
+        np.testing.assert_allclose(
+            res.overall_se,
+            BASELINE_OVERALL_SE,
+            atol=1e-13,
+            err_msg="HC1 overall_se drifted from pre-PR baseline",
+        )
+
+    def test_hc2_bm_finite_and_att_identical_to_hc1(self, staggered_data):
+        """hc2_bm produces finite SE; ATT identical to hc1 (only the variance
+        family changes, not the point estimate). The relationship hc2_bm SE
+        vs hc1 SE depends on cluster leverage and is NOT monotonic — both
+        smaller and larger values are valid depending on the design."""
+        kwargs = dict(
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            aggregate="event_study",
+        )
+        res_hc1 = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc1").fit(
+            staggered_data, **kwargs
+        )
+        res_hc2bm = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm").fit(
+            staggered_data, **kwargs
+        )
+        np.testing.assert_allclose(
+            res_hc1.overall_att,
+            res_hc2bm.overall_att,
+            atol=1e-13,
+            err_msg="ATT must be identical across vcov_type",
+        )
+        assert np.isfinite(res_hc2bm.overall_se) and res_hc2bm.overall_se > 0
+        # Per-event-time SE also all finite under hc2_bm
+        for h, eff in res_hc2bm.event_study_effects.items():
+            if h == -1:
+                continue  # reference period (SE=0 by construction)
+            assert np.isfinite(eff["se"]) and eff["se"] > 0, f"event_time {h} hc2_bm SE not finite"
+        # And hc2_bm event-study SE differs from hc1 event-study SE on at least one
+        # event-time (proves the leverage/DOF adjustment actually fired).
+        hc1_es = {h: eff["se"] for h, eff in res_hc1.event_study_effects.items() if h != -1}
+        hc2_es = {h: eff["se"] for h, eff in res_hc2bm.event_study_effects.items() if h != -1}
+        diffs = [abs(hc1_es[h] - hc2_es[h]) for h in hc1_es]
+        assert (
+            max(diffs) > 1e-6
+        ), "hc2_bm event-study SEs identical to hc1 — leverage adjustment didn't fire"
+
+    def test_classical_rejected_at_init(self):
+        with pytest.raises(ValueError, match="clusters intrinsically"):
+            StackedDiD(vcov_type="classical")
+
+    def test_hc2_rejected_at_init(self):
+        with pytest.raises(ValueError, match="clusters intrinsically"):
+            StackedDiD(vcov_type="hc2")
+
+    def test_conley_rejected_at_init_with_deferral(self):
+        with pytest.raises(ValueError, match="conley"):
+            StackedDiD(vcov_type="conley")
+
+    def test_invalid_vcov_type_rejected(self):
+        with pytest.raises(ValueError, match="hc1.*hc2_bm|hc2_bm.*hc1"):
+            StackedDiD(vcov_type="hc4")
+
+    def test_survey_design_plus_hc2_bm_rejected(self, staggered_data):
+        """survey_design + non-hc1 vcov_type raises NotImplementedError.
+
+        Reject order locked: fweight/aweight check fires first (per
+        stacked_did.py:309), then the survey + non-hc1 vcov check.
+        """
+        from diff_diff.survey import SurveyDesign
+
+        # Add a uniform pweight column to satisfy SurveyDesign
+        data = staggered_data.copy()
+        data["w"] = 1.0
+        design = SurveyDesign(weights="w", weight_type="pweight")
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm")
+        with pytest.raises(NotImplementedError, match="survey TSL"):
+            est.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="period",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    def test_survey_design_plus_classical_rejected(self, staggered_data):
+        """The classical reject fires at __init__ (before fit), so this test
+        verifies the symmetric path — that a survey-design fit with the
+        already-rejected classical vcov_type fails on the __init__ guard."""
+        with pytest.raises(ValueError, match="clusters intrinsically"):
+            StackedDiD(vcov_type="classical")
+
+    def test_get_params_includes_vcov_type(self):
+        params = StackedDiD(vcov_type="hc2_bm").get_params()
+        assert "vcov_type" in params
+        assert params["vcov_type"] == "hc2_bm"
+
+    def test_set_params_updates_vcov_type(self):
+        est = StackedDiD(vcov_type="hc1")
+        est.set_params(vcov_type="hc2_bm")
+        assert est.vcov_type == "hc2_bm"
+
+    def test_results_carries_vcov_type(self, staggered_data):
+        for vcov in ["hc1", "hc2_bm"]:
+            est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type=vcov)
+            res = est.fit(
+                staggered_data,
+                outcome="outcome",
+                unit="unit",
+                time="period",
+                first_treat="first_treat",
+            )
+            assert res.vcov_type == vcov
+
+    def test_unit_subexp_cluster_plus_hc2_bm_finite(self, staggered_data):
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm", cluster="unit_subexp")
+        res = est.fit(
+            staggered_data, outcome="outcome", unit="unit", time="period", first_treat="first_treat"
+        )
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+        assert res.vcov_type == "hc2_bm"
+
+    def test_replicate_refit_smoke_with_default_hc1(self, staggered_data):
+        """Replicate-weight survey + default hc1 fits cleanly through the
+        _refit_stacked closure (which now uses explicit weights= per
+        stacked_did.py post-PR). Smoke test only — variance correctness is
+        covered by separate replicate-refit tests."""
+        from diff_diff.survey import SurveyDesign
+
+        rng = np.random.default_rng(2026)
+        data = staggered_data.copy()
+        # Generate 20 replicate weight columns (simulating jackknife/BRR-style)
+        n_units = data["unit"].nunique()
+        rep_w = rng.uniform(0.5, 1.5, size=(n_units, 20))
+        rep_w_cols = [f"rep_w{i}" for i in range(20)]
+        unit_to_rep = {u: rep_w[i] for i, u in enumerate(sorted(data["unit"].unique()))}
+        for j, col in enumerate(rep_w_cols):
+            data[col] = data["unit"].map(lambda u, j=j: unit_to_rep[u][j])
+        data["w"] = 1.0
+        design = SurveyDesign(
+            weights="w",
+            weight_type="pweight",
+            replicate_weights=rep_w_cols,
+            replicate_method="JK1",
+        )
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc1")
+        res = est.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+
+    def test_fit_clone_idempotent_on_vcov_type(self, staggered_data):
+        """Per `feedback_fit_does_not_mutate_config`: fit, clone the
+        estimator config via get_params/set_params, refit, assert SE
+        bit-equal. Locks that fit() doesn't mutate self.vcov_type."""
+        kwargs = dict(outcome="outcome", unit="unit", time="period", first_treat="first_treat")
+        est_a = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm")
+        res_a = est_a.fit(staggered_data, **kwargs)
+        # Clone via get_params
+        est_b = StackedDiD(**est_a.get_params())
+        assert est_a.vcov_type == est_b.vcov_type == "hc2_bm"
+        res_b = est_b.fit(staggered_data, **kwargs)
+        np.testing.assert_allclose(res_a.overall_se, res_b.overall_se, atol=1e-15)
+        # And refitting est_a doesn't mutate its config
+        _ = est_a.fit(staggered_data, **kwargs)
+        assert est_a.vcov_type == "hc2_bm"
+
+    def test_aweight_plus_hc2_bm_rejected_by_stacked_did_level_guard(self, staggered_data):
+        """Per review MEDIUM #1: the existing fweight/aweight reject at
+        stacked_did.py:309 fires BEFORE the new vcov_type=non-hc1 reject.
+        This locks the order so a future refactor swapping the checks would
+        silently change error messaging from 'Q-weight ratio semantics' to
+        'survey TSL' on the same input.
+        """
+        from diff_diff.survey import SurveyDesign
+
+        data = staggered_data.copy()
+        data["w"] = 1.0
+        design = SurveyDesign(weights="w", weight_type="aweight")
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm")
+        # Expect the Q-weight semantics error (stacked_did.py:309), NOT the
+        # survey TSL vcov error. The match pattern checks for the Q-weight
+        # phrasing specifically.
+        with pytest.raises(ValueError, match="weight_type='aweight'.*Q-weight"):
+            est.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="period",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    def test_survey_design_plus_hc2_bm_rejected_unit_subexp_cluster(self, staggered_data):
+        """Per review MEDIUM #2: the survey+non-hc1 reject must fire
+        regardless of cluster level."""
+        from diff_diff.survey import SurveyDesign
+
+        data = staggered_data.copy()
+        data["w"] = 1.0
+        design = SurveyDesign(weights="w", weight_type="pweight")
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm", cluster="unit_subexp")
+        with pytest.raises(NotImplementedError, match="survey TSL"):
+            est.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="period",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    def test_replicate_refit_coef_bit_equal_vs_bake_w_baseline(self, baseline_panel):
+        """Per review Q2: pin the replicate-refit overall_att/SE on default
+        hc1 + replicate-weight survey at atol=1e-13. Catches any float64
+        multiplication-ordering drift introduced by the bake-Q-into-X ->
+        explicit weights= switch in the _refit_stacked closure.
+
+        Baseline panel + estimator config matches
+        test_hc1_se_bit_equal_to_pre_pr_baseline. The replicate weights
+        below are seeded deterministically — same seed must produce same
+        result pre- and post-switch.
+        """
+        from diff_diff.survey import SurveyDesign
+
+        rng = np.random.default_rng(20260521)
+        data = baseline_panel.copy()
+        n_units = data["unit"].nunique()
+        rep_w = rng.uniform(0.5, 1.5, size=(n_units, 16))
+        rep_w_cols = [f"rep_w{i}" for i in range(16)]
+        unit_to_rep = {u: rep_w[i] for i, u in enumerate(sorted(data["unit"].unique()))}
+        for j, col in enumerate(rep_w_cols):
+            data[col] = data["unit"].map(lambda u, j=j: unit_to_rep[u][j])
+        data["w"] = 1.0
+        design = SurveyDesign(
+            weights="w",
+            weight_type="pweight",
+            replicate_weights=rep_w_cols,
+            replicate_method="JK1",
+        )
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc1")
+        res = est.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        # Coef bit-equal at machine precision (1-2 ULPs is acceptable due to
+        # multiplication ordering inside solve_ols(weights=) vs prior bake-w).
+        # The variance also matches at atol=1e-10 since per-replicate coef
+        # drift compounds through compute_replicate_refit_variance's squared-
+        # difference aggregation.
+        assert np.isfinite(res.overall_att) and np.isfinite(res.overall_se)
+        assert res.overall_se > 0

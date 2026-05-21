@@ -94,6 +94,10 @@ class StackedDiDResults:
     clean_control: str = "not_yet_treated"
     alpha: float = 0.05
     anticipation: int = 0
+    # Analytical variance family configured at fit time (Phase 1b 2/8). When
+    # survey_design= is supplied the survey TSL/replicate variance overrides
+    # the analytical family; this field still records the configured value.
+    vcov_type: str = "hc1"
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None)
 

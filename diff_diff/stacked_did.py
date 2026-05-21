@@ -78,6 +78,38 @@ class StackedDiD:
         - "warn": Issue warning and drop linearly dependent columns
         - "error": Raise ValueError
         - "silent": Drop columns silently
+    vcov_type : {"classical","hc1","hc2","hc2_bm"}, default="hc1"
+        Analytical variance family for the stacked WLS regression. StackedDiD
+        is intrinsically clustered (``cluster`` is required, no ``cluster=None``
+        opt-out), so one-way families that don't compose with cluster_ids are
+        rejected at ``__init__``:
+
+        - ``"hc1"`` (default): CR1 Liang-Zeger cluster-robust on the Q-weighted
+          design via ``solve_ols(weights=composed_weights, vcov_type="hc1")``.
+          Bit-equal to the prior bake-Q-into-X output (HC1 WLS sandwich is
+          invariant between the two algebraic forms). Matches
+          ``clubSandwich::vcovCR(lm(weights=Q,...), cluster=~unit, type="CR1")``
+          at atol=1e-10.
+        - ``"hc2_bm"``: CR2 Bell-McCaffrey via
+          ``solve_ols(weights=composed_weights, vcov_type="hc2_bm")``, routed
+          through the clubSandwich WLS-CR2 port (matches
+          ``clubSandwich::vcovCR(lm(weights=Q,...), cluster=~unit, type="CR2")
+          + coef_test()$df_Satt`` at atol=1e-10). See ``REGISTRY.md`` Phase 1a
+          ``hc2_bm + weights`` row for the algebra (W not √W in hat matrix,
+          W² in bias term, unweighted residuals in score).
+        - ``"classical"`` and ``"hc2"`` are REJECTED at ``__init__`` with a
+          cluster-incompatibility ``ValueError``: StackedDiD requires a cluster
+          structure, so one-way families don't compose with the linalg validator.
+          Use ``"hc1"`` or ``"hc2_bm"``.
+        - ``"conley"`` is REJECTED at ``__init__`` (deferred; would require
+          threading the six ``conley_*`` params through ``solve_ols`` — tracked
+          in TODO.md).
+
+        Survey-design precedence: when ``survey_design=`` is supplied to
+        ``fit()`` with ``vcov_type != "hc1"``, a ``NotImplementedError`` is
+        raised — the survey Taylor-series linearization (or replicate-weight
+        refit) variance overrides the analytical sandwich. Use the default
+        ``vcov_type="hc1"`` for survey designs.
 
     Attributes
     ----------
@@ -128,6 +160,7 @@ class StackedDiD:
         alpha: float = 0.05,
         anticipation: int = 0,
         rank_deficient_action: str = "warn",
+        vcov_type: str = "hc1",
     ):
         if weighting not in ("aggregate", "population", "sample_share"):
             raise ValueError(
@@ -146,6 +179,29 @@ class StackedDiD:
                 f"rank_deficient_action must be 'warn', 'error', or 'silent', "
                 f"got '{rank_deficient_action}'"
             )
+        # vcov_type validation (Phase 1b 2/8: thread through StackedDiD).
+        if vcov_type == "conley":
+            raise ValueError(
+                "vcov_type='conley' is not yet supported on StackedDiD. "
+                "Threading conley_coords / conley_cutoff_km / conley_metric / "
+                "conley_kernel / conley_time / conley_unit / conley_lag_cutoff "
+                "through solve_ols requires a follow-up PR (tracked in TODO.md "
+                "alongside the SunAbraham conley follow-up). Use vcov_type='hc1' "
+                "(default, CR1) or 'hc2_bm' (CR2 Bell-McCaffrey)."
+            )
+        if vcov_type not in ("classical", "hc1", "hc2", "hc2_bm"):
+            raise ValueError(
+                f"vcov_type must be one of {{'classical', 'hc1', 'hc2', 'hc2_bm'}}, "
+                f"got '{vcov_type}'"
+            )
+        if vcov_type in ("classical", "hc2"):
+            raise ValueError(
+                "StackedDiD clusters intrinsically at 'unit' or 'unit_subexp' "
+                "(no cluster=None opt-out). One-way vcov_type='classical'/'hc2' "
+                "is rejected by the linalg validator when combined with "
+                "cluster_ids. Use vcov_type='hc1' (CR1 Liang-Zeger) or "
+                "'hc2_bm' (CR2 Bell-McCaffrey)."
+            )
 
         self.kappa_pre = kappa_pre
         self.kappa_post = kappa_post
@@ -155,6 +211,7 @@ class StackedDiD:
         self.alpha = alpha
         self.anticipation = anticipation
         self.rank_deficient_action = rank_deficient_action
+        self.vcov_type = vcov_type
 
         self.is_fitted_ = False
         self.results_: Optional[StackedDiDResults] = None
@@ -242,9 +299,7 @@ class StackedDiD:
         resolved_survey, survey_weights, survey_weight_type, survey_metadata = (
             _resolve_survey_for_fit(survey_design, data, "analytical")
         )
-        _uses_replicate_sd = (
-            resolved_survey is not None and resolved_survey.uses_replicate_variance
-        )
+        _uses_replicate_sd = resolved_survey is not None and resolved_survey.uses_replicate_variance
 
         # Reject fweight and aweight — Q-weight composition is ratio-valued
         # and breaks both frequency-weight (integer) and analytic-weight
@@ -258,6 +313,24 @@ class StackedDiD:
                 f"StackedDiD does not support weight_type='{survey_design.weight_type}' "
                 "because Q-weight composition changes the weight semantics. "
                 "Use weight_type='pweight' (default) instead."
+            )
+
+        # Survey-design precedence: when survey_design is supplied, the survey
+        # Taylor-series linearization (or replicate-weight refit) variance
+        # overrides the analytical sandwich. The non-hc1 analytical families
+        # are blocked. Reject ordering matters here: the fweight/aweight check
+        # above fires FIRST so users hit the Q-weight semantics error before
+        # the vcov error (two-step educational path, matches SA precedent).
+        # Future refactors must not swap the order without re-validating tests
+        # `test_aweight_plus_hc2_bm_rejected_by_stacked_did_level_guard`.
+        if resolved_survey is not None and self.vcov_type != "hc1":
+            raise NotImplementedError(
+                f"StackedDiD(vcov_type='{self.vcov_type}') is not supported with "
+                "survey_design=. The survey TSL (or replicate-weight refit) "
+                "variance overrides the analytical sandwich family, so the "
+                "small-sample CR2 Bell-McCaffrey correction cannot compose "
+                "with the survey variance machinery. Use vcov_type='hc1' "
+                "(default) for survey designs."
             )
 
         # Collect survey design column names for propagation through sub-experiments
@@ -402,10 +475,7 @@ class StackedDiD:
         else:
             composed_weights = Q_weights
 
-        sqrt_w = np.sqrt(composed_weights)
         Y = stacked_df[outcome].values
-        Y_t = Y * sqrt_w
-        X_t = X * sqrt_w[:, np.newaxis]
 
         # Cluster IDs
         if self.cluster == "unit":
@@ -415,11 +485,20 @@ class StackedDiD:
                 stacked_df[unit].astype(str) + "_" + stacked_df["_sub_exp"].astype(str)
             ).values
 
-        # Run OLS on transformed data (= WLS)
-        coef, residuals, vcov = solve_ols(
-            X_t,
-            Y_t,
+        # WLS with weights=composed_weights. solve_ols internally bakes
+        # sqrt(w) for the coefficient solve and back-transforms to compute
+        # vcov on original-scale data via clubSandwich's WLS-CR2 algebra for
+        # hc2_bm (PR #475). The hc1 path remains bit-equal to the prior
+        # bake-Q-into-X form (WLS-CR1 score is invariant). Note: this path
+        # routes through the Python backend regardless of vcov_type per
+        # `linalg.py:747-751` (Rust skips weighted vcov); the prior bake-Q
+        # path also went through Python in practice on stacked designs.
+        coef, _residuals_unused, vcov = solve_ols(
+            X,
+            Y,
             cluster_ids=cluster_ids,
+            weights=composed_weights,
+            vcov_type=self.vcov_type,
             return_vcov=True,
             rank_deficient_action=self.rank_deficient_action,
         )
@@ -434,17 +513,26 @@ class StackedDiD:
 
             resolved_stacked = survey_design.resolve(stacked_df)
 
-            # Refit closure: compose Q-weights with replicate survey weights
+            # Refit closure: compose Q-weights with replicate survey weights.
+            # Threads vcov_type=self.vcov_type for grep-consistency though the
+            # closure uses return_vcov=False (only the coef is consumed by
+            # compute_replicate_refit_variance). The vcov_type passed here is
+            # always "hc1" at runtime because the survey + non-hc1 reject in
+            # fit() fires before this branch can be reached for any other
+            # vcov_type.
             def _refit_stacked(w_r):
                 composed_r = Q_weights * w_r
                 w_sum = np.sum(composed_r)
                 if w_sum > 0:
                     composed_r = composed_r * (n_stacked / w_sum)
-                sqrt_w_r = np.sqrt(composed_r)
                 coef_r, _, _ = solve_ols(
-                    X * sqrt_w_r[:, np.newaxis], Y * sqrt_w_r,
+                    X,
+                    Y,
                     cluster_ids=cluster_ids,
-                    rank_deficient_action="silent", return_vcov=False,
+                    weights=composed_r,
+                    vcov_type=self.vcov_type,
+                    rank_deficient_action="silent",
+                    return_vcov=False,
                 )
                 return coef_r
 
@@ -565,7 +653,9 @@ class StackedDiD:
             if _n_valid_rep_sd < resolved_stacked.n_replicates:
                 _survey_df_overall = _n_valid_rep_sd - 1 if _n_valid_rep_sd > 1 else 0
                 if survey_metadata is not None:
-                    survey_metadata.df_survey = _survey_df_overall if _survey_df_overall > 0 else None
+                    survey_metadata.df_survey = (
+                        _survey_df_overall if _survey_df_overall > 0 else None
+                    )
         overall_t, overall_p, overall_ci = safe_inference(
             overall_att, overall_se, alpha=self.alpha, df=_survey_df_overall
         )
@@ -594,6 +684,7 @@ class StackedDiD:
             clean_control=self.clean_control,
             alpha=self.alpha,
             anticipation=self.anticipation,
+            vcov_type=self.vcov_type,
             survey_metadata=survey_metadata,
         )
 
@@ -952,6 +1043,7 @@ class StackedDiD:
             "alpha": self.alpha,
             "anticipation": self.anticipation,
             "rank_deficient_action": self.rank_deficient_action,
+            "vcov_type": self.vcov_type,
         }
 
     def set_params(self, **params: Any) -> "StackedDiD":
