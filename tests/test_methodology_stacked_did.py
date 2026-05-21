@@ -465,6 +465,31 @@ class TestStackedDiDParityRVariants:
             atol=1e-10,
             err_msg="StackedDiD weighting='population' hc2_bm overall_se must match R",
         )
+        # DOF parity (per R9 P1)
+        r_dof_es = np.array(goldens["population"]["unit"]["dof_bm_es"])
+        r_dof_overall = float(goldens["population"]["unit"]["dof_bm_overall"])
+        for h, r_dof_h in zip(event_times, r_dof_es):
+            es = res.event_study_effects[h]
+            if es["se"] == 0:
+                continue
+            df_py = _recover_dof_from_ci(es["effect"], es["se"], es["conf_int"][1], res.alpha)
+            np.testing.assert_allclose(
+                df_py,
+                r_dof_h,
+                atol=1e-6,
+                rtol=1e-6,
+                err_msg=f"population hc2_bm BM DOF at h={h} must match R",
+            )
+        df_overall = _recover_dof_from_ci(
+            res.overall_att, res.overall_se, res.overall_conf_int[1], res.alpha
+        )
+        np.testing.assert_allclose(
+            df_overall,
+            r_dof_overall,
+            atol=1e-6,
+            rtol=1e-6,
+            err_msg="population hc2_bm overall BM DOF must match R Wald_test(HTZ)",
+        )
 
     def test_anticipation1_hc1_matches_clubsandwich_cr1s(self, goldens, panel):
         """anticipation=1: reference period shifts to e=-2, post-period
@@ -527,4 +552,118 @@ class TestStackedDiDParityRVariants:
             r_overall_se,
             atol=1e-10,
             err_msg="StackedDiD anticipation=1 hc2_bm overall_se must match R",
+        )
+        # DOF parity (per R9 P1): under anticipation=1, the post-period
+        # contrast includes h=-1, so the BM DOF should reflect that extension.
+        r_dof_es = np.array(goldens["anticipation1"]["unit"]["dof_bm_es"])
+        r_dof_overall = float(goldens["anticipation1"]["unit"]["dof_bm_overall"])
+        for h, r_dof_h in zip(event_times, r_dof_es):
+            es = res.event_study_effects[h]
+            if es["se"] == 0:
+                continue
+            df_py = _recover_dof_from_ci(es["effect"], es["se"], es["conf_int"][1], res.alpha)
+            np.testing.assert_allclose(
+                df_py,
+                r_dof_h,
+                atol=1e-6,
+                rtol=1e-6,
+                err_msg=f"anticipation1 hc2_bm BM DOF at h={h} must match R",
+            )
+        df_overall = _recover_dof_from_ci(
+            res.overall_att, res.overall_se, res.overall_conf_int[1], res.alpha
+        )
+        np.testing.assert_allclose(
+            df_overall,
+            r_dof_overall,
+            atol=1e-6,
+            rtol=1e-6,
+            err_msg="anticipation1 hc2_bm overall BM DOF must match R Wald_test(HTZ)",
+        )
+
+    def test_sample_share_weighting_hc1_matches_clubsandwich_cr1s(self, goldens, panel):
+        """weighting='sample_share' uses a distinct Q-weight formula
+        `Q_sa = ((N^D_a + N^C_a)/(N^D+N^C)) / (N^C_a/N^C)` for controls.
+        Pin R parity at atol=1e-10 (per R9 P1)."""
+        if "sample_share" not in goldens:
+            pytest.skip("sample_share variant not in goldens")
+        r_se_es = np.array(goldens["sample_share"]["unit"]["se_cr1_es"])
+        r_overall_se = float(goldens["sample_share"]["unit"]["se_overall_cr1"])
+        event_times = goldens["sample_share"]["meta"]["event_times_non_ref"]
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc1", weighting="sample_share")
+        res = est.fit(
+            panel,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            aggregate="event_study",
+        )
+        py_se = _es_se_vector(res, event_times)
+        np.testing.assert_allclose(
+            py_se,
+            r_se_es,
+            atol=1e-10,
+            rtol=1e-10,
+            err_msg="sample_share hc1 event-study SE must match R CR1S",
+        )
+        np.testing.assert_allclose(
+            res.overall_se,
+            r_overall_se,
+            atol=1e-10,
+            err_msg="sample_share hc1 overall_se must match R",
+        )
+
+    def test_sample_share_weighting_hc2_bm_matches_clubsandwich_cr2(self, goldens, panel):
+        """sample_share + hc2_bm: pin SE + BM DOF parity."""
+        if "sample_share" not in goldens:
+            pytest.skip("sample_share variant not in goldens")
+        r_se_es = np.array(goldens["sample_share"]["unit"]["se_cr2_es"])
+        r_overall_se = float(goldens["sample_share"]["unit"]["se_overall_cr2"])
+        r_dof_es = np.array(goldens["sample_share"]["unit"]["dof_bm_es"])
+        r_dof_overall = float(goldens["sample_share"]["unit"]["dof_bm_overall"])
+        event_times = goldens["sample_share"]["meta"]["event_times_non_ref"]
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm", weighting="sample_share")
+        res = est.fit(
+            panel,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            aggregate="event_study",
+        )
+        py_se = _es_se_vector(res, event_times)
+        np.testing.assert_allclose(
+            py_se,
+            r_se_es,
+            atol=1e-10,
+            rtol=1e-10,
+            err_msg="sample_share hc2_bm event-study SE must match R CR2",
+        )
+        np.testing.assert_allclose(
+            res.overall_se,
+            r_overall_se,
+            atol=1e-10,
+            err_msg="sample_share hc2_bm overall_se must match R",
+        )
+        for h, r_dof_h in zip(event_times, r_dof_es):
+            es = res.event_study_effects[h]
+            if es["se"] == 0:
+                continue
+            df_py = _recover_dof_from_ci(es["effect"], es["se"], es["conf_int"][1], res.alpha)
+            np.testing.assert_allclose(
+                df_py,
+                r_dof_h,
+                atol=1e-6,
+                rtol=1e-6,
+                err_msg=f"sample_share hc2_bm BM DOF at h={h} must match R",
+            )
+        df_overall = _recover_dof_from_ci(
+            res.overall_att, res.overall_se, res.overall_conf_int[1], res.alpha
+        )
+        np.testing.assert_allclose(
+            df_overall,
+            r_dof_overall,
+            atol=1e-6,
+            rtol=1e-6,
+            err_msg="sample_share hc2_bm overall BM DOF must match R Wald_test(HTZ)",
         )

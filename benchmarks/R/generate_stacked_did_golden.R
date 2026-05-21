@@ -51,6 +51,11 @@ variants <- list(
     csv = "benchmarks/data/stacked_did_anticipation1_panel.csv",
     ref_period = -2L,  # shifted: e = -1 - anticipation
     out_key = "anticipation1_unit"
+  ),
+  sample_share = list(
+    csv = "benchmarks/data/stacked_did_sample_share_panel.csv",
+    ref_period = -1L,
+    out_key = "sample_share_unit"  # third Q-weight formula
   )
 )
 
