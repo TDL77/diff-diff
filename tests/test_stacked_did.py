@@ -1109,6 +1109,26 @@ class TestStackedDiDVcovType:
         est.set_params(vcov_type="hc2_bm")
         assert est.vcov_type == "hc2_bm"
 
+    def test_set_params_revalidates_vcov_type(self):
+        """Per local codex R4 P3: `set_params(vcov_type=...)` must re-validate
+        via the same estimator-level guard as `__init__`, not silently accept
+        any value and fail later in the linalg layer with a different message.
+        """
+        est = StackedDiD(vcov_type="hc1")
+        # All three reject paths must fire from set_params too:
+        with pytest.raises(ValueError, match="clusters intrinsically"):
+            est.set_params(vcov_type="classical")
+        assert est.vcov_type == "hc1"  # estimator state unchanged after reject
+        with pytest.raises(ValueError, match="clusters intrinsically"):
+            est.set_params(vcov_type="hc2")
+        with pytest.raises(ValueError, match="conley"):
+            est.set_params(vcov_type="conley")
+        with pytest.raises(ValueError, match="hc1.*hc2_bm|hc2_bm.*hc1"):
+            est.set_params(vcov_type="hc4")
+        # Valid mutation still works
+        est.set_params(vcov_type="hc2_bm")
+        assert est.vcov_type == "hc2_bm"
+
     def test_results_carries_vcov_type(self, staggered_data):
         for vcov in ["hc1", "hc2_bm"]:
             est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type=vcov)
@@ -1261,13 +1281,20 @@ class TestStackedDiDVcovType:
             first_treat="first_treat",
             survey_design=design,
         )
-        # Coef bit-equal at machine precision (1-2 ULPs is acceptable due to
-        # multiplication ordering inside solve_ols(weights=) vs prior bake-w).
-        # The variance also matches at atol=1e-10 since per-replicate coef
-        # drift compounds through compute_replicate_refit_variance's squared-
-        # difference aggregation.
-        assert np.isfinite(res.overall_att) and np.isfinite(res.overall_se)
-        assert res.overall_se > 0
+        # Drift lock: hardcoded baseline values captured on the post-PR
+        # branch with the explicit weights= pattern. If multiplication
+        # ordering ever shifts (e.g., a future linalg refactor changes the
+        # bake-w internals in solve_ols), this test catches it. Coef is
+        # pinned at atol=1e-13 (per-replicate drift typically 1-2 ULPs);
+        # the variance compounds the per-replicate drift through
+        # compute_replicate_refit_variance's squared-difference
+        # aggregation, so SE gets atol=1e-10. Both bands match
+        # similar "no methodologically significant drift" tolerances
+        # used elsewhere in the project.
+        BASELINE_ATT = 2.0807833161293945
+        BASELINE_SE = 0.14697256517699428
+        np.testing.assert_allclose(res.overall_att, BASELINE_ATT, atol=1e-13)
+        np.testing.assert_allclose(res.overall_se, BASELINE_SE, atol=1e-10)
 
     def test_hc2_bm_rank_deficient_design_keeps_bm_dof_on_identified_contrasts(
         self, staggered_data

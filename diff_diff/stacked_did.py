@@ -183,6 +183,28 @@ class StackedDiD:
                 f"got '{rank_deficient_action}'"
             )
         # vcov_type validation (Phase 1b 2/8: thread through StackedDiD).
+        # Factored into _validate_vcov_type so set_params() can re-validate.
+        self._validate_vcov_type(vcov_type)
+
+        self.kappa_pre = kappa_pre
+        self.kappa_post = kappa_post
+        self.weighting = weighting
+        self.clean_control = clean_control
+        self.cluster = cluster
+        self.alpha = alpha
+        self.anticipation = anticipation
+        self.rank_deficient_action = rank_deficient_action
+        self.vcov_type = vcov_type
+
+        self.is_fitted_ = False
+        self.results_: Optional[StackedDiDResults] = None
+
+    @staticmethod
+    def _validate_vcov_type(vcov_type: str) -> None:
+        """Validate vcov_type. Called from __init__ AND set_params so that
+        sklearn-style mutation (`est.set_params(vcov_type="bad")`) hits the
+        estimator-level guard rather than failing later in the linalg layer
+        with a different message."""
         if vcov_type == "conley":
             raise ValueError(
                 "vcov_type='conley' is not yet supported on StackedDiD. "
@@ -205,19 +227,6 @@ class StackedDiD:
                 "cluster_ids. Use vcov_type='hc1' (CR1 Liang-Zeger) or "
                 "'hc2_bm' (CR2 Bell-McCaffrey)."
             )
-
-        self.kappa_pre = kappa_pre
-        self.kappa_post = kappa_post
-        self.weighting = weighting
-        self.clean_control = clean_control
-        self.cluster = cluster
-        self.alpha = alpha
-        self.anticipation = anticipation
-        self.rank_deficient_action = rank_deficient_action
-        self.vcov_type = vcov_type
-
-        self.is_fitted_ = False
-        self.results_: Optional[StackedDiDResults] = None
 
     def fit(
         self,
@@ -588,14 +597,18 @@ class StackedDiD:
                 except (ValueError, np.linalg.LinAlgError) as exc:
                     # Genuine singularity on the IDENTIFIED design (very rare
                     # — the rank-deficient handling above already subsets to
-                    # identified columns). Emit a UserWarning and fall back
-                    # to normal-theory inference for visibility.
+                    # identified columns). Emit a UserWarning; the downstream
+                    # inference path NaN-closes (per the fail-closed contract
+                    # added in this PR) so the user receives undefined
+                    # inference rather than silent normal-theory fallback.
                     warnings.warn(
                         f"StackedDiD(vcov_type='hc2_bm') aggregated inference "
                         f"could not compute Bell-McCaffrey contrast DOF on the "
                         f"identified-column design ({type(exc).__name__}: "
-                        f"{exc}). Falling back to normal distribution; "
-                        "aggregated p-values/CIs may be anti-conservative.",
+                        f"{exc}). Aggregated p-values, t-statistics, and "
+                        "confidence intervals will be returned as NaN to "
+                        "preserve the hc2_bm contract (small-sample inference "
+                        "must use BM Satterthwaite DOF, not normal-theory).",
                         UserWarning,
                         stacklevel=2,
                     )
@@ -1178,7 +1191,17 @@ class StackedDiD:
         }
 
     def set_params(self, **params: Any) -> "StackedDiD":
-        """Set estimator parameters (sklearn-compatible)."""
+        """Set estimator parameters (sklearn-compatible).
+
+        Re-validates `vcov_type` via the shared `_validate_vcov_type`
+        helper so sklearn-style mutation hits the estimator-level guard
+        before fit() (avoids a later, less-informative failure in the
+        linalg layer).
+        """
+        # Validate vcov_type up-front if it's being set, so the same
+        # error surface as __init__ applies.
+        if "vcov_type" in params:
+            self._validate_vcov_type(params["vcov_type"])
         for key, value in params.items():
             if hasattr(self, key):
                 setattr(self, key, value)
