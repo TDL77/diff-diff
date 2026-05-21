@@ -1799,13 +1799,25 @@ class TestWooldridgeVcovType:
                 survey_design=design,
             )
 
-    def test_bootstrap_plus_one_way_no_user_cluster_rejected(self):
+    def test_bootstrap_plus_one_way_rejected_regardless_of_cluster(self):
+        """Bootstrap + one-way analytical vcov_type is rejected at the
+        estimator boundary regardless of ``self.cluster`` — under
+        ``cluster=None`` the auto-cluster is dropped (no cluster for the
+        bootstrap to draw at); under ``cluster=X`` the linalg validator
+        rejects one-way + cluster_ids. Both fail paths produce a less-
+        informative downstream error, so the estimator rejects up front."""
         df = _make_vcov_panel()
-        est = WooldridgeDiD(
-            method="ols", vcov_type="classical", n_bootstrap=10, seed=0
-        )
+        # Case 1: cluster=None (default) — bootstrap reject fires
+        est = WooldridgeDiD(method="ols", vcov_type="classical", n_bootstrap=10, seed=0)
         with pytest.raises(ValueError, match=r"multiplier bootstrap"):
             est.fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        # Case 2: cluster=X — also rejected at the estimator boundary (would
+        # otherwise hit the linalg validator with a less-informative message)
+        est_cl = WooldridgeDiD(
+            method="ols", vcov_type="hc2", n_bootstrap=10, cluster="unit", seed=0
+        )
+        with pytest.raises(ValueError, match=r"multiplier bootstrap"):
+            est_cl.fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
 
     def test_get_params_includes_vcov_type(self):
         est = WooldridgeDiD(vcov_type="hc2_bm")

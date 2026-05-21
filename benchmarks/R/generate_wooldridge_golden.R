@@ -154,6 +154,72 @@ overall_se_hc2 <- sqrt(
   t(overall_contrast) %*% vcov_hc2 %*% overall_contrast
 )[1, 1]
 
+# 5. Aggregate hc2_bm BM contrast DOFs for group / calendar / event
+# aggregations. These mirror WooldridgeDiDResults.aggregate(...) at fit time:
+# each aggregation key gets a 1-row constraint matrix in full-coef space whose
+# entries are the per-cell `n_{g,t} / w_total` weights at the (g, t) coefficient
+# columns. Compute the BM Satterthwaite DOF via Wald_test(test="HTZ"). diff-diff
+# uses lazy contrast-DOF computation in aggregate() with the same algebra;
+# pinning here proves R-parity across all three non-simple aggregation surfaces.
+build_contrast_for_cells <- function(cells, weights_by_pair) {
+  col <- numeric(n_total_coef)
+  if (length(cells) == 0L) return(NULL)
+  w_total <- sum(vapply(cells, function(p) weights_by_pair[[paste(p, collapse = "_")]], numeric(1)))
+  if (w_total == 0) return(NULL)
+  for (p in cells) {
+    key <- paste(p, collapse = "_")
+    cell_w <- weights_by_pair[[key]]
+    # find the lm coef index for D_{g}_{t}
+    nm <- sprintf("D_%d_%d", p[1], p[2])
+    pos <- match(nm, names(coef(fit)))
+    if (!is.na(pos)) {
+      col[pos] <- cell_w / w_total
+    }
+  }
+  col
+}
+weights_by_pair <- setNames(as.list(n_gt), vapply(gt_pairs, function(p) paste(p, collapse = "_"), character(1)))
+
+compute_bm_dof_for_contrast <- function(col) {
+  if (is.null(col)) return(NA_real_)
+  cm <- matrix(col, nrow = 1)
+  wt <- tryCatch(
+    Wald_test(fit, constraints = cm, vcov = vcov_cr2, test = "HTZ"),
+    error = function(e) NULL
+  )
+  if (is.null(wt)) NA_real_ else wt$df_denom
+}
+
+# group: one contrast per treated cohort g, cells = (g, t) for t >= g
+agg_group_dofs <- list()
+agg_group_keys <- treated_cohorts
+for (g in treated_cohorts) {
+  cells <- lapply(gt_pairs, function(p) if (p[1] == g && p[2] >= g) p else NULL)
+  cells <- Filter(Negate(is.null), cells)
+  col <- build_contrast_for_cells(cells, weights_by_pair)
+  agg_group_dofs[[as.character(g)]] <- compute_bm_dof_for_contrast(col)
+}
+
+# calendar: one contrast per time period t, cells = (g, t) for g > 0 and t >= g
+agg_calendar_dofs <- list()
+agg_calendar_keys <- times
+for (t in times) {
+  cells <- lapply(gt_pairs, function(p) if (p[2] == t && p[1] <= t) p else NULL)
+  cells <- Filter(Negate(is.null), cells)
+  col <- build_contrast_for_cells(cells, weights_by_pair)
+  agg_calendar_dofs[[as.character(t)]] <- compute_bm_dof_for_contrast(col)
+}
+
+# event: one contrast per relative period k = t - g
+all_k <- sort(unique(vapply(gt_pairs, function(p) p[2] - p[1], numeric(1))))
+agg_event_dofs <- list()
+for (k in all_k) {
+  cells <- lapply(gt_pairs, function(p) if ((p[2] - p[1]) == k) p else NULL)
+  cells <- Filter(Negate(is.null), cells)
+  col <- build_contrast_for_cells(cells, weights_by_pair)
+  agg_event_dofs[[as.character(k)]] <- compute_bm_dof_for_contrast(col)
+}
+
 # Coefficient point estimates (for cross-check; identical across all 4 variants
 # since they share the lm fit).
 beta_int <- coef(fit)[int_idx]
@@ -184,7 +250,11 @@ golden <- list(
     per_coef_se = unname(se_hc2_bm),
     per_coef_df_satt = unname(df_satt_hc2_bm),
     overall_att_se = overall_se_hc2_bm,
-    overall_att_contrast_dof = overall_att_contrast_dof
+    overall_att_contrast_dof = overall_att_contrast_dof,
+    aggregate_group_dof = agg_group_dofs,
+    aggregate_calendar_dof = agg_calendar_dofs,
+    aggregate_event_dof = agg_event_dofs,
+    aggregate_event_keys = all_k
   ),
   classical = list(
     per_coef_se = unname(se_classical),

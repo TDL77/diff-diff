@@ -536,23 +536,26 @@ class WooldridgeDiD:
                 "design-based variance independently."
             )
 
-        # 0e. Reject bootstrap + explicit one-way vcov_type without user-set
-        # cluster. The multiplier bootstrap is fundamentally clustered (it
-        # draws per-cluster weights); under explicit ``vcov_type in {"hc2",
-        # "classical"}`` with ``self.cluster=None``, the OLS path drops the
-        # unit auto-cluster for the analytical sandwich (mirrors SA), which
-        # would leave the bootstrap with no cluster ID to draw weights at.
-        # The user must either provide an explicit ``cluster=X`` or use a
-        # cluster-compatible ``vcov_type`` ("hc1" or "hc2_bm").
-        if self.n_bootstrap > 0 and self.vcov_type in ("hc2", "classical") and self.cluster is None:
+        # 0e. Reject bootstrap + one-way analytical vcov_type. The multiplier
+        # bootstrap is intrinsically clustered (draws per-cluster weights);
+        # one-way ``vcov_type in {"hc2","classical"}`` either drops the unit
+        # auto-cluster (``cluster=None`` → bootstrap has no cluster to draw
+        # at) OR is rejected by the linalg validator (``cluster=X`` + one-way
+        # + cluster_ids). Both fail paths produce a less-informative downstream
+        # error, so reject at the estimator boundary across both. The user
+        # must drop bootstrap (``n_bootstrap=0``) or pick a cluster-compatible
+        # ``vcov_type`` (``hc1`` or ``hc2_bm``).
+        if self.n_bootstrap > 0 and self.vcov_type in ("hc2", "classical"):
             raise ValueError(
                 f"WooldridgeDiD(vcov_type={self.vcov_type!r}, "
-                f"n_bootstrap={self.n_bootstrap}, cluster=None) is not "
-                "supported: the multiplier bootstrap is intrinsically "
-                "clustered, but the one-way vcov_type drops the unit "
-                "auto-cluster. Either set cluster='unit' (or another column) "
-                "or use vcov_type='hc1' / 'hc2_bm' for the analytical "
-                "sandwich."
+                f"n_bootstrap={self.n_bootstrap}) is not supported: the "
+                "multiplier bootstrap is intrinsically clustered, but the "
+                "one-way vcov_type does not compose with cluster_ids — "
+                "either the unit auto-cluster is dropped (when cluster=None) "
+                "leaving the bootstrap with no cluster to draw weights at, "
+                "or the linalg validator rejects one-way + cluster_ids at "
+                "fit (when cluster=X). Use vcov_type='hc1' / 'hc2_bm' for "
+                "the analytical sandwich, or set n_bootstrap=0."
             )
 
         # 1. Filter to analysis sample
@@ -1442,6 +1445,13 @@ class WooldridgeDiD:
             alpha=self.alpha,
             anticipation=self.anticipation,
             survey_metadata=survey_metadata,
+            # vcov_type is locked to "hc1" on the nonlinear paths (the
+            # __init__ guard rejects non-hc1 + method != "ols"). Surface
+            # cluster_name / n_clusters for shared introspection contract
+            # with the OLS path.
+            vcov_type=self.vcov_type,
+            cluster_name=cluster_col,
+            n_clusters=int(np.unique(cluster_ids).size),
             _gt_weights=gt_weights,
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
@@ -1683,6 +1693,12 @@ class WooldridgeDiD:
             alpha=self.alpha,
             anticipation=self.anticipation,
             survey_metadata=survey_metadata,
+            # vcov_type locked to "hc1" on Poisson path (the __init__ guard
+            # rejects non-hc1 + method != "ols"). Surface cluster_name /
+            # n_clusters for shared introspection contract.
+            vcov_type=self.vcov_type,
+            cluster_name=cluster_col,
+            n_clusters=int(np.unique(cluster_ids).size),
             _gt_weights=gt_weights,
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,

@@ -184,3 +184,70 @@ class TestWooldridgeParityR:
             py_se = res.group_time_effects[(g, t)]["se"]
             assert py_se == pytest.approx(r_ses[i], abs=1e-10)
         assert res.overall_se == pytest.approx(golden["hc2"]["overall_att_se"], abs=1e-10)
+
+    def test_aggregate_group_bm_dof_matches_wald_test_htz(
+        self, golden: dict, panel: pd.DataFrame
+    ) -> None:
+        """``aggregate('group')`` BM contrast DOF per cohort matches R
+        ``clubSandwich::Wald_test(test="HTZ")$df_denom`` at atol=1e-6 (CI
+        inversion tolerance)."""
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("group")
+        r_dofs = golden["hc2_bm"]["aggregate_group_dof"]
+        assert res.group_effects is not None
+        for g, eff in res.group_effects.items():
+            r_key = str(g)
+            if r_key not in r_dofs or r_dofs[r_key] in (None, "NA"):
+                continue
+            py_dof = _recover_dof_from_ci(
+                eff["att"], eff["se"], eff["conf_int"][1], res.alpha
+            )
+            assert py_dof == pytest.approx(float(r_dofs[r_key]), abs=1e-6), (
+                f"group g={g}: Py df={py_dof:.4f} R df={r_dofs[r_key]}"
+            )
+
+    def test_aggregate_calendar_bm_dof_matches_wald_test_htz(
+        self, golden: dict, panel: pd.DataFrame
+    ) -> None:
+        """``aggregate('calendar')`` BM contrast DOF per treated time period
+        matches R `Wald_test(test="HTZ")$df_denom` at atol=1e-6."""
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("calendar")
+        r_dofs = golden["hc2_bm"]["aggregate_calendar_dof"]
+        assert res.calendar_effects is not None
+        for t, eff in res.calendar_effects.items():
+            r_key = str(t)
+            if r_key not in r_dofs or r_dofs[r_key] in (None, "NA"):
+                continue
+            py_dof = _recover_dof_from_ci(
+                eff["att"], eff["se"], eff["conf_int"][1], res.alpha
+            )
+            assert py_dof == pytest.approx(float(r_dofs[r_key]), abs=1e-6), (
+                f"calendar t={t}: Py df={py_dof:.4f} R df={r_dofs[r_key]}"
+            )
+
+    def test_aggregate_event_bm_dof_matches_wald_test_htz(
+        self, golden: dict, panel: pd.DataFrame
+    ) -> None:
+        """``aggregate('event')`` BM contrast DOF per relative-period k
+        matches R `Wald_test(test="HTZ")$df_denom` at atol=1e-6."""
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("event")
+        r_dofs = golden["hc2_bm"]["aggregate_event_dof"]
+        assert res.event_study_effects is not None
+        for k, eff in res.event_study_effects.items():
+            r_key = str(k)
+            if r_key not in r_dofs or r_dofs[r_key] in (None, "NA"):
+                continue
+            py_dof = _recover_dof_from_ci(
+                eff["att"], eff["se"], eff["conf_int"][1], res.alpha
+            )
+            assert py_dof == pytest.approx(float(r_dofs[r_key]), abs=1e-6), (
+                f"event k={k}: Py df={py_dof:.4f} R df={r_dofs[r_key]}"
+            )
