@@ -31,10 +31,33 @@ suppressPackageStartupMessages({
 
 stopifnot(packageVersion("clubSandwich") >= "0.7.0")
 
-# --- Load pre-stacked panel -------------------------------------------------
-csv_path <- "benchmarks/data/stacked_did_test_panel.csv"
-stopifnot(file.exists(csv_path))
-df <- read.csv(csv_path)
+# --- Variant configurations -------------------------------------------------
+# Each variant has its own pre-stacked CSV + reference period + non_ref vector.
+# Default aggregate (kappa_pre=2, kappa_post=2, anticipation=0, weighting='aggregate')
+# is the primary case; non-default variants pin the methodology-relevant
+# parameter interactions (per local codex R8 P1).
+variants <- list(
+  default = list(
+    csv = "benchmarks/data/stacked_did_test_panel.csv",
+    ref_period = -1L,
+    out_key = NULL  # written to top-level keys: unit, unit_subexp
+  ),
+  population = list(
+    csv = "benchmarks/data/stacked_did_population_panel.csv",
+    ref_period = -1L,
+    out_key = "population_unit"  # heterogeneous-population Q-weights
+  ),
+  anticipation1 = list(
+    csv = "benchmarks/data/stacked_did_anticipation1_panel.csv",
+    ref_period = -2L,  # shifted: e = -1 - anticipation
+    out_key = "anticipation1_unit"
+  )
+)
+
+
+process_variant <- function(csv_path, ref_period) {
+  stopifnot(file.exists(csv_path))
+  df <- read.csv(csv_path)
 
 # Sanity check expected columns
 required_cols <- c("unit", "period", "outcome", "_sub_exp", "_event_time",
@@ -45,14 +68,12 @@ for (col in required_cols) {
   stopifnot(col %in% colnames(df))
 }
 
-# --- Build the design matrix ------------------------------------------------
-# StackedDiD's regression form (Equation 3 in Wing-Freedman-Hollingsworth 2024):
-#   y ~ intercept + D_sa + sum_h lambda_h * I(e=h) + sum_h delta_h * D_sa * I(e=h)
-# with the reference period e=-1 dropped. event_times = [-2, 0, 1, 2] for the
-# kappa_pre=2, kappa_post=2 configuration on this panel (e=-1 omitted).
-event_times <- sort(unique(df$`_event_time`))
-ref_period <- -1
-non_ref <- event_times[event_times != ref_period]
+  # --- Build the design matrix ----------------------------------------------
+  # StackedDiD's regression form (Equation 3 in Wing-Freedman-Hollingsworth 2024):
+  #   y ~ intercept + D_sa + sum_h lambda_h * I(e=h) + sum_h delta_h * D_sa * I(e=h)
+  # with the reference period dropped.
+  event_times <- sort(unique(df$`_event_time`))
+  non_ref <- event_times[event_times != ref_period]
 # Rename underscore-prefix columns to R-friendly names for the formula.
 # (lm formulas can't reference backtick-quoted names with leading underscore
 # reliably across R versions.)
@@ -65,49 +86,45 @@ df$event_time <- df$`_event_time`
 ev_name <- function(h) {
   if (h < 0) paste0("_neg", abs(h)) else paste0("_", h)
 }
-for (h in non_ref) {
-  lname <- paste0("lambda", ev_name(h))
-  dname <- paste0("delta", ev_name(h))
-  df[[lname]] <- as.integer(df$event_time == h)
-  df[[dname]] <- df[[lname]] * df$D_sa
-}
+  for (h in non_ref) {
+    lname <- paste0("lambda", ev_name(h))
+    dname <- paste0("delta", ev_name(h))
+    df[[lname]] <- as.integer(df$event_time == h)
+    df[[dname]] <- df[[lname]] * df$D_sa
+  }
 
-# Construct formula explicitly
-lambda_cols <- paste0("lambda", sapply(non_ref, ev_name))
-delta_cols <- paste0("delta", sapply(non_ref, ev_name))
-lambda_terms <- paste(lambda_cols, collapse = " + ")
-delta_terms <- paste(delta_cols, collapse = " + ")
-form_str <- paste("outcome ~", "D_sa", "+", lambda_terms, "+", delta_terms)
-form <- as.formula(form_str)
+  # Construct formula explicitly
+  lambda_cols <- paste0("lambda", sapply(non_ref, ev_name))
+  delta_cols <- paste0("delta", sapply(non_ref, ev_name))
+  lambda_terms <- paste(lambda_cols, collapse = " + ")
+  delta_terms <- paste(delta_cols, collapse = " + ")
+  form_str <- paste("outcome ~", "D_sa", "+", lambda_terms, "+", delta_terms)
+  form <- as.formula(form_str)
 
-# Fit WLS with weights=Q
-fit <- lm(form, data = df, weights = Q_weight)
+  # Fit WLS with weights=Q
+  fit <- lm(form, data = df, weights = Q_weight)
 
-# --- Coefficient names + indices --------------------------------------------
-coef_names <- names(coef(fit))
-# Event-study interactions: coef_names matching the renamed delta_* columns
-es_coef_names <- delta_cols
+  coef_names <- names(coef(fit))
+  es_coef_names <- delta_cols
 
-# --- CR1 + CR2 + BM DOF for both cluster levels -----------------------------
-clusters_to_test <- list(unit = df$unit, unit_subexp = df$unit_subexp)
-output <- list(
-  meta = list(
-    clubSandwich_version = as.character(packageVersion("clubSandwich")),
-    R_version = R.version.string,
-    panel_csv = "benchmarks/data/stacked_did_test_panel.csv",
-    panel_descriptor = list(
-      n_units = 50L, n_periods = 8L,
-      cohort_periods = c(3L, 5L, 7L),
-      never_treated_frac = 0.3, treatment_effect = 2.0,
-      dynamic_effects = FALSE, seed = 20260521L
-    ),
-    estimator_descriptor = list(kappa_pre = 2L, kappa_post = 2L),
-    event_times_non_ref = non_ref,
-    es_coef_names = es_coef_names
+  # Anticipation: under non-default anticipation>0, the "post-period" for
+  # the overall ATT contrast is `h >= -anticipation`, which depends on the
+  # reference period offset. anticipation = -1 - ref_period (since
+  # ref_period = -1 - anticipation in Python).
+  anticipation <- -1L - ref_period
+  post_threshold <- -anticipation  # h >= -anticipation enters overall ATT
+
+  clusters_to_test <- list(unit = df$unit, unit_subexp = df$unit_subexp)
+  variant_result <- list(
+    meta = list(
+      event_times_non_ref = non_ref,
+      es_coef_names = es_coef_names,
+      ref_period = ref_period,
+      anticipation = anticipation
+    )
   )
-)
 
-for (cl_name in names(clusters_to_test)) {
+  for (cl_name in names(clusters_to_test)) {
   cl <- clusters_to_test[[cl_name]]
 
   # Use CR1S (Stata-style: G/(G-1) * (n-1)/(n-p) finite-sample correction)
@@ -126,49 +143,84 @@ for (cl_name in names(clusters_to_test)) {
   se_cr2_es <- se_cr2_all[es_coef_names]
   dof_bm_es <- ct_cr2[es_coef_names, "df_Satt"]
 
-  # Overall ATT contrast DOF: post-period delta average via Wald_test HTZ.
-  # StackedDiD's overall_att is mean(delta_h) over h >= 0 (with anticipation=0).
-  # On this fixture event_times=[-2,0,1,2], so post-period is [0, 1, 2].
-  post_delta_names <- delta_cols[non_ref >= 0]
-  K_post <- length(post_delta_names)
-  # Linear contrast row: 1/K for each post-period delta, 0 elsewhere.
-  c_overall <- matrix(0, nrow = 1, ncol = length(coef_names))
-  colnames(c_overall) <- coef_names
-  for (nm in post_delta_names) {
-    c_overall[1, nm] <- 1.0 / K_post
+    # Overall ATT contrast: post-period delta average. Under anticipation>0
+    # the post-period starts at h=-anticipation, NOT h=0 (mirrors Python's
+    # `_post_event_times_preview` filter at stacked_did.py:546-548).
+    post_delta_names <- delta_cols[non_ref >= post_threshold]
+    K_post <- length(post_delta_names)
+    c_overall <- matrix(0, nrow = 1, ncol = length(coef_names))
+    colnames(c_overall) <- coef_names
+    for (nm in post_delta_names) {
+      c_overall[1, nm] <- 1.0 / K_post
+    }
+    wt_overall <- Wald_test(fit, constraints = c_overall, vcov = vcov_cr2, test = "HTZ")
+    dof_bm_overall <- as.numeric(wt_overall$df_denom)
+    overall_var_cr2 <- as.numeric(c_overall %*% vcov_cr2 %*% t(c_overall))
+    se_overall_cr2 <- sqrt(overall_var_cr2)
+    overall_var_cr1 <- as.numeric(c_overall %*% vcov_cr1 %*% t(c_overall))
+    se_overall_cr1 <- sqrt(overall_var_cr1)
+
+    variant_result[[cl_name]] <- list(
+      se_cr1_es = as.numeric(se_cr1_es),
+      se_cr2_es = as.numeric(se_cr2_es),
+      dof_bm_es = as.numeric(dof_bm_es),
+      dof_bm_overall = dof_bm_overall,
+      se_overall_cr1 = se_overall_cr1,
+      se_overall_cr2 = se_overall_cr2,
+      es_coef_names = es_coef_names,
+      se_cr1_intercept = as.numeric(se_cr1_all["(Intercept)"]),
+      se_cr2_intercept = as.numeric(se_cr2_all["(Intercept)"]),
+      coef_es = as.numeric(coef(fit)[es_coef_names])
+    )
   }
-  # Wald_test with HTZ test returns df_denom which equals Satterthwaite DOF
-  # for a 1-row constraint matrix (mirrors PR #465's MPD avg_att approach).
-  wt_overall <- Wald_test(fit, constraints = c_overall, vcov = vcov_cr2, test = "HTZ")
-  dof_bm_overall <- as.numeric(wt_overall$df_denom)
+  return(variant_result)
+}
 
-  # Overall delta-method SE: c @ vcov @ c^T for the post-period average row.
-  # Pin this directly so a regression in the post-period covariance terms
-  # would be caught (per R6 P3: prior fixture only pinned BM DOF, leaving
-  # the variance contract unanchored).
-  overall_var_cr2 <- as.numeric(c_overall %*% vcov_cr2 %*% t(c_overall))
-  se_overall_cr2 <- sqrt(overall_var_cr2)
-  overall_var_cr1 <- as.numeric(c_overall %*% vcov_cr1 %*% t(c_overall))
-  se_overall_cr1 <- sqrt(overall_var_cr1)
 
-  output[[cl_name]] <- list(
-    se_cr1_es = as.numeric(se_cr1_es),
-    se_cr2_es = as.numeric(se_cr2_es),
-    dof_bm_es = as.numeric(dof_bm_es),
-    dof_bm_overall = dof_bm_overall,
-    se_overall_cr1 = se_overall_cr1,
-    se_overall_cr2 = se_overall_cr2,
-    es_coef_names = es_coef_names,
-    se_cr1_intercept = as.numeric(se_cr1_all["(Intercept)"]),
-    se_cr2_intercept = as.numeric(se_cr2_all["(Intercept)"]),
-    coef_es = as.numeric(coef(fit)[es_coef_names])
+# --- Drive all variants -----------------------------------------------------
+output <- list(
+  meta = list(
+    clubSandwich_version = as.character(packageVersion("clubSandwich")),
+    R_version = R.version.string,
+    panel_descriptor = list(
+      n_units = 50L, n_periods = 8L,
+      cohort_periods = c(3L, 5L, 7L),
+      never_treated_frac = 0.3, treatment_effect = 2.0,
+      dynamic_effects = FALSE, seed = 20260521L
+    ),
+    estimator_descriptor = list(kappa_pre = 2L, kappa_post = 2L)
   )
+)
+
+for (variant_name in names(variants)) {
+  v <- variants[[variant_name]]
+  cat("Processing variant:", variant_name, "(csv=", v$csv, ", ref=", v$ref_period, ")\n")
+  result <- process_variant(v$csv, v$ref_period)
+  if (variant_name == "default") {
+    # Default variant: write per-cluster keys at top level (back-compat)
+    output$unit <- result$unit
+    output$unit_subexp <- result$unit_subexp
+    output$meta$event_times_non_ref <- result$meta$event_times_non_ref
+    output$meta$es_coef_names <- result$meta$es_coef_names
+  } else {
+    # Non-default variants: write under variant-specific key
+    output[[variant_name]] <- result
+  }
 }
 
 # --- Write JSON -------------------------------------------------------------
 out_path <- "benchmarks/data/stacked_did_golden.json"
 write_json(output, out_path, digits = 15, auto_unbox = TRUE, pretty = TRUE)
 cat("Wrote", out_path, "\n")
-cat("CR1 unit-cluster SE for delta_0:", output$unit$se_cr1_es[which(non_ref == 0)], "\n")
-cat("CR2-BM unit-cluster SE for delta_0:", output$unit$se_cr2_es[which(non_ref == 0)], "\n")
-cat("BM DOF unit-cluster for delta_0:", output$unit$dof_bm_es[which(non_ref == 0)], "\n")
+cat("Default CR1 unit-cluster SE for delta_0:",
+    output$unit$se_cr1_es[which(output$meta$event_times_non_ref == 0)], "\n")
+cat("Default CR2-BM unit-cluster SE for delta_0:",
+    output$unit$se_cr2_es[which(output$meta$event_times_non_ref == 0)], "\n")
+if (!is.null(output$population)) {
+  cat("Population CR2-BM unit SE for delta_0:",
+      output$population$unit$se_cr2_es[which(output$population$unit$es_coef_names == "delta_0")], "\n")
+}
+if (!is.null(output$anticipation1)) {
+  cat("Anticipation1 CR2-BM unit overall_se:",
+      output$anticipation1$unit$se_overall_cr2, "\n")
+}

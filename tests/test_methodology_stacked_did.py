@@ -367,3 +367,164 @@ class TestStackedDiDParityR:
                 f"recovered df_python={df_python}, R df={r_dof_overall}"
             ),
         )
+
+
+# =============================================================================
+# Variant parity (per R8 P1): pin non-default vcov_type surfaces to R goldens.
+# =============================================================================
+
+
+@pytest.fixture(scope="module")
+def population_panel():
+    """Heterogeneous-population panel matching the R variant fixture.
+
+    Same seed/population assignment as the Python helper that dumped
+    `stacked_did_population_panel.csv`. Per R8 P1: the prior `population`
+    smoke test used a constant pop=1.0 which is numerically degenerate
+    with aggregate weighting. This fixture forces heterogeneous Q-weights.
+    """
+    rng = np.random.default_rng(99)
+    data = generate_staggered_data(
+        n_units=50,
+        n_periods=8,
+        cohort_periods=[3, 5, 7],
+        never_treated_frac=0.3,
+        treatment_effect=2.0,
+        dynamic_effects=False,
+        seed=20260521,
+    )
+    unit_pops = rng.uniform(1.0, 100.0, size=data["unit"].nunique())
+    data = data.copy()
+    data["pop"] = data["unit"].map(lambda u: unit_pops[int(u)])
+    return data
+
+
+class TestStackedDiDParityRVariants:
+    """R-parity for non-default vcov_type surfaces (R8 P1 coverage)."""
+
+    def test_population_weighting_hc1_matches_clubsandwich_cr1s(self, goldens, population_panel):
+        """weighting='population' with heterogeneous Q-weights produces
+        SE that differs from the aggregate-weight case AND matches R."""
+        if "population" not in goldens:
+            pytest.skip("population variant not in goldens; regenerate fixture")
+        r_se_es = np.array(goldens["population"]["unit"]["se_cr1_es"])
+        r_overall_se = float(goldens["population"]["unit"]["se_overall_cr1"])
+        event_times = goldens["population"]["meta"]["event_times_non_ref"]
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc1", weighting="population")
+        res = est.fit(
+            population_panel,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            population="pop",
+            aggregate="event_study",
+        )
+        py_se = _es_se_vector(res, event_times)
+        np.testing.assert_allclose(
+            py_se,
+            r_se_es,
+            atol=1e-10,
+            rtol=1e-10,
+            err_msg="StackedDiD weighting='population' hc1 event-study SE must match R CR1S",
+        )
+        np.testing.assert_allclose(
+            res.overall_se,
+            r_overall_se,
+            atol=1e-10,
+            err_msg="StackedDiD weighting='population' hc1 overall_se must match R",
+        )
+
+    def test_population_weighting_hc2_bm_matches_clubsandwich_cr2(self, goldens, population_panel):
+        if "population" not in goldens:
+            pytest.skip("population variant not in goldens")
+        r_se_es = np.array(goldens["population"]["unit"]["se_cr2_es"])
+        r_overall_se = float(goldens["population"]["unit"]["se_overall_cr2"])
+        event_times = goldens["population"]["meta"]["event_times_non_ref"]
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm", weighting="population")
+        res = est.fit(
+            population_panel,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            population="pop",
+            aggregate="event_study",
+        )
+        py_se = _es_se_vector(res, event_times)
+        np.testing.assert_allclose(
+            py_se,
+            r_se_es,
+            atol=1e-10,
+            rtol=1e-10,
+            err_msg="StackedDiD weighting='population' hc2_bm event-study SE must match R CR2",
+        )
+        np.testing.assert_allclose(
+            res.overall_se,
+            r_overall_se,
+            atol=1e-10,
+            err_msg="StackedDiD weighting='population' hc2_bm overall_se must match R",
+        )
+
+    def test_anticipation1_hc1_matches_clubsandwich_cr1s(self, goldens, panel):
+        """anticipation=1: reference period shifts to e=-2, post-period
+        starts at h=-1, event window expands by 1 pre-period. Verify R
+        parity on both event-study and overall SE."""
+        if "anticipation1" not in goldens:
+            pytest.skip("anticipation1 variant not in goldens")
+        r_se_es = np.array(goldens["anticipation1"]["unit"]["se_cr1_es"])
+        r_overall_se = float(goldens["anticipation1"]["unit"]["se_overall_cr1"])
+        event_times = goldens["anticipation1"]["meta"]["event_times_non_ref"]
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc1", anticipation=1)
+        res = est.fit(
+            panel,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            aggregate="event_study",
+        )
+        py_se = _es_se_vector(res, event_times)
+        np.testing.assert_allclose(
+            py_se,
+            r_se_es,
+            atol=1e-10,
+            rtol=1e-10,
+            err_msg="StackedDiD anticipation=1 hc1 event-study SE must match R CR1S",
+        )
+        np.testing.assert_allclose(
+            res.overall_se,
+            r_overall_se,
+            atol=1e-10,
+            err_msg="StackedDiD anticipation=1 hc1 overall_se must match R",
+        )
+
+    def test_anticipation1_hc2_bm_matches_clubsandwich_cr2(self, goldens, panel):
+        if "anticipation1" not in goldens:
+            pytest.skip("anticipation1 variant not in goldens")
+        r_se_es = np.array(goldens["anticipation1"]["unit"]["se_cr2_es"])
+        r_overall_se = float(goldens["anticipation1"]["unit"]["se_overall_cr2"])
+        event_times = goldens["anticipation1"]["meta"]["event_times_non_ref"]
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm", anticipation=1)
+        res = est.fit(
+            panel,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            aggregate="event_study",
+        )
+        py_se = _es_se_vector(res, event_times)
+        np.testing.assert_allclose(
+            py_se,
+            r_se_es,
+            atol=1e-10,
+            rtol=1e-10,
+            err_msg="StackedDiD anticipation=1 hc2_bm event-study SE must match R CR2",
+        )
+        np.testing.assert_allclose(
+            res.overall_se,
+            r_overall_se,
+            atol=1e-10,
+            err_msg="StackedDiD anticipation=1 hc2_bm overall_se must match R",
+        )
