@@ -126,10 +126,27 @@ for (cl_name in names(clusters_to_test)) {
   se_cr2_es <- se_cr2_all[es_coef_names]
   dof_bm_es <- ct_cr2[es_coef_names, "df_Satt"]
 
+  # Overall ATT contrast DOF: post-period delta average via Wald_test HTZ.
+  # StackedDiD's overall_att is mean(delta_h) over h >= 0 (with anticipation=0).
+  # On this fixture event_times=[-2,0,1,2], so post-period is [0, 1, 2].
+  post_delta_names <- delta_cols[non_ref >= 0]
+  K_post <- length(post_delta_names)
+  # Linear contrast row: 1/K for each post-period delta, 0 elsewhere.
+  c_overall <- matrix(0, nrow = 1, ncol = length(coef_names))
+  colnames(c_overall) <- coef_names
+  for (nm in post_delta_names) {
+    c_overall[1, nm] <- 1.0 / K_post
+  }
+  # Wald_test with HTZ test returns df_denom which equals Satterthwaite DOF
+  # for a 1-row constraint matrix (mirrors PR #465's MPD avg_att approach).
+  wt_overall <- Wald_test(fit, constraints = c_overall, vcov = vcov_cr2, test = "HTZ")
+  dof_bm_overall <- as.numeric(wt_overall$df_denom)
+
   output[[cl_name]] <- list(
     se_cr1_es = as.numeric(se_cr1_es),
     se_cr2_es = as.numeric(se_cr2_es),
     dof_bm_es = as.numeric(dof_bm_es),
+    dof_bm_overall = dof_bm_overall,
     es_coef_names = es_coef_names,
     se_cr1_intercept = as.numeric(se_cr1_all["(Intercept)"]),
     se_cr2_intercept = as.numeric(se_cr2_all["(Intercept)"]),

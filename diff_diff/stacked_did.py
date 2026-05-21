@@ -86,10 +86,13 @@ class StackedDiD:
 
         - ``"hc1"`` (default): CR1 Liang-Zeger cluster-robust on the Q-weighted
           design via ``solve_ols(weights=composed_weights, vcov_type="hc1")``.
-          Bit-equal to the prior bake-Q-into-X output (HC1 WLS sandwich is
-          invariant between the two algebraic forms). Matches
-          ``clubSandwich::vcovCR(lm(weights=Q,...), cluster=~unit, type="CR1")``
-          at atol=1e-10.
+          Bit-equal to the prior bake-Q-into-X output up to float64 multiplication
+          ordering at machine precision (HC1 WLS sandwich is algebraically
+          invariant between the two forms). Matches
+          ``clubSandwich::vcovCR(lm(weights=Q,...), cluster=~unit, type="CR1S")``
+          at atol=1e-10 (target is ``CR1S`` — Stata-style ``G/(G-1) * (n-1)/(n-p)``
+          finite-sample correction — NOT plain ``CR1`` which omits the
+          ``(n-1)/(n-p)`` factor and would diverge by ~1.4%).
         - ``"hc2_bm"``: CR2 Bell-McCaffrey via
           ``solve_ols(weights=composed_weights, vcov_type="hc2_bm")``, routed
           through the clubSandwich WLS-CR2 port (matches
@@ -504,6 +507,74 @@ class StackedDiD:
         )
         assert vcov is not None
 
+        # Bell-McCaffrey Satterthwaite contrast DOF for hc2_bm. Per the
+        # registry contract for `vcov_type="hc2_bm"`, the user-facing
+        # aggregated inference (event_study_effects[h]['p_value']/['conf_int']
+        # and overall_p_value/overall_conf_int) must use CR2 Bell-McCaffrey
+        # Satterthwaite DOF for each contrast — not the normal distribution
+        # that safe_inference(df=None) would otherwise default to. Mirrors
+        # the SunAbraham aggregated-inference pattern from PR #472
+        # (sun_abraham.py:997-1097) and the MPD avg_att pattern from PR #465.
+        # Computed BEFORE constructing event_study_effects / overall_*
+        # inference so the DOFs can be threaded into the safe_inference calls.
+        _bm_contrast_dof_per_event: Dict[int, float] = {}
+        _bm_contrast_dof_overall: Optional[float] = None
+        if self.vcov_type == "hc2_bm" and not _uses_replicate_sd:
+            from diff_diff.linalg import _compute_cr2_bm_contrast_dof
+
+            bread_matrix = X.T @ (X * composed_weights[:, np.newaxis])
+            k_design = X.shape[1]
+            # Per-event-time contrast: unit vector at the delta_h column.
+            es_keys: List[int] = []
+            es_cols: List[np.ndarray] = []
+            for h in event_times:
+                if h in interaction_indices:
+                    c = np.zeros(k_design)
+                    c[interaction_indices[h]] = 1.0
+                    es_keys.append(h)
+                    es_cols.append(c)
+            # Overall ATT contrast: average of post-period delta_h columns
+            # (the same 1/K * ones contrast used for overall_se below).
+            _post_event_times_preview = [
+                h for h in event_times if h >= -self.anticipation and h in interaction_indices
+            ]
+            overall_col: Optional[np.ndarray] = None
+            if len(_post_event_times_preview) > 0:
+                K_prev = len(_post_event_times_preview)
+                overall_col = np.zeros(k_design)
+                for h in _post_event_times_preview:
+                    overall_col[interaction_indices[h]] = 1.0 / K_prev
+            if es_cols or overall_col is not None:
+                cols = list(es_cols)
+                if overall_col is not None:
+                    cols.append(overall_col)
+                contrasts_matrix = np.column_stack(cols)
+                try:
+                    dof_vec = _compute_cr2_bm_contrast_dof(
+                        X,
+                        cluster_ids,
+                        bread_matrix,
+                        contrasts_matrix,
+                        weights=composed_weights,
+                    )
+                    for idx, h in enumerate(es_keys):
+                        _bm_contrast_dof_per_event[h] = float(dof_vec[idx])
+                    if overall_col is not None:
+                        _bm_contrast_dof_overall = float(dof_vec[-1])
+                except (ValueError, np.linalg.LinAlgError) as exc:
+                    # Rank-deficient or other linalg issue: fall back to
+                    # normal-theory inference (downgraded). Emit a UserWarning
+                    # so the deviation is visible.
+                    warnings.warn(
+                        f"StackedDiD(vcov_type='hc2_bm') aggregated inference "
+                        f"could not compute Bell-McCaffrey contrast DOF "
+                        f"({type(exc).__name__}: {exc}). Falling back to "
+                        "normal distribution; aggregated p-values/CIs may be "
+                        "anti-conservative under small-sample.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
         # ---- Survey VCV override ----
         _n_valid_rep_sd = None
         resolved_stacked = None
@@ -612,9 +683,10 @@ class StackedDiD:
                         _survey_df = _n_valid_rep_sd - 1 if _n_valid_rep_sd > 1 else 0
                         if survey_metadata is not None:
                             survey_metadata.df_survey = _survey_df if _survey_df > 0 else None
-                t_stat, p_value, conf_int = safe_inference(
-                    effect, se, alpha=self.alpha, df=_survey_df
-                )
+                # Use BM contrast DOF for hc2_bm when available; falls back
+                # to survey DOF (None ⇒ normal distribution) otherwise.
+                _df_eff = _bm_contrast_dof_per_event.get(h, _survey_df)
+                t_stat, p_value, conf_int = safe_inference(effect, se, alpha=self.alpha, df=_df_eff)
                 n_obs_h = int(np.sum((et_vals == h) & (d_vals == 1)))
                 event_study_effects[h] = {
                     "effect": effect,
@@ -656,8 +728,13 @@ class StackedDiD:
                     survey_metadata.df_survey = (
                         _survey_df_overall if _survey_df_overall > 0 else None
                     )
+        # Use BM contrast DOF for overall ATT (hc2_bm) when available;
+        # falls back to survey DOF (None ⇒ normal) otherwise.
+        _df_overall_eff = (
+            _bm_contrast_dof_overall if _bm_contrast_dof_overall is not None else _survey_df_overall
+        )
         overall_t, overall_p, overall_ci = safe_inference(
-            overall_att, overall_se, alpha=self.alpha, df=_survey_df_overall
+            overall_att, overall_se, alpha=self.alpha, df=_df_overall_eff
         )
 
         # ---- Construct results ----
