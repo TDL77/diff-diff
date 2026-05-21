@@ -335,8 +335,13 @@ class ChaisemartinDHaultfoeuilleResults:
         ``L_max >= 1`` it was repurposed to hold the per-group count
         that matches the ``DID_1`` estimand. Originally equals
         once regardless of how many original observations fed into it.
-        This is the ``N_S`` denominator of ``DID_M`` per AER 2020
-        Theorem 3 — cell counts, not within-cell observation counts.
+        This is the ``N_S`` denominator of ``DID_M`` under the library's
+        equal-cell weighting convention (cell counts, not within-cell
+        observation sums). The AER 2020 paper's Equation 3 defines
+        ``N_{d,d',t} = sum_g N_{g,t}`` (observation sums); the
+        library's choice is a documented deviation - see
+        ``docs/methodology/REGISTRY.md`` ``## ChaisemartinDHaultfoeuille``
+        L517 for the full Note.
     n_cohorts : int
         Distinct cohorts ``(D_{g,1}, F_g, S_g)`` after filtering.
     n_groups_dropped_crossers : int
