@@ -55,10 +55,29 @@ def goldens():
         return json.load(f)
 
 
+_PANEL_CSV_PATH = os.path.join(
+    os.path.dirname(__file__),
+    "..",
+    "benchmarks",
+    "data",
+    "stacked_did_test_panel.csv",
+)
+
+
 @pytest.fixture(scope="module")
 def panel():
-    """Same panel descriptor as the R fixture; must match exactly."""
-    return generate_staggered_data(
+    """Same panel descriptor as the R fixture; must match exactly.
+
+    Per R6 P3: cross-check the regenerated panel against the committed
+    `stacked_did_test_panel.csv` to detect any drift in
+    `generate_staggered_data` that would otherwise silently invalidate the
+    R-parity assertions. The CSV is the post-stacking panel; we verify
+    that the pre-stacking columns (unit, period, outcome, first_treat)
+    match column-by-column. If `generate_staggered_data` ever changes,
+    this test will FAIL with a clear DGP-drift message rather than
+    producing wrong parity output.
+    """
+    data = generate_staggered_data(
         n_units=50,
         n_periods=8,
         cohort_periods=[3, 5, 7],
@@ -67,6 +86,46 @@ def panel():
         dynamic_effects=False,
         seed=20260521,
     )
+    # DGP drift check: load committed CSV (post-stacking, contains a subset
+    # of original rows duplicated across sub-experiments) and verify that
+    # the (unit, period) tuples present in the CSV have matching `outcome`
+    # values in the regenerated panel. The CSV is the canonical reference
+    # used by the R fixture script; any drift in `generate_staggered_data`
+    # that changes the underlying outcomes would otherwise silently
+    # invalidate the R-parity assertions below.
+    if os.path.exists(_PANEL_CSV_PATH):
+        import pandas as pd
+
+        csv = pd.read_csv(_PANEL_CSV_PATH)
+        csv_unique = csv.drop_duplicates(subset=["unit", "period"]).copy()
+        merged = csv_unique.merge(
+            data[["unit", "period", "outcome", "first_treat"]],
+            on=["unit", "period"],
+            how="inner",
+            suffixes=("_csv", "_regen"),
+        )
+        assert len(merged) == len(csv_unique), (
+            f"DGP drift: regenerated panel missing (unit, period) rows present "
+            f"in committed CSV. CSV unique rows={len(csv_unique)}, "
+            f"merged rows={len(merged)}. Regenerate the CSV if the DGP "
+            "helper change is intentional."
+        )
+        # Check the outcome column only — first_treat is recoded between
+        # CSV (inf for never-treated) and regenerated (0 for never-treated)
+        # in some pandas versions, but the outcome is what drives parity.
+        np.testing.assert_allclose(
+            merged["outcome_regen"].astype(float).values,
+            merged["outcome_csv"].astype(float).values,
+            atol=1e-12,
+            err_msg=(
+                "DGP drift detected: generate_staggered_data(...) produces "
+                "different 'outcome' values than the committed "
+                "benchmarks/data/stacked_did_test_panel.csv on the "
+                "matching (unit, period) rows. Regenerate the CSV "
+                "if the change is intentional."
+            ),
+        )
+    return data
 
 
 def _fit(panel, vcov_type, cluster):
@@ -129,12 +188,18 @@ class TestStackedDiDParityR:
     def test_hc1_se_matches_clubsandwich_cr1s_unit_cluster(self, goldens, panel):
         """Default cluster=unit, vcov_type=hc1 matches R `vcovCR(type='CR1S')`.
 
+        Pins BOTH per-event-time SE AND the post-period-average overall_se
+        (per R6 P3: prior fixture only pinned per-event SE; the overall
+        delta-method SE was untested, leaving a gap where post-period
+        covariance regressions could slip through).
+
         See module docstring: 'CR1S' (Stata-style) is the correct comparison
         target; plain 'CR1' (clubSandwich's no-(n-1)/(n-p) form) would diverge
         by ~1.4% on this fixture.
         """
         event_times = goldens["meta"]["event_times_non_ref"]
         r_se = np.array(goldens["unit"]["se_cr1_es"])
+        r_overall_se = float(goldens["unit"]["se_overall_cr1"])
         res = _fit(panel, vcov_type="hc1", cluster="unit")
         py_se = _es_se_vector(res, event_times)
         np.testing.assert_allclose(
@@ -147,11 +212,26 @@ class TestStackedDiDParityR:
                 "Note: target is CR1S (Stata-style), not plain CR1."
             ),
         )
+        np.testing.assert_allclose(
+            res.overall_se,
+            r_overall_se,
+            atol=1e-10,
+            rtol=1e-10,
+            err_msg=(
+                "StackedDiD hc1 overall_se (post-period delta-method) must "
+                "match clubSandwich CR1S contrast variance at atol=1e-10"
+            ),
+        )
 
     def test_hc2_bm_se_matches_clubsandwich_cr2_unit_cluster(self, goldens, panel):
-        """cluster=unit, vcov_type=hc2_bm matches R `vcovCR(type='CR2')`."""
+        """cluster=unit, vcov_type=hc2_bm matches R `vcovCR(type='CR2')`.
+
+        Pins BOTH per-event-time SE AND overall_se contract variance
+        (per R6 P3).
+        """
         event_times = goldens["meta"]["event_times_non_ref"]
         r_se = np.array(goldens["unit"]["se_cr2_es"])
+        r_overall_se = float(goldens["unit"]["se_overall_cr2"])
         res = _fit(panel, vcov_type="hc2_bm", cluster="unit")
         py_se = _es_se_vector(res, event_times)
         np.testing.assert_allclose(
@@ -160,6 +240,16 @@ class TestStackedDiDParityR:
             atol=1e-10,
             rtol=1e-10,
             err_msg="StackedDiD hc2_bm event-study SE must match clubSandwich CR2 at atol=1e-10",
+        )
+        np.testing.assert_allclose(
+            res.overall_se,
+            r_overall_se,
+            atol=1e-10,
+            rtol=1e-10,
+            err_msg=(
+                "StackedDiD hc2_bm overall_se must match clubSandwich CR2 "
+                "contrast variance at atol=1e-10"
+            ),
         )
 
     def test_hc2_bm_per_event_dof_matches_coef_test_df_satt_unit_cluster(self, goldens, panel):
@@ -217,9 +307,11 @@ class TestStackedDiDParityR:
         )
 
     def test_hc2_bm_se_matches_clubsandwich_cr2_unit_subexp_cluster(self, goldens, panel):
-        """Same parity for the alternate cluster level."""
+        """Same parity for the alternate cluster level (per-event SE +
+        overall_se contract variance)."""
         event_times = goldens["meta"]["event_times_non_ref"]
         r_se = np.array(goldens["unit_subexp"]["se_cr2_es"])
+        r_overall_se = float(goldens["unit_subexp"]["se_overall_cr2"])
         res = _fit(panel, vcov_type="hc2_bm", cluster="unit_subexp")
         py_se = _es_se_vector(res, event_times)
         np.testing.assert_allclose(
@@ -230,6 +322,16 @@ class TestStackedDiDParityR:
             err_msg=(
                 "StackedDiD hc2_bm + cluster=unit_subexp must match "
                 "clubSandwich CR2 at atol=1e-10"
+            ),
+        )
+        np.testing.assert_allclose(
+            res.overall_se,
+            r_overall_se,
+            atol=1e-10,
+            rtol=1e-10,
+            err_msg=(
+                "StackedDiD hc2_bm + cluster=unit_subexp overall_se must "
+                "match clubSandwich CR2 at atol=1e-10"
             ),
         )
 

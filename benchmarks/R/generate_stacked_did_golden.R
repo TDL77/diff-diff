@@ -142,11 +142,22 @@ for (cl_name in names(clusters_to_test)) {
   wt_overall <- Wald_test(fit, constraints = c_overall, vcov = vcov_cr2, test = "HTZ")
   dof_bm_overall <- as.numeric(wt_overall$df_denom)
 
+  # Overall delta-method SE: c @ vcov @ c^T for the post-period average row.
+  # Pin this directly so a regression in the post-period covariance terms
+  # would be caught (per R6 P3: prior fixture only pinned BM DOF, leaving
+  # the variance contract unanchored).
+  overall_var_cr2 <- as.numeric(c_overall %*% vcov_cr2 %*% t(c_overall))
+  se_overall_cr2 <- sqrt(overall_var_cr2)
+  overall_var_cr1 <- as.numeric(c_overall %*% vcov_cr1 %*% t(c_overall))
+  se_overall_cr1 <- sqrt(overall_var_cr1)
+
   output[[cl_name]] <- list(
     se_cr1_es = as.numeric(se_cr1_es),
     se_cr2_es = as.numeric(se_cr2_es),
     dof_bm_es = as.numeric(dof_bm_es),
     dof_bm_overall = dof_bm_overall,
+    se_overall_cr1 = se_overall_cr1,
+    se_overall_cr2 = se_overall_cr2,
     es_coef_names = es_coef_names,
     se_cr1_intercept = as.numeric(se_cr1_all["(Intercept)"]),
     se_cr2_intercept = as.numeric(se_cr2_all["(Intercept)"]),
