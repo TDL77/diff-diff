@@ -835,6 +835,8 @@ class StackedDiD:
             alpha=self.alpha,
             anticipation=self.anticipation,
             vcov_type=self.vcov_type,
+            cluster_name=self.cluster,
+            n_clusters=int(np.unique(cluster_ids).size),
             survey_metadata=survey_metadata,
         )
 

@@ -1678,3 +1678,40 @@ class TestStackedDiDVcovType:
             "Under anticipation=1, hc1 vs hc2_bm SEs must differ — "
             "leverage/DOF adjustment didn't fire"
         )
+
+    def test_summary_renders_clustered_variance_label(self, staggered_data):
+        """Per CI codex R2 P2: summary() must render the clustered CR1/CR2-BM
+        label ('CR1 cluster-robust at unit, G=N' / 'CR2 Bell-McCaffrey
+        cluster-robust at unit, G=N'), NOT the one-way label ('HC1
+        heteroskedasticity-robust' / 'HC2 + Bell-McCaffrey DOF (one-way)').
+        StackedDiD is intrinsically clustered."""
+        kwargs = dict(outcome="outcome", unit="unit", time="period", first_treat="first_treat")
+        for vcov, expected_substr in [
+            ("hc1", "CR1 cluster-robust at unit"),
+            ("hc2_bm", "CR2 Bell-McCaffrey cluster-robust at unit"),
+        ]:
+            est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type=vcov, cluster="unit")
+            res = est.fit(staggered_data, **kwargs)
+            s = res.summary()
+            assert "Variance:" in s, f"summary() missing Variance: line for {vcov}"
+            variance_lines = [line for line in s.split("\n") if "Variance:" in line]
+            assert any(expected_substr in line for line in variance_lines), (
+                f"summary() variance label for vcov_type={vcov} should contain "
+                f"'{expected_substr}', got: {variance_lines}"
+            )
+            # MUST NOT render as one-way (would mislead users)
+            assert not any(
+                "(one-way" in line for line in variance_lines
+            ), f"vcov_type={vcov} mislabeled as one-way: {variance_lines}"
+            # G count present
+            assert any(
+                "G=" in line for line in variance_lines
+            ), f"summary() should include cluster count G= for {vcov}: {variance_lines}"
+        # Also test unit_subexp cluster level
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm", cluster="unit_subexp")
+        res = est.fit(staggered_data, **kwargs)
+        s = res.summary()
+        variance_lines = [line for line in s.split("\n") if "Variance:" in line]
+        assert any(
+            "at unit_subexp" in line for line in variance_lines
+        ), f"cluster='unit_subexp' should render in label: {variance_lines}"
