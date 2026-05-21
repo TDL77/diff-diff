@@ -330,7 +330,14 @@ and planned follow-up enhancements:
   ``conley_lag_cutoff > 0`` panel-block composition).** SHIPPED in
   Wave E.2 follow-up. ``vcov_type="conley" + conley_lag_cutoff > 0 +
   survey_design=`` is now supported by adding a within-PSU serial
-  Bartlett HAC term to the Wave E.2 spatial sandwich.
+  Bartlett HAC term to the Wave E.2 spatial sandwich, **provided the
+  survey design has an effective PSU** (either explicit
+  ``survey_design.psu`` or a ``cluster=<col>`` argument that gets
+  injected as the effective PSU per Wave E.1's
+  ``_inject_cluster_as_psu`` routing). No-effective-PSU survey designs
+  (weights-only / strata-only WITHOUT a cluster fallback) raise
+  ``NotImplementedError`` at ``SpilloverDiD.fit`` post-resolution —
+  see the Restrictions list below.
 
   .. note::
 
@@ -390,6 +397,14 @@ and planned follow-up enhancements:
 
   Restrictions:
 
+  - **Requires an effective PSU** — either explicit ``survey_design.psu``
+    OR ``cluster=<col>`` injected as the effective PSU per Wave E.1's
+    ``_inject_cluster_as_psu``. No-effective-PSU survey designs
+    (weights-only / strata-only WITHOUT a cluster fallback) raise
+    ``NotImplementedError`` post-resolution at ``SpilloverDiD.fit``
+    because the pseudo-PSU = obs-index fallback would silently zero
+    the serial sum (each pseudo-PSU appears in exactly one period).
+    Tracked as a follow-up in ``TODO.md``.
   - Replicate-weight variance (BRR / Fay / JK1 / JKn / SDR) raises
     ``NotImplementedError`` (inherits Wave E.1 gate).
   - DiagnosticReport routing for the panel-block case is queued for the

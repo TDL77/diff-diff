@@ -838,6 +838,36 @@ def _compute_stratified_conley_meat(
         )
         return np.full((p_2, p_2), np.nan)
 
+    # Finite + PSD guards on the COMBINED survey meat (spatial + serial).
+    # Mirrors :func:`diff_diff.conley._compute_conley_meat` L966-990 so the
+    # survey panel-block path has the same diagnostic surface as the
+    # no-survey path. The radial 1-D Bartlett spatial kernel and the
+    # Newey-West Bartlett serial kernel are both practitioner
+    # specializations that are NOT formally PSD-guaranteed; adding two
+    # non-PSD-guaranteed terms can produce a more indefinite combined
+    # meat, so the check matters most on the panel-block path. CI codex
+    # R1 P2 fix.
+    if not np.all(np.isfinite(meat)):
+        raise ValueError(
+            "SpilloverDiD Wave E.2 stratified-Conley meat contains non-finite "
+            "values; check Psi for NaN/Inf upstream of the sandwich."
+        )
+    eigvals = np.linalg.eigvalsh(meat)
+    if eigvals.size and eigvals.min() < -1e-12:
+        warnings.warn(
+            f"SpilloverDiD Wave E.2 stratified-Conley meat with conley_kernel="
+            f"{conley_kernel!r} has a materially negative eigenvalue "
+            f"({eigvals.min():.2e}); the variance estimator is not guaranteed "
+            "PSD on this design. Both supported kernels (radial bartlett and "
+            "uniform spatial) plus the hardcoded serial Bartlett term are "
+            "practitioner specializations of Conley 1999 / Newey-West 1987 "
+            "and are not formally PSD-guaranteed; consider varying "
+            "conley_cutoff_km / conley_lag_cutoff, or reviewing the design "
+            "for collinearity / degenerate residual structure.",
+            UserWarning,
+            stacklevel=2,
+        )
+
     return meat
 
 

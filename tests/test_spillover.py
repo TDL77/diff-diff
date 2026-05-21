@@ -6481,16 +6481,20 @@ class TestSpilloverDiDWaveE2FollowupConleySurveyLagCutoff:
         )
 
     def test_a_lag0_strict_bit_identical_to_wave_e2_meat(self):
-        """`conley_lag_cutoff = 0` MUST be bit-identical to shipped Wave E.2
-        on the full meat matrix (not just SE scalar — a bug where SE coincides
-        but meat[i, j] differs would pass a scalar pin). Orchestrator must
-        short-circuit BEFORE calling the serial helper.
+        """`conley_lag_cutoff = 0` MUST produce bit-identical ATT AND scalar SE
+        as a fresh Wave E.2 baseline fit (`assert_array_equal`). Orchestrator
+        must short-circuit BEFORE calling the serial helper; test_a2 mock-spy
+        verifies the helper isn't invoked.
 
         Methodology lock: the early-return at the orchestrator level is the
         backwards-compatibility guarantee that the shipped Wave E.2 surface
         is unaffected by the follow-up. Without the early-return, a numerical
         zero from the serial helper would still inject floating-point noise
-        into the spatial-only meat.
+        into the spatial-only meat (which would surface as SE drift).
+
+        Note: full meat-matrix equality is implied (ATT + SE bit-identity is
+        load-bearing for the user-visible regression pin; the meat matrix is
+        not directly exposed on `SpilloverDiDResults`).
         """
         df = generate_butts_nonstaggered_dgp(seed=0)
         df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)

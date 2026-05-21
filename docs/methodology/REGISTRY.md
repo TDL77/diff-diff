@@ -3289,7 +3289,7 @@ Degrees of freedom for the t-distribution lookup use `ResolvedSurveyDesign.df_su
 - **Reduction semantics (load-bearing for tests):**
   - `conley_lag_cutoff = 0` or `None`: **bit-identical** to shipped Wave E.2 (orchestrator early-returns BEFORE invoking the serial helper; `assert_array_equal` regression pin at test_a).
   - `conley_time is None` or `T = 1`: serial helper short-circuits to zero meat (no cross-period pairs possible) — the degenerate panel-block path, NOT a saturation diagnostic.
-  - Single stratum (`H = 1`, `FPC = inf`): spatial reduces to `sum_t` plain Conley sandwich on per-period PSU totals; serial reduces to plain Newey-West Bartlett HAC on PSU totals (modulo the panel-wide `G/(G-1)` survey factor).
+  - Single stratum (`H = 1`, `FPC = inf`): spatial reduces to `sum_t` Conley sandwich on per-period **within-stratum-CENTERED** PSU totals (NOT raw — at H=1 the centering still subtracts the per-period mean over all G PSUs); serial reduces to Newey-West Bartlett HAC on per-period within-stratum-CENTERED PSU totals (NOT raw scores; the survey-weighted form retains Binder TSL centering even at H=1). Both reductions carry the panel-wide `G/(G-1)` survey factor in lieu of FPC.
   - Bandwidth → 0, `L > 0`: spatial reduces to `sum_t` per-period within-stratum HC sandwich on PSU totals; serial term unchanged (separable form).
   - All PSUs singleton in stratum + `lonely_psu="remove"`: `df_survey = 0` and the meat NaN-fails (saturation warning template "Wave E.2 stratified-Conley sandwich" covers both cross-sectional and panel-block cases).
   - Cross-stratum kernel weight is exactly zero on the serial term too (the within-PSU loop is necessarily within-stratum).
