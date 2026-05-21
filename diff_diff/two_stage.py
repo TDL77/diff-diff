@@ -77,6 +77,7 @@ def _compute_gmm_corrected_meat(
     conley_lag_cutoff: Optional[int] = None,
     survey_weights: Optional[np.ndarray] = None,
     resolved_survey: Optional["ResolvedSurveyDesign"] = None,
+    score_pad_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Gardner (2022) GMM first-stage uncertainty correction — unified IF meat.
 
@@ -207,6 +208,27 @@ def _compute_gmm_corrected_meat(
         Wave E.1 Binder TSL meat. Required when ``survey_weights`` is
         supplied and stratified-cluster variance is requested. When None,
         the no-survey Wave D dispatch applies.
+    score_pad_mask : np.ndarray of shape (n_full,), bool, optional
+        Wave E.3 split-length contract for the survey path. When supplied,
+        the FIT-SAMPLE inputs ``X_1_sparse`` / ``X_10_sparse`` / ``eps_10`` /
+        ``X_2`` / ``eps_2`` / ``survey_weights`` (all length ``n_fit`` where
+        ``n_fit == int(np.sum(score_pad_mask))``) are used to build
+        ``gamma_hat`` and the fit-sample ``Psi``; the helper then zero-pads
+        ``Psi`` to full panel length via
+        ``Psi_padded[score_pad_mask] = Psi_fit`` AFTER construction but
+        BEFORE kernel dispatch. The kernel-dispatch arrays — ``cluster_ids``,
+        ``conley_coords``, ``conley_time``, ``conley_unit``,
+        ``resolved_survey`` — must be at FULL length ``n_full`` so the meat
+        helpers (Binder TSL / stratified-Conley / serial Bartlett) see the
+        full-domain PSU / strata / centroid / time geometry. Default
+        ``None`` keeps the historic single-length contract (all per-row
+        inputs at the same length); this is what TwoStageDiD and the
+        no-survey SpilloverDiD path use. Adopted in SpilloverDiD Wave E.3
+        to mirror R ``survey::svyrecvar(subset())`` (Lumley 2010 §2.5) +
+        the in-library precedents at ``imputation.py:2175-2183`` and
+        ``prep.py:1401-1432``. Fit-sample construction is critical for the
+        drop-first stage-1 FE column space stability — see the in-code
+        comment block at the score-pad branch below.
 
     Returns
     -------
@@ -219,13 +241,20 @@ def _compute_gmm_corrected_meat(
     # Validate Conley kwargs explicitly here. SpilloverDiD's Wave D path
     # bypasses solve_ols's vcov computation, so _validate_vcov_args /
     # _validate_conley_kwargs would not otherwise fire on this call.
+    #
+    # Wave E.3: when `score_pad_mask` is provided, the kernel-dispatch arrays
+    # (conley_coords / conley_time / conley_unit / cluster_ids / resolved_survey)
+    # are at FULL panel length while X / eps_* / X_*_sparse are at fit length.
+    # Validate Conley shapes against the full length so the validator sees
+    # consistent dimensions with the post-pad Psi the kernel actually consumes.
+    n_for_conley = len(score_pad_mask) if score_pad_mask is not None else n
     if vcov_type == "conley":
         _validate_conley_kwargs(
             conley_coords,
             conley_cutoff_km,
             conley_metric,  # type: ignore[arg-type]  # validator raises ValueError if None
             conley_kernel,
-            n,
+            n_for_conley,
             time=conley_time,
             unit=conley_unit,
             lag_cutoff=conley_lag_cutoff,
@@ -298,11 +327,44 @@ def _compute_gmm_corrected_meat(
         )
         return np.full((p_2, p_2), np.nan)
 
+    # Wave E.3 zero-pad: when caller supplies `score_pad_mask`, expand the
+    # fit-sample Psi to the full panel length by placing fit-sample rows at
+    # `score_pad_mask == True` positions and zeros elsewhere. This preserves
+    # the documented "zero-pad scores to full panel + retain full-design
+    # resolved survey" pattern (R `survey::svyrecvar(subset())` form;
+    # `imputation.py:2175-2183` and `prep.py:1401-1432` precedent) AFTER the
+    # gamma_hat/Psi construction is done on the fit-sample inputs (which
+    # keeps the stage-1 FE column space unchanged and the gamma_hat solve
+    # full-rank). The downstream kernel-dispatch helpers see full-length Psi
+    # and reuse the full-length cluster_ids / conley_* / resolved_survey
+    # the caller passes. Excluded rows contribute exactly zero score, so
+    # the meat is mathematically equivalent to "compute meat on fit-sample
+    # Psi then place sums into the full-domain bookkeeping".
+    if score_pad_mask is not None:
+        n_full = len(score_pad_mask)
+        if Psi.shape[0] != int(np.sum(score_pad_mask)):
+            raise ValueError(
+                "_compute_gmm_corrected_meat: score_pad_mask "
+                f"length-mismatch (fit-sample Psi has {Psi.shape[0]} rows, "
+                f"score_pad_mask has {int(np.sum(score_pad_mask))} True "
+                f"entries out of {n_full})."
+            )
+        Psi_padded = np.zeros((n_full, p_2), dtype=np.float64)
+        Psi_padded[score_pad_mask] = Psi
+        Psi = Psi_padded
+        n = n_full  # downstream finite-sample multipliers / kernel dispatch
+        # see the full-length Psi (length matches cluster_ids / conley_*
+        # which the caller passes at full length under the survey path).
+
     # 3. Kernel dispatch.
     #
     # Wave E.1 survey path (`resolved_survey is not None`) overrides the
     # Wave D HC1 / cluster branches with Binder TSL on PSU-aggregated Psi.
-    # The Conley + survey combination is rejected upfront above.
+    # The Conley + survey combination (Wave E.2 / E.2 follow-up) is
+    # handled by the `vcov_type == "conley"` branch further down, which
+    # routes `resolved_survey is not None` fits to
+    # `_compute_stratified_conley_meat` (panel-aware stratified-Conley
+    # sandwich + optional within-PSU serial Bartlett HAC).
     if resolved_survey is not None and vcov_type in ("hc1", "cluster"):
         return _compute_binder_tsl_meat(
             Psi,

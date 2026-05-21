@@ -255,13 +255,9 @@ and planned follow-up enhancements:
     ``TwoStageDiD._resolve_effective_cluster``). When the two groupings
     are identical, no warning fires; PSU still takes precedence
     (inference is unchanged either way).
-  - ``SurveyDesign.subpopulation()`` with FE-undefined zero-weight
-    padding rows: Wave E.1 physically removes such rows from the
-    survey design via ``finite_mask`` rather than retaining them as
-    zero-score domain padding. ``n_psu`` / ``df_survey`` / Binder
-    centering reflect the reduced fit sample rather than the full
-    domain design. See the REGISTRY note for details and the Wave E.3
-    follow-up tracked in ``TODO.md``.
+  - ``SurveyDesign.subpopulation()`` and warn-and-drop full-design
+    retention SHIPPED in Wave E.3 — see "Survey-design integration
+    (Wave E.3)" entry below.
 - **Survey-design integration (Wave E.2 — Conley × survey via
   stratified-Conley sandwich on PSU totals).** SHIPPED in Wave E.2.
   ``vcov_type="conley" + survey_design=`` is now supported via a
@@ -413,6 +409,78 @@ and planned follow-up enhancements:
     ``NotImplementedError`` (inherits Wave E.1 gate).
   - DiagnosticReport routing for the panel-block case is queued for the
     same Wave F follow-up as the Wave E.2 cross-sectional case.
+- **Survey-design integration (Wave E.3 — `SurveyDesign.subpopulation()`
+  / warn-and-drop full-design retention via zero-pad scores).** SHIPPED
+  in Wave E.3. ``SurveyDesign.subpopulation()``-derived designs AND
+  warn-and-drop fits now preserve the full-domain resolved survey
+  design: ``n_psu`` / ``n_strata`` / ``df_survey`` and the Binder TSL
+  per-stratum centering reflect the FULL domain rather than the
+  post-``finite_mask`` fit sample.
+
+  .. note::
+
+     Wave E.3 adopts the canonical zero-pad convention from R
+     ``survey::svyrecvar`` applied to a ``subset()`` design (Lumley
+     2010 §2.5 "Domains and subpopulations") — the same convention
+     already established in ``diff_diff/imputation.py:2175-2183``
+     (PreTrendsImputation lead regression) and
+     ``diff_diff/prep.py:1401-1432`` (DCDH cell variance). The
+     ``gamma_hat`` / ``Psi`` construction stays on SURVEY-FINITE-MASK
+     inputs (``X_1_sparse_fit``, ``X_10_sparse_fit``, ``eps_10_fit``
+     built on ``survey_finite_mask = finite_mask & survey_weights > 0``;
+     ``X_2_kept_gamma``, ``eps_2_fit_gamma``,
+     ``survey_weights_fit_gamma`` projected from the fit-sample frame
+     down to ``survey_finite_mask``) so the drop-first stage-1 FE
+     column space excludes zero-weight subpop rows — critical because
+     ``_build_butts_fe_design_csr`` re-factorizes inputs via
+     ``pd.factorize`` and drops the first unit / time code; including
+     zero-weight subpop rows in the factorize input would change which
+     unit/time code sorts first and silently shift ``gamma_hat``. The full-domain zero-pad
+     invariant is delivered by a new optional
+     ``score_pad_mask=survey_finite_mask`` kwarg on
+     ``_compute_gmm_corrected_meat``, where
+     ``survey_finite_mask = finite_mask & (survey_weights > 0)``
+     under the survey path (= ``finite_mask`` on the no-survey
+     path). The survey-path subset removes zero-weight subpop rows
+     from the FE basis-construction sample so the drop-first
+     identification is invariant to which units the subpop mask
+     excluded; warn-and-dropped rows (NaN ``y_tilde``) are also
+     excluded since ``finite_mask`` is False for them. The helper
+     zero-pads the resulting survey-finite-mask ``Psi`` back to
+     full panel length AFTER construction but BEFORE kernel dispatch
+     via ``Psi_padded[score_pad_mask] = Psi``. Kernel-dispatch arrays
+     (``cluster_ids``, ``conley_coords``, ``conley_time``,
+     ``conley_unit``, ``resolved_survey``) are passed at FULL
+     length so the meat helpers (Binder TSL / stratified-Conley /
+     serial Bartlett) see the full-domain PSU / strata / centroid
+     / time geometry. The stage-2 OLS solve still runs on
+     fit-sample-aligned ``X_2_kept`` / ``y_tilde_fit`` (active
+     sample). No reference software combines all four ingredients
+     (Conley + Binder TSL + Gardner GMM + R
+     ``svyrecvar``-style zero-pad) on a two-stage influence function.
+
+  Reduction semantics:
+
+  - When ``finite_mask.all() == True`` AND all weights ``> 0`` (no
+    zero-pad needed): bit-identical to shipped Wave E.2 /
+    E.2-follow-up baseline.
+  - A2 invariant: warn-and-drop and subpopulation drops are treated
+    identically (both apply the zero-pad mechanism).
+  - Subpopulation parity vs upstream-subset: ``df_survey`` matches the
+    full domain (``n_psu_full - n_strata_full``) regardless of how
+    many rows the subpopulation mask excludes. SE may differ from
+    ``fit(data[mask], ..., survey_design=plain_design)`` by design
+    (subpopulation retains zero-padded PSU geometry; subset drops
+    PSUs entirely).
+
+  Restrictions:
+
+  - Replicate-weight variance + subpopulation continues to raise
+    ``NotImplementedError`` at the Wave E.1 gate
+    (``spillover.py:2400``).
+  - TwoStageDiD's analogous ``finite_mask + design-subset`` pattern at
+    ``two_stage.py:567-601`` is NOT yet adopted to Wave E.3 — separate
+    parity follow-up tracked in ``TODO.md``.
 - **Count-of-treated-in-ring** — only the "nearest-treated ring"
   specification is implemented. The "count" form re-introduces
   functional-form dependence (paper Section 3.2 end) and is queued.
