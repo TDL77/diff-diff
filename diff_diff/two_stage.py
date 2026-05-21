@@ -125,20 +125,25 @@ def _compute_gmm_corrected_meat(
       TSL has its own ``(1-f_h) * n_h/(n_h-1)`` correction).
     - ``vcov_type="cluster"``: ``cluster_ids`` IS the PSU (via upstream
       ``_inject_cluster_as_psu``); identical to the HC1+survey branch.
-    - ``vcov_type="conley"`` (cross-sectional only — ``conley_lag_cutoff = 0``):
+    - ``vcov_type="conley"`` with ``conley_lag_cutoff = 0`` (cross-sectional):
       Wave E.2 stratified-Conley sandwich on PSU totals via
       :func:`_compute_stratified_conley_meat`. Aggregates Psi to PSU
       totals + derives per-PSU centroids as the mean of per-obs
       ``conley_coords``; for each stratum applies the Conley kernel
       between PSU centroids scaled by ``(1 - f_h) * n_h/(n_h-1)``.
       Cross-stratum kernel weights are zero by sampling design.
-    - ``vcov_type="conley"`` with ``conley_lag_cutoff > 0`` (panel-block
-      Conley): raises ``NotImplementedError`` upstream at
-      ``SpilloverDiD.fit``. The panel-block decomposition would need to
-      compose the within-unit serial Bartlett HAC with the within-stratum
-      cross-PSU spatial kernel on PSU-by-time scores rather than the
-      collapsed PSU totals; out of Wave E.2 scope and tracked as a
-      follow-up in ``TODO.md``.
+    - ``vcov_type="conley"`` with ``conley_lag_cutoff > 0`` (panel-block,
+      Wave E.2 follow-up): the orchestrator at
+      :func:`_compute_stratified_conley_meat` adds a within-PSU serial
+      Bartlett HAC term (Newey-West 1987 form) onto the Wave E.2 spatial
+      sandwich — ``meat = meat_spatial + meat_serial`` with disjoint
+      index sets (matches the no-survey panel-block decomposition at
+      :func:`diff_diff.conley._compute_conley_meat`). Serial term uses
+      per-period within-stratum centering (Binder TSL form) and
+      panel-wide per-stratum FPC. Requires ``survey_design.psu`` set;
+      no-PSU survey designs (weights-only / strata-only) raise
+      ``NotImplementedError`` upstream at ``SpilloverDiD.fit`` because
+      the pseudo-PSU fallback would silently zero the serial sum.
 
     **`gamma_hat` solve** (mirror of `TwoStageDiD._compute_gmm_variance`
     pattern at `two_stage.py:1886-1917`): factorize ``X_10' W X_10`` via
@@ -364,10 +369,13 @@ def _compute_gmm_corrected_meat(
                 "conley_coords, conley_cutoff_km, and conley_metric."
             )
         if resolved_survey is not None:
-            # Wave E.2: stratified-Conley sandwich on PSU totals. cluster_ids
-            # is intentionally NOT threaded through — after PSU aggregation
-            # every PSU is its own cluster, so a cluster product kernel
-            # would zero all cross-PSU pairs. Wave E.1's
+            # Wave E.2: stratified-Conley sandwich on PSU totals.
+            # Wave E.2 follow-up: with conley_lag_cutoff > 0 the orchestrator
+            # adds the within-PSU serial Bartlett HAC term onto the spatial
+            # sandwich (separable form; meat = meat_spatial + meat_serial).
+            # cluster_ids is intentionally NOT threaded through — after PSU
+            # aggregation every PSU is its own cluster, so a cluster product
+            # kernel would zero all cross-PSU pairs. Wave E.1's
             # _resolve_effective_cluster path already coerced any
             # user-supplied cluster=<col> into PSU upstream.
             meat = _compute_stratified_conley_meat(
@@ -378,6 +386,7 @@ def _compute_gmm_corrected_meat(
                 conley_kernel=conley_kernel,
                 resolved_survey=resolved_survey,
                 conley_time=conley_time,  # panel-aware per-period sandwich
+                conley_lag_cutoff=conley_lag_cutoff,  # Wave E.2 follow-up serial term
             )
         else:
             # Wave D no-survey Conley path UNCHANGED — bit-identical fallback.
@@ -546,6 +555,7 @@ def _compute_stratified_conley_meat(
     conley_kernel: str,
     resolved_survey: "ResolvedSurveyDesign",
     conley_time: Optional[np.ndarray] = None,
+    conley_lag_cutoff: Optional[int] = None,
 ) -> np.ndarray:
     """Wave E.2 panel-aware stratified-Conley meat on PSU-by-time scores.
 
@@ -553,8 +563,13 @@ def _compute_stratified_conley_meat(
     Proposition 1 Binder TSL (the Wave E.1 foundation) and the Wave D
     Gardner GMM first-stage uncertainty correction (Butts 2021 ss3.1 +
     Gardner 2022 ss4) applied to SpilloverDiD's ring-indicator stage-2
-    design. No reference software combines all three ingredients on a
-    two-stage influence function.
+    design. Wave E.2 follow-up extends to ``conley_lag_cutoff > 0`` by
+    summing the within-PSU serial Bartlett HAC term (Newey-West 1987)
+    onto the spatial sandwich: ``meat = meat_spatial + meat_serial`` with
+    disjoint index sets, exactly matching the no-survey panel-block
+    decomposition at :func:`diff_diff.conley._compute_conley_meat`. No
+    reference software combines panel-block Conley + Binder TSL + Gardner
+    GMM correction on a two-stage influence function.
 
     **Panel-aware composition (preserves the library's panel Conley
     contract):** for each period ``t``, aggregate per-obs Psi to PSU
@@ -599,6 +614,14 @@ def _compute_stratified_conley_meat(
         one iteration on the full Psi, which is the cross-sectional
         Wave E.2 design). When provided (the standard SpilloverDiD case),
         the per-period loop preserves the within-period spatial semantic.
+    conley_lag_cutoff : int, optional
+        Bartlett serial-HAC bandwidth ``L`` in panel periods (Wave E.2
+        follow-up). When None or 0, the spatial term is the entire meat
+        (shipped Wave E.2 behaviour); when ``> 0``, the within-PSU serial
+        Bartlett HAC :func:`_compute_stratified_serial_bartlett_meat` is
+        added to the spatial term. ``L > 0`` requires ``conley_time`` set
+        (with ``conley_time is None`` the panel reduces to T=1 and the
+        serial helper short-circuits to zero meat).
 
     Returns
     -------
@@ -627,18 +650,19 @@ def _compute_stratified_conley_meat(
 
     - ``T = 1`` (single period or ``conley_time is None``): single-pass
       stratified-Conley sandwich on the full PSU totals (the original
-      cross-sectional Wave E.2 design).
-    - ``H = 1`` stratum, ``FPC = inf``: reduces to ``sum_t`` plain
-      Conley sandwich on per-period PSU totals.
-    - Bandwidth -> 0 (``K = I``): reduces to ``sum_t`` per-period
+      cross-sectional Wave E.2 design). With ``conley_lag_cutoff > 0``
+      the serial helper short-circuits to zero meat (no cross-period
+      pairs possible).
+    - ``H = 1`` stratum, ``FPC = inf``: spatial term reduces to ``sum_t``
+      plain Conley sandwich on per-period PSU totals; serial term (if
+      ``conley_lag_cutoff > 0``) reduces to plain Newey-West Bartlett HAC
+      on PSU totals.
+    - Bandwidth -> 0 (``K = I``): spatial reduces to ``sum_t`` per-period
       within-stratum HC sandwich on PSU totals (NOT Wave E.1 Binder,
-      which is over time-collapsed PSU totals).
-
-    Out of scope (deferred follow-up, tracked in TODO.md):
-
-    - ``conley_lag_cutoff > 0`` panel-block: the within-PSU serial
-      Bartlett HAC over time would compose with the spatial sandwich
-      here. Rejected upfront at ``SpilloverDiD.fit``.
+      which is over time-collapsed PSU totals); serial term unchanged
+      (separable form).
+    - ``conley_lag_cutoff = 0`` or ``None``: bit-identical to shipped
+      Wave E.2 (no serial helper call; spatial-only meat).
     """
     from diff_diff.survey import _compute_stratified_conley_meat_from_psu_scores
 
@@ -779,6 +803,29 @@ def _compute_stratified_conley_meat(
         _variance_computed = _variance_computed or var_t
         _legit_zero += legit_zero_t
 
+    # Wave E.2 follow-up: serial Bartlett HAC term for conley_lag_cutoff > 0.
+    # Sums onto the spatial meat with disjoint index sets (separable form,
+    # NOT Driscoll-Kraay 2D-HAC). Lag=0 / None short-circuits — the helper
+    # itself returns zero-meat for L<=0 or T<=1 so this branch never erodes
+    # the lag=0 bit-identity guarantee with shipped Wave E.2 (test (a)).
+    # `cluster_ids` intentionally not threaded (same rationale as the spatial
+    # term: post-PSU-aggregation each PSU is its own cluster, the within-PSU
+    # serial loop already iterates exactly the right scope; threading a
+    # cluster product kernel would be a no-op).
+    if conley_lag_cutoff is not None and conley_lag_cutoff > 0:
+        meat_serial, var_serial, legit_zero_serial = _compute_stratified_serial_bartlett_meat(
+            Psi,
+            psu_arr=psu_arr,
+            time_arr=time_arr,
+            strata_arr_full=strata_arr_full,
+            fpc_arr_full=fpc_arr_full,
+            conley_lag_cutoff=int(conley_lag_cutoff),
+            lonely_psu=resolved_survey.lonely_psu,
+        )
+        meat = meat + meat_serial
+        _variance_computed = _variance_computed or var_serial
+        _legit_zero += legit_zero_serial
+
     # Wave E.2 survey-saturated NaN-fail per `feedback_no_silent_failures`.
     if not _variance_computed and _legit_zero == 0:
         warnings.warn(
@@ -792,6 +839,278 @@ def _compute_stratified_conley_meat(
         return np.full((p_2, p_2), np.nan)
 
     return meat
+
+
+def _compute_stratified_serial_bartlett_meat(
+    Psi: np.ndarray,
+    *,
+    psu_arr: np.ndarray,
+    time_arr: np.ndarray,
+    strata_arr_full: Optional[np.ndarray],
+    fpc_arr_full: Optional[np.ndarray],
+    conley_lag_cutoff: int,
+    lonely_psu: str,
+) -> Tuple[np.ndarray, bool, int]:
+    """Wave E.2 follow-up: within-PSU serial Bartlett HAC meat over time on
+    PSU-aggregated per-period scores.
+
+    Composes Newey-West (1987) serial Bartlett HAC with Conley (1999)'s panel
+    block-decomposition convention, Binder (1983) FPC, and Gerber (2026,
+    arXiv:2605.04124) Proposition 1 Binder TSL on Wave D Gardner GMM IFs
+    (Butts 2021 ss3.1 + Gardner 2022 ss4). Sibling helper to the Wave E.2
+    spatial orchestrator :func:`_compute_stratified_conley_meat`; the two
+    terms sum with disjoint index sets to form the panel-block meat
+    ``meat = meat_spatial + meat_serial`` exactly matching the no-survey
+    panel-block decomposition at :func:`diff_diff.conley._compute_conley_meat`.
+
+    **Composition (separable form, NOT Driscoll-Kraay 2D-HAC):**
+
+        meat_serial = sum_h FPC_h * sum_{g in stratum h}
+                       sum_{|t-s| <= L, t != s, present[g, t] & present[g, s]}
+                         (1 - |t-s|/(L+1)) * S_centered_t[g] @ S_centered_s[g].T
+
+    where ``S_psu_t[g] = sum_{i in PSU g, time t} Psi[i]`` is the per-period
+    PSU total, ``S_centered_t[g] = S_psu_t[g] - S_bar_h(g)_t`` is the
+    per-period within-stratum centered score (Binder TSL form — matches the
+    spatial helper's centering exactly), and ``|t-s|`` is computed on PANEL-
+    WIDE dense time codes ``np.unique(time_arr, return_inverse=True)``
+    (matches :func:`diff_diff.conley._compute_conley_meat` panel-block
+    convention at conley.py:934-939; mirrors R ``conleyreg::time_dist``).
+    Serial Bartlett kernel weights are hardcoded regardless of the spatial
+    ``conley_kernel`` argument (also matches the conley.py reference).
+
+    **FPC convention (panel-wide per-stratum)** — STANDALONE Newey-West
+    composition on stratified clusters, NOT by analogy to the Binder spatial
+    helper at :func:`_compute_binder_tsl_meat`. The serial sum aggregates
+    within-PSU temporal correlation across all observed periods — it is a
+    PANEL-level construct, not a period-level construct. The cluster set for
+    the panel-level sum is the panel-wide set of PSUs in stratum h, so the
+    FPC denominator uses ``n_h_panel = |unique PSUs in stratum h across the
+    active sample|``, not the per-period ``n_h_t``. The spatial term keeps
+    its per-period FPC unchanged (the period-t spatial sum IS a within-period
+    stratified-cluster sandwich at one time index). For balanced panels with
+    PSU present in every period, ``n_h_panel = n_h_t`` for all t so the two
+    converge; the difference surfaces under unbalanced panels.
+
+    **Centering asymmetry vs no-survey reference** — `conley.py:949-965`
+    uses RAW scores for the serial term (no centering) because the no-survey
+    path assumes ``E[scores] = 0`` under correct specification (X*eps
+    centered around zero), so centering is a no-op. The survey-weighted
+    Binder TSL form estimates the within-stratum mean and centers explicitly
+    (textbook stratified-cluster sandwich; the per-period stratum mean enters
+    via Binder's finite-population variance derivation). Using raw scores in
+    the survey case would inflate variance by twice the squared per-period
+    stratum mean and would NOT reduce to the cross-sectional Wave E.2 form
+    at lag=0.
+
+    **Singleton-adjust panel-wide mean asymmetry** — for ``lonely_psu="adjust"``
+    on a singleton stratum, the serial helper centers against the panel-wide
+    mean of per-period PSU totals (averaged over all (g, t) with
+    ``present[g, t]``), NOT the per-period within-stratum mean used by the
+    spatial helper. The scope difference reflects the serial term's panel-
+    level nature: a singleton stratum at the panel level has no within-
+    stratum cross-PSU variation to demean against, so the only meaningful
+    centering target is the panel-wide PSU mean. The ``continue``-skip-FPC
+    pattern matches the spatial helper at :func:`_compute_stratified_conley_meat_from_psu_scores`
+    L2007-2017 to avoid divide-by-zero on ``n_h_panel = 1``.
+
+    Parameters
+    ----------
+    Psi : np.ndarray of shape (n, p_2)
+        Per-obs Wave D Gardner GMM IF scores (Hajek-weighted upstream via
+        Wave E.1 eps multiplication). Bit-identical to the spatial path Psi.
+    psu_arr : np.ndarray of shape (n,)
+        Per-obs PSU identifier. ``resolved_survey.psu`` or pseudo-PSU =
+        obs-index per the orchestrator's no-PSU fallback.
+    time_arr : np.ndarray of shape (n,)
+        Per-obs period label; normalized to dense codes 0..T-1 internally.
+    strata_arr_full : np.ndarray of shape (n,) or None
+        Per-obs stratum. None synthesizes a single stratum.
+    fpc_arr_full : np.ndarray of shape (n,) or None
+        Per-obs FPC. None disables FPC scaling on the serial term
+        (`(1-f_h) = 1`); the n_h/(n_h-1) factor is still applied.
+    conley_lag_cutoff : int
+        Bartlett serial-HAC bandwidth `L` in panel periods. Must be >= 1
+        (T=1 or L=0 returns zeros via short-circuit).
+    lonely_psu : str
+        ``"remove"`` / ``"certainty"`` / ``"adjust"`` — singleton-stratum
+        handling, matches the Wave E.2 spatial helper exactly.
+
+    Returns
+    -------
+    meat : np.ndarray of shape (p_2, p_2)
+        Serial Bartlett HAC meat.
+    variance_computed : bool
+        Whether any actual variance was contributed.
+    legitimate_zero_count : int
+        Strata that legitimately contribute zero (lonely_psu="certainty").
+
+    Notes
+    -----
+    Does NOT thread ``cluster_ids``: after PSU aggregation every PSU is its
+    own cluster, so a cluster product kernel would zero all cross-PSU pairs
+    (Wave E.2 dispatch-boundary rationale). Inherits Wave E.1
+    `_resolve_effective_cluster` warn-and-coerce-to-PSU upstream.
+
+    Does NOT receive ``psu_value_to_centroid``: the serial kernel operates
+    on temporal lag only (no spatial component), so PSU centroids are
+    irrelevant for this term. Asymmetric vs the spatial helper which needs
+    centroids.
+
+    T = 1 (single observed period) or ``conley_lag_cutoff <= 0`` short-
+    circuits to zero meat with no variance reported — the degenerate panel-
+    block path, NOT a saturation diagnostic.
+    """
+    p_2 = Psi.shape[1]
+    L = int(conley_lag_cutoff)
+
+    # T=1 short-circuit: no cross-period pairs are possible.
+    unique_times, time_indices = np.unique(time_arr, return_inverse=True)
+    T = len(unique_times)
+    if T <= 1 or L <= 0:
+        return np.zeros((p_2, p_2)), False, 0
+
+    # PSU-stratum constancy is enforced upstream by `_validate_unit_constant_survey`
+    # at survey.py:1008-1048 (PSU is a unit-level survey column; a PSU's
+    # stratum assignment is constant across all observations by sampling-
+    # design invariant). No defensive re-check here; the validator would have
+    # raised before we reach the meat construction.
+
+    # Build per-PSU per-period score tensor S_psu_panel[g, t, :].
+    unique_psus, first_idx_panel, psu_indices_full = np.unique(
+        psu_arr, return_index=True, return_inverse=True
+    )
+    G_panel = len(unique_psus)
+    S_psu_panel = np.zeros((G_panel, T, p_2))
+    for j in range(p_2):
+        np.add.at(S_psu_panel[:, :, j], (psu_indices_full, time_indices), Psi[:, j])
+
+    # Presence mask: True iff PSU g has at least one obs at period t.
+    counts = np.zeros((G_panel, T), dtype=np.int64)
+    np.add.at(counts, (psu_indices_full, time_indices), 1)
+    present = counts > 0
+
+    # Per-PSU panel-wide attributes (stratum + FPC).
+    if strata_arr_full is not None:
+        psu_strata_panel = np.asarray(strata_arr_full)[first_idx_panel]
+    else:
+        psu_strata_panel = np.zeros(G_panel, dtype=int)
+    if fpc_arr_full is not None:
+        psu_fpc_panel: Optional[np.ndarray] = np.asarray(fpc_arr_full, dtype=np.float64)[
+            first_idx_panel
+        ]
+    else:
+        psu_fpc_panel = None
+
+    # Per-period within-stratum centering on the (G_panel, T, p_2) tensor.
+    # Match the spatial helper's per-period stratum-mean centering exactly.
+    # Initialize to ZEROS (NOT raw S_psu_panel) so any (g, t) cell whose
+    # stratum-period has < 2 active PSUs contributes zero to downstream
+    # serial cross-products. Leaving raw scores in singleton-active-period
+    # cells would feed uncentered values into the serial Bartlett sum and
+    # contaminate the covariance — codex R1 P1 fix. With < 2 active PSUs in
+    # stratum h at period t, within-stratum variance is undefined; the
+    # methodologically-correct behavior is zero contribution from that
+    # (h, t) leg, matching the spatial helper's lonely_psu="remove"
+    # convention applied at the per-period level.
+    S_centered = np.zeros_like(S_psu_panel)
+    unique_strata_panel = np.unique(psu_strata_panel)
+    for t in range(T):
+        for h in unique_strata_panel:
+            active_mask = (psu_strata_panel == h) & present[:, t]
+            if int(active_mask.sum()) < 2:
+                # Singleton/empty active PSUs in stratum h at period t:
+                # leave S_centered as zero (no contribution to serial sum
+                # from this leg). The per-stratum singleton branch below
+                # still handles panel-wide n_h_panel < 2.
+                continue
+            stratum_mean_t = S_psu_panel[active_mask, t, :].mean(axis=0)
+            S_centered[active_mask, t, :] = S_psu_panel[active_mask, t, :] - stratum_mean_t
+
+    # Panel-wide PSU mean for the singleton-adjust branch (compute lazily —
+    # only needed if lonely_psu == "adjust" AND any singleton stratum exists).
+    _global_psu_mean: Optional[np.ndarray] = None
+    if lonely_psu == "adjust":
+        present_count = int(present.sum())
+        if present_count > 0:
+            _global_psu_mean = (S_psu_panel * present[:, :, None]).sum(axis=(0, 1)) / present_count
+
+    # Per-stratum serial accumulation.
+    meat = np.zeros((p_2, p_2))
+    _variance_computed = False
+    legitimate_zero_count = 0
+    t_codes_full = np.arange(T, dtype=np.float64)
+
+    for h in unique_strata_panel:
+        stratum_psus = np.where(psu_strata_panel == h)[0]
+        n_h_panel = len(stratum_psus)
+
+        # Singleton-stratum branch (mirror spatial helper at survey.py:2001-2017
+        # — FPC `n_h/(n_h-1)` divides by zero when n_h_panel = 1 so MUST continue
+        # to skip the multi-PSU FPC block below).
+        if n_h_panel < 2:
+            if lonely_psu == "remove":
+                continue
+            elif lonely_psu == "certainty":
+                legitimate_zero_count += 1
+                continue
+            elif lonely_psu == "adjust":
+                # Center against panel-wide PSU mean (different scope from
+                # spatial helper's per-period stratum mean; see docstring
+                # "singleton-adjust panel-wide mean asymmetry"). The guard
+                # below covers the all-empty-presence edge (present_count = 0
+                # at the global mean computation above leaves _global_psu_mean
+                # None); in that pathological case every PSU's present mask
+                # is all-False so the inner loop continues without subtraction.
+                if _global_psu_mean is None:
+                    continue
+                for g in stratum_psus:
+                    present_g = present[g]
+                    if int(present_g.sum()) < 2:
+                        continue
+                    t_g = t_codes_full[present_g]
+                    lag_mat = np.abs(t_g[:, None] - t_g[None, :])
+                    K_g = ((lag_mat <= L) & (lag_mat != 0)).astype(np.float64) * (
+                        1.0 - lag_mat / (L + 1.0)
+                    )
+                    S_g_centered = S_psu_panel[g, present_g] - _global_psu_mean
+                    with np.errstate(invalid="ignore", over="ignore"):
+                        meat += S_g_centered.T @ K_g @ S_g_centered
+                _variance_computed = True
+                continue
+
+        # Multi-PSU branch (n_h_panel >= 2): standard FPC + per-PSU serial.
+        f_h_panel = 0.0
+        if psu_fpc_panel is not None:
+            N_h = psu_fpc_panel[stratum_psus[0]]
+            if N_h < n_h_panel:
+                raise ValueError(
+                    f"FPC ({N_h}) is less than the number of PSUs "
+                    f"({n_h_panel}) in stratum (Wave E.2 follow-up serial helper). "
+                    "FPC must be >= n_PSU_panel."
+                )
+            f_h_panel = n_h_panel / N_h
+
+        M_h_serial = np.zeros((p_2, p_2))
+        for g in stratum_psus:
+            present_g = present[g]
+            if int(present_g.sum()) < 2:
+                continue
+            t_g = t_codes_full[present_g]
+            # PANEL-WIDE dense time codes for the serial kernel (NOT per-PSU
+            # positional encoding). See test (g) in TestSpilloverDiDWaveE2Followup
+            # for the methodology lock; matches conley.py:940 R-deviation.
+            lag_mat = np.abs(t_g[:, None] - t_g[None, :])
+            K_g = ((lag_mat <= L) & (lag_mat != 0)).astype(np.float64) * (1.0 - lag_mat / (L + 1.0))
+            S_g_centered = S_centered[g, present_g]
+            with np.errstate(invalid="ignore", over="ignore"):
+                M_h_serial += S_g_centered.T @ K_g @ S_g_centered
+
+        fpc_scale = (1.0 - f_h_panel) * n_h_panel / (n_h_panel - 1)
+        meat += fpc_scale * M_h_serial
+        _variance_computed = True
+
+    return meat, _variance_computed, legitimate_zero_count
 
 
 # =============================================================================

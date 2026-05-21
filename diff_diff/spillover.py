@@ -2197,37 +2197,23 @@ class SpilloverDiD:
         # check, cluster-vs-PSU warn) runs AFTER `_validate_spillover_inputs`
         # below so it sees the panel columns the validator guarantees.
         #
-        # Wave E.2 scope-limit (upfront, before resolution / panel work):
-        # the panel-block Conley HAC (`conley_lag_cutoff > 0`) is NOT
-        # composed with the survey path in this PR. The stratified-Conley
-        # helper applies a cross-sectional kernel on PSU-aggregated totals;
-        # composing the within-unit serial Bartlett HAC with the within-
-        # stratum cross-PSU spatial kernel requires carrying PSU-by-time
-        # scores into the meat construction, which is a separate Wave E.x
-        # follow-up tracked in TODO.md. Reject upfront with a clear pointer
-        # so users running `survey_design=` + `conley_lag_cutoff > 0` get
-        # the error before stage-1 / 2 work (per `feedback_no_silent_failures`).
-        if (
-            survey_design is not None
-            and self.vcov_type == "conley"
-            and self.conley_lag_cutoff is not None
-            and self.conley_lag_cutoff > 0
-        ):
-            raise NotImplementedError(
-                "SpilloverDiD(vcov_type='conley', conley_lag_cutoff > 0) "
-                "combined with survey_design= is not supported in Wave E.2. "
-                "The Wave E.2 stratified-Conley sandwich aggregates Psi to "
-                "PSU totals before applying the cross-sectional Conley "
-                "kernel; the panel-block decomposition (within-unit serial "
-                "Bartlett HAC over time) would require carrying PSU-by-time "
-                "scores and composing the serial kernel with the within-"
-                "stratum cross-PSU spatial kernel. This composition is "
-                "queued as a follow-up (see TODO.md). For Wave E.2, use "
-                "conley_lag_cutoff=0 (cross-sectional Conley) with "
-                "survey_design=, or use survey_design= with "
-                "vcov_type='hc1' (+ cluster=<col> for CR1) for the full "
-                "Wave E.1 path."
-            )
+        # Wave E.2 follow-up (shipped): `vcov_type='conley' + conley_lag_cutoff > 0
+        # + survey_design=` is supported via panel-block stratified-Conley
+        # sandwich (spatial Wave E.2 term + within-PSU serial Bartlett HAC)
+        # WHEN there is an effective PSU (explicit `survey_design.psu` OR
+        # injected via `cluster=<col>` per Wave E.1's `_inject_cluster_as_psu`
+        # routing). The orchestrator at
+        # `two_stage.py::_compute_stratified_conley_meat` sums the two terms
+        # with disjoint index sets — matches the no-survey panel-block
+        # decomposition at `conley.py::_compute_conley_meat` (Conley 1999
+        # spatial + Newey-West 1987 serial Bartlett; separable form, NOT
+        # Driscoll-Kraay 2D-HAC). FPC convention: per-period FPC on spatial,
+        # panel-wide stratum-level FPC on serial. The no-effective-PSU
+        # fail-closed gate is downstream at the post-resolution check (see
+        # the `resolved_survey_fit.psu is None` block below the cluster
+        # injection); the gate cannot live up here because at this point
+        # the user-supplied `cluster=<col>` has not yet been injected into
+        # the survey design as the effective PSU.
         # Validate `anticipation` up front: must be a non-negative integer.
         # Accepting fractional or negative values would silently shift
         # treatment timing and ring exposure beyond what the estimator's
@@ -3099,6 +3085,50 @@ class SpilloverDiD:
             _conley_time_arg = None
             _conley_unit_arg = None
             _conley_lag_arg = None
+
+        # Wave E.2 follow-up gate (post-resolution, post-injection):
+        # fail-closed for `vcov_type="conley" + conley_lag_cutoff > 0` when
+        # the EFFECTIVE PSU is still absent after `_inject_cluster_as_psu`.
+        # Under no-effective-PSU survey designs (weights-only / strata-only
+        # WITHOUT a cluster fallback) the orchestrator falls back to
+        # pseudo-PSU = obs-index in `_compute_stratified_conley_meat`, but
+        # each pseudo-PSU appears in exactly one period, so the per-PSU
+        # serial cross-period loop never contributes anything (silent zero
+        # serial term). Routing the serial loop to `conley_unit` (the panel
+        # unit) instead of pseudo-PSU would mix IF allocators (PSU spatial
+        # vs unit serial), which violates the single-IF-allocator design
+        # pinned by the user-confirmed methodology in the Wave E.2 follow-up
+        # plan. Fail-closed per `feedback_no_silent_failures` until a
+        # no-effective-PSU-specific derivation is queued. Note: this fires
+        # AFTER `_inject_cluster_as_psu` (which runs upstream) so the
+        # documented `cluster=<col> + survey_design(without psu)` surface
+        # — which becomes an effective-PSU layout via injection — passes
+        # through unscathed. R2 P1 fix: original front-door gate at
+        # `spillover.py:2210-2242` (now removed) fired before injection
+        # and broke the cluster-as-PSU survey-Conley surface.
+        if (
+            resolved_survey_fit is not None
+            and resolved_survey_fit.psu is None
+            and self.vcov_type == "conley"
+            and self.conley_lag_cutoff is not None
+            and self.conley_lag_cutoff > 0
+        ):
+            raise NotImplementedError(
+                "SpilloverDiD(vcov_type='conley', conley_lag_cutoff > 0) "
+                "combined with a no-effective-PSU survey_design "
+                "(weights-only / strata-only WITHOUT a cluster fallback) "
+                "is not supported in Wave E.2 follow-up. Under no-effective-"
+                "PSU survey designs the panel-block serial Bartlett HAC "
+                "would silently contribute zero (each pseudo-PSU = "
+                "obs-index appears in exactly one period, so the within-PSU "
+                "temporal sum has no cross-period pairs to accumulate). "
+                "Routing the serial loop to `conley_unit` would mix IF "
+                "allocators with the spatial term and is not derived in "
+                "this PR. Supply either an explicit `survey_design.psu`, "
+                "or `cluster=<col>` (which is injected as the effective "
+                "PSU per Wave E.1's `_inject_cluster_as_psu` routing), "
+                "or use `conley_lag_cutoff=0` (cross-sectional Wave E.2)."
+            )
 
         # Derive the Wave D variance mode from the PUBLIC contract:
         #   - vcov_type="conley"          → "conley" (Conley spatial-HAC + GMM)
