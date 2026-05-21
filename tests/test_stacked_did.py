@@ -1538,3 +1538,143 @@ class TestStackedDiDVcovType:
             ), f"event_time h={h} inference must NaN-close, not fall back to normal"
         assert np.isnan(res.overall_t_stat), "overall_t_stat must NaN-close on helper failure"
         assert np.isnan(res.overall_p_value)
+
+    def test_anticipation_plus_hc2_bm_threads_bm_dof(self, staggered_data):
+        """Per local codex R7 P1: the BM-DOF code path uses anticipation in
+        post-period selection (`h >= -self.anticipation` at stacked_did.py:
+        546-548 and 754-758). Verify hc2_bm + anticipation=1 still threads
+        BM DOF into both event-study and overall inference (CI half-width >
+        z_0.975 * SE), the shifted reference period is honored, and the
+        overall ATT contrast includes h=-1 (per anticipation extension)."""
+        from scipy.stats import norm
+
+        z_975 = norm.ppf(0.975)
+
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm", anticipation=1)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = est.fit(
+                staggered_data,
+                outcome="outcome",
+                unit="unit",
+                time="period",
+                first_treat="first_treat",
+                aggregate="event_study",
+            )
+        fallback_warns = [w for w in caught if "Bell-McCaffrey contrast DOF" in str(w.message)]
+        assert (
+            len(fallback_warns) == 0
+        ), f"hc2_bm + anticipation should not warn; got {len(fallback_warns)}"
+        # Reference period under anticipation=1 shifts to e=-2 (=-1-1)
+        # so event_study_effects[-2] should have SE=0 (reference).
+        assert -2 in res.event_study_effects
+        assert res.event_study_effects[-2]["se"] == 0.0, (
+            f"Reference period should shift to -2 under anticipation=1; "
+            f"got SE={res.event_study_effects[-2]['se']}"
+        )
+        # Overall ATT: includes h=-1 per anticipation extension; verify
+        # the overall CI uses t(BM DOF), not normal.
+        if np.isfinite(res.overall_se) and res.overall_se > 0:
+            overall_t_crit = (res.overall_conf_int[1] - res.overall_att) / res.overall_se
+            assert overall_t_crit > z_975 * 1.0001, (
+                f"Overall ATT CI under anticipation=1 must use t(BM DOF); "
+                f"got t_crit={overall_t_crit}"
+            )
+        # At least one event-study CI uses t-distribution
+        any_t = False
+        for h, eff in res.event_study_effects.items():
+            if h == -2 or eff["n_obs"] == 0 or eff["se"] == 0:
+                continue
+            tc = (eff["conf_int"][1] - eff["effect"]) / eff["se"]
+            if tc > z_975 * 1.0001:
+                any_t = True
+                break
+        assert any_t, "hc2_bm + anticipation=1 event-study CIs should use t(BM DOF)"
+
+    def test_population_weighting_plus_hc2_bm_finite_threads_bm_dof(self, staggered_data):
+        """Per local codex R7 P1: weighting='population' uses a different
+        Q-weight formula (`Q_sa = (Pop^D_a / Pop^D) / (N^C_a / N^C)` for
+        controls per StackedDiD registry); verify that hc2_bm still threads
+        BM DOF correctly when composed_weights changes formula."""
+        from scipy.stats import norm
+
+        z_975 = norm.ppf(0.975)
+
+        # Need a population column. Add one (constant for simplicity).
+        data = staggered_data.copy()
+        data["pop"] = 1.0  # Equal populations ⇒ same as aggregate weighting
+
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm", weighting="population")
+        res = est.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            population="pop",
+            aggregate="event_study",
+        )
+        assert np.isfinite(res.overall_att) and np.isfinite(res.overall_se)
+        assert res.overall_se > 0
+        # Verify BM DOF threaded (t-distribution used)
+        if np.isfinite(res.overall_se) and res.overall_se > 0:
+            overall_t_crit = (res.overall_conf_int[1] - res.overall_att) / res.overall_se
+            assert (
+                overall_t_crit > z_975 * 1.0001
+            ), "hc2_bm + weighting='population' overall CI must use t(BM DOF)"
+
+    def test_sample_share_weighting_plus_hc2_bm_finite_threads_bm_dof(self, staggered_data):
+        """Per local codex R7 P1: weighting='sample_share' uses a third
+        Q-weight formula (`Q_sa = ((N^D_a + N^C_a) / (N^D + N^C)) / (N^C_a / N^C)`
+        for controls per StackedDiD registry); verify hc2_bm threads BM DOF."""
+        from scipy.stats import norm
+
+        z_975 = norm.ppf(0.975)
+
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm", weighting="sample_share")
+        res = est.fit(
+            staggered_data,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            aggregate="event_study",
+        )
+        assert np.isfinite(res.overall_att) and np.isfinite(res.overall_se)
+        assert res.overall_se > 0
+        if np.isfinite(res.overall_se) and res.overall_se > 0:
+            overall_t_crit = (res.overall_conf_int[1] - res.overall_att) / res.overall_se
+            assert (
+                overall_t_crit > z_975 * 1.0001
+            ), "hc2_bm + weighting='sample_share' overall CI must use t(BM DOF)"
+
+    def test_hc1_vs_hc2_bm_differ_under_anticipation(self, staggered_data):
+        """Sanity check: hc1 and hc2_bm produce different SEs under
+        anticipation=1 (proves the BM-DOF logic actually fires under
+        non-default params, not just defaults)."""
+        kwargs = dict(
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+            aggregate="event_study",
+        )
+        res_hc1 = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc1", anticipation=1).fit(
+            staggered_data, **kwargs
+        )
+        res_hc2bm = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm", anticipation=1).fit(
+            staggered_data, **kwargs
+        )
+        # ATT identical (vcov-only change); SE differs on event-study
+        np.testing.assert_allclose(res_hc1.overall_att, res_hc2bm.overall_att, atol=1e-13)
+        hc1_es = {
+            h: e["se"] for h, e in res_hc1.event_study_effects.items() if h != -2 and e["se"] > 0
+        }
+        hc2_es = {
+            h: e["se"] for h, e in res_hc2bm.event_study_effects.items() if h != -2 and e["se"] > 0
+        }
+        diffs = [abs(hc1_es[h] - hc2_es[h]) for h in hc1_es if h in hc2_es]
+        assert max(diffs) > 1e-6, (
+            "Under anticipation=1, hc1 vs hc2_bm SEs must differ — "
+            "leverage/DOF adjustment didn't fire"
+        )

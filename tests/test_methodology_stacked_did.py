@@ -110,9 +110,7 @@ def panel():
             f"merged rows={len(merged)}. Regenerate the CSV if the DGP "
             "helper change is intentional."
         )
-        # Check the outcome column only — first_treat is recoded between
-        # CSV (inf for never-treated) and regenerated (0 for never-treated)
-        # in some pandas versions, but the outcome is what drives parity.
+        # Outcome parity (drives the R-side fit).
         np.testing.assert_allclose(
             merged["outcome_regen"].astype(float).values,
             merged["outcome_csv"].astype(float).values,
@@ -123,6 +121,24 @@ def panel():
                 "benchmarks/data/stacked_did_test_panel.csv on the "
                 "matching (unit, period) rows. Regenerate the CSV "
                 "if the change is intentional."
+            ),
+        )
+        # Treatment-timing parity: normalize first_treat (CSV stores inf
+        # for never-treated; regenerated panel uses 0 in some pandas
+        # versions). Per R7 P3: pin the treatment-timing inputs too so
+        # a future drift in cohort assignment is caught independently of
+        # outcome drift.
+        regen_ft = merged["first_treat_regen"].astype(float).replace(0.0, np.inf).values
+        csv_ft = merged["first_treat_csv"].astype(float).values
+        # CSV stores 0 for never-treated in some serializations too; normalize.
+        csv_ft = np.where(csv_ft == 0.0, np.inf, csv_ft)
+        np.testing.assert_array_equal(
+            regen_ft,
+            csv_ft,
+            err_msg=(
+                "DGP drift detected: generate_staggered_data(...) produces "
+                "different treatment timing ('first_treat') than the committed "
+                "CSV. Cohort assignment changed; regenerate CSV if intentional."
             ),
         )
     return data
