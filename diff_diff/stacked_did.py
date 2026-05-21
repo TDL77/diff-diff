@@ -78,6 +78,41 @@ class StackedDiD:
         - "warn": Issue warning and drop linearly dependent columns
         - "error": Raise ValueError
         - "silent": Drop columns silently
+    vcov_type : {"classical","hc1","hc2","hc2_bm"}, default="hc1"
+        Analytical variance family for the stacked WLS regression. StackedDiD
+        is intrinsically clustered (``cluster`` is required, no ``cluster=None``
+        opt-out), so one-way families that don't compose with cluster_ids are
+        rejected at ``__init__``:
+
+        - ``"hc1"`` (default): CR1 Liang-Zeger cluster-robust on the Q-weighted
+          design via ``solve_ols(weights=composed_weights, vcov_type="hc1")``.
+          Bit-equal to the prior bake-Q-into-X output up to float64 multiplication
+          ordering at machine precision (HC1 WLS sandwich is algebraically
+          invariant between the two forms). Matches
+          ``clubSandwich::vcovCR(lm(weights=Q,...), cluster=~unit, type="CR1S")``
+          at atol=1e-10 (target is ``CR1S`` — Stata-style ``G/(G-1) * (n-1)/(n-p)``
+          finite-sample correction — NOT plain ``CR1`` which omits the
+          ``(n-1)/(n-p)`` factor and would diverge by ~1.4%).
+        - ``"hc2_bm"``: CR2 Bell-McCaffrey via
+          ``solve_ols(weights=composed_weights, vcov_type="hc2_bm")``, routed
+          through the clubSandwich WLS-CR2 port (matches
+          ``clubSandwich::vcovCR(lm(weights=Q,...), cluster=~unit, type="CR2")
+          + coef_test()$df_Satt`` at atol=1e-10). See ``REGISTRY.md`` Phase 1a
+          ``hc2_bm + weights`` row for the algebra (W not √W in hat matrix,
+          W² in bias term, unweighted residuals in score).
+        - ``"classical"`` and ``"hc2"`` are REJECTED at ``__init__`` with a
+          cluster-incompatibility ``ValueError``: StackedDiD requires a cluster
+          structure, so one-way families don't compose with the linalg validator.
+          Use ``"hc1"`` or ``"hc2_bm"``.
+        - ``"conley"`` is REJECTED at ``__init__`` (deferred; would require
+          threading the six ``conley_*`` params through ``solve_ols`` — tracked
+          in TODO.md).
+
+        Survey-design precedence: when ``survey_design=`` is supplied to
+        ``fit()`` with ``vcov_type != "hc1"``, a ``NotImplementedError`` is
+        raised — the survey Taylor-series linearization (or replicate-weight
+        refit) variance overrides the analytical sandwich. Use the default
+        ``vcov_type="hc1"`` for survey designs.
 
     Attributes
     ----------
@@ -128,6 +163,7 @@ class StackedDiD:
         alpha: float = 0.05,
         anticipation: int = 0,
         rank_deficient_action: str = "warn",
+        vcov_type: str = "hc1",
     ):
         if weighting not in ("aggregate", "population", "sample_share"):
             raise ValueError(
@@ -146,6 +182,9 @@ class StackedDiD:
                 f"rank_deficient_action must be 'warn', 'error', or 'silent', "
                 f"got '{rank_deficient_action}'"
             )
+        # vcov_type validation (Phase 1b 2/8: thread through StackedDiD).
+        # Factored into _validate_vcov_type so set_params() can re-validate.
+        self._validate_vcov_type(vcov_type)
 
         self.kappa_pre = kappa_pre
         self.kappa_post = kappa_post
@@ -155,9 +194,39 @@ class StackedDiD:
         self.alpha = alpha
         self.anticipation = anticipation
         self.rank_deficient_action = rank_deficient_action
+        self.vcov_type = vcov_type
 
         self.is_fitted_ = False
         self.results_: Optional[StackedDiDResults] = None
+
+    @staticmethod
+    def _validate_vcov_type(vcov_type: str) -> None:
+        """Validate vcov_type. Called from __init__ AND set_params so that
+        sklearn-style mutation (`est.set_params(vcov_type="bad")`) hits the
+        estimator-level guard rather than failing later in the linalg layer
+        with a different message."""
+        if vcov_type == "conley":
+            raise ValueError(
+                "vcov_type='conley' is not yet supported on StackedDiD. "
+                "Threading conley_coords / conley_cutoff_km / conley_metric / "
+                "conley_kernel / conley_time / conley_unit / conley_lag_cutoff "
+                "through solve_ols requires a follow-up PR (tracked in TODO.md "
+                "alongside the SunAbraham conley follow-up). Use vcov_type='hc1' "
+                "(default, CR1) or 'hc2_bm' (CR2 Bell-McCaffrey)."
+            )
+        if vcov_type not in ("classical", "hc1", "hc2", "hc2_bm"):
+            raise ValueError(
+                f"vcov_type must be one of {{'classical', 'hc1', 'hc2', 'hc2_bm'}}, "
+                f"got '{vcov_type}'"
+            )
+        if vcov_type in ("classical", "hc2"):
+            raise ValueError(
+                "StackedDiD clusters intrinsically at 'unit' or 'unit_subexp' "
+                "(no cluster=None opt-out). One-way vcov_type='classical'/'hc2' "
+                "is rejected by the linalg validator when combined with "
+                "cluster_ids. Use vcov_type='hc1' (CR1 Liang-Zeger) or "
+                "'hc2_bm' (CR2 Bell-McCaffrey)."
+            )
 
     def fit(
         self,
@@ -242,9 +311,7 @@ class StackedDiD:
         resolved_survey, survey_weights, survey_weight_type, survey_metadata = (
             _resolve_survey_for_fit(survey_design, data, "analytical")
         )
-        _uses_replicate_sd = (
-            resolved_survey is not None and resolved_survey.uses_replicate_variance
-        )
+        _uses_replicate_sd = resolved_survey is not None and resolved_survey.uses_replicate_variance
 
         # Reject fweight and aweight — Q-weight composition is ratio-valued
         # and breaks both frequency-weight (integer) and analytic-weight
@@ -258,6 +325,24 @@ class StackedDiD:
                 f"StackedDiD does not support weight_type='{survey_design.weight_type}' "
                 "because Q-weight composition changes the weight semantics. "
                 "Use weight_type='pweight' (default) instead."
+            )
+
+        # Survey-design precedence: when survey_design is supplied, the survey
+        # Taylor-series linearization (or replicate-weight refit) variance
+        # overrides the analytical sandwich. The non-hc1 analytical families
+        # are blocked. Reject ordering matters here: the fweight/aweight check
+        # above fires FIRST so users hit the Q-weight semantics error before
+        # the vcov error (two-step educational path, matches SA precedent).
+        # Future refactors must not swap the order without re-validating tests
+        # `test_aweight_plus_hc2_bm_rejected_by_stacked_did_level_guard`.
+        if resolved_survey is not None and self.vcov_type != "hc1":
+            raise NotImplementedError(
+                f"StackedDiD(vcov_type='{self.vcov_type}') is not supported with "
+                "survey_design=. The survey TSL (or replicate-weight refit) "
+                "variance overrides the analytical sandwich family, so the "
+                "small-sample CR2 Bell-McCaffrey correction cannot compose "
+                "with the survey variance machinery. Use vcov_type='hc1' "
+                "(default) for survey designs."
             )
 
         # Collect survey design column names for propagation through sub-experiments
@@ -402,10 +487,7 @@ class StackedDiD:
         else:
             composed_weights = Q_weights
 
-        sqrt_w = np.sqrt(composed_weights)
         Y = stacked_df[outcome].values
-        Y_t = Y * sqrt_w
-        X_t = X * sqrt_w[:, np.newaxis]
 
         # Cluster IDs
         if self.cluster == "unit":
@@ -415,15 +497,126 @@ class StackedDiD:
                 stacked_df[unit].astype(str) + "_" + stacked_df["_sub_exp"].astype(str)
             ).values
 
-        # Run OLS on transformed data (= WLS)
-        coef, residuals, vcov = solve_ols(
-            X_t,
-            Y_t,
+        # WLS with weights=composed_weights. solve_ols internally bakes
+        # sqrt(w) for the coefficient solve and back-transforms to compute
+        # vcov on original-scale data via clubSandwich's WLS-CR2 algebra for
+        # hc2_bm (PR #475). The hc1 path remains bit-equal to the prior
+        # bake-Q-into-X form (WLS-CR1 score is invariant). Note: this path
+        # routes through the Python backend regardless of vcov_type per
+        # `linalg.py:747-751` (Rust skips weighted vcov); the prior bake-Q
+        # path also went through Python in practice on stacked designs.
+        coef, _residuals_unused, vcov = solve_ols(
+            X,
+            Y,
             cluster_ids=cluster_ids,
+            weights=composed_weights,
+            weight_type="pweight",
+            vcov_type=self.vcov_type,
             return_vcov=True,
             rank_deficient_action=self.rank_deficient_action,
         )
         assert vcov is not None
+
+        # Bell-McCaffrey Satterthwaite contrast DOF for hc2_bm. Per the
+        # registry contract for `vcov_type="hc2_bm"`, the user-facing
+        # aggregated inference (event_study_effects[h]['p_value']/['conf_int']
+        # and overall_p_value/overall_conf_int) must use CR2 Bell-McCaffrey
+        # Satterthwaite DOF for each contrast — not the normal distribution
+        # that safe_inference(df=None) would otherwise default to. Mirrors
+        # the SunAbraham aggregated-inference pattern from PR #472
+        # (sun_abraham.py:997-1097) and the MPD avg_att pattern from PR #465.
+        # Computed BEFORE constructing event_study_effects / overall_*
+        # inference so the DOFs can be threaded into the safe_inference calls.
+        _bm_contrast_dof_per_event: Dict[int, float] = {}
+        _bm_contrast_dof_overall: Optional[float] = None
+        if self.vcov_type == "hc2_bm" and not _uses_replicate_sd and not np.all(np.isnan(coef)):
+            from diff_diff.linalg import _compute_cr2_bm_contrast_dof
+
+            # Mirror the MultiPeriodDiD rank-deficient pattern (PR #465,
+            # estimators.py:1860-1913): solve_ols emits NaN for dropped
+            # coefficients under R-style rank handling. Subset X, bread,
+            # and contrast vectors to the identified-column block BEFORE
+            # calling _compute_cr2_bm_contrast_dof; otherwise the singular
+            # full-design bread would raise LinAlgError and downgrade
+            # identified contrasts to normal-theory inference (R2 codex
+            # P1: catch-and-fallback was too aggressive for identified
+            # target contrasts).
+            _identified = ~np.isnan(coef)
+            _kept = np.where(_identified)[0]
+            X_kept = X[:, _kept]
+            bread_kept = X_kept.T @ (X_kept * composed_weights[:, np.newaxis])
+            k_design = X.shape[1]
+            # Per-event-time contrast: unit vector at the delta_h column.
+            # Only build contrasts whose target column is identified; if a
+            # delta_h column itself was dropped, that event-time will get
+            # NaN inference (left to safe_inference's df=None path).
+            # Per CI codex R1 P3: skip per-event contrast DOFs when the
+            # event-study surface is not user-visible (aggregate != "event_study").
+            # The overall ATT contrast still gets computed below.
+            es_keys: List[int] = []
+            es_cols_full: List[np.ndarray] = []
+            if aggregate == "event_study":
+                for h in event_times:
+                    if h in interaction_indices and _identified[interaction_indices[h]]:
+                        c = np.zeros(k_design)
+                        c[interaction_indices[h]] = 1.0
+                        es_keys.append(h)
+                        es_cols_full.append(c)
+            # Overall ATT contrast: average of post-period delta_h columns
+            # (the same 1/K * ones contrast used for overall_se below). Only
+            # construct if ALL post-period delta_h are identified — otherwise
+            # the contrast is undefined.
+            _post_event_times_preview = [
+                h for h in event_times if h >= -self.anticipation and h in interaction_indices
+            ]
+            _post_all_identified = all(
+                _identified[interaction_indices[h]] for h in _post_event_times_preview
+            )
+            overall_col_full: Optional[np.ndarray] = None
+            if len(_post_event_times_preview) > 0 and _post_all_identified:
+                K_prev = len(_post_event_times_preview)
+                overall_col_full = np.zeros(k_design)
+                for h in _post_event_times_preview:
+                    overall_col_full[interaction_indices[h]] = 1.0 / K_prev
+            if es_cols_full or overall_col_full is not None:
+                # Subset all contrasts to the kept columns. Since each contrast
+                # is non-zero only at identified columns (by construction
+                # above), no information is lost in the subset.
+                cols_full = list(es_cols_full)
+                if overall_col_full is not None:
+                    cols_full.append(overall_col_full)
+                contrasts_full = np.column_stack(cols_full)
+                contrasts_kept = contrasts_full[_kept, :]
+                try:
+                    dof_vec = _compute_cr2_bm_contrast_dof(
+                        X_kept,
+                        cluster_ids,
+                        bread_kept,
+                        contrasts_kept,
+                        weights=composed_weights,
+                    )
+                    for idx, h in enumerate(es_keys):
+                        _bm_contrast_dof_per_event[h] = float(dof_vec[idx])
+                    if overall_col_full is not None:
+                        _bm_contrast_dof_overall = float(dof_vec[-1])
+                except (ValueError, np.linalg.LinAlgError) as exc:
+                    # Genuine singularity on the IDENTIFIED design (very rare
+                    # — the rank-deficient handling above already subsets to
+                    # identified columns). Emit a UserWarning; the downstream
+                    # inference path NaN-closes (per the fail-closed contract
+                    # added in this PR) so the user receives undefined
+                    # inference rather than silent normal-theory fallback.
+                    warnings.warn(
+                        f"StackedDiD(vcov_type='hc2_bm') aggregated inference "
+                        f"could not compute Bell-McCaffrey contrast DOF on the "
+                        f"identified-column design ({type(exc).__name__}: "
+                        f"{exc}). Aggregated p-values, t-statistics, and "
+                        "confidence intervals will be returned as NaN to "
+                        "preserve the hc2_bm contract (small-sample inference "
+                        "must use BM Satterthwaite DOF, not normal-theory).",
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
         # ---- Survey VCV override ----
         _n_valid_rep_sd = None
@@ -434,17 +627,27 @@ class StackedDiD:
 
             resolved_stacked = survey_design.resolve(stacked_df)
 
-            # Refit closure: compose Q-weights with replicate survey weights
+            # Refit closure: compose Q-weights with replicate survey weights.
+            # Threads vcov_type=self.vcov_type for grep-consistency though the
+            # closure uses return_vcov=False (only the coef is consumed by
+            # compute_replicate_refit_variance). The vcov_type passed here is
+            # always "hc1" at runtime because the survey + non-hc1 reject in
+            # fit() fires before this branch can be reached for any other
+            # vcov_type.
             def _refit_stacked(w_r):
                 composed_r = Q_weights * w_r
                 w_sum = np.sum(composed_r)
                 if w_sum > 0:
                     composed_r = composed_r * (n_stacked / w_sum)
-                sqrt_w_r = np.sqrt(composed_r)
                 coef_r, _, _ = solve_ols(
-                    X * sqrt_w_r[:, np.newaxis], Y * sqrt_w_r,
+                    X,
+                    Y,
                     cluster_ids=cluster_ids,
-                    rank_deficient_action="silent", return_vcov=False,
+                    weights=composed_r,
+                    weight_type="pweight",
+                    vcov_type=self.vcov_type,
+                    rank_deficient_action="silent",
+                    return_vcov=False,
                 )
                 return coef_r
 
@@ -524,9 +727,26 @@ class StackedDiD:
                         _survey_df = _n_valid_rep_sd - 1 if _n_valid_rep_sd > 1 else 0
                         if survey_metadata is not None:
                             survey_metadata.df_survey = _survey_df if _survey_df > 0 else None
-                t_stat, p_value, conf_int = safe_inference(
-                    effect, se, alpha=self.alpha, df=_survey_df
-                )
+                # Use BM contrast DOF for hc2_bm. Fail-closed: when the
+                # hc2_bm contract is in effect but BM DOF is unavailable (helper
+                # failed OR noise-floor NaN guard fired), emit all-NaN inference
+                # rather than fall back to normal-theory CIs/p-values. Mirrors
+                # the fix in LinearRegression.get_inference() from PR #475 R7
+                # (linalg.py:3689-3706). Without this, safe_inference(df=NaN)
+                # would pass df comparison >= 0 (NaN < 0 is False) and emit
+                # finite t_stat with NaN p/CI — silent wrong inference.
+                _is_hc2bm_path = self.vcov_type == "hc2_bm" and not _uses_replicate_sd
+                _bm_df = _bm_contrast_dof_per_event.get(h)
+                if _is_hc2bm_path and (_bm_df is None or not np.isfinite(_bm_df)):
+                    # BM DOF unavailable on hc2_bm path: NaN-out inference.
+                    t_stat = float("nan")
+                    p_value = float("nan")
+                    conf_int = (float("nan"), float("nan"))
+                else:
+                    _df_eff = _bm_df if _bm_df is not None else _survey_df
+                    t_stat, p_value, conf_int = safe_inference(
+                        effect, se, alpha=self.alpha, df=_df_eff
+                    )
                 n_obs_h = int(np.sum((et_vals == h) & (d_vals == 1)))
                 event_study_effects[h] = {
                     "effect": effect,
@@ -565,10 +785,30 @@ class StackedDiD:
             if _n_valid_rep_sd < resolved_stacked.n_replicates:
                 _survey_df_overall = _n_valid_rep_sd - 1 if _n_valid_rep_sd > 1 else 0
                 if survey_metadata is not None:
-                    survey_metadata.df_survey = _survey_df_overall if _survey_df_overall > 0 else None
-        overall_t, overall_p, overall_ci = safe_inference(
-            overall_att, overall_se, alpha=self.alpha, df=_survey_df_overall
-        )
+                    survey_metadata.df_survey = (
+                        _survey_df_overall if _survey_df_overall > 0 else None
+                    )
+        # Use BM contrast DOF for overall ATT (hc2_bm). Fail-closed: when
+        # the hc2_bm contract is in effect but BM DOF is unavailable, emit
+        # all-NaN inference (per the LinearRegression.get_inference pattern
+        # from PR #475 R7). Without this, normal-theory fallback would
+        # silently produce wrong p-values/CIs on the overall_* surface.
+        _is_hc2bm_path_overall = self.vcov_type == "hc2_bm" and not _uses_replicate_sd
+        if _is_hc2bm_path_overall and (
+            _bm_contrast_dof_overall is None or not np.isfinite(_bm_contrast_dof_overall)
+        ):
+            overall_t = float("nan")
+            overall_p = float("nan")
+            overall_ci = (float("nan"), float("nan"))
+        else:
+            _df_overall_eff = (
+                _bm_contrast_dof_overall
+                if _bm_contrast_dof_overall is not None
+                else _survey_df_overall
+            )
+            overall_t, overall_p, overall_ci = safe_inference(
+                overall_att, overall_se, alpha=self.alpha, df=_df_overall_eff
+            )
 
         # ---- Construct results ----
         self.results_ = StackedDiDResults(
@@ -594,6 +834,9 @@ class StackedDiD:
             clean_control=self.clean_control,
             alpha=self.alpha,
             anticipation=self.anticipation,
+            vcov_type=self.vcov_type,
+            cluster_name=self.cluster,
+            n_clusters=int(np.unique(cluster_ids).size),
             survey_metadata=survey_metadata,
         )
 
@@ -952,10 +1195,21 @@ class StackedDiD:
             "alpha": self.alpha,
             "anticipation": self.anticipation,
             "rank_deficient_action": self.rank_deficient_action,
+            "vcov_type": self.vcov_type,
         }
 
     def set_params(self, **params: Any) -> "StackedDiD":
-        """Set estimator parameters (sklearn-compatible)."""
+        """Set estimator parameters (sklearn-compatible).
+
+        Re-validates `vcov_type` via the shared `_validate_vcov_type`
+        helper so sklearn-style mutation hits the estimator-level guard
+        before fit() (avoids a later, less-informative failure in the
+        linalg layer).
+        """
+        # Validate vcov_type up-front if it's being set, so the same
+        # error surface as __init__ applies.
+        if "vcov_type" in params:
+            self._validate_vcov_type(params["vcov_type"])
         for key, value in params.items():
             if hasattr(self, key):
                 setattr(self, key, value)

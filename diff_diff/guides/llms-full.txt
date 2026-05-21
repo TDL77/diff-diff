@@ -743,6 +743,7 @@ StackedDiD(
     alpha: float = 0.05,
     anticipation: int = 0,
     rank_deficient_action: str = "warn",
+    vcov_type: str = "hc1",                   # {"hc1","hc2_bm"}; classical/hc2 rejected (intrinsically clustered), conley deferred. survey_design=... requires hc1
 )
 ```
 

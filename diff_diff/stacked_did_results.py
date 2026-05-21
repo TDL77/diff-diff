@@ -94,6 +94,17 @@ class StackedDiDResults:
     clean_control: str = "not_yet_treated"
     alpha: float = 0.05
     anticipation: int = 0
+    # Analytical variance family configured at fit time (Phase 1b 2/8). When
+    # survey_design= is supplied the survey TSL/replicate variance overrides
+    # the analytical family; this field still records the configured value.
+    vcov_type: str = "hc1"
+    # Cluster identity ("unit" or "unit_subexp") and realized cluster count
+    # at fit time. Used by summary() to render the correct CR1/CR2-BM label
+    # via `_format_vcov_label(cluster_name=, n_clusters=)`. Per CI codex R2
+    # P2: passing cluster_name=None mislabelled clustered StackedDiD fits
+    # as one-way HC1/HC2-BM. StackedDiD is intrinsically clustered.
+    cluster_name: Optional[str] = None
+    n_clusters: Optional[int] = None
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None)
 
@@ -171,6 +182,24 @@ class StackedDiDResults:
             f"{'Clean control:':<30} {self.clean_control:>10}",
             "",
         ]
+
+        # Variance family label (per CI codex R1 P2): surface the analytical
+        # vcov_type when the survey path didn't override. Per R2 P2: pass
+        # cluster_name + n_clusters so the label renders as "CR1 cluster-
+        # robust at unit, G=N" rather than the one-way "HC1 heteroskedasticity-
+        # robust" — StackedDiD is intrinsically clustered.
+        if self.survey_metadata is None and self.vcov_type:
+            from diff_diff.results import _format_vcov_label
+
+            label = _format_vcov_label(
+                self.vcov_type,
+                cluster_name=self.cluster_name,
+                n_clusters=self.n_clusters,
+                n_obs=self.n_stacked_obs,
+            )
+            if label is not None:
+                lines.append(f"{'Variance:':<30} {label:>50}")
+                lines.append("")
 
         # Add survey design info
         if self.survey_metadata is not None:
