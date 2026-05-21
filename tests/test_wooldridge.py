@@ -1821,6 +1821,79 @@ class TestWooldridgeVcovType:
         with pytest.raises(ValueError, match=r"multiplier bootstrap"):
             est_cl.fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
 
+    def test_hc2_bm_plus_bootstrap_finite_inference(self):
+        """Positive regression: ``vcov_type='hc2_bm'`` + ``n_bootstrap > 0``
+        runs through the new full-dummy branch's bootstrap closure (with
+        ``coef_offset=1`` for the post-period ATT reconstruction) without
+        regressing. Asserts finite ``overall_se`` (overridden by the
+        multiplier bootstrap), stable ``overall_att`` (matches the
+        analytical fit at machine precision since the bootstrap only
+        overrides SE), and finite event-study aggregation."""
+        df = _make_vcov_panel()
+        # Analytical hc2_bm fit for ATT reference.
+        res_analytical = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        # Bootstrap fit on the same data + seed.
+        res_boot = WooldridgeDiD(
+            method="ols", vcov_type="hc2_bm", n_bootstrap=50, seed=0
+        ).fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        # ATT is unchanged by the bootstrap (only SE is overridden)
+        assert res_boot.overall_att == pytest.approx(
+            res_analytical.overall_att, abs=1e-10
+        )
+        # SE finite + sensible (positive, smaller than the panel SD of y)
+        assert np.isfinite(res_boot.overall_se)
+        assert res_boot.overall_se > 0
+        assert res_boot.overall_se < df["y"].std()
+        # Bootstrap overrides analytical inference for overall ATT
+        assert np.isfinite(res_boot.overall_t_stat)
+        assert np.isfinite(res_boot.overall_p_value)
+        # Per-cell SEs still come from the analytical full-dummy CR2-BM path
+        # (bootstrap only overrides overall_*); locks the coef_offset
+        # bootstrap indexing didn't regress the per-cell analytical path.
+        for k, eff in res_boot.group_time_effects.items():
+            assert np.isfinite(eff["se"])
+            assert eff["att"] == pytest.approx(
+                res_analytical.group_time_effects[k]["att"], abs=1e-10
+            )
+        # Event-study aggregate also produces finite inference under bootstrap
+        res_boot.aggregate("event")
+        assert res_boot.event_study_effects is not None
+        for k, eff in res_boot.event_study_effects.items():
+            assert np.isfinite(eff["att"])
+            assert np.isfinite(eff["se"])
+            assert np.isfinite(eff["t_stat"])
+
+    def test_hc2_bm_plus_bootstrap_rank_deficient(self):
+        """hc2_bm + bootstrap on a rank-deficient design (all-eventually-
+        treated panel where late cohorts drop out of solve_ols) — bootstrap
+        loop must still run because cluster_ids_bootstrap defaults to unit
+        (cluster_ids itself is non-None on hc2_bm). Locks that the
+        coef_offset + dropped-cell indexing in the bootstrap closure
+        survives rank deficiency."""
+        rng = np.random.default_rng(42)
+        n_units, n_periods = 20, 8
+        units = np.repeat(np.arange(n_units), n_periods)
+        periods = np.tile(np.arange(1, n_periods + 1), n_units)
+        cohorts = rng.choice([3, 5, 7], size=n_units)
+        cohort_per_obs = cohorts[units]
+        tau = np.where(
+            periods >= cohort_per_obs, 0.5 + 0.2 * (periods - cohort_per_obs), 0.0
+        )
+        y = 1.0 + 0.1 * periods + tau + 0.1 * rng.normal(size=len(units))
+        df = pd.DataFrame(
+            {"unit": units, "time": periods, "cohort": cohort_per_obs, "y": y}
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = WooldridgeDiD(
+                method="ols", vcov_type="hc2_bm", n_bootstrap=50, seed=0
+            ).fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        assert np.isfinite(res.overall_att)
+        assert np.isfinite(res.overall_se)
+        assert res.overall_se > 0
+
     def test_get_params_includes_vcov_type(self):
         est = WooldridgeDiD(vcov_type="hc2_bm")
         params = est.get_params()

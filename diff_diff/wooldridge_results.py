@@ -98,6 +98,12 @@ class WooldridgeDiDResults:
     ``group_time_effects`` to its column index in ``X_red``. Storing reduced
     artifacts avoids the singular full-design bread that
     ``_compute_cr2_bm_contrast_dof`` would otherwise reject."""
+    _df_one_way: Optional[float] = field(default=None, repr=False)
+    """Residual DOF (``n - rank(X)``) for one-way ``vcov_type in
+    {"classical","hc2"}`` paths (full-dummy, no survey). ``aggregate()``
+    uses this to thread R's ``lm()`` t-distribution into per-key
+    inference. ``None`` on hc1 / hc2_bm / surveyed paths (which use BM
+    DOF or ``_df_survey`` instead)."""
 
     # ------------------------------------------------------------------ #
     # Public methods                                                      #
@@ -206,8 +212,11 @@ class WooldridgeDiDResults:
             """Build an effect dict using ``df_for_inference`` for the t-distribution.
 
             When ``self.vcov_type == "hc2_bm"``, ``df_for_inference`` should be
-            the BM contrast DOF (NaN → fail-closed). Otherwise it falls back
-            to ``self._df_survey`` (None → normal-theory).
+            the BM contrast DOF (NaN → fail-closed). For ``classical`` /
+            ``hc2`` (one-way, no survey) the residual DOF ``self._df_one_way``
+            is used so per-key inference matches R ``lm()`` /
+            ``coef_test()`` t-distribution. For hc1 / surveyed paths,
+            ``self._df_survey`` (None → normal-theory) is used.
             """
             if self.vcov_type == "hc2_bm":
                 if df_for_inference is None or not np.isfinite(df_for_inference):
@@ -220,6 +229,14 @@ class WooldridgeDiDResults:
                     }
                 t_stat, p_value, conf_int = safe_inference(
                     att, se, alpha=self.alpha, df=df_for_inference
+                )
+            elif (
+                self.vcov_type in ("classical", "hc2")
+                and self._df_one_way is not None
+                and np.isfinite(self._df_one_way)
+            ):
+                t_stat, p_value, conf_int = safe_inference(
+                    att, se, alpha=self.alpha, df=self._df_one_way
                 )
             else:
                 t_stat, p_value, conf_int = safe_inference(

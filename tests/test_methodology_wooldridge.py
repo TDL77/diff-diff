@@ -185,6 +185,45 @@ class TestWooldridgeParityR:
             assert py_se == pytest.approx(r_ses[i], abs=1e-10)
         assert res.overall_se == pytest.approx(golden["hc2"]["overall_att_se"], abs=1e-10)
 
+    def test_classical_per_cell_inference_uses_residual_df(
+        self, golden: dict, panel: pd.DataFrame
+    ) -> None:
+        """Per-cell ``vcov_type="classical"`` inference uses ``n - rank(X)``
+        residual DOF (matches R ``summary(lm(...))$coefficients`` t-distribution)
+        rather than normal-theory.
+
+        n_obs=240, full-dummy design has intercept (1) + treatment cells (6) +
+        unit dummies (drop_first=True, 39) + time dummies (drop_first=True, 5)
+        = 51 columns, all kept (full rank). Residual df = 240 - 51 = 189.
+        """
+        res = WooldridgeDiD(method="ols", vcov_type="classical").fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        expected_df = float(panel.shape[0] - 51)  # 189
+        for (g, t), eff in res.group_time_effects.items():
+            recovered_df = _recover_dof_from_ci(
+                eff["att"], eff["se"], eff["conf_int"][1], res.alpha
+            )
+            assert recovered_df == pytest.approx(expected_df, abs=1e-6), (
+                f"(g={g}, t={t}): recovered df={recovered_df:.4f} expected={expected_df}"
+            )
+
+    def test_hc2_per_cell_inference_uses_residual_df(
+        self, golden: dict, panel: pd.DataFrame
+    ) -> None:
+        """Per-cell ``vcov_type="hc2"`` inference uses ``n - rank(X)`` residual
+        DOF (matches R ``coef_test(fit, vcov=vcovHC(type="HC2"))`` t-distribution
+        default) rather than normal-theory."""
+        res = WooldridgeDiD(method="ols", vcov_type="hc2").fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        expected_df = float(panel.shape[0] - 51)
+        for (g, t), eff in res.group_time_effects.items():
+            recovered_df = _recover_dof_from_ci(
+                eff["att"], eff["se"], eff["conf_int"][1], res.alpha
+            )
+            assert recovered_df == pytest.approx(expected_df, abs=1e-6)
+
     def test_aggregate_group_bm_dof_matches_wald_test_htz(
         self, golden: dict, panel: pd.DataFrame
     ) -> None:

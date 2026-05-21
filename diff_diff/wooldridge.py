@@ -1003,6 +1003,23 @@ class WooldridgeDiD:
         bm_artifacts: Optional[
             Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[Tuple, int]]
         ] = None
+        # Residual DOF for one-way ``vcov_type in {"classical","hc2"}`` paths
+        # (full-dummy, no survey). Matches R's ``lm()`` / ``coef_test()`` use
+        # of ``n - rank(X)`` for the t-distribution under both classical OLS
+        # SE and ``sandwich::vcovHC(type="HC2")``. ``None`` on hc1 /
+        # hc2_bm / surveyed paths (those use their own DOF threading or
+        # df_inf). Mirrors R's t-distribution convention so per-cell +
+        # aggregate p-values/CIs are not normal-theory under small samples.
+        df_one_way: Optional[float] = None
+        if (
+            self.vcov_type in ("classical", "hc2")
+            and use_full_dummy
+            and resolved is None
+            and vcov is not None
+        ):
+            n_kept = int((~np.isnan(coefs)).sum())
+            df_candidate = X.shape[0] - n_kept
+            df_one_way = float(df_candidate) if df_candidate > 0 else float("nan")
         if (
             self.vcov_type == "hc2_bm"
             and use_full_dummy
@@ -1104,10 +1121,13 @@ class WooldridgeDiD:
             # coefficient space and avoids the singular full-design bread.
             bm_artifacts = (X_red, cluster_ids, bread_red, reduced_coef_idx_map)
 
-        # 8a. Apply per-cell BM DOFs (or fail-closed NaN) to ``gt_effects``
-        # for hc2_bm; otherwise use the shared ``df_inf`` (survey df or None).
-        # Per ``feedback_bm_contrast_dof_fail_closed``: when per-cell DOF
-        # is NaN, the cell's inference fields are NaN.
+        # 8a. Apply DOF threading (or fail-closed NaN) to ``gt_effects``:
+        # hc2_bm uses per-cell BM Satterthwaite DOF; classical/hc2 (one-way,
+        # no survey) use the residual ``df_one_way = n - rank(X)`` so
+        # p-values/CIs match R ``lm()`` / ``coef_test()`` t-distribution
+        # instead of normal-theory; hc1 / surveyed paths use ``df_inf``
+        # (survey df or None). Per ``feedback_bm_contrast_dof_fail_closed``:
+        # NaN BM DOF emits NaN inference fields (never normal-theory).
         for (g, t), eff in gt_effects.items():
             if self.vcov_type == "hc2_bm" and use_full_dummy and resolved is None:
                 cell_dof = per_cell_bm_dof.get((g, t), float("nan"))
@@ -1119,6 +1139,16 @@ class WooldridgeDiD:
                     t_stat = float("nan")
                     p_value = float("nan")
                     conf_int = (float("nan"), float("nan"))
+            elif (
+                self.vcov_type in ("classical", "hc2")
+                and use_full_dummy
+                and resolved is None
+                and df_one_way is not None
+                and np.isfinite(df_one_way)
+            ):
+                t_stat, p_value, conf_int = safe_inference(
+                    eff["att"], eff["se"], alpha=self.alpha, df=df_one_way
+                )
             else:
                 t_stat, p_value, conf_int = safe_inference(
                     eff["att"], eff["se"], alpha=self.alpha, df=df_inf
@@ -1127,11 +1157,11 @@ class WooldridgeDiD:
             eff["p_value"] = p_value
             eff["conf_int"] = conf_int
 
-        # 8b. Simple aggregation (always computed). Use BM contrast DOF for
-        # the overall ATT inference when ``vcov_type='hc2_bm'``; otherwise
-        # fall back to the shared df (survey df or None). Fail-closed: when
-        # BM DOF is NaN, the analytical sandwich inference fields are NaN
-        # too (see ``feedback_bm_contrast_dof_fail_closed``).
+        # 8b. Simple aggregation (always computed). DOF threading mirrors 8a:
+        # hc2_bm uses the overall ATT BM contrast DOF (fail-closed NaN if
+        # unavailable); classical/hc2 (one-way, no survey) use the residual
+        # ``df_one_way``; hc1 / surveyed paths use ``df_inf`` (survey df or
+        # None).
         if self.vcov_type == "hc2_bm" and use_full_dummy and resolved is None:
             if overall_att_bm_dof is not None and np.isfinite(overall_att_bm_dof):
                 overall = _compute_weighted_agg(
@@ -1161,6 +1191,16 @@ class WooldridgeDiD:
                     "p_value": float("nan"),
                     "conf_int": (float("nan"), float("nan")),
                 }
+        elif (
+            self.vcov_type in ("classical", "hc2")
+            and use_full_dummy
+            and resolved is None
+            and df_one_way is not None
+            and np.isfinite(df_one_way)
+        ):
+            overall = _compute_weighted_agg(
+                gt_effects, gt_weights, gt_keys_ordered, gt_vcov, self.alpha, df=df_one_way
+            )
         else:
             overall = _compute_weighted_agg(
                 gt_effects, gt_weights, gt_keys_ordered, gt_vcov, self.alpha, df=df_inf
@@ -1206,6 +1246,7 @@ class WooldridgeDiD:
             _df_survey=df_inf,
             _bm_per_cell_dof=per_cell_bm_dof,
             _bm_artifacts=bm_artifacts,
+            _df_one_way=df_one_way,
         )
 
         # 9. Optional multiplier bootstrap (overrides analytic SE for overall ATT).
