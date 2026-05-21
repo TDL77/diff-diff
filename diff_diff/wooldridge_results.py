@@ -56,6 +56,21 @@ class WooldridgeDiDResults:
     anticipation: int = 0
     survey_metadata: Optional[Any] = field(default=None, repr=False)
 
+    # Variance-family metadata. ``vcov_type`` records the configured analytical
+    # family ("classical", "hc1", "hc2", or "hc2_bm"); when ``survey_design=``
+    # is supplied the survey TSL (or replicate-weight refit) variance overrides
+    # this — the field still records the configured value and
+    # ``survey_metadata`` indicates the survey path was active. On bootstrap
+    # fits (``n_bootstrap > 0``) the SE comes from the multiplier bootstrap,
+    # not the analytical family. ``cluster_name`` / ``n_clusters`` are
+    # populated when the fit was clustered (default unit cluster, or
+    # user-set ``cluster=X``); both are ``None`` on explicit one-way
+    # (``vcov_type in {"classical","hc2"}`` + no user cluster) fits where
+    # the auto-cluster was dropped.
+    vcov_type: str = "hc1"
+    cluster_name: Optional[str] = None
+    n_clusters: Optional[int] = None
+
     # ------------------------------------------------------------------ #
     # Internal — used by aggregate() for delta-method SEs                 #
     # ------------------------------------------------------------------ #
