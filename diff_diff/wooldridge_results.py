@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -81,6 +82,14 @@ class WooldridgeDiDResults:
     """Ordered list of (g,t) keys corresponding to _gt_vcov columns."""
     _df_survey: Optional[int] = field(default=None, repr=False)
     """Survey degrees of freedom for t-distribution inference."""
+    _bm_per_cell_dof: Dict[Tuple[Any, Any], float] = field(default_factory=dict, repr=False)
+    """Per-cell Bell-McCaffrey Satterthwaite DOF (only populated for vcov_type='hc2_bm').
+    Used by group_time_effects[(g, t)] inference fields at fit time."""
+    _bm_artifacts: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[Tuple[Any, Any], int]]] = field(
+        default=None, repr=False
+    )
+    """(X_full, cluster_ids, bread_matrix, gt_coef_index_map) for hc2_bm; enables
+    lazy BM contrast-DOF computation in aggregate()."""
 
     # ------------------------------------------------------------------ #
     # Public methods                                                      #
@@ -94,6 +103,15 @@ class WooldridgeDiDResults:
         type : "simple" | "group" | "calendar" | "event"
 
         Returns self for chaining.
+
+        Notes
+        -----
+        When ``vcov_type == "hc2_bm"``, aggregated inference (t_stat / p_value /
+        conf_int) uses Bell-McCaffrey Satterthwaite contrast-specific DOFs
+        rather than the survey/None default. The BM DOFs are computed lazily
+        from ``_bm_artifacts`` via ``_compute_cr2_bm_contrast_dof`` and
+        fail-closed (NaN inference) when the helper raises or returns NaN —
+        per ``feedback_bm_contrast_dof_fail_closed``.
         """
         valid = ("simple", "group", "calendar", "event")
         if type not in valid:
@@ -110,10 +128,91 @@ class WooldridgeDiDResults:
                 return float("nan")
             return float(np.sqrt(max(w_vec @ vcov @ w_vec, 0.0)))
 
-        def _build_effect(att: float, se: float) -> Dict[str, Any]:
-            t_stat, p_value, conf_int = safe_inference(
-                att, se, alpha=self.alpha, df=self._df_survey
-            )
+        # Compute BM contrast DOFs lazily for hc2_bm. ``cells_by_key`` is an
+        # ordered mapping of aggregation_key -> list of (g, t) cells; the
+        # contrast for each key sums the per-cell one-hot vectors weighted
+        # by ``weights[(g, t)] / w_total``. Returns a dict mapping
+        # aggregation_key -> df (or NaN on fail-closed). For non-hc2_bm,
+        # returns an empty dict (caller falls back to ``self._df_survey``).
+        def _bm_contrast_dofs_for(
+            cells_by_key: Dict[Any, List[Tuple[Any, Any]]],
+        ) -> Dict[Any, float]:
+            if self.vcov_type != "hc2_bm" or self._bm_artifacts is None:
+                return {}
+            X_full, cluster_ids_full, bread_matrix, coef_idx_map = self._bm_artifacts
+            n_total = X_full.shape[1]
+            contrast_cols: List[np.ndarray] = []
+            agg_keys: List[Any] = []
+            for agg_key, cells in cells_by_key.items():
+                if not cells:
+                    continue
+                w_total = sum(weights.get(c, 0) for c in cells)
+                if w_total == 0:
+                    continue
+                col = np.zeros(n_total)
+                contributed = False
+                for c in cells:
+                    if c not in coef_idx_map:
+                        continue
+                    col[coef_idx_map[c]] = weights.get(c, 0) / w_total
+                    contributed = True
+                if not contributed:
+                    continue
+                contrast_cols.append(col)
+                agg_keys.append(agg_key)
+            if not contrast_cols:
+                return {k: float("nan") for k in cells_by_key}
+            from diff_diff.linalg import _compute_cr2_bm_contrast_dof
+
+            contrasts_matrix = np.column_stack(contrast_cols)
+            dof_map: Dict[Any, float] = {}
+            try:
+                dof_vec = _compute_cr2_bm_contrast_dof(
+                    X_full, cluster_ids_full, bread_matrix, contrasts_matrix
+                )
+                for i, k in enumerate(agg_keys):
+                    candidate = float(dof_vec[i])
+                    dof_map[k] = candidate if np.isfinite(candidate) else float("nan")
+            except (ValueError, np.linalg.LinAlgError) as exc:
+                warnings.warn(
+                    f"WooldridgeDiDResults.aggregate({type!r}) could not "
+                    f"compute Bell-McCaffrey contrast DOF "
+                    f"({exc.__class__.__name__}: {exc}). "
+                    "Affected aggregated inference (t_stat / p_value / "
+                    "conf_int) will be NaN to preserve the hc2_bm contract.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                for k in agg_keys:
+                    dof_map[k] = float("nan")
+            # Fill non-computed keys with NaN to fail-closed.
+            for k in cells_by_key:
+                dof_map.setdefault(k, float("nan"))
+            return dof_map
+
+        def _build_effect(att: float, se: float, df_for_inference: Optional[float]) -> Dict[str, Any]:
+            """Build an effect dict using ``df_for_inference`` for the t-distribution.
+
+            When ``self.vcov_type == "hc2_bm"``, ``df_for_inference`` should be
+            the BM contrast DOF (NaN → fail-closed). Otherwise it falls back
+            to ``self._df_survey`` (None → normal-theory).
+            """
+            if self.vcov_type == "hc2_bm":
+                if df_for_inference is None or not np.isfinite(df_for_inference):
+                    return {
+                        "att": att,
+                        "se": se,
+                        "t_stat": float("nan"),
+                        "p_value": float("nan"),
+                        "conf_int": (float("nan"), float("nan")),
+                    }
+                t_stat, p_value, conf_int = safe_inference(
+                    att, se, alpha=self.alpha, df=df_for_inference
+                )
+            else:
+                t_stat, p_value, conf_int = safe_inference(
+                    att, se, alpha=self.alpha, df=self._df_survey
+                )
             return {
                 "att": att,
                 "se": se,
@@ -128,27 +227,36 @@ class WooldridgeDiDResults:
             pass
 
         elif type == "group":
-            result: Dict[Any, Dict] = {}
+            cells_by_g: Dict[Any, List[Tuple[Any, Any]]] = {}
             for g in self.groups:
-                cells = [(g2, t) for (g2, t) in keys_ordered if g2 == g and t >= g]
+                cells_by_g[g] = [
+                    (g2, t) for (g2, t) in keys_ordered if g2 == g and t >= g
+                ]
+            dofs = _bm_contrast_dofs_for(cells_by_g)
+            result: Dict[Any, Dict] = {}
+            for g, cells in cells_by_g.items():
                 if not cells:
                     continue
                 w_total = sum(weights.get(c, 0) for c in cells)
                 if w_total == 0:
                     continue
                 att = sum(weights.get(c, 0) * gt[c]["att"] for c in cells) / w_total
-                # delta-method weights vector over all keys_ordered
                 w_vec = np.array(
                     [weights.get(c, 0) / w_total if c in cells else 0.0 for c in keys_ordered]
                 )
                 se = _agg_se(w_vec)
-                result[g] = _build_effect(att, se)
+                result[g] = _build_effect(att, se, dofs.get(g))
             self.group_effects = result
 
         elif type == "calendar":
-            result = {}
+            cells_by_t: Dict[Any, List[Tuple[Any, Any]]] = {}
             for t in self.time_periods:
-                cells = [(g, t2) for (g, t2) in keys_ordered if t2 == t and t >= g]
+                cells_by_t[t] = [
+                    (g, t2) for (g, t2) in keys_ordered if t2 == t and t >= g
+                ]
+            dofs = _bm_contrast_dofs_for(cells_by_t)
+            result = {}
+            for t, cells in cells_by_t.items():
                 if not cells:
                     continue
                 w_total = sum(weights.get(c, 0) for c in cells)
@@ -159,14 +267,17 @@ class WooldridgeDiDResults:
                     [weights.get(c, 0) / w_total if c in cells else 0.0 for c in keys_ordered]
                 )
                 se = _agg_se(w_vec)
-                result[t] = _build_effect(att, se)
+                result[t] = _build_effect(att, se, dofs.get(t))
             self.calendar_effects = result
 
         elif type == "event":
             all_k = sorted({t - g for (g, t) in keys_ordered})
-            result = {}
+            cells_by_k: Dict[int, List[Tuple[Any, Any]]] = {}
             for k in all_k:
-                cells = [(g, t) for (g, t) in keys_ordered if t - g == k]
+                cells_by_k[k] = [(g, t) for (g, t) in keys_ordered if t - g == k]
+            dofs = _bm_contrast_dofs_for(cells_by_k)
+            result = {}
+            for k, cells in cells_by_k.items():
                 if not cells:
                     continue
                 w_total = sum(weights.get(c, 0) for c in cells)
@@ -177,7 +288,7 @@ class WooldridgeDiDResults:
                     [weights.get(c, 0) / w_total if c in cells else 0.0 for c in keys_ordered]
                 )
                 se = _agg_se(w_vec)
-                result[k] = _build_effect(att, se)
+                result[k] = _build_effect(att, se, dofs.get(k))
             self.event_study_effects = result
 
         return self

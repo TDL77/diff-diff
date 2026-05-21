@@ -104,6 +104,31 @@ class TestWooldridgeParityR:
                 r_ses[i], abs=1e-10
             ), f"(g={g}, t={t}): Py SE={py_se:.10f} R SE={r_ses[i]:.10f}"
 
+    def test_hc2_bm_per_coef_df_satt_matches_coef_test(
+        self, golden: dict, panel: pd.DataFrame
+    ) -> None:
+        """Per-treatment-cell Bell-McCaffrey Satterthwaite DOF matches R
+        ``clubSandwich::coef_test()$df_Satt`` at atol=1e-6.
+
+        Recovered from the Python CI half-width via t-distribution inversion
+        (the dataclass doesn't expose per-cell DOF directly). The underlying
+        BM DOF computation matches R at machine precision (~6e-16 on per-coef
+        SE); brentq inversion adds the only material tolerance.
+        """
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        r_keys = [(d["g"], d["t"]) for d in golden["point_estimates"]["gt_keys"]]
+        r_dfs = golden["hc2_bm"]["per_coef_df_satt"]
+        for i, (g, t) in enumerate(r_keys):
+            eff = res.group_time_effects[(g, t)]
+            py_df = _recover_dof_from_ci(
+                eff["att"], eff["se"], eff["conf_int"][1], res.alpha
+            )
+            assert py_df == pytest.approx(r_dfs[i], abs=1e-6), (
+                f"(g={g}, t={t}): Py df={py_df:.4f} R df={r_dfs[i]:.4f}"
+            )
+
     def test_hc2_bm_overall_att_se_matches_clubsandwich_cr2(
         self, golden: dict, panel: pd.DataFrame
     ) -> None:

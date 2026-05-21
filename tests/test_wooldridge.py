@@ -1871,10 +1871,10 @@ class TestWooldridgeVcovType:
         assert res1.overall_att == pytest.approx(res2.overall_att, abs=1e-14)
 
     def test_bm_dof_nan_fails_closed(self, monkeypatch):
-        """When ``_compute_cr2_bm_contrast_dof`` returns NaN, the overall ATT
-        inference fields (t_stat / p_value / conf_int) MUST be NaN — do NOT
-        fall back to ``safe_inference(df=None)`` which silently uses
-        normal-theory. Per ``feedback_bm_contrast_dof_fail_closed``.
+        """When ``_compute_cr2_bm_contrast_dof`` returns NaN, BOTH per-cell
+        AND overall ATT inference fields (t_stat / p_value / conf_int) MUST
+        be NaN — do NOT fall back to ``safe_inference(df=None)`` which
+        silently uses normal-theory. Per ``feedback_bm_contrast_dof_fail_closed``.
         """
         df = _make_vcov_panel()
         import diff_diff.linalg as linalg_mod
@@ -1886,10 +1886,96 @@ class TestWooldridgeVcovType:
         res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
             df, outcome="y", unit="unit", time="time", cohort="cohort"
         )
-        # att and se preserved (sandwich is finite); inference fields NaN
+        # Overall: att + se preserved (sandwich is finite); inference NaN
         assert np.isfinite(res.overall_att)
         assert np.isfinite(res.overall_se)
         assert np.isnan(res.overall_t_stat)
         assert np.isnan(res.overall_p_value)
         assert np.isnan(res.overall_conf_int[0])
         assert np.isnan(res.overall_conf_int[1])
+        # Per-cell: same pattern (att + se preserved, inference NaN)
+        for (g, t), eff in res.group_time_effects.items():
+            assert np.isfinite(eff["att"]), f"cell ({g},{t}) att should be finite"
+            assert np.isfinite(eff["se"]), f"cell ({g},{t}) se should be finite"
+            assert np.isnan(eff["t_stat"]), f"cell ({g},{t}) t_stat should be NaN"
+            assert np.isnan(eff["p_value"]), f"cell ({g},{t}) p_value should be NaN"
+            assert np.isnan(eff["conf_int"][0]), f"cell ({g},{t}) conf_int[0] should be NaN"
+            assert np.isnan(eff["conf_int"][1]), f"cell ({g},{t}) conf_int[1] should be NaN"
+
+    def test_aggregate_group_under_hc2_bm_uses_bm_contrast_dof(self):
+        """aggregate('group') under hc2_bm produces finite p-values using
+        Bell-McCaffrey contrast DOFs; reverts to NaN under monkeypatch-
+        induced fail-closed."""
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("group")
+        assert res.group_effects is not None
+        for g, eff in res.group_effects.items():
+            assert np.isfinite(eff["att"])
+            assert np.isfinite(eff["se"])
+            assert np.isfinite(eff["t_stat"]), f"group {g} t_stat NaN — BM DOF threading regressed"
+            assert np.isfinite(eff["p_value"])
+            assert np.isfinite(eff["conf_int"][0])
+            assert np.isfinite(eff["conf_int"][1])
+
+    def test_aggregate_event_under_hc2_bm_uses_bm_contrast_dof(self):
+        """aggregate('event') under hc2_bm produces finite p-values using
+        Bell-McCaffrey contrast DOFs."""
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("event")
+        assert res.event_study_effects is not None
+        for k, eff in res.event_study_effects.items():
+            assert np.isfinite(eff["att"])
+            assert np.isfinite(eff["se"])
+            assert np.isfinite(eff["t_stat"]), f"event k={k} t_stat NaN — BM DOF threading regressed"
+            assert np.isfinite(eff["p_value"])
+            assert np.isfinite(eff["conf_int"][0])
+            assert np.isfinite(eff["conf_int"][1])
+
+    def test_aggregate_calendar_under_hc2_bm_uses_bm_contrast_dof(self):
+        """aggregate('calendar') under hc2_bm produces finite p-values using
+        Bell-McCaffrey contrast DOFs."""
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("calendar")
+        assert res.calendar_effects is not None
+        for t, eff in res.calendar_effects.items():
+            assert np.isfinite(eff["att"])
+            assert np.isfinite(eff["se"])
+            assert np.isfinite(eff["t_stat"]), f"calendar t={t} t_stat NaN — BM DOF threading regressed"
+            assert np.isfinite(eff["p_value"])
+            assert np.isfinite(eff["conf_int"][0])
+            assert np.isfinite(eff["conf_int"][1])
+
+    def test_aggregate_under_hc2_bm_fail_closed_on_dof_helper_error(self, monkeypatch):
+        """When _compute_cr2_bm_contrast_dof raises in aggregate(), the
+        affected aggregate inference fields are NaN (fail-closed),
+        att + se preserved."""
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        # Patch the helper AFTER fit so that aggregate() retry fails.
+        import diff_diff.linalg as linalg_mod
+
+        def _raise(X, cluster_ids, bread, contrasts):
+            raise ValueError("induced failure for fail-closed test")
+
+        monkeypatch.setattr(linalg_mod, "_compute_cr2_bm_contrast_dof", _raise)
+        with pytest.warns(UserWarning, match=r"could not compute Bell-McCaffrey"):
+            res.aggregate("group")
+        assert res.group_effects is not None
+        for g, eff in res.group_effects.items():
+            assert np.isfinite(eff["att"])
+            assert np.isfinite(eff["se"])
+            assert np.isnan(eff["t_stat"])
+            assert np.isnan(eff["p_value"])
+            assert np.isnan(eff["conf_int"][0])
+            assert np.isnan(eff["conf_int"][1])

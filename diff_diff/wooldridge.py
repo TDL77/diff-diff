@@ -43,7 +43,7 @@ def _compute_weighted_agg(
     gt_keys: List,
     gt_vcov: Optional[np.ndarray],
     alpha: float,
-    df: Optional[int] = None,
+    df: Optional[float] = None,
 ) -> Dict:
     """Compute simple (overall) weighted average ATT and SE via delta method."""
     post_keys = [(g, t) for (g, t) in gt_keys if t >= g]
@@ -920,8 +920,14 @@ class WooldridgeDiD:
         # ``0..n_int-1``. The shift only affects this loop's indexing into
         # ``coefs`` / ``vcov`` — the (g, t) key space and the order of
         # ``gt_keys`` are identical across branches.
+        #
+        # First pass: collect non-dropped (g, t) cells + att + se. Per-cell
+        # df_Satt is computed in a single batched call below (BM DOF section)
+        # so per-cell inference fields use the Satterthwaite DOF rather than
+        # df_inf=None (normal-theory).
         gt_effects: Dict[Tuple, Dict] = {}
         gt_weights: Dict[Tuple, int] = {}
+        gt_coef_index_map: Dict[Tuple, int] = {}  # (g, t) -> full-coef-space index
         for idx, (g, t) in enumerate(gt_keys):
             coef_idx = idx + coef_offset
             if coef_idx >= len(coefs):
@@ -935,15 +941,15 @@ class WooldridgeDiD:
                 if vcov is not None
                 else float("nan")
             )
-            t_stat, p_value, conf_int = safe_inference(att, se, alpha=self.alpha, df=df_inf)
             gt_effects[(g, t)] = {
                 "att": att,
                 "se": se,
-                "t_stat": t_stat,
-                "p_value": p_value,
-                "conf_int": conf_int,
+                "t_stat": float("nan"),
+                "p_value": float("nan"),
+                "conf_int": (float("nan"), float("nan")),
             }
             gt_weights[(g, t)] = int(((sample[cohort] == g) & (sample[time] == t)).sum())
+            gt_coef_index_map[(g, t)] = coef_idx
 
         # Extract vcov submatrix for identified β_{g,t} only (skip NaN/dropped).
         # Shift by coef_offset so the submatrix lands on treatment cells
@@ -955,15 +961,26 @@ class WooldridgeDiD:
         else:
             gt_vcov = None
 
-        # 8. Bell-McCaffrey contrast DOF threading for the overall ATT under
-        # ``vcov_type="hc2_bm"``. Per ``feedback_bm_contrast_dof_fail_closed``,
-        # when the BM DOF is unavailable (helper raises or returns non-finite)
-        # the user-facing aggregated inference must emit ALL-NaN
-        # (t_stat/p_value/conf_int) rather than fall back to
-        # ``safe_inference(df=None)`` which silently uses normal-theory.
+        # 8. Bell-McCaffrey contrast DOF threading for hc2_bm. Computes (in
+        # one batched call) the per-coefficient ``df_Satt`` for every
+        # present ``(g, t)`` cell AND the post-period-average overall ATT
+        # contrast DOF. Per-cell DOFs are applied to ``gt_effects`` inference
+        # below (8a); the overall DOF is applied to the simple aggregation
+        # (8b). BM artifacts (X, cluster_ids, bread, coef_index_map) are
+        # also stashed on the Results object so that downstream
+        # ``aggregate("group" | "calendar" | "event")`` can compute contrast-
+        # specific DOFs lazily without recomputing the full-dummy fit.
         # Mirrors the SunAbraham PR #472 pattern at
         # ``sun_abraham.py:1008-1097`` and the StackedDiD PR #479 R3 fix.
+        # Per ``feedback_bm_contrast_dof_fail_closed``: when DOF is
+        # unavailable (helper raises or returns non-finite), affected
+        # user-facing inference is NaN rather than falling back to
+        # ``safe_inference(df=None)`` (silent normal-theory).
         overall_att_bm_dof: Optional[float] = None
+        per_cell_bm_dof: Dict[Tuple, float] = {}
+        bm_artifacts: Optional[
+            Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[Tuple, int]]
+        ] = None
         if (
             self.vcov_type == "hc2_bm"
             and use_full_dummy
@@ -975,44 +992,88 @@ class WooldridgeDiD:
             from diff_diff.linalg import _compute_cr2_bm_contrast_dof
 
             n_coefs = X.shape[1]
-            # Build the overall-ATT post-period-average contrast in full-coef
-            # space. Post-period (g, t) cells have ``t >= g``; weights are
-            # ``gt_weights[k] / w_total_post`` where ``w_total_post`` is the
-            # sum of cell weights across post-period (g, t) keys present in
-            # ``gt_effects``. Non-post cells get zero weight; non-treatment
-            # columns (intercept, FE dummies) get zero weight.
+            bread_matrix = X.T @ X
+            # Per-cell one-hot contrasts (one column per present (g, t) cell).
+            per_cell_keys = list(gt_keys_ordered)
+            # Overall ATT post-period-average contrast (matches the default
+            # ``_compute_weighted_agg`` weights ``n_{g,t}``).
             post_keys = [(g, t) for (g, t) in gt_keys_ordered if t >= g]
             w_total_post = sum(gt_weights.get(k, 0) for k in post_keys)
+            overall_contrast = np.zeros(n_coefs)
             if w_total_post > 0:
-                contrast_vec = np.zeros(n_coefs)
-                for i, k in enumerate(gt_keys):
-                    if k in gt_effects and k in post_keys:
-                        contrast_vec[i + coef_offset] = gt_weights[k] / w_total_post
-                if np.any(contrast_vec != 0):
-                    bread_matrix = X.T @ X
-                    try:
-                        dof_vec = _compute_cr2_bm_contrast_dof(
-                            X,
-                            cluster_ids,
-                            bread_matrix,
-                            contrast_vec.reshape(-1, 1),
+                for k in post_keys:
+                    overall_contrast[gt_coef_index_map[k]] = (
+                        gt_weights[k] / w_total_post
+                    )
+            include_overall = w_total_post > 0 and bool(np.any(overall_contrast != 0))
+            cols: List[np.ndarray] = []
+            for k in per_cell_keys:
+                col = np.zeros(n_coefs)
+                col[gt_coef_index_map[k]] = 1.0
+                cols.append(col)
+            if include_overall:
+                cols.append(overall_contrast)
+            if cols:
+                contrasts_matrix = np.column_stack(cols)
+                try:
+                    dof_vec = _compute_cr2_bm_contrast_dof(
+                        X, cluster_ids, bread_matrix, contrasts_matrix
+                    )
+                    for i, k in enumerate(per_cell_keys):
+                        candidate = float(dof_vec[i])
+                        per_cell_bm_dof[k] = (
+                            candidate if np.isfinite(candidate) else float("nan")
                         )
-                        candidate = float(dof_vec[0])
-                        overall_att_bm_dof = candidate if np.isfinite(candidate) else float("nan")
-                    except (ValueError, np.linalg.LinAlgError) as exc:
-                        warnings.warn(
-                            f"WooldridgeDiD(vcov_type='hc2_bm') aggregated "
-                            f"inference could not compute Bell-McCaffrey "
-                            f"contrast DOF ({type(exc).__name__}: {exc}). "
-                            "Overall ATT inference (t_stat / p_value / "
-                            "conf_int) will be NaN to preserve the hc2_bm "
-                            "contract.",
-                            UserWarning,
-                            stacklevel=3,
+                    if include_overall:
+                        candidate = float(dof_vec[-1])
+                        overall_att_bm_dof = (
+                            candidate if np.isfinite(candidate) else float("nan")
                         )
+                except (ValueError, np.linalg.LinAlgError) as exc:
+                    warnings.warn(
+                        f"WooldridgeDiD(vcov_type='hc2_bm') analytical "
+                        f"inference could not compute Bell-McCaffrey "
+                        f"contrast DOF ({type(exc).__name__}: {exc}). "
+                        "Affected per-cell and overall inference (t_stat / "
+                        "p_value / conf_int) will be NaN to preserve the "
+                        "hc2_bm contract.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                    for k in per_cell_keys:
+                        per_cell_bm_dof[k] = float("nan")
+                    if include_overall:
                         overall_att_bm_dof = float("nan")
+            # Stash artifacts for ``aggregate()`` regardless of whether the
+            # batched DOF call succeeded — the dataclass-side helper will
+            # retry contrast-specific DOFs lazily and fail-closed on its
+            # own errors.
+            bm_artifacts = (X, cluster_ids, bread_matrix, dict(gt_coef_index_map))
 
-        # 8a. Simple aggregation (always computed). Use BM contrast DOF for
+        # 8a. Apply per-cell BM DOFs (or fail-closed NaN) to ``gt_effects``
+        # for hc2_bm; otherwise use the shared ``df_inf`` (survey df or None).
+        # Per ``feedback_bm_contrast_dof_fail_closed``: when per-cell DOF
+        # is NaN, the cell's inference fields are NaN.
+        for (g, t), eff in gt_effects.items():
+            if self.vcov_type == "hc2_bm" and use_full_dummy and resolved is None:
+                cell_dof = per_cell_bm_dof.get((g, t), float("nan"))
+                if np.isfinite(cell_dof):
+                    t_stat, p_value, conf_int = safe_inference(
+                        eff["att"], eff["se"], alpha=self.alpha, df=cell_dof
+                    )
+                else:
+                    t_stat = float("nan")
+                    p_value = float("nan")
+                    conf_int = (float("nan"), float("nan"))
+            else:
+                t_stat, p_value, conf_int = safe_inference(
+                    eff["att"], eff["se"], alpha=self.alpha, df=df_inf
+                )
+            eff["t_stat"] = t_stat
+            eff["p_value"] = p_value
+            eff["conf_int"] = conf_int
+
+        # 8b. Simple aggregation (always computed). Use BM contrast DOF for
         # the overall ATT inference when ``vcov_type='hc2_bm'``; otherwise
         # fall back to the shared df (survey df or None). Fail-closed: when
         # BM DOF is NaN, the analytical sandwich inference fields are NaN
@@ -1080,6 +1141,8 @@ class WooldridgeDiD:
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
             _df_survey=df_inf,
+            _bm_per_cell_dof=per_cell_bm_dof,
+            _bm_artifacts=bm_artifacts,
         )
 
         # 9. Optional multiplier bootstrap (overrides analytic SE for overall ATT).
