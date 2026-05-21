@@ -326,6 +326,93 @@ and planned follow-up enhancements:
     survey_design=)`` is queued for a follow-up (the
     ``_APPLICABILITY`` / ``_PT_METHOD`` wiring must register the new
     combination first).
+- **Survey-design integration (Wave E.2 follow-up —
+  ``conley_lag_cutoff > 0`` panel-block composition).** SHIPPED in
+  Wave E.2 follow-up. ``vcov_type="conley" + conley_lag_cutoff > 0 +
+  survey_design=`` is now supported by adding a within-PSU serial
+  Bartlett HAC term to the Wave E.2 spatial sandwich, **provided the
+  survey design has an effective PSU** (either explicit
+  ``survey_design.psu`` or a ``cluster=<col>`` argument that gets
+  injected as the effective PSU per Wave E.1's
+  ``_inject_cluster_as_psu`` routing). No-effective-PSU survey designs
+  (weights-only / strata-only WITHOUT a cluster fallback) raise
+  ``NotImplementedError`` at ``SpilloverDiD.fit`` post-resolution —
+  see the Restrictions list below.
+
+  .. note::
+
+     Wave E.2 follow-up composes Wave E.2's panel-aware stratified-Conley
+     spatial sandwich with within-PSU serial Bartlett HAC over time
+     (Newey-West 1987 form, kernel weights ``1 - |t-s|/(L+1)`` for
+     ``|t-s| <= L, t != s``). The composition is
+     ``meat = meat_spatial + meat_serial`` with disjoint index sets,
+     exactly matching the no-survey panel-block decomposition at
+     ``diff_diff.conley._compute_conley_meat`` (Conley 1999 + Newey-West
+     1987 separable form, NOT Driscoll-Kraay 2D-HAC). For each stratum
+     ``h``: ``meat_serial_h = FPC_h_panel * sum_{g in stratum h}
+     sum_{|t-s| <= L, t != s, both periods present for PSU g}
+     K_serial(|t-s|/(L+1)) * S_centered_t[g] @ S_centered_s[g]'`` where
+     ``S_centered_t[g] = S_psu_t[g] - S_bar_h(g)_t`` is per-period
+     within-stratum centered (Binder TSL form — matches the spatial
+     helper's centering exactly), and ``|t-s|`` uses panel-wide dense
+     time codes (matches ``conley.py:940`` documented R deviation that
+     mirrors R ``conleyreg``). Serial Bartlett kernel is hardcoded
+     regardless of ``conley_kernel`` (mirrors ``conley.py:951-965``;
+     ``conley_kernel`` governs spatial kernel only). FPC for serial uses
+     panel-wide ``n_h_panel = |unique PSUs in stratum h across active
+     sample|``, NOT per-period ``n_h_t`` (the serial sum is a PANEL-level
+     construct; standalone Newey-West composition on stratified clusters,
+     deliberately NOT by analogy to the cross-sectional Wave E.2 spatial
+     FPC convention). No reference software combines panel-block Conley +
+     Binder TSL + Gardner GMM correction on a two-stage influence
+     function.
+
+  Reduction semantics:
+
+  - ``conley_lag_cutoff = 0`` or ``None``: **bit-identical** to shipped
+    Wave E.2 ATT and scalar SE (orchestrator skips the serial helper
+    invocation when ``L = 0`` so meat_serial does not contribute; the
+    test_a2 mock-spy independently asserts the helper isn't invoked).
+  - ``conley_time is None`` or ``T = 1``: serial helper short-circuits to
+    zero meat (no cross-period pairs possible).
+  - Single stratum (H = 1, FPC = inf) with ``L > 0``: serial reduces to
+    Newey-West Bartlett HAC on per-period within-stratum-CENTERED per-PSU
+    score sequences (NOT raw scores — Binder TSL centering is retained at
+    H=1 because the survey path always subtracts the per-period stratum
+    mean before the kernel application; the panel-wide ``G/(G-1)``
+    survey factor replaces FPC).
+  - Bandwidth → 0 with ``L > 0``: spatial reduces to per-period
+    within-stratum HC sandwich; serial term unchanged (separable form).
+  - All PSUs singleton + ``lonely_psu="remove"`` with ``L > 0``: meat
+    NaN-fails on the saturation diagnostic (template "Wave E.2
+    stratified-Conley sandwich" covers both spatial-only and panel-block
+    cases).
+
+  Centering asymmetry vs no-survey reference:
+
+  - The no-survey panel-block path at ``conley.py:949-965`` uses RAW
+    scores for the serial term (no centering) because it assumes
+    ``E[scores] = 0`` under correct specification. The survey-weighted
+    Binder TSL form estimates the within-stratum mean and centers
+    explicitly (textbook stratified-cluster sandwich); raw scores in the
+    survey case would inflate variance by twice the squared per-period
+    stratum mean and would NOT reduce to the cross-sectional Wave E.2
+    form at ``lag = 0``.
+
+  Restrictions:
+
+  - **Requires an effective PSU** — either explicit ``survey_design.psu``
+    OR ``cluster=<col>`` injected as the effective PSU per Wave E.1's
+    ``_inject_cluster_as_psu``. No-effective-PSU survey designs
+    (weights-only / strata-only WITHOUT a cluster fallback) raise
+    ``NotImplementedError`` post-resolution at ``SpilloverDiD.fit``
+    because the pseudo-PSU = obs-index fallback would silently zero
+    the serial sum (each pseudo-PSU appears in exactly one period).
+    Tracked as a follow-up in ``TODO.md``.
+  - Replicate-weight variance (BRR / Fay / JK1 / JKn / SDR) raises
+    ``NotImplementedError`` (inherits Wave E.1 gate).
+  - DiagnosticReport routing for the panel-block case is queued for the
+    same Wave F follow-up as the Wave E.2 cross-sectional case.
 - **Count-of-treated-in-ring** — only the "nearest-treated ring"
   specification is implemented. The "count" form re-introduces
   functional-form dependence (paper Section 3.2 end) and is queued.

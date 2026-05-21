@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from diff_diff import SurveyDesign
 from diff_diff.spillover import (
     SpilloverDiD,
     _apply_callable_metric_pairwise,
@@ -6100,36 +6101,6 @@ class TestSpilloverDiDWaveE2ConleySurveyDesign:
         assert np.isnan(res.t_stat)
         assert np.isnan(res.p_value)
 
-    def test_j0_panel_conley_lag_cutoff_rejected_under_survey(self):
-        """vcov_type='conley' + conley_lag_cutoff > 0 + survey_design raises
-        NotImplementedError upfront. Wave E.2 ships cross-sectional only;
-        the panel-block decomposition (within-unit serial Bartlett HAC over
-        time) would need PSU-by-time scores rather than the collapsed PSU
-        totals. Tracked as a Wave E.2 follow-up in TODO.md.
-        """
-        from diff_diff import SurveyDesign
-
-        df = generate_butts_nonstaggered_dgp(seed=180)
-        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
-        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
-        est = SpilloverDiD(
-            rings=[0.0, 100.0],
-            conley_coords=("lat", "lon"),
-            conley_metric="haversine",
-            conley_cutoff_km=self._CUTOFF_KM,
-            conley_lag_cutoff=2,  # panel-block path
-            vcov_type="conley",
-        )
-        with pytest.raises(NotImplementedError, match="conley_lag_cutoff > 0"):
-            est.fit(
-                df_s,
-                outcome="y",
-                unit="unit",
-                time="time",
-                first_treat="first_treat",
-                survey_design=design,
-            )
-
     def test_j_replicate_weights_rejection_inherits_wave_e1(self):
         """Replicate-weight variance still raises NotImplementedError under
         conley+survey (inherits Wave E.1 gate). SurveyDesign requires
@@ -6468,6 +6439,1081 @@ class TestSpilloverDiDWaveE2ConleySurveyDesign:
         # Survey metadata reflects subset (post-finite_mask), not the full panel.
         assert res.survey_metadata is not None
         assert res.n_obs <= len(df_s)  # at least the always-treated unit's rows dropped
+
+
+class TestSpilloverDiDWaveE2FollowupConleySurveyLagCutoff:
+    """Wave E.2 follow-up: conley + survey + conley_lag_cutoff > 0 via
+    panel-block composition (spatial + serial Bartlett HAC).
+
+    Methodology anchor: Wave E.2's panel-aware stratified-Conley spatial
+    sandwich (Conley 1999 × Binder/Gerber 2026 × Wave D Gardner GMM)
+    composed with within-PSU serial Bartlett HAC (Newey-West 1987 separable
+    form). Verifies:
+      - lag=0 STRICT bit-identity to shipped Wave E.2 ATT and scalar SE
+        (test_a) plus mock-spy that the serial helper isn't invoked (test_a2)
+      - serial centering = Binder TSL form (per-period within-stratum), NOT raw
+      - AR(1) DGP serial-term behavioral inflation
+      - panel-wide per-stratum FPC for the serial term
+      - panel-wide dense time codes for the lag math
+      - singleton-adjust panel-wide mean asymmetry (vs spatial's per-period mean)
+      - saturation NaN-fail still fires
+    """
+
+    _CUTOFF_KM = 1000.0
+
+    def _fit(self, df, lag_cutoff=1, design=None, **kwargs):
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=lag_cutoff,
+            vcov_type="conley",
+            event_study=False,
+            **kwargs,
+        )
+        return est.fit(
+            df,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+
+    def test_a_lag0_strict_bit_identical_to_wave_e2_meat(self):
+        """`conley_lag_cutoff = 0` MUST produce bit-identical ATT AND scalar SE
+        as a fresh Wave E.2 baseline fit (`assert_array_equal`). The
+        orchestrator does NOT truly early-return at lag=0 — the spatial
+        loop, saturation guard, and new PSD/finite guard all still run; the
+        guarantee is that the serial helper is NOT invoked (so meat_serial
+        contributes nothing). test_a2 mock-spy verifies the helper isn't
+        called.
+
+        Methodology lock: skipping the serial helper at the orchestrator
+        level is the backwards-compatibility guarantee that the shipped
+        Wave E.2 surface is unaffected by the follow-up. Without that skip,
+        a numerical zero from the serial helper would still inject
+        floating-point noise into the spatial-only meat (which would
+        surface as SE drift).
+
+        Note: full meat-matrix equality is NOT asserted — only ATT + scalar
+        SE are pinned (the meat matrix is not directly exposed on
+        `SpilloverDiDResults`).
+        """
+        df = generate_butts_nonstaggered_dgp(seed=0)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_lag0 = self._fit(df_s, lag_cutoff=0, design=design)
+        # `lag=0` fit must match a fresh Wave E.2 baseline estimator fit
+        # (which has the same config, same lag, same data) — bit-identical.
+        # This catches any case where the orchestrator fails to short-circuit
+        # and the serial helper injects floating-point noise into the
+        # spatial-only meat. The Wave E.2 baseline is constructed inline
+        # (rather than relying on captured goldens) so this test is robust
+        # to BLAS-runner drift on absolute values; the assertion is on
+        # cross-fit bit-identity at one runner.
+        est_e2_baseline = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=0,
+            vcov_type="conley",
+            event_study=False,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_e2_baseline = est_e2_baseline.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+        np.testing.assert_array_equal(res_lag0.att, res_e2_baseline.att)
+        np.testing.assert_array_equal(res_lag0.se, res_e2_baseline.se)
+
+    def test_a2_lag0_does_not_call_serial_helper(self):
+        """Structural anchor: orchestrator skips the serial helper at `lag_cutoff = 0`
+        BEFORE invoking `_compute_stratified_serial_bartlett_meat`. Mirrors
+        the Wave E.2 test_a2 mock-spy pattern. Without this, a future
+        refactor that always-invokes the serial helper would silently degrade
+        the lag=0 backwards-compat guarantee.
+        """
+        from unittest.mock import patch
+
+        df = generate_butts_nonstaggered_dgp(seed=2)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with patch("diff_diff.two_stage._compute_stratified_serial_bartlett_meat") as mock_serial:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self._fit(df_s, lag_cutoff=0, design=design)
+            assert not mock_serial.called, (
+                "lag=0 conley + survey fit must NOT call the serial helper "
+                "— orchestrator short-circuit broken."
+            )
+
+    def test_b_lag1_invokes_serial_helper(self):
+        """lag=1 MUST invoke the new serial helper exactly once."""
+        from unittest.mock import patch
+
+        df = generate_butts_nonstaggered_dgp(seed=3)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        from diff_diff.two_stage import _compute_stratified_serial_bartlett_meat as _orig
+
+        with patch(
+            "diff_diff.two_stage._compute_stratified_serial_bartlett_meat", wraps=_orig
+        ) as spy:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                self._fit(df_s, lag_cutoff=1, design=design)
+            assert spy.called, "lag=1 fit must invoke the serial helper"
+            assert spy.call_count == 1
+
+    def test_c0_serial_centering_hand_check_raw_vs_centered(self):
+        """Pure unit test: the serial helper applies per-period within-stratum
+        centering (Binder TSL form), NOT raw scores like the no-survey
+        reference at conley.py:949-965. Construct a 2-PSU × 2-period synthetic
+        with materially nonzero per-period stratum mean; assert the centered
+        helper output equals the hand-computed centered form (not the raw form).
+
+        Pins MEDIUM #2 from plan-review: codex will push hard on the asymmetry
+        vs the no-survey panel-block reference; the load-bearing claim is
+        that the centered form is the methodologically-correct choice under
+        Binder TSL and that raw scores would inflate the variance.
+        """
+        from diff_diff.two_stage import _compute_stratified_serial_bartlett_meat
+
+        # 2 PSUs (one stratum, both PSUs in stratum 0), 2 periods, score dim 2.
+        # Per-period stratum mean is NOT zero (the two PSUs' scores have
+        # nonzero average): PSU 0 has [+2, +1] at t=0, [+3, +2] at t=1;
+        # PSU 1 has [-1, 0] at t=0, [-2, +1] at t=1.
+        # Stratum mean at t=0: [(2-1)/2, (1+0)/2] = [0.5, 0.5]
+        # Stratum mean at t=1: [(3-2)/2, (2+1)/2] = [0.5, 1.5]
+        # Centered: PSU 0 at t=0: [1.5, 0.5]; PSU 1 at t=0: [-1.5, -0.5]
+        #           PSU 0 at t=1: [2.5, 0.5]; PSU 1 at t=1: [-2.5, -0.5]
+        # Serial sum per PSU at L=1: K_serial(|0-1|=1) = (1 - 1/2) = 0.5
+        # PSU 0 contribution: 0.5 * (centered_t0[0] @ centered_t1[0].T)
+        #                   = 0.5 * outer([1.5, 0.5], [2.5, 0.5])
+        # PSU 1 contribution: 0.5 * outer([-1.5, -0.5], [-2.5, -0.5])
+        # NOTE: K_serial is symmetric so we get the (t=0, t=1) and (t=1, t=0)
+        #       contributions both as the same scalar K=0.5 times each PSU's
+        #       cross-period outer product (with appropriate transposition).
+        # Total per-PSU meat = sum over (t, s) with t != s of K * S_t @ S_s.T
+        #   = K * (S_0 @ S_1.T + S_1 @ S_0.T)
+        # FPC: n_h_panel = 2, fpc_per_psu = inf -> f_h = 0, scale = 2/(2-1) = 2
+        psu_arr = np.array([0, 0, 1, 1])
+        time_arr = np.array([0, 1, 0, 1])
+        strata_arr = np.array([0, 0, 0, 0])
+        fpc_arr = np.full(4, np.inf)
+        Psi = np.array(
+            [
+                [2.0, 1.0],  # PSU 0, t=0
+                [3.0, 2.0],  # PSU 0, t=1
+                [-1.0, 0.0],  # PSU 1, t=0
+                [-2.0, 1.0],  # PSU 1, t=1
+            ]
+        )
+
+        meat_centered, var_computed, _ = _compute_stratified_serial_bartlett_meat(
+            Psi,
+            psu_arr=psu_arr,
+            time_arr=time_arr,
+            strata_arr_full=strata_arr,
+            fpc_arr_full=fpc_arr,
+            conley_lag_cutoff=1,
+            lonely_psu="remove",
+        )
+        assert var_computed
+
+        # Hand-compute expected (centered form)
+        S_psu_0 = np.array([[2.0, 1.0], [3.0, 2.0]])  # (T, k)
+        S_psu_1 = np.array([[-1.0, 0.0], [-2.0, 1.0]])
+        # Per-period stratum means
+        mean_t0 = (S_psu_0[0] + S_psu_1[0]) / 2  # [0.5, 0.5]
+        mean_t1 = (S_psu_0[1] + S_psu_1[1]) / 2  # [0.5, 1.5]
+        S0_centered = np.array([S_psu_0[0] - mean_t0, S_psu_0[1] - mean_t1])
+        S1_centered = np.array([S_psu_1[0] - mean_t0, S_psu_1[1] - mean_t1])
+        # K_serial at L=1: K[t,s] = (1 - |t-s|/2) for |t-s| in {1}; K[t,t] = 0
+        K_serial = np.array([[0.0, 0.5], [0.5, 0.0]])
+        meat_0 = S0_centered.T @ K_serial @ S0_centered
+        meat_1 = S1_centered.T @ K_serial @ S1_centered
+        # f_h = 0 (FPC=inf), n_h=2, scale = (1-0) * 2/(2-1) = 2
+        meat_expected_centered = 2.0 * (meat_0 + meat_1)
+        np.testing.assert_allclose(meat_centered, meat_expected_centered, rtol=1e-12, atol=1e-14)
+
+        # Verify the RAW form would be DIFFERENT (sanity check that centering matters)
+        meat_0_raw = S_psu_0.T @ K_serial @ S_psu_0
+        meat_1_raw = S_psu_1.T @ K_serial @ S_psu_1
+        meat_expected_raw = 2.0 * (meat_0_raw + meat_1_raw)
+        # Raw and centered should differ MATERIALLY on this fixture
+        assert not np.allclose(
+            meat_expected_centered, meat_expected_raw, rtol=1e-2
+        ), "Test fixture must have nonzero centering effect to anchor the asymmetry"
+
+    def test_c1_hand_computation_methodology_anchor_lag1(self):
+        """Hand-compute the serial Bartlett HAC at L=1 on a 4-PSU x 3-period
+        synthetic and assert implementation parity. Methodology anchor that
+        gets codified from the _scratch/wave_e2_followup_smoke.py.
+        """
+        from diff_diff.two_stage import _compute_stratified_serial_bartlett_meat
+
+        rng = np.random.default_rng(0)
+        G, T, k = 4, 3, 2
+        psu_arr = np.repeat(np.arange(G), T)
+        time_arr = np.tile(np.arange(T), G)
+        strata_arr = np.repeat([0, 0, 1, 1], T)
+        fpc_arr = np.full(G * T, 20.0)
+        Psi = rng.standard_normal((G * T, k))
+
+        meat, var_computed, _ = _compute_stratified_serial_bartlett_meat(
+            Psi,
+            psu_arr=psu_arr,
+            time_arr=time_arr,
+            strata_arr_full=strata_arr,
+            fpc_arr_full=fpc_arr,
+            conley_lag_cutoff=1,
+            lonely_psu="remove",
+        )
+
+        # Hand-compute expected
+        S_psu = np.zeros((G, T, k))
+        for i in range(G * T):
+            S_psu[psu_arr[i], time_arr[i]] += Psi[i]
+        meat_expected = np.zeros((k, k))
+        for h in [0, 1]:
+            stratum_psus = np.where(strata_arr[::T] == h)[0]
+            n_h_panel = len(stratum_psus)
+            # Per-period within-stratum mean
+            S_h = S_psu[stratum_psus]  # (n_h, T, k)
+            S_bar_h = S_h.mean(axis=0)  # (T, k)
+            S_centered = S_h - S_bar_h[None, :, :]
+            # K_serial at L=1
+            K = np.array([[0.0, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.0]])
+            meat_h = np.zeros((k, k))
+            for g_local in range(n_h_panel):
+                S_g = S_centered[g_local]
+                meat_h += S_g.T @ K @ S_g
+            N_h = 20.0
+            fpc_scale = (1.0 - n_h_panel / N_h) * n_h_panel / (n_h_panel - 1)
+            meat_expected += fpc_scale * meat_h
+
+        np.testing.assert_allclose(meat, meat_expected, rtol=1e-12, atol=1e-14)
+        assert var_computed
+
+    def test_c2_hand_computation_methodology_anchor_lag2(self):
+        """L=2 exercises multiple kernel weights: K(1) = 2/3, K(2) = 1/3."""
+        from diff_diff.two_stage import _compute_stratified_serial_bartlett_meat
+
+        rng = np.random.default_rng(1)
+        G, T, k = 4, 4, 2
+        psu_arr = np.repeat(np.arange(G), T)
+        time_arr = np.tile(np.arange(T), G)
+        strata_arr = np.repeat([0, 0, 1, 1], T)
+        fpc_arr = np.full(G * T, 30.0)
+        Psi = rng.standard_normal((G * T, k))
+
+        meat, _, _ = _compute_stratified_serial_bartlett_meat(
+            Psi,
+            psu_arr=psu_arr,
+            time_arr=time_arr,
+            strata_arr_full=strata_arr,
+            fpc_arr_full=fpc_arr,
+            conley_lag_cutoff=2,
+            lonely_psu="remove",
+        )
+
+        # Hand-compute
+        S_psu = np.zeros((G, T, k))
+        for i in range(G * T):
+            S_psu[psu_arr[i], time_arr[i]] += Psi[i]
+        meat_expected = np.zeros((k, k))
+        # K[t,s] at L=2: (1 - |t-s|/3) for |t-s| in {1, 2}
+        K = np.array(
+            [
+                [0.0, 2 / 3, 1 / 3, 0.0],
+                [2 / 3, 0.0, 2 / 3, 1 / 3],
+                [1 / 3, 2 / 3, 0.0, 2 / 3],
+                [0.0, 1 / 3, 2 / 3, 0.0],
+            ]
+        )
+        for h in [0, 1]:
+            stratum_psus = np.where(strata_arr[::T] == h)[0]
+            n_h_panel = len(stratum_psus)
+            S_h = S_psu[stratum_psus]
+            S_bar_h = S_h.mean(axis=0)
+            S_centered = S_h - S_bar_h[None, :, :]
+            meat_h = np.zeros((k, k))
+            for g_local in range(n_h_panel):
+                S_g = S_centered[g_local]
+                meat_h += S_g.T @ K @ S_g
+            N_h = 30.0
+            fpc_scale = (1.0 - n_h_panel / N_h) * n_h_panel / (n_h_panel - 1)
+            meat_expected += fpc_scale * meat_h
+
+        np.testing.assert_allclose(meat, meat_expected, rtol=1e-12, atol=1e-14)
+
+    def test_c3_serial_term_inflates_se_on_ar1_dgp(self):
+        """Behavioral (not invariant): on a panel with within-unit AR(1)
+        residuals (positive autocorrelation), SE at lag=1 should be at least
+        5% larger than SE at lag=0. Without this test, a bug where the
+        serial term computes to near-zero (e.g. centered scores cancel)
+        would pass all reduction/parity tests.
+
+        Pins MEDIUM #7 from plan-review: invariant-only coverage is
+        susceptible to silent zero bugs.
+        """
+        # Generate AR(1) panel via deterministic seed
+        rng = np.random.default_rng(101)
+        n_units, T = 16, 8
+        rho = 0.7
+        unit_ids = np.repeat(np.arange(n_units), T)
+        times = np.tile(np.arange(T), n_units)
+        # AR(1) within-unit residuals
+        residuals = np.zeros(n_units * T)
+        for u in range(n_units):
+            e = rng.standard_normal(T)
+            r = np.zeros(T)
+            r[0] = e[0]
+            for t in range(1, T):
+                r[t] = rho * r[t - 1] + np.sqrt(1 - rho**2) * e[t]
+            residuals[u * T : (u + 1) * T] = r
+
+        # PSU/stratum assignment
+        psu_per_unit = unit_ids // 4  # 4 PSUs, 4 units each
+        strata_per_unit = psu_per_unit // 2  # 2 strata, 2 PSUs each
+        # Spatial coords: UNIT-CONSTANT (SpilloverDiD requires constant coords
+        # within each unit across periods). PSU 0/1 (treated) clustered near
+        # lat 40; PSU 2/3 (never-treated) FAR (~1000+ km away near lat 50)
+        # so they stay in Omega_0 (untreated AND unexposed) at every period.
+        # Without the geographic separation, near-control units within
+        # ring_max would be flagged as S_it=1 and the time-FE identification
+        # would fail at treated periods.
+        psu_lat_centers = np.array([40.0, 40.1, 50.0, 50.1])
+        psu_lon_centers = np.array([-120.0, -120.1, -120.0, -120.1])
+        unit_lat_offset = rng.normal(0, 0.005, size=n_units)
+        unit_lon_offset = rng.normal(0, 0.005, size=n_units)
+        # unit_to_coords map: unit u gets PSU centroid + unit-level offset
+        lat = psu_lat_centers[psu_per_unit] + unit_lat_offset[unit_ids]
+        lon = psu_lon_centers[psu_per_unit] + unit_lon_offset[unit_ids]
+        # PSU 0/1 treated at t=3; PSU 2/3 never treated
+        first_treat = np.where(psu_per_unit < 2, 3, 2**31 - 1)
+        # Outcome: pure noise (treatment effect = 0)
+        y = residuals + np.where((psu_per_unit < 2) & (times >= 3), 0.0, 0.0)
+
+        df = pd.DataFrame(
+            {
+                "unit": unit_ids,
+                "time": times,
+                "first_treat": first_treat,
+                "y": y,
+                "psu": psu_per_unit,
+                "stratum": strata_per_unit,
+                "lat": lat,
+                "lon": lon,
+                "w": 1.0,
+                "N_h": 100.0,
+            }
+        )
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_lag0 = self._fit(df, lag_cutoff=0, design=design)
+            res_lag1 = self._fit(df, lag_cutoff=1, design=design)
+        # AR(1) with rho=0.7 should produce material serial inflation. The 5%
+        # threshold is loose enough to tolerate bootstrap/numerical jitter
+        # but tight enough to catch a near-zero serial term.
+        inflation = (res_lag1.se / res_lag0.se) - 1.0
+        assert inflation > 0.05, (
+            f"AR(1) DGP serial inflation {inflation:.4f} should exceed 5%; "
+            f"lag0_se={res_lag0.se:.6f}, lag1_se={res_lag1.se:.6f}"
+        )
+
+    def test_d_single_stratum_lag1_finite_and_finite_se(self):
+        """Single stratum (H=1) + lag=1 fit produces finite output. (Strict
+        bit-equivalence to no-survey panel-block conley requires careful
+        Hajek-weight + bread alignment; the simpler invariant tested here is
+        that the new path produces well-defined output on a single-stratum
+        survey design.)
+        """
+        df = generate_butts_nonstaggered_dgp(seed=5)
+        df_s = _augment_with_survey(df, n_strata=1, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = self._fit(df_s, lag_cutoff=1, design=design)
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+
+    def test_e_cross_stratum_independence_with_serial(self):
+        """Pure unit test on the serial helper: full meat must equal
+        partition-by-stratum-then-sum-of-each-stratum's-meat. Pins that
+        cross-stratum contributions are exactly zero in the serial term
+        (each stratum's serial sum is independent because it only iterates
+        within-stratum PSUs).
+        """
+        from diff_diff.two_stage import _compute_stratified_serial_bartlett_meat
+
+        rng = np.random.default_rng(7)
+        G, T, k = 6, 3, 2
+        psu_arr = np.repeat(np.arange(G), T)
+        time_arr = np.tile(np.arange(T), G)
+        strata_arr = np.repeat([0, 0, 0, 1, 1, 1], T)
+        fpc_arr = np.full(G * T, 20.0)
+        Psi = rng.standard_normal((G * T, k))
+
+        meat_full, _, _ = _compute_stratified_serial_bartlett_meat(
+            Psi,
+            psu_arr=psu_arr,
+            time_arr=time_arr,
+            strata_arr_full=strata_arr,
+            fpc_arr_full=fpc_arr,
+            conley_lag_cutoff=1,
+            lonely_psu="remove",
+        )
+        # Partition + sum
+        meat_partitioned = np.zeros((k, k))
+        for h in [0, 1]:
+            mask = strata_arr == h
+            psu_arr_h = psu_arr[mask]
+            sub_strata = np.zeros(mask.sum(), dtype=int)
+            meat_h, _, _ = _compute_stratified_serial_bartlett_meat(
+                Psi[mask],
+                psu_arr=psu_arr_h,
+                time_arr=time_arr[mask],
+                strata_arr_full=sub_strata,
+                fpc_arr_full=fpc_arr[mask],
+                conley_lag_cutoff=1,
+                lonely_psu="remove",
+            )
+            meat_partitioned += meat_h
+        np.testing.assert_allclose(meat_full, meat_partitioned, rtol=1e-12, atol=1e-14)
+
+    def test_f_singleton_adjust_lag1_no_divide_by_zero(self):
+        """Pure unit test: singleton stratum + lonely_psu="adjust" + lag=1
+        produces finite output (the panel-wide n_h_panel = 1 FPC must be
+        SKIPPED via the `continue` mirror; otherwise the helper would
+        divide-by-zero). Pins the singleton-adjust panel-wide mean asymmetry.
+        """
+        from diff_diff.two_stage import _compute_stratified_serial_bartlett_meat
+
+        rng = np.random.default_rng(11)
+        # 1 PSU in stratum 0, 2 PSUs in stratum 1; lonely_psu="adjust" exercises
+        # the singleton branch for stratum 0.
+        G, T, k = 3, 3, 2
+        psu_arr = np.repeat([0, 1, 2], T)
+        time_arr = np.tile(np.arange(T), G)
+        strata_arr = np.repeat([0, 1, 1], T)
+        fpc_arr = np.full(G * T, 10.0)
+        Psi = rng.standard_normal((G * T, k))
+
+        meat, var_computed, _ = _compute_stratified_serial_bartlett_meat(
+            Psi,
+            psu_arr=psu_arr,
+            time_arr=time_arr,
+            strata_arr_full=strata_arr,
+            fpc_arr_full=fpc_arr,
+            conley_lag_cutoff=1,
+            lonely_psu="adjust",
+        )
+        assert np.all(np.isfinite(meat)), "singleton-adjust path divided by zero"
+        assert var_computed
+
+    def test_f2_all_singleton_remove_lag1_returns_zero(self):
+        """Pure unit test: all strata singleton + lonely_psu="remove" + lag=1
+        returns zero meat and variance_computed=False. (At the orchestrator
+        level the spatial term would also fail; the orchestrator combines
+        both terms' var_computed flags before NaN-failing.)
+        """
+        from diff_diff.two_stage import _compute_stratified_serial_bartlett_meat
+
+        rng = np.random.default_rng(13)
+        G, T, k = 3, 3, 2
+        psu_arr = np.repeat([0, 1, 2], T)
+        time_arr = np.tile(np.arange(T), G)
+        strata_arr = np.repeat([0, 1, 2], T)  # 1 PSU each — all singleton
+        fpc_arr = np.full(G * T, 10.0)
+        Psi = rng.standard_normal((G * T, k))
+
+        meat, var_computed, _ = _compute_stratified_serial_bartlett_meat(
+            Psi,
+            psu_arr=psu_arr,
+            time_arr=time_arr,
+            strata_arr_full=strata_arr,
+            fpc_arr_full=fpc_arr,
+            conley_lag_cutoff=1,
+            lonely_psu="remove",
+        )
+        np.testing.assert_array_equal(meat, np.zeros((k, k)))
+        assert not var_computed
+
+    def test_g_unbalanced_panel_panel_wide_dense_codes(self):
+        """Unit test: panel-wide dense time codes for lag math (matches
+        `conley.py:940` R deviation). Drop PSU 0 from period t=2 in a
+        4-PSU × 4-period synthetic. PSU 0's observed periods become {0, 1, 3};
+        with L=1, only the (t=0, t=1) pair contributes (pair (t=1, t=3) at
+        panel-wide lag |1-3|=2 > 1; pair (t=0, t=3) at lag 3 > 1). Hand-compute
+        the expected serial contribution from PSU 0.
+
+        Pins MEDIUM #1 from re-review: the lag convention is PANEL-WIDE dense
+        codes (NOT per-PSU positional encoding).
+        """
+        from diff_diff.two_stage import _compute_stratified_serial_bartlett_meat
+
+        rng = np.random.default_rng(17)
+        G, T, k = 4, 4, 2
+        # Build obs list with PSU 0 missing period 2
+        psu_obs_list, time_obs_list, strata_obs_list, fpc_obs_list = [], [], [], []
+        for g in range(G):
+            for t in range(T):
+                if g == 0 and t == 2:
+                    continue  # PSU 0 missing period 2
+                psu_obs_list.append(g)
+                time_obs_list.append(t)
+                strata_obs_list.append(g // 2)
+                fpc_obs_list.append(20.0)
+        psu_arr = np.array(psu_obs_list)
+        time_arr = np.array(time_obs_list)
+        strata_arr = np.array(strata_obs_list)
+        fpc_arr = np.array(fpc_obs_list, dtype=np.float64)
+        Psi = rng.standard_normal((len(psu_arr), k))
+
+        meat, _, _ = _compute_stratified_serial_bartlett_meat(
+            Psi,
+            psu_arr=psu_arr,
+            time_arr=time_arr,
+            strata_arr_full=strata_arr,
+            fpc_arr_full=fpc_arr,
+            conley_lag_cutoff=1,
+            lonely_psu="remove",
+        )
+
+        # Verify PSU 0's serial pairs use panel-wide lag codes {0,1,3} -> lag={1,2,3}
+        # not per-PSU positional {0,1,2} -> lag={1,1,2}.
+        # If the implementation incorrectly used per-PSU positional, PSU 0
+        # would contribute the (t=1, t=3) pair at lag=1 (positional), not lag=2.
+        # We verify by computing expected meat under both conventions and
+        # asserting which the implementation matches.
+
+        # Panel-wide convention (correct): PSU 0 only contributes (t=0, t=1) at lag=1.
+        # Per-PSU positional convention (incorrect): would also contribute
+        # (t=1, t=3) at positional lag=1 (positions 1 and 2 in {0, 1, 3}).
+        # The contributions differ; verify implementation matches panel-wide.
+
+        # Build S_psu per (g, t) with NaN at missing cells, then sum into meat
+        # using panel-wide t codes.
+        S_psu = np.full((G, T, k), np.nan)
+        for i, (g, t) in enumerate(zip(psu_arr, time_arr)):
+            if np.isnan(S_psu[g, t, 0]):
+                S_psu[g, t] = Psi[i]
+            else:
+                S_psu[g, t] += Psi[i]
+        # Per-period within-stratum centering. Initialize to ZEROS (NOT raw
+        # S_psu) so any (g, t) cell with < 2 active PSUs in stratum at period
+        # contributes zero to the serial sum — matches the helper's
+        # codex-R1-P1 fix preventing raw-score leakage into the serial
+        # Bartlett covariance.
+        S_centered = np.zeros_like(S_psu)
+        # Replace NaN with 0 in the base (won't matter — zero-init prevents
+        # NaN propagation from the helper's initial copy of S_psu).
+        for t in range(T):
+            for h in [0, 1]:
+                stratum_psus = [g for g in range(G) if g // 2 == h]
+                active_psus = [g for g in stratum_psus if not np.isnan(S_psu[g, t, 0])]
+                if len(active_psus) < 2:
+                    continue  # singleton-active-period: leave S_centered as zero
+                stratum_mean = np.mean([S_psu[g, t] for g in active_psus], axis=0)
+                for g in active_psus:
+                    S_centered[g, t] = S_psu[g, t] - stratum_mean
+        # Per-PSU serial accumulation
+        meat_expected = np.zeros((k, k))
+        for h in [0, 1]:
+            stratum_psus = [g for g in range(G) if g // 2 == h]
+            n_h_panel = len(stratum_psus)
+            if n_h_panel < 2:
+                continue
+            meat_h = np.zeros((k, k))
+            for g in stratum_psus:
+                present_g = ~np.isnan(S_centered[g, :, 0])
+                t_g = np.arange(T)[present_g].astype(np.float64)
+                if len(t_g) < 2:
+                    continue
+                lag_mat = np.abs(t_g[:, None] - t_g[None, :])
+                K_g = ((lag_mat <= 1) & (lag_mat != 0)).astype(np.float64) * (1.0 - lag_mat / 2.0)
+                S_g = S_centered[g, present_g]
+                meat_h += S_g.T @ K_g @ S_g
+            N_h = 20.0
+            fpc_scale = (1.0 - n_h_panel / N_h) * n_h_panel / (n_h_panel - 1)
+            meat_expected += fpc_scale * meat_h
+
+        np.testing.assert_allclose(meat, meat_expected, rtol=1e-12, atol=1e-14)
+
+    def test_g2_lag_greater_than_T_minus_1_finite(self):
+        """L > T-1 is well-defined (no kernel overflow); fit succeeds with
+        finite output. Pinned per plan: lag=T and lag=T+5 should not crash.
+        """
+        df = generate_butts_nonstaggered_dgp(seed=19)  # T=2 panel
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        T_max = df["time"].nunique()
+        for L in [T_max, T_max + 5]:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                res = self._fit(df_s, lag_cutoff=L, design=design)
+            assert np.isfinite(res.att), f"ATT NaN at L={L}"
+            assert np.isfinite(res.se), f"SE NaN at L={L}"
+
+    def test_h_singleton_active_period_centering_zeros(self):
+        """Pure unit test: when a stratum-period has < 2 active PSUs, the
+        per-period centering must zero out S_centered (not leave raw scores).
+        Pins codex R1 P1 fix — leaving raw scores in singleton-active-period
+        cells would feed uncentered values into the serial Bartlett sum and
+        contaminate the covariance.
+
+        Construct a 4-PSU x 3-period panel where one stratum has both PSUs
+        present at t=0, t=2 but only ONE PSU present at t=1 (simulating
+        finite_mask-style sparsity). With the bug, the singleton-active-period
+        cell at t=1 leaks RAW scores into the serial sum across (t=0, t=1)
+        and (t=1, t=2) pairs; with the fix, those legs contribute zero.
+        """
+        from diff_diff.two_stage import _compute_stratified_serial_bartlett_meat
+
+        rng = np.random.default_rng(37)
+        # 4 PSUs: stratum 0 has PSUs (0, 1), stratum 1 has PSUs (2, 3).
+        # PSU 1 missing at t=1 -> stratum 0 has only PSU 0 active at t=1.
+        # Stratum 1 has both PSUs at all periods.
+        obs = []
+        for g in range(4):
+            for t in range(3):
+                if g == 1 and t == 1:
+                    continue  # PSU 1 absent at t=1 (singleton-active-period for stratum 0)
+                obs.append((g, t, g // 2))
+        psu_arr = np.array([o[0] for o in obs])
+        time_arr = np.array([o[1] for o in obs])
+        strata_arr = np.array([o[2] for o in obs])
+        fpc_arr = np.full(len(obs), 20.0)
+        # Choose Psi values so PSU 0 has materially nonzero score at t=1
+        # (the singleton-active-period cell). Without the fix, this raw
+        # value would leak into the serial cross-product with (PSU 0, t=0)
+        # and (PSU 0, t=2); with the fix, the t=1 leg of PSU 0's serial sum
+        # contributes zero.
+        Psi = rng.standard_normal((len(obs), 2))
+        # Override PSU 0's t=1 score to a known large value
+        for i, (g, t, _) in enumerate(obs):
+            if g == 0 and t == 1:
+                Psi[i] = np.array([10.0, 10.0])
+
+        meat, _, _ = _compute_stratified_serial_bartlett_meat(
+            Psi,
+            psu_arr=psu_arr,
+            time_arr=time_arr,
+            strata_arr_full=strata_arr,
+            fpc_arr_full=fpc_arr,
+            conley_lag_cutoff=1,
+            lonely_psu="remove",
+        )
+        # Hand-compute expected: PSU 0's t=1 leg has S_centered = 0
+        # (singleton-active in stratum 0); so PSU 0's serial sum only
+        # contributes from valid cross-period pairs where both legs have
+        # >= 2 active PSUs in stratum 0.
+        # At t=0, t=2: stratum 0 has both PSUs (0, 1) active. So
+        # S_centered_0_t0 = Psi_0_t0 - (Psi_0_t0 + Psi_1_t0)/2
+        # S_centered_0_t2 = Psi_0_t2 - (Psi_0_t2 + Psi_1_t2)/2
+        # Cross-period pair (t=0, t=2) at lag=2 contributes 0 to L=1 sum.
+        # Cross-period pairs (t=0, t=1) and (t=1, t=2) at lag=1 should
+        # contribute zero from PSU 0's leg (since S_centered at t=1 is zero).
+        # So PSU 0 contributes nothing to the serial sum at L=1.
+        # PSU 1: only present at t=0, t=2; lag=2 > L=1 so no contribution.
+        # Total contribution from stratum 0 = 0.
+        # PSU 2, PSU 3 (stratum 1) contribute normally at L=1.
+        # Compute stratum 1's expected contribution
+        psi_2_t0 = Psi[[i for i, (g, t, _) in enumerate(obs) if g == 2 and t == 0][0]]
+        psi_2_t1 = Psi[[i for i, (g, t, _) in enumerate(obs) if g == 2 and t == 1][0]]
+        psi_2_t2 = Psi[[i for i, (g, t, _) in enumerate(obs) if g == 2 and t == 2][0]]
+        psi_3_t0 = Psi[[i for i, (g, t, _) in enumerate(obs) if g == 3 and t == 0][0]]
+        psi_3_t1 = Psi[[i for i, (g, t, _) in enumerate(obs) if g == 3 and t == 1][0]]
+        psi_3_t2 = Psi[[i for i, (g, t, _) in enumerate(obs) if g == 3 and t == 2][0]]
+        # Stratum 1 mean at each t
+        mean_t0 = (psi_2_t0 + psi_3_t0) / 2
+        mean_t1 = (psi_2_t1 + psi_3_t1) / 2
+        mean_t2 = (psi_2_t2 + psi_3_t2) / 2
+        # Centered PSU 2
+        s2 = np.array([psi_2_t0 - mean_t0, psi_2_t1 - mean_t1, psi_2_t2 - mean_t2])
+        s3 = np.array([psi_3_t0 - mean_t0, psi_3_t1 - mean_t1, psi_3_t2 - mean_t2])
+        K_serial = np.array([[0.0, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.0]])
+        meat_s1 = s2.T @ K_serial @ s2 + s3.T @ K_serial @ s3
+        # FPC scale: panel-wide n_h_panel = 2, N_h = 20, f = 0.1, scale = 0.9 * 2/1 = 1.8
+        meat_expected = 1.8 * meat_s1
+
+        np.testing.assert_allclose(meat, meat_expected, rtol=1e-12, atol=1e-14)
+
+    def test_n_no_psu_survey_lag_positive_raises(self):
+        """No-PSU survey design + conley_lag_cutoff > 0 raises
+        NotImplementedError upfront (codex R1 P0 fix). Pseudo-PSU = obs-index
+        fallback would silently zero the serial sum; the gate prevents the
+        silent zero by failing closed at SpilloverDiD.fit.
+        """
+        df = generate_butts_nonstaggered_dgp(seed=41)
+        # No PSU column; just weights + strata.
+        df_s = df.copy()
+        df_s["w"] = 1.0
+        df_s["stratum"] = 0  # single stratum
+        design = SurveyDesign(weights="w", strata="stratum")  # no psu, no fpc
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=1,  # the problematic combination
+            vcov_type="conley",
+        )
+        with pytest.raises(NotImplementedError, match="no-effective-PSU survey_design"):
+            est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    def test_n3_cluster_injects_psu_under_no_psu_survey_lag_positive(self):
+        """Positive test (R2 P1 fix): `cluster=<col>` injected as PSU under
+        a no-PSU survey design (weights + strata + fpc) must allow lag>0
+        survey-Conley fitting via `_inject_cluster_as_psu`. ATT AND SE must
+        equal the equivalent fit with explicit `survey_design.psu="psu"`
+        — the FPC scaling is the SAME on both paths (Wave E.1 `_inject_cluster_as_psu`
+        carries the FPC through), so SE parity is the load-bearing pin.
+
+        Pins the documented Wave E.1 surface that `cluster=<col>` becomes
+        the effective PSU when survey PSU is absent; the codex-R2 P1 fix
+        moved the no-effective-PSU gate to AFTER injection so this
+        documented surface continues to work for lag>0. R3 P3 fix: original
+        test omitted fpc on the no-PSU design and only asserted ATT
+        equality + finite SE; this version includes fpc on both paths and
+        asserts ATT AND scalar SE tight numerical parity (`assert_allclose`
+        at rtol=1e-12, atol=1e-14) so a future variance regression on the
+        cluster-injected surface fails. The full meat matrix is not
+        asserted (SE is a projection of meat that could in principle
+        coincide while off-diagonals differ); scalar-SE parity is the
+        load-bearing user-visible pin.
+        """
+        df = generate_butts_nonstaggered_dgp(seed=53)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Reference fit: explicit survey_design.psu="psu"
+        design_explicit = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_explicit = self._fit(df_s, lag_cutoff=1, design=design_explicit)
+        # Cluster-injected fit: SurveyDesign(weights, strata, fpc) + cluster="psu"
+        # (fpc included so SE comparison is apples-to-apples)
+        design_no_psu = SurveyDesign(weights="w", strata="stratum", fpc="N_h")
+        est_cluster = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=1,
+            vcov_type="conley",
+            cluster="psu",  # injected as effective PSU
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_cluster = est_cluster.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design_no_psu,
+            )
+        # ATT bit-identical (variance-method-invariant) AND SE bit-identical
+        # (cluster injection carries fpc through; both paths see identical
+        # effective PSU labels + FPC scaling for the panel-block sandwich).
+        np.testing.assert_allclose(res_cluster.att, res_explicit.att, rtol=1e-12, atol=1e-14)
+        np.testing.assert_allclose(res_cluster.se, res_explicit.se, rtol=1e-12, atol=1e-14)
+        assert np.isfinite(res_cluster.se) and res_cluster.se > 0
+
+    def test_n2_weights_only_survey_lag_positive_raises(self):
+        """Weights-only SurveyDesign + conley_lag_cutoff > 0 also raises
+        (covers the weights-only no-PSU sub-case)."""
+        df = generate_butts_nonstaggered_dgp(seed=43)
+        df_s = df.copy()
+        df_s["w"] = 1.0
+        design = SurveyDesign(weights="w")  # weights only, no psu/strata/fpc
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=2,
+            vcov_type="conley",
+        )
+        with pytest.raises(NotImplementedError, match="no-effective-PSU survey_design"):
+            est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    def test_j_no_survey_panel_block_unchanged_with_lag(self):
+        """The no-survey Wave D panel-block conley path at `conley.py:920-965`
+        must still work after the orchestrator gate-relaxation. The dispatch
+        in `_compute_gmm_corrected_meat` only ROUTES the survey branch
+        through the new orchestrator; the `resolved_survey is None` branch is
+        bit-identical to Wave D pre-PR.
+        """
+        df = generate_butts_nonstaggered_dgp(seed=23)
+        # No survey design; just conley + lag=1 (already supported pre-PR via Wave A/D)
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=1000.0,
+            conley_lag_cutoff=1,
+            vcov_type="conley",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(df, outcome="y", unit="unit", time="time", first_treat="first_treat")
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se) and res.se > 0
+
+    def test_k_replicate_weights_rejection_inherits_wave_e1(self):
+        """Replicate-weight + conley + lag>0 + survey raises NotImplementedError.
+        Replicate-weight SurveyDesigns are by construction no-PSU (replicate
+        weights can't combine with strata/psu/fpc), so the codex-R1-P0
+        no-PSU lag-gate at SpilloverDiD.fit fires before the Wave E.1
+        replicate-weight gate — either error is informative. We assert the
+        broader rejection contract: ANY of the gates fires.
+        """
+        df = generate_butts_nonstaggered_dgp(seed=29)
+        df_s = df.copy()
+        df_s["w"] = 1.0
+        # Build replicate-weight columns (unit-constant)
+        units_sorted = sorted(df_s["unit"].unique())
+        rep_cols = []
+        rng = np.random.default_rng(0)
+        for r in range(5):
+            col = f"rep_{r}"
+            w_by_unit = {u: rng.uniform(0.5, 1.5) for u in units_sorted}
+            df_s[col] = df_s["unit"].map(w_by_unit)
+            rep_cols.append(col)
+        design = SurveyDesign(weights="w", replicate_weights=rep_cols, replicate_method="JK1")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=1000.0,
+            conley_lag_cutoff=1,
+            vcov_type="conley",
+        )
+        with pytest.raises(NotImplementedError, match="(?:replicate|no-effective-PSU)"):
+            est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    def test_m_fit_idempotency_lag1(self):
+        """Repeated fit with lag=1 produces bit-identical results (per
+        `feedback_fit_does_not_mutate_config`).
+        """
+        df = generate_butts_nonstaggered_dgp(seed=31)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=1000.0,
+            conley_lag_cutoff=1,
+            vcov_type="conley",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res1 = est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+            # Re-fit on a fresh estimator instance with same params
+            est2 = SpilloverDiD(**est.get_params())
+            res2 = est2.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+        np.testing.assert_array_equal(res1.att, res2.att)
+        np.testing.assert_array_equal(res1.se, res2.se)
+
+    def test_r_drift_goldens_lag1(self):
+        """ATT is variance-method-invariant: lag=1 ATT MUST match lag=0 ATT
+        bit-identically on the same data + estimator config (only vcov_type
+        / lag changes the meat, never the point estimate). SE MUST differ
+        (serial Bartlett term contributes nonzero variance under panel data
+        with within-PSU temporal correlation). Catches any case where the
+        serial helper accidentally feeds back into the point estimate path.
+        """
+        df = generate_butts_nonstaggered_dgp(seed=0)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_lag0 = self._fit(df_s, lag_cutoff=0, design=design)
+            res_lag1 = self._fit(df_s, lag_cutoff=1, design=design)
+        # Both finite + positive
+        assert np.isfinite(res_lag0.att) and np.isfinite(res_lag0.se) and res_lag0.se > 0
+        assert np.isfinite(res_lag1.att) and np.isfinite(res_lag1.se) and res_lag1.se > 0
+        # ATT bit-identical between lag=0 and lag=1 (variance-method-invariant)
+        np.testing.assert_array_equal(
+            res_lag1.att,
+            res_lag0.att,
+            err_msg="ATT must be variance-method-invariant; lag=1 ATT must match lag=0 ATT exactly",
+        )
+        # SE differs (serial Bartlett term contributes nonzero variance)
+        assert not np.allclose(res_lag1.se, res_lag0.se, rtol=1e-10), (
+            f"lag=1 SE ({res_lag1.se}) must differ from lag=0 SE ({res_lag0.se}); "
+            "serial Bartlett term should add nonzero variance contribution. "
+            "Note: on a 2-period Butts DGP only L=1 pairs exist (only adjacent "
+            "periods), so the inflation may be small but should be detectable."
+        )
+
+
+class TestSpilloverDiDWaveE2FollowupConleySurveyLagCutoffEventStudy:
+    """Wave E.2 follow-up event-study mirror: conley + survey + lag>0 on both
+    `is_staggered` branches (per `feedback_cohort_loop_trigger_cache_both_branches`).
+    """
+
+    _CUTOFF_KM = 1000.0
+
+    def test_o_event_study_conley_lag1_survey_is_staggered_true(self):
+        """Full plumbing end-to-end on the staggered event-study path with
+        `conley_lag_cutoff=1` survey."""
+        df = generate_butts_staggered_dgp(seed=24)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=1,  # NEW: panel-block composition
+            vcov_type="conley",
+            event_study=True,
+            horizon_max=2,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+        assert np.isfinite(res.att) and np.isfinite(res.se) and res.se > 0
+        assert res.spillover_effects is not None
+        assert res.survey_metadata is not None
+        # df_survey on this fixture matches Wave E.2 event-study test_o
+        assert res.survey_metadata.df_survey == 6
+
+    def test_p_event_study_conley_lag1_survey_is_staggered_false(self):
+        """The non-staggered branch of the event-study path also works with
+        lag>0 (per `feedback_cohort_loop_trigger_cache_both_branches`)."""
+        df = generate_butts_nonstaggered_dgp(seed=25)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(
+            rings=[0.0, 100.0],
+            conley_coords=("lat", "lon"),
+            conley_metric="haversine",
+            conley_cutoff_km=self._CUTOFF_KM,
+            conley_lag_cutoff=1,  # NEW: panel-block composition
+            vcov_type="conley",
+            event_study=True,
+            horizon_max=1,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = est.fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+        assert np.isfinite(res.att) and np.isfinite(res.se) and res.se > 0
+        assert res.survey_metadata is not None
+
+    def test_r_event_study_drift_goldens_lag1_vs_lag0(self):
+        """Event-study + survey + lag=1: ATT bit-identical to lag=0 (variance-
+        method-invariant); SE differs (serial Bartlett contributes).
+        """
+        df = generate_butts_staggered_dgp(seed=24)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res_lag0 = SpilloverDiD(
+                rings=[0.0, 100.0],
+                conley_coords=("lat", "lon"),
+                conley_metric="haversine",
+                conley_cutoff_km=self._CUTOFF_KM,
+                conley_lag_cutoff=0,
+                vcov_type="conley",
+                event_study=True,
+                horizon_max=2,
+            ).fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+            res_lag1 = SpilloverDiD(
+                rings=[0.0, 100.0],
+                conley_coords=("lat", "lon"),
+                conley_metric="haversine",
+                conley_cutoff_km=self._CUTOFF_KM,
+                conley_lag_cutoff=1,
+                vcov_type="conley",
+                event_study=True,
+                horizon_max=2,
+            ).fit(
+                df_s,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+        # ATT bit-identical (point estimate variance-method-invariant)
+        np.testing.assert_array_equal(res_lag1.att, res_lag0.att)
+        # SE differs (serial term contributes nonzero variance under panel
+        # data with multiple periods of within-PSU score correlation)
+        assert not np.allclose(res_lag1.se, res_lag0.se, rtol=1e-10)
 
 
 class TestSpilloverDiDWaveE2ConleySurveyDesignEventStudy:

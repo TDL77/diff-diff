@@ -202,6 +202,10 @@ Multi-Period and Staggered Adoption
 
 - **Goodman-Bacon, A. (2021).** "Difference-in-Differences with Variation in Treatment Timing." *Journal of Econometrics*, 225(2), 254-277. https://doi.org/10.1016/j.jeconom.2021.03.014
 
+- **Newey, W. K., & West, K. D. (1987).** "A Simple, Positive Semi-Definite, Heteroskedasticity and Autocorrelation Consistent Covariance Matrix." *Econometrica*, 55(3), 703-708. https://doi.org/10.2307/1913610
+
+  Primary source for the Bartlett serial-HAC kernel weights `1 - |t-s|/(L+1)` used in time-series and panel HAC variance estimators. Our ``diff_diff/conley.py`` panel-block path at L949-965 hardcodes this kernel for the within-unit serial component (mirrors R ``conleyreg::time_dist``); SpilloverDiD's Wave E.2 follow-up composes the same kernel weights with Binder/Gerber TSL + Wave D Gardner GMM correction for the panel-block survey case (``_compute_stratified_serial_bartlett_meat`` at ``diff_diff/two_stage.py``; see REGISTRY section "Variance (Wave E.2 follow-up)").
+
 - **Wing, C., Freedman, S. M., & Hollingsworth, A. (2024).** "Stacked Difference-in-Differences." *NBER Working Paper* 32054. https://www.nber.org/papers/w32054
 
 - **Chen, X., Sant'Anna, P. H. C., & Xie, H. (2025).** "Efficient Difference-in-Differences and Event Study Estimators." *Working Paper*.
