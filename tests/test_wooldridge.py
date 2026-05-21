@@ -1,5 +1,7 @@
 """Tests for WooldridgeDiD estimator and WooldridgeDiDResults."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -1965,6 +1967,88 @@ class TestWooldridgeVcovType:
             assert np.isfinite(eff["p_value"])
             assert np.isfinite(eff["conf_int"][0])
             assert np.isfinite(eff["conf_int"][1])
+
+    def test_hc2_bm_handles_rank_deficient_all_eventually_treated(self):
+        """All-eventually-treated panel with not_yet_treated control: late
+        cohorts have no valid post-treatment comparison and get dropped by
+        solve_ols's rank-deficiency handling. hc2_bm must compute BM DOF
+        on the REDUCED design (kept-column subspace) — operating on the
+        unreduced full-dummy bread would LinAlgError and fail-close every
+        inference field to NaN (codex R3 P1). Per-cell + aggregate
+        inference on identified cells must remain finite."""
+        rng = np.random.default_rng(42)
+        n_units, n_periods = 20, 8
+        units = np.repeat(np.arange(n_units), n_periods)
+        periods = np.tile(np.arange(1, n_periods + 1), n_units)
+        cohorts = rng.choice([3, 5, 7], size=n_units)
+        cohort_per_obs = cohorts[units]
+        tau = np.where(
+            periods >= cohort_per_obs, 0.5 + 0.2 * (periods - cohort_per_obs), 0.0
+        )
+        y = 1.0 + 0.1 * periods + tau + 0.1 * rng.normal(size=len(units))
+        df = pd.DataFrame(
+            {"unit": units, "time": periods, "cohort": cohort_per_obs, "y": y}
+        )
+        # Expect a rank-deficient warning from solve_ols (late-cohort drop).
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+                df, outcome="y", unit="unit", time="time", cohort="cohort"
+            )
+        # Per-cell inference: all identified cells finite (att + se + p +
+        # CI). solve_ols already excluded the dropped cells from
+        # group_time_effects, so every key here is identified.
+        assert len(res.group_time_effects) > 0
+        for k, eff in res.group_time_effects.items():
+            assert np.isfinite(eff["att"]), f"({k}) att NaN"
+            assert np.isfinite(eff["se"]), f"({k}) se NaN"
+            assert np.isfinite(eff["t_stat"]), f"({k}) t_stat NaN — BM DOF not threaded on reduced design"
+            assert np.isfinite(eff["p_value"]), f"({k}) p_value NaN"
+            assert np.isfinite(eff["conf_int"][0])
+            assert np.isfinite(eff["conf_int"][1])
+        # Overall ATT inference: finite end-to-end.
+        assert np.isfinite(res.overall_t_stat)
+        assert np.isfinite(res.overall_p_value)
+        # Aggregate("event"): finite p-values across event-time bins
+        res.aggregate("event")
+        assert res.event_study_effects is not None
+        for k, eff in res.event_study_effects.items():
+            assert np.isfinite(eff["t_stat"]), f"event k={k} t_stat NaN — aggregate BM DOF on reduced design regressed"
+            assert np.isfinite(eff["p_value"])
+
+    def test_hc2_bm_handles_rank_deficient_with_unit_invariant_exovar(self):
+        """Unit-invariant exovar covariate is collinear with unit FE under
+        full-dummy: solve_ols drops it as rank-deficient. hc2_bm must
+        compute BM DOF on the reduced design (P1 codex R3 regression)."""
+        df = _make_vcov_panel(n_units=30, n_periods=6, seed=20260521)
+        # Unit-invariant covariate: x = f(unit) only → collinear with unit FE
+        df["x_unit"] = df["unit"].astype(float)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+                df,
+                outcome="y",
+                unit="unit",
+                time="time",
+                cohort="cohort",
+                exovar=["x_unit"],
+            )
+        # Per-cell + overall inference finite on identified cells
+        assert len(res.group_time_effects) > 0
+        for k, eff in res.group_time_effects.items():
+            assert np.isfinite(eff["att"]), f"({k}) att NaN"
+            assert np.isfinite(eff["se"]), f"({k}) se NaN"
+            assert np.isfinite(eff["t_stat"]), f"({k}) t_stat NaN under rank-deficient exovar — BM DOF not threaded"
+            assert np.isfinite(eff["p_value"])
+        assert np.isfinite(res.overall_t_stat)
+        assert np.isfinite(res.overall_p_value)
+        # Group + event aggregates should also produce finite inference
+        for agg_type in ("group", "event"):
+            res.aggregate(agg_type)
+        for g, eff in (res.group_effects or {}).items():
+            assert np.isfinite(eff["t_stat"]), f"group g={g} t_stat NaN under rank-deficient exovar"
+        for k, eff in (res.event_study_effects or {}).items():
+            assert np.isfinite(eff["t_stat"]), f"event k={k} t_stat NaN under rank-deficient exovar"
 
     def test_aggregate_under_hc2_bm_fail_closed_on_dof_helper_error(self, monkeypatch):
         """When _compute_cr2_bm_contrast_dof raises in aggregate(), the

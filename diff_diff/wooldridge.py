@@ -994,25 +994,54 @@ class WooldridgeDiD:
         ):
             from diff_diff.linalg import _compute_cr2_bm_contrast_dof
 
-            n_coefs = X.shape[1]
-            bread_matrix = X.T @ X
-            # Per-cell one-hot contrasts (one column per present (g, t) cell).
-            per_cell_keys = list(gt_keys_ordered)
-            # Overall ATT post-period-average contrast (matches the default
-            # ``_compute_weighted_agg`` weights ``n_{g,t}``).
+            # Honor rank deficiency: solve_ols sets coefs[i] = NaN for dropped
+            # columns. The full-design bread (X.T @ X) is singular on the
+            # dropped columns, so _compute_cr2_bm_contrast_dof would
+            # LinAlgError on it. Reduce X / bread / contrasts to the kept-
+            # column subspace before computing BM DOF (matches the existing
+            # MPD pattern at estimators.py:1860-1913 and SA's full-dummy
+            # behavior). Identified (g, t) cells survive; cells whose
+            # treatment-cell coefficient was dropped get per_cell_bm_dof=NaN
+            # and the gt_effects loop fail-closes their inference.
+            nan_mask = np.isnan(coefs)
+            kept_indices = np.where(~nan_mask)[0]
+            kept_set = set(int(i) for i in kept_indices.tolist())
+            X_red = X[:, kept_indices]
+            bread_red = X_red.T @ X_red
+            # Map full-coef index → reduced-coef index for kept columns only.
+            full_to_reduced: Dict[int, int] = {
+                int(full_idx): red_pos for red_pos, full_idx in enumerate(kept_indices)
+            }
+            # Reduced coef-index map for (g, t) cells whose coefficient was
+            # kept; cells with dropped coefficients are absent here and will
+            # be fail-closed at gt_effects inference + aggregate() time.
+            reduced_coef_idx_map: Dict[Tuple, int] = {
+                k: full_to_reduced[v]
+                for k, v in gt_coef_index_map.items()
+                if int(v) in kept_set
+            }
+            n_red = X_red.shape[1]
+            # Per-cell one-hot contrasts (kept cells only). Dropped cells get
+            # NaN per_cell_bm_dof (caller fail-closes inference fields).
+            per_cell_keys_kept = [k for k in gt_keys_ordered if k in reduced_coef_idx_map]
+            per_cell_keys_dropped = [
+                k for k in gt_keys_ordered if k not in reduced_coef_idx_map
+            ]
+            # Overall ATT contrast across post-period kept cells.
             post_keys = [(g, t) for (g, t) in gt_keys_ordered if t >= g]
-            w_total_post = sum(gt_weights.get(k, 0) for k in post_keys)
-            overall_contrast = np.zeros(n_coefs)
+            post_keys_kept = [k for k in post_keys if k in reduced_coef_idx_map]
+            w_total_post = sum(gt_weights.get(k, 0) for k in post_keys_kept)
+            overall_contrast = np.zeros(n_red)
             if w_total_post > 0:
-                for k in post_keys:
-                    overall_contrast[gt_coef_index_map[k]] = (
+                for k in post_keys_kept:
+                    overall_contrast[reduced_coef_idx_map[k]] = (
                         gt_weights[k] / w_total_post
                     )
             include_overall = w_total_post > 0 and bool(np.any(overall_contrast != 0))
             cols: List[np.ndarray] = []
-            for k in per_cell_keys:
-                col = np.zeros(n_coefs)
-                col[gt_coef_index_map[k]] = 1.0
+            for k in per_cell_keys_kept:
+                col = np.zeros(n_red)
+                col[reduced_coef_idx_map[k]] = 1.0
                 cols.append(col)
             if include_overall:
                 cols.append(overall_contrast)
@@ -1020,9 +1049,9 @@ class WooldridgeDiD:
                 contrasts_matrix = np.column_stack(cols)
                 try:
                     dof_vec = _compute_cr2_bm_contrast_dof(
-                        X, cluster_ids, bread_matrix, contrasts_matrix
+                        X_red, cluster_ids, bread_red, contrasts_matrix
                     )
-                    for i, k in enumerate(per_cell_keys):
+                    for i, k in enumerate(per_cell_keys_kept):
                         candidate = float(dof_vec[i])
                         per_cell_bm_dof[k] = (
                             candidate if np.isfinite(candidate) else float("nan")
@@ -1043,15 +1072,18 @@ class WooldridgeDiD:
                         UserWarning,
                         stacklevel=3,
                     )
-                    for k in per_cell_keys:
+                    for k in per_cell_keys_kept:
                         per_cell_bm_dof[k] = float("nan")
                     if include_overall:
                         overall_att_bm_dof = float("nan")
-            # Stash artifacts for ``aggregate()`` regardless of whether the
-            # batched DOF call succeeded — the dataclass-side helper will
-            # retry contrast-specific DOFs lazily and fail-closed on its
-            # own errors.
-            bm_artifacts = (X, cluster_ids, bread_matrix, dict(gt_coef_index_map))
+            # Cells whose coefficient was dropped get NaN regardless of
+            # whether the batched call succeeded.
+            for k in per_cell_keys_dropped:
+                per_cell_bm_dof[k] = float("nan")
+            # Stash REDUCED artifacts for ``aggregate()`` so the lazy
+            # contrast DOF computation operates in the same reduced
+            # coefficient space and avoids the singular full-design bread.
+            bm_artifacts = (X_red, cluster_ids, bread_red, reduced_coef_idx_map)
 
         # 8a. Apply per-cell BM DOFs (or fail-closed NaN) to ``gt_effects``
         # for hc2_bm; otherwise use the shared ``df_inf`` (survey df or None).
