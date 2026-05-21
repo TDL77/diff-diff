@@ -262,13 +262,14 @@ Footnote 15 cross-references Callaway and Sant'Anna (2018), later published 2021
 
 ### Tuning Parameters
 
-| Parameter | Type | Default | Selection Method |
-|-----------|------|---------|-----------------|
-| Treatment direction | enum (joiners / leavers / both) | both | Driven by panel content; staggered-adoption designs auto-restrict to joiners. |
-| `L_max` (dynamic companion) | int / None | None | None gives Phase 1 per-period `DID_M`; `>= 1` activates `DID_l` event-study path (NBER WP 29873). |
-| `n_bootstrap` | int | 0 (analytical) | `>= 199` recommended for percentile / wild bootstrap CIs. |
-| Cluster level | column name | group | Paper applies bootstrap at the panel-unit level (county, worker). |
-| Placebo lag (`L_pre`) | int | 1 | Each additional lag drops observations - see Application 2 obs sequence. |
+| Parameter (paper concept) | Library API | Type | Default | Selection method |
+|---|---|---|---|---|
+| Treatment direction (joiners / leavers / both) | Not user-settable; inferred from the fitted sample. Joiners-only and leavers-only views are exposed as `results.joiners_*` / `results.leavers_*` alongside the aggregate `DID_M`. | n/a | n/a | Staggered-adoption designs auto-restrict to joiners. |
+| Max horizon (dynamic companion: `L`) | `L_max` on `fit()` | `Optional[int]` | `None` | `None` selects Phase 1 per-period `DID_M`; `>= 1` activates the Phase 2 dynamic `DID_l` event-study path (NBER WP 29873, revised July 2023). |
+| Bootstrap iteration count | `n_bootstrap` on `__init__` | `int` | `0` (analytical) | `>= 199` recommended for percentile bootstrap CIs; analytical SE remains the library default. |
+| Cluster level | `cluster` on `__init__` | `Optional[Any]` | `None` (only supported value) | Clustering is fixed at the group level (or PSU level under `survey_design`). User-specified cluster columns raise `NotImplementedError`; the paper's `DID_M` table SEs in Applications 1-2 are county- and worker-level cluster-robust respectively, which the library mirrors by clustering at the group level. |
+| Placebo gate | `placebo` on `__init__` | `bool` | `True` | Boolean gate, not an integer lag count. Library computes the single-lag `DID_M^pl` on Phase 1; longer backward placebos require the Phase 2 `DID^{pl}_l` path (`L_max >= 1`). Set `placebo=False` to skip computation for speed. |
+| Bootstrap weight distribution | `bootstrap_weights` on `__init__` | str | `"rademacher"` | `"rademacher"`, `"mammen"`, or `"webb"`. Ignored when `n_bootstrap = 0`. |
 
 ### Relation to Existing diff-diff Estimators
 - Already implemented as `diff_diff.ChaisemartinDHaultfoeuille` (8,783 LoC).
