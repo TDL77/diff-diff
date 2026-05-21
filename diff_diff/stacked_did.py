@@ -519,58 +519,83 @@ class StackedDiD:
         # inference so the DOFs can be threaded into the safe_inference calls.
         _bm_contrast_dof_per_event: Dict[int, float] = {}
         _bm_contrast_dof_overall: Optional[float] = None
-        if self.vcov_type == "hc2_bm" and not _uses_replicate_sd:
+        if self.vcov_type == "hc2_bm" and not _uses_replicate_sd and not np.all(np.isnan(coef)):
             from diff_diff.linalg import _compute_cr2_bm_contrast_dof
 
-            bread_matrix = X.T @ (X * composed_weights[:, np.newaxis])
+            # Mirror the MultiPeriodDiD rank-deficient pattern (PR #465,
+            # estimators.py:1860-1913): solve_ols emits NaN for dropped
+            # coefficients under R-style rank handling. Subset X, bread,
+            # and contrast vectors to the identified-column block BEFORE
+            # calling _compute_cr2_bm_contrast_dof; otherwise the singular
+            # full-design bread would raise LinAlgError and downgrade
+            # identified contrasts to normal-theory inference (R2 codex
+            # P1: catch-and-fallback was too aggressive for identified
+            # target contrasts).
+            _identified = ~np.isnan(coef)
+            _kept = np.where(_identified)[0]
+            X_kept = X[:, _kept]
+            bread_kept = X_kept.T @ (X_kept * composed_weights[:, np.newaxis])
             k_design = X.shape[1]
             # Per-event-time contrast: unit vector at the delta_h column.
+            # Only build contrasts whose target column is identified; if a
+            # delta_h column itself was dropped, that event-time will get
+            # NaN inference (left to safe_inference's df=None path).
             es_keys: List[int] = []
-            es_cols: List[np.ndarray] = []
+            es_cols_full: List[np.ndarray] = []
             for h in event_times:
-                if h in interaction_indices:
+                if h in interaction_indices and _identified[interaction_indices[h]]:
                     c = np.zeros(k_design)
                     c[interaction_indices[h]] = 1.0
                     es_keys.append(h)
-                    es_cols.append(c)
+                    es_cols_full.append(c)
             # Overall ATT contrast: average of post-period delta_h columns
-            # (the same 1/K * ones contrast used for overall_se below).
+            # (the same 1/K * ones contrast used for overall_se below). Only
+            # construct if ALL post-period delta_h are identified — otherwise
+            # the contrast is undefined.
             _post_event_times_preview = [
                 h for h in event_times if h >= -self.anticipation and h in interaction_indices
             ]
-            overall_col: Optional[np.ndarray] = None
-            if len(_post_event_times_preview) > 0:
+            _post_all_identified = all(
+                _identified[interaction_indices[h]] for h in _post_event_times_preview
+            )
+            overall_col_full: Optional[np.ndarray] = None
+            if len(_post_event_times_preview) > 0 and _post_all_identified:
                 K_prev = len(_post_event_times_preview)
-                overall_col = np.zeros(k_design)
+                overall_col_full = np.zeros(k_design)
                 for h in _post_event_times_preview:
-                    overall_col[interaction_indices[h]] = 1.0 / K_prev
-            if es_cols or overall_col is not None:
-                cols = list(es_cols)
-                if overall_col is not None:
-                    cols.append(overall_col)
-                contrasts_matrix = np.column_stack(cols)
+                    overall_col_full[interaction_indices[h]] = 1.0 / K_prev
+            if es_cols_full or overall_col_full is not None:
+                # Subset all contrasts to the kept columns. Since each contrast
+                # is non-zero only at identified columns (by construction
+                # above), no information is lost in the subset.
+                cols_full = list(es_cols_full)
+                if overall_col_full is not None:
+                    cols_full.append(overall_col_full)
+                contrasts_full = np.column_stack(cols_full)
+                contrasts_kept = contrasts_full[_kept, :]
                 try:
                     dof_vec = _compute_cr2_bm_contrast_dof(
-                        X,
+                        X_kept,
                         cluster_ids,
-                        bread_matrix,
-                        contrasts_matrix,
+                        bread_kept,
+                        contrasts_kept,
                         weights=composed_weights,
                     )
                     for idx, h in enumerate(es_keys):
                         _bm_contrast_dof_per_event[h] = float(dof_vec[idx])
-                    if overall_col is not None:
+                    if overall_col_full is not None:
                         _bm_contrast_dof_overall = float(dof_vec[-1])
                 except (ValueError, np.linalg.LinAlgError) as exc:
-                    # Rank-deficient or other linalg issue: fall back to
-                    # normal-theory inference (downgraded). Emit a UserWarning
-                    # so the deviation is visible.
+                    # Genuine singularity on the IDENTIFIED design (very rare
+                    # — the rank-deficient handling above already subsets to
+                    # identified columns). Emit a UserWarning and fall back
+                    # to normal-theory inference for visibility.
                     warnings.warn(
                         f"StackedDiD(vcov_type='hc2_bm') aggregated inference "
-                        f"could not compute Bell-McCaffrey contrast DOF "
-                        f"({type(exc).__name__}: {exc}). Falling back to "
-                        "normal distribution; aggregated p-values/CIs may be "
-                        "anti-conservative under small-sample.",
+                        f"could not compute Bell-McCaffrey contrast DOF on the "
+                        f"identified-column design ({type(exc).__name__}: "
+                        f"{exc}). Falling back to normal distribution; "
+                        "aggregated p-values/CIs may be anti-conservative.",
                         UserWarning,
                         stacklevel=2,
                     )
