@@ -441,20 +441,39 @@ class WooldridgeDiD:
         }
 
     def set_params(self, **params: Any) -> "WooldridgeDiD":
-        """Set estimator parameters (sklearn-compatible). Returns self."""
-        for key, value in params.items():
+        """Set estimator parameters (sklearn-compatible). Returns self.
+
+        Atomic: if validation rejects the incoming combination (unknown
+        parameter, invalid value, or the ``method`` × ``vcov_type``
+        interaction guard fires), ``self`` is unchanged so a caller that
+        catches ``ValueError`` / ``NotImplementedError`` can keep using
+        the estimator with its previous configuration. Mirrors the
+        ``DifferenceInDifferences.set_params`` pattern at
+        ``estimators.py:995-1023``.
+        """
+        # First pass: validate all incoming keys are known attributes so
+        # we don't partially apply a batch that ends in "Unknown parameter".
+        for key in params:
             if not hasattr(self, key):
                 raise ValueError(f"Unknown parameter: {key!r}")
+
+        # Compute pending values by overlaying ``params`` on the current
+        # configuration; validate on those locals (catches invalid sets +
+        # the method × vcov_type interaction) BEFORE mutating ``self``.
+        pending = {
+            "method": params.get("method", self.method),
+            "control_group": params.get("control_group", self.control_group),
+            "anticipation": params.get("anticipation", self.anticipation),
+            "bootstrap_weights": params.get(
+                "bootstrap_weights", self.bootstrap_weights
+            ),
+            "vcov_type": params.get("vcov_type", self.vcov_type),
+        }
+        self._validate_constructor_args(**pending)
+
+        # All validation passed — apply mutations atomically.
+        for key, value in params.items():
             setattr(self, key, value)
-        # Re-run validation (catches mutations into invalid sets AND the
-        # method × vcov_type interaction) using the shared validator.
-        self._validate_constructor_args(
-            method=self.method,
-            control_group=self.control_group,
-            anticipation=self.anticipation,
-            bootstrap_weights=self.bootstrap_weights,
-            vcov_type=self.vcov_type,
-        )
         # Recompute the explicit-vcov flag after any vcov_type mutation.
         self._vcov_type_explicit = self.vcov_type != "hc1"
         return self
@@ -1170,8 +1189,17 @@ class WooldridgeDiD:
             anticipation=self.anticipation,
             survey_metadata=survey_metadata,
             vcov_type=self.vcov_type,
-            cluster_name=cluster_col,
-            n_clusters=(int(np.unique(cluster_ids).size) if cluster_ids is not None else None),
+            # Cluster metadata: ``None`` under survey TSL because the
+            # analytical sandwich (and its cluster_ids) was overridden by
+            # the survey variance; ``survey_metadata`` carries the
+            # design-side stratification/PSU instead. Under non-survey, the
+            # analytical cluster (default unit, dropped for explicit one-way).
+            cluster_name=(None if resolved is not None else cluster_col),
+            n_clusters=(
+                None
+                if resolved is not None
+                else (int(np.unique(cluster_ids).size) if cluster_ids is not None else None)
+            ),
             _gt_weights=gt_weights,
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
@@ -1480,10 +1508,14 @@ class WooldridgeDiD:
             # vcov_type is locked to "hc1" on the nonlinear paths (the
             # __init__ guard rejects non-hc1 + method != "ols"). Surface
             # cluster_name / n_clusters for shared introspection contract
-            # with the OLS path.
+            # with the OLS path. Under survey TSL the analytical sandwich
+            # (including its cluster_ids) is replaced — surface ``None``
+            # so downstream introspection doesn't claim a unit-cluster
+            # that wasn't actually applied; survey_metadata carries the
+            # design-side structure instead.
             vcov_type=self.vcov_type,
-            cluster_name=cluster_col,
-            n_clusters=int(np.unique(cluster_ids).size),
+            cluster_name=(None if _has_survey else cluster_col),
+            n_clusters=(None if _has_survey else int(np.unique(cluster_ids).size)),
             _gt_weights=gt_weights,
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
@@ -1727,10 +1759,13 @@ class WooldridgeDiD:
             survey_metadata=survey_metadata,
             # vcov_type locked to "hc1" on Poisson path (the __init__ guard
             # rejects non-hc1 + method != "ols"). Surface cluster_name /
-            # n_clusters for shared introspection contract.
+            # n_clusters for shared introspection contract. Under survey
+            # TSL the analytical sandwich is replaced — surface ``None``
+            # so downstream introspection doesn't claim a unit-cluster
+            # that wasn't actually applied.
             vcov_type=self.vcov_type,
-            cluster_name=cluster_col,
-            n_clusters=int(np.unique(cluster_ids).size),
+            cluster_name=(None if _has_survey else cluster_col),
+            n_clusters=(None if _has_survey else int(np.unique(cluster_ids).size)),
             _gt_weights=gt_weights,
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,

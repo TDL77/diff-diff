@@ -1839,6 +1839,58 @@ class TestWooldridgeVcovType:
         with pytest.raises(NotImplementedError):
             est.set_params(method="logit", vcov_type="hc2_bm")
 
+    def test_set_params_is_atomic_on_validation_failure(self):
+        """Per codex R5 P1: rejected set_params must leave the estimator
+        unchanged so subsequent fit() runs on the validated configuration,
+        not a half-mutated one. Without atomicity, a caller that catches
+        the exception could later run e.g. a logit HC1 fit while
+        ``self.vcov_type`` silently reads ``'hc2_bm'``."""
+        est = WooldridgeDiD(method="ols", vcov_type="hc1")
+        original_params = est.get_params()
+        # Reject: method=logit + vcov_type=hc2_bm (interaction guard)
+        with pytest.raises(NotImplementedError):
+            est.set_params(method="logit", vcov_type="hc2_bm")
+        # Estimator must be unchanged
+        assert est.get_params() == original_params
+        assert est.method == "ols"
+        assert est.vcov_type == "hc1"
+        assert est._vcov_type_explicit is False
+        # Reject: unknown vcov_type. Try changing multiple params at once
+        # to verify atomicity catches partial application.
+        with pytest.raises(ValueError, match="hc4"):
+            est.set_params(method="poisson", vcov_type="hc4")
+        # method must NOT have changed to "poisson" — the validator rejected
+        # the batch before any setattr() ran.
+        assert est.method == "ols"
+        assert est.vcov_type == "hc1"
+        # Unknown parameter key: same atomicity guarantee.
+        with pytest.raises(ValueError, match="bogus_param"):
+            est.set_params(vcov_type="hc2_bm", bogus_param=42)
+        assert est.vcov_type == "hc1"
+        assert est._vcov_type_explicit is False
+
+    def test_survey_design_clears_cluster_metadata(self):
+        """Per codex R5 P2: under survey TSL the analytical sandwich (and
+        its cluster_ids) is replaced — cluster_name / n_clusters should be
+        ``None`` (the survey design's stratification lives in
+        ``survey_metadata``), not a misleading echo of the default unit
+        cluster."""
+        from diff_diff.survey import SurveyDesign
+
+        df = _make_vcov_panel()
+        df["w"] = 1.0
+        design = SurveyDesign(weights="w", weight_type="pweight")
+        # OLS + survey + default hc1: the analytical fall-through would
+        # have surfaced cluster_name='unit', n_clusters=N — but survey TSL
+        # replaces that vcov, so the dataclass must report None.
+        res = WooldridgeDiD(method="ols", vcov_type="hc1").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort",
+            survey_design=design,
+        )
+        assert res.survey_metadata is not None
+        assert res.cluster_name is None
+        assert res.n_clusters is None
+
     def test_set_params_updates_vcov_type_explicit_flag(self):
         est = WooldridgeDiD(vcov_type="hc1")
         assert est._vcov_type_explicit is False
