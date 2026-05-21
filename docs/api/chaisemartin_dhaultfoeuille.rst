@@ -113,7 +113,7 @@ library option for non-absorbing treatments.
 - de Chaisemartin, C. & D'Haultfœuille, X. (2020). Two-Way Fixed Effects
   Estimators with Heterogeneous Treatment Effects. *American Economic
   Review*, 110(9), 2964-2996.
-- de Chaisemartin, C. & D'Haultfœuille, X. (2022, revised 2024).
+- de Chaisemartin, C. & D'Haultfœuille, X. (2022, revised July 2023).
   Difference-in-Differences Estimators of Intertemporal Treatment
   Effects. NBER Working Paper 29873.
 

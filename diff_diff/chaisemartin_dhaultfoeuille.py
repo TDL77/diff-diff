@@ -19,7 +19,7 @@ References
 - de Chaisemartin, C. & D'Haultfoeuille, X. (2020). Two-Way Fixed Effects
   Estimators with Heterogeneous Treatment Effects. *American Economic
   Review*, 110(9), 2964-2996.
-- de Chaisemartin, C. & D'Haultfoeuille, X. (2022, revised 2023).
+- de Chaisemartin, C. & D'Haultfoeuille, X. (2022, revised July 2023).
   Difference-in-Differences Estimators of Intertemporal Treatment Effects.
   NBER Working Paper 29873. Web Appendix Section 3.7.3 contains the
   cohort-recentered plug-in variance formula implemented here.
@@ -4506,11 +4506,15 @@ def _compute_per_period_dids(
         leaver_mask = (d_prev == 1) & (d_curr == 0) & present
         stable1_mask = (d_prev == 1) & (d_curr == 1) & present
 
-        # AER 2020 Theorem 3 N_{a,b,t} weights are CELL counts, not
-        # within-cell observation sums. Each (g, t) cell contributes once
+        # Library equal-cell weighting: N_{a,b,t} here counts (g, t)
+        # cells in each transition state. Each cell contributes once
         # regardless of how many original observations fed into the
-        # y_gt cell mean. See REGISTRY.md ChaisemartinDHaultfoeuille
-        # estimator equations.
+        # y_gt cell mean. This is a documented library deviation from
+        # AER 2020 Equation 3 (which defines N_{d,d',t} = sum N_{g,t},
+        # i.e., observation-sum weighting) and from R DIDmultiplegtDYN
+        # (individual-row weighting on unbalanced inputs). See
+        # REGISTRY.md ## ChaisemartinDHaultfoeuille L517 "Note (deviation
+        # from R DIDmultiplegtDYN ...)" for the full text.
         n_10 = int(joiner_mask.sum())
         n_00 = int(stable0_mask.sum())
         n_01 = int(leaver_mask.sum())
@@ -4635,7 +4639,8 @@ def _compute_placebo(
         leaver_mask = (d_pre_prev == 1) & (d_prev == 1) & (d_curr == 0) & present
         stable1_mask = (d_pre_prev == 1) & (d_prev == 1) & (d_curr == 1) & present
 
-        # Placebo weights are CELL counts (matching Theorem 3 convention)
+        # Placebo weights: library equal-cell counts (same documented
+        # deviation as the main DID_M path; see REGISTRY.md L517).
         n_10 = int(joiner_mask.sum())
         n_00 = int(stable0_mask.sum())
         n_01 = int(leaver_mask.sum())

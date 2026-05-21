@@ -827,27 +827,33 @@ class TestDropLargerLower:
 
     def test_cell_count_weighting_unbalanced_input(self):
         """
-        Regression test: dCDH must use cell counts (paper-literal),
-        not within-cell observation counts, as the Theorem 3 N_{a,b,t}
-        weights.
+        Regression test: pins the library's documented equal-cell
+        (cell-count) weighting contract for the Theorem 3 N_{a,b,t}
+        weights. This is a documented deviation from both the AER 2020
+        paper's Equation 3 (which uses observation-sum N_{g,t} weights)
+        and from R DIDmultiplegtDYN's individual-row weighting; see
+        docs/methodology/REGISTRY.md (## ChaisemartinDHaultfoeuille
+        equal-cell deviation note) and the paper review at
+        docs/methodology/papers/dechaisemartin-dhaultfoeuille-2020-review.md
+        L76-L88 + L278-L280.
 
         Constructed with two joiner groups whose (g, t) cells contain
         very different numbers of original observations (group 1 has
         100 obs/cell, group 2 has 1 obs/cell). Both joiners have the
-        same true effect under the cell-weighted formula.
+        same true effect under the library's cell-weighted formula.
 
-        Under cell weighting (paper-literal, the correct behavior),
-        each cell contributes equally and the result equals the simple
-        average of cell-level effects (~5.0). Under the bug behavior
-        (sample-size weighting), group 1 dominates by 100x because its
-        cells contribute 100x the weight.
+        Under the library's cell weighting, each cell contributes
+        equally and the result equals the simple average of cell-level
+        effects (~5.0). Under sample-size weighting (the R / paper
+        formula), group 1 would dominate by 100x because its cells
+        contribute 100x the weight.
 
         On a noiseless DGP both formulas would give 5.0; we add a
-        deliberate per-cell perturbation to group 1 so that the bug
-        would be visible: under sample-size weighting the result
-        would shift toward group 1's cell mean (which is perturbed),
-        while under cell weighting group 2's pristine effect would
-        anchor the average.
+        deliberate per-cell perturbation to group 1 so the deviation
+        is visible: under sample-size weighting the result would shift
+        toward group 1's cell mean (which is perturbed), while under
+        the library's cell weighting group 2's pristine effect anchors
+        the average.
         """
         records = []
         # Group 1: 100 obs per cell, joiner at t=2, but with a +0.5
