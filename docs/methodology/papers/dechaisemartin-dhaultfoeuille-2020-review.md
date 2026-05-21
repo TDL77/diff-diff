@@ -2,7 +2,7 @@
 
 **Authors:** Clément de Chaisemartin and Xavier D'Haultfœuille
 **Citation:** de Chaisemartin, C., & D'Haultfœuille, X. (2020). Two-Way Fixed Effects Estimators with Heterogeneous Treatment Effects. *American Economic Review*, 110(9), 2964-2996. DOI: 10.1257/aer.20181169.
-**PDF reviewed:** papers/Chaisemartin-TwoWayFixedEffects-2020.pdf
+**PDF reviewed:** American Economic Review version (DOI: [10.1257/aer.20181169](https://doi.org/10.1257/aer.20181169)). Local PDFs are gitignored under `/papers/`; the journal/DOI version is the authoritative source.
 **Review date:** 2026-05-21
 
 ---

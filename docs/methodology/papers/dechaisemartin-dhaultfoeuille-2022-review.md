@@ -2,7 +2,7 @@
 
 **Authors:** Clément de Chaisemartin and Xavier D'Haultfœuille
 **Citation:** de Chaisemartin, C., & D'Haultfœuille, X. (2022). Difference-in-Differences Estimators of Intertemporal Treatment Effects. *NBER Working Paper 29873*, March 2022 (revised July 2023). URL: https://www.nber.org/papers/w29873.
-**PDF reviewed:** papers/w29873.pdf
+**PDF reviewed:** NBER Working Paper 29873 ([https://www.nber.org/papers/w29873](https://www.nber.org/papers/w29873)), March 2022 (revised July 2023). Local PDFs are gitignored under `/papers/`; the NBER landing page is the authoritative source.
 **Review date:** 2026-05-21
 
 ---
@@ -394,6 +394,6 @@ The paper devotes Section 4 (pages 30-36) to decomposing three TWFE-derived prac
 
 - **No Monte Carlo / simulation evidence in the paper:** the paper relies on the Favara-Imbs (2015) banking-deregulation empirical application as its sole validation surface (Section 5). The Web Appendix has no simulation studies. Implementations should be tested against R `DIDmultiplegtDYN` on the same Favara-Imbs panel, which is the canonical parity anchor.
 
-- **Revision of record:** this review covers the "March 2022, revised July 2023" version of NBER WP 29873 — the PDF on disk at `papers/w29873.pdf`. The same revision string is now used in `docs/references.rst:199`, `docs/methodology/REGISTRY.md:488`, and the code docstring at `diff_diff/chaisemartin_dhaultfoeuille_results.py:16`, aligned in the same PR that adds this review. If a later NBER revision becomes locally available, a follow-up paper-review pass against that PDF would extend this surface; the methodology transcribed above (six numbered assumptions, cohort-recentered plug-in variance, the `DID_l` / `DID^n_l` / `DID_l^pl` / `DID^X` / `DID^{fd}` constructions) is keyed to the July 2023 revision and any future-revision diffs are out of scope for this review.
+- **Revision of record:** this review covers the "March 2022, revised July 2023" version of NBER WP 29873. Local PDFs are gitignored under `/papers/`; the NBER landing page (https://www.nber.org/papers/w29873) is the authoritative source. The same revision string is used in `docs/references.rst:199`, `docs/methodology/REGISTRY.md:488`, and the code docstring at `diff_diff/chaisemartin_dhaultfoeuille_results.py:16`, aligned in the same PR that adds this review. If a later NBER revision is posted, a follow-up paper-review pass against that revision would extend this surface; the methodology transcribed above (six numbered assumptions, cohort-recentered plug-in variance, the `DID_l` / `DID^n_l` / `DID_l^pl` / `DID^X` / `DID^{fd}` constructions) is keyed to the July 2023 revision and any future-revision diffs are out of scope for this review.
 
 For cross-reference with library implementation deviations, consult `docs/methodology/REGISTRY.md` ChaisemartinDHaultfoeuille section. For the AER 2020 static `DID_M` half of the same library entry, see `docs/methodology/papers/dechaisemartin-dhaultfoeuille-2020-review.md`.
