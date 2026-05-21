@@ -370,8 +370,9 @@ and planned follow-up enhancements:
   Reduction semantics:
 
   - ``conley_lag_cutoff = 0`` or ``None``: **bit-identical** to shipped
-    Wave E.2 (orchestrator early-returns before invoking the serial
-    helper).
+    Wave E.2 ATT and scalar SE (orchestrator skips the serial helper
+    invocation when ``L = 0`` so meat_serial does not contribute; the
+    test_a2 mock-spy independently asserts the helper isn't invoked).
   - ``conley_time is None`` or ``T = 1``: serial helper short-circuits to
     zero meat (no cross-period pairs possible).
   - Single stratum (H = 1, FPC = inf) with ``L > 0``: serial reduces to

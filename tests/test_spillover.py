@@ -6483,19 +6483,23 @@ class TestSpilloverDiDWaveE2FollowupConleySurveyLagCutoff:
 
     def test_a_lag0_strict_bit_identical_to_wave_e2_meat(self):
         """`conley_lag_cutoff = 0` MUST produce bit-identical ATT AND scalar SE
-        as a fresh Wave E.2 baseline fit (`assert_array_equal`). Orchestrator
-        must short-circuit BEFORE calling the serial helper; test_a2 mock-spy
-        verifies the helper isn't invoked.
+        as a fresh Wave E.2 baseline fit (`assert_array_equal`). The
+        orchestrator does NOT truly early-return at lag=0 — the spatial
+        loop, saturation guard, and new PSD/finite guard all still run; the
+        guarantee is that the serial helper is NOT invoked (so meat_serial
+        contributes nothing). test_a2 mock-spy verifies the helper isn't
+        called.
 
-        Methodology lock: the early-return at the orchestrator level is the
-        backwards-compatibility guarantee that the shipped Wave E.2 surface
-        is unaffected by the follow-up. Without the early-return, a numerical
-        zero from the serial helper would still inject floating-point noise
-        into the spatial-only meat (which would surface as SE drift).
+        Methodology lock: skipping the serial helper at the orchestrator
+        level is the backwards-compatibility guarantee that the shipped
+        Wave E.2 surface is unaffected by the follow-up. Without that skip,
+        a numerical zero from the serial helper would still inject
+        floating-point noise into the spatial-only meat (which would
+        surface as SE drift).
 
-        Note: full meat-matrix equality is implied (ATT + SE bit-identity is
-        load-bearing for the user-visible regression pin; the meat matrix is
-        not directly exposed on `SpilloverDiDResults`).
+        Note: full meat-matrix equality is NOT asserted — only ATT + scalar
+        SE are pinned (the meat matrix is not directly exposed on
+        `SpilloverDiDResults`).
         """
         df = generate_butts_nonstaggered_dgp(seed=0)
         df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
@@ -6534,7 +6538,7 @@ class TestSpilloverDiDWaveE2FollowupConleySurveyLagCutoff:
         np.testing.assert_array_equal(res_lag0.se, res_e2_baseline.se)
 
     def test_a2_lag0_does_not_call_serial_helper(self):
-        """Structural anchor: orchestrator early-returns at `lag_cutoff = 0`
+        """Structural anchor: orchestrator skips the serial helper at `lag_cutoff = 0`
         BEFORE invoking `_compute_stratified_serial_bartlett_meat`. Mirrors
         the Wave E.2 test_a2 mock-spy pattern. Without this, a future
         refactor that always-invokes the serial helper would silently degrade
