@@ -311,7 +311,7 @@ The paper devotes Section 4 (pages 30-36) to decomposing three TWFE-derived prac
 
 - **Never-switching groups:** `F_g > T` so `S_g = 0` and the score `U^G_{g,l}` carries zero estimand loading. **But never-switching groups appear in `N^g_{F_g-1+l}` denominators as stable controls for switchers in their `D_{g,1}` cohort.** Hence `lambda^G_{g,l}` for never-switchers is NON-ZERO via the stable-control role. The Web Appendix derivation (page 66) makes this explicit: `N^k_t >= #C^G_k` if `f_k > t`, so the stable-control pool is at least as large as the cohort cardinality. **This is the library's "Round 2 full-IF fix"** (`chaisemartin_dhaultfoeuille_results.py:355-358`) - never-switching groups participate in `sigma_hat_l^2` not via their own treatment effect (which does not exist) but via the perturbation they contribute to the comparison-cohort mean for each switcher. The `n_groups_dropped_never_switching` field is retained for backwards compatibility but no longer represents an actual exclusion.
 
-- **Anticipation:** an `anticipation = K` parameter shifts placebo definitions and the eligible horizon range backwards by `K` periods. Not covered in the main paper text but consistent with the deferred Section 3.5 "Other extensions" framework.
+- **Anticipation (paper concept, not exposed by the library):** the paper's Section 3.5 "Other extensions" framework discusses shifting placebo definitions and eligible horizon ranges backwards by `K` periods to accommodate treatment anticipation. The library does NOT currently expose an `anticipation` parameter; the fix uses `F_g - 1` as the canonical pre-period anchor (no shift). Anticipation-aware analyses would require a manual horizon-window re-mapping by the caller. Tracked as a potential future extension.
 
 - **Terminal missingness:** library retains terminal-missing rows via the per-period `present = (N_mat[:, t] > 0) & (N_mat[:, t-1] > 0)` mask. This is a deviation from R `DIDmultiplegtDYN` - documented in REGISTRY.
 
@@ -348,13 +348,13 @@ The paper devotes Section 4 (pages 30-36) to decomposing three TWFE-derived prac
 
 ### Tuning Parameters
 
-| Parameter | Type | Default | Selection Method |
-|-----------|------|---------|-----------------|
-| `effects` (max horizon `L`) | int | 1 | data-driven; library emits `<50%-switcher` warning when `N_l / N_1 < 0.5` per the Favara-Imbs application (page 39) |
-| `placebo` (number of placebos `L^pl`) | int | 0 | bounded above by `max_g {min(T_g - F_g + 1, F_g - 2)}` |
-| `anticipation` (`K`) | int | 0 | based on subject-matter knowledge; shifts placebo and horizon definitions |
-| Cluster level | column name | group | Assumption 8 is at the group level |
-| `n_bootstrap` | int | 0 (analytical) | analytical is the default; `>= 199` activates PSU-level Hall-Mammen wild bootstrap for survey designs |
+| Parameter | Library API | Type | Default | Selection method |
+|-----------|------|------|---------|-----------------|
+| Max horizon (paper: `L`; R: `effects`) | `L_max` on `fit()` | `Optional[int]` | `None` | `None` falls back to AER 2020 per-period `DID_M`; `>= 1` activates the dynamic event study. Library emits a `<50%-switcher` warning when `N_l / N_1 < 0.5` per the Favara-Imbs application (page 39). |
+| Placebo gate (paper: `L^pl`) | `placebo` on `__init__` | `bool` | `True` | Boolean gate, not an integer count. The library computes the single-lag `DID_M^pl` on Phase 1 (`L_max=None`) and all `L_max` backward placebos on Phase 2; per-horizon placebo eligibility is bounded above by `max_g {min(T_g - F_g + 1, F_g - 2)}` automatically. Set to `False` to skip placebo computation; results still expose `placebo_*` fields with NaN values. |
+| Cluster level | `cluster` on `__init__` | `Optional[Any]` | `None` (only supported value) | The estimator clusters at the group level by default (or PSU-level under `survey_design`). The `cluster=` kwarg rejects any non-`None` value via `NotImplementedError` — custom user-specified clustering is reserved for a future phase (see REGISTRY's cluster-contract Note). |
+| Bootstrap iteration count | `n_bootstrap` on `__init__` | `int` | `0` (analytical default) | `0` uses the cohort-recentered analytical plug-in variance (Section 3.4 / Web Appendix Section 3.7.3). `>= 199` activates the multiplier bootstrap; PSU-level Hall-Mammen wild bootstrap is automatic under `survey_design`. |
+| Bootstrap weight distribution | `bootstrap_weights` on `__init__` | str | `"rademacher"` | `"rademacher"`, `"mammen"`, or `"webb"`. Ignored when `n_bootstrap = 0`. |
 
 ### Relation to Existing diff-diff Estimators
 
