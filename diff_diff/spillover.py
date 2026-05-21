@@ -2740,6 +2740,31 @@ class SpilloverDiD:
             survey_finite_mask = finite_mask
         n_nan_or_zero = int((~survey_finite_mask).sum())
 
+        # Wave E.3 (CI codex R1 P1 fix): the front-door D_it.sum() == 0 gate
+        # at L2556 runs on the FULL DOMAIN. Under SurveyDesign.subpopulation()
+        # the user can zero-out all treated rows (e.g. mask excludes every
+        # ever-treated unit), and the full-domain check still passes — but
+        # the effective estimating sample (survey_finite_mask) has zero
+        # treated observations and tau_total is unidentified. The downstream
+        # OLS solve would land on a rank-deficient stage-2 design and either
+        # NaN-fail silently or surface a generic rank-deficiency warning.
+        # Add an active-sample treatment-support check immediately after
+        # survey_finite_mask is built so users get a clear assumption-violation
+        # error on this edge case (matches the documented R svyrecvar(subset())
+        # convention: domain estimation requires the domain to contain
+        # identifying variation).
+        if resolved_survey is not None and int(D_it[survey_finite_mask].sum()) == 0:
+            raise ValueError(
+                "SurveyDesign.subpopulation() (or zero-weight survey design) "
+                "removes EVERY treated observation from the effective "
+                "estimating sample (survey_finite_mask = finite_mask & "
+                "survey_weights > 0). The Wave E.3 active-sample identification "
+                "support for tau_total requires at least one treated row to "
+                "remain in the weighted sample after the subpopulation filter. "
+                "Either expand the subpopulation mask to include treated units "
+                "or verify the survey weight column."
+            )
+
         # Step 13: build stage-2 design.
         ring_labels = [_ring_label(list(self.rings), j) for j in range(K)]
 

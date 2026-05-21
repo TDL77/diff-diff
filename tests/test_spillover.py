@@ -8349,6 +8349,46 @@ class TestSpilloverDiDWaveE3SubpopulationFullDesign:
             f"reported count under the survey-finite-mask contract."
         )
 
+    def test_q4_subpop_excludes_all_treated_raises(self):
+        """Wave E.3 CI codex R1 P1 fix: SurveyDesign.subpopulation() that
+        zeros out EVERY treated row must raise a clear identification error
+        immediately after survey_finite_mask is built, NOT silently fall
+        through to rank-deficient OLS or to the front-door full-domain
+        D_it.sum() == 0 gate (which still passes because full-domain D_it
+        is non-zero).
+
+        Pre-fix: the full-domain treatment-support gate at spillover.py:2556
+        runs BEFORE survey_finite_mask is computed; a subpop mask removing
+        all treated units passes it but the effective weighted sample has
+        zero treated rows and the OLS solve lands on a rank-deficient
+        stage-2 design.
+
+        Post-fix at spillover.py:~2745: active-sample check
+        `D_it[survey_finite_mask].sum() == 0` raises ValueError mentioning
+        survey_finite_mask + Wave E.3 + treated identification.
+        """
+        from diff_diff import SurveyDesign
+
+        df = generate_butts_staggered_dgp(seed=950)
+        df_s = _augment_with_survey(df, n_strata=2, psus_per_stratum=4, fpc=200.0)
+        # Exclude all ever-treated units via subpopulation
+        df_s["include"] = df_s["first_treat"] == np.inf
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))
+        sub_design, df_sub = design.subpopulation(df_s, "include")
+        with pytest.raises(ValueError, match=r"removes EVERY treated observation"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                est.fit(
+                    df_sub,
+                    outcome="y",
+                    unit="unit",
+                    time="time",
+                    first_treat="first_treat",
+                    survey_design=sub_design,
+                )
+
     def test_r_warn_drop_se_drift_golden(self):
         """Wave E.3 numeric anchor (codex R3 P2 fix): the WARN-DROP path
         is the actual surface Wave E.3 changes — the no-drop bit-identity
@@ -8541,8 +8581,7 @@ class TestSpilloverDiDWaveE3SubpopulationFullDesignEventStudy:
         expected_n_list = [22, 0, 26, 26, 56]
         actual_n_list = res_subpop.att_dynamic["n_obs"].tolist()
         assert actual_n_list == expected_n_list, (
-            f"Wave E.3: att_dynamic.n_obs={actual_n_list}, "
-            f"expected {expected_n_list}"
+            f"Wave E.3: att_dynamic.n_obs={actual_n_list}, " f"expected {expected_n_list}"
         )
         # spillover_effects per-(ring, k) n_obs reflects count_mask too.
         # Excluded PSU 3 (treated, first_treat=3) drops some ring rows.
