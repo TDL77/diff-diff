@@ -140,10 +140,14 @@ def _compute_gmm_corrected_meat(
       index sets (matches the no-survey panel-block decomposition at
       :func:`diff_diff.conley._compute_conley_meat`). Serial term uses
       per-period within-stratum centering (Binder TSL form) and
-      panel-wide per-stratum FPC. Requires ``survey_design.psu`` set;
-      no-PSU survey designs (weights-only / strata-only) raise
-      ``NotImplementedError`` upstream at ``SpilloverDiD.fit`` because
-      the pseudo-PSU fallback would silently zero the serial sum.
+      panel-wide per-stratum FPC. Requires an **effective PSU** —
+      either explicit ``survey_design.psu`` OR ``cluster=<col>``
+      injected as the effective PSU per Wave E.1's
+      ``_inject_cluster_as_psu`` routing. No-effective-PSU survey
+      designs (weights-only / strata-only WITHOUT a cluster fallback)
+      raise ``NotImplementedError`` upstream at ``SpilloverDiD.fit``
+      post-resolution because the pseudo-PSU fallback would silently
+      zero the serial sum.
 
     **`gamma_hat` solve** (mirror of `TwoStageDiD._compute_gmm_variance`
     pattern at `two_stage.py:1886-1917`): factorize ``X_10' W X_10`` via

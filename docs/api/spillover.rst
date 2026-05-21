@@ -375,8 +375,11 @@ and planned follow-up enhancements:
   - ``conley_time is None`` or ``T = 1``: serial helper short-circuits to
     zero meat (no cross-period pairs possible).
   - Single stratum (H = 1, FPC = inf) with ``L > 0``: serial reduces to
-    plain Newey-West Bartlett HAC on per-PSU score sequences (modulo the
-    panel-wide ``G/(G-1)`` survey factor).
+    Newey-West Bartlett HAC on per-period within-stratum-CENTERED per-PSU
+    score sequences (NOT raw scores — Binder TSL centering is retained at
+    H=1 because the survey path always subtracts the per-period stratum
+    mean before the kernel application; the panel-wide ``G/(G-1)``
+    survey factor replaces FPC).
   - Bandwidth → 0 with ``L > 0``: spatial reduces to per-period
     within-stratum HC sandwich; serial term unchanged (separable form).
   - All PSUs singleton + ``lonely_psu="remove"`` with ``L > 0``: meat

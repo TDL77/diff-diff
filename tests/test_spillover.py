@@ -6449,7 +6449,8 @@ class TestSpilloverDiDWaveE2FollowupConleySurveyLagCutoff:
     sandwich (Conley 1999 × Binder/Gerber 2026 × Wave D Gardner GMM)
     composed with within-PSU serial Bartlett HAC (Newey-West 1987 separable
     form). Verifies:
-      - lag=0 STRICT bit-identity to shipped Wave E.2 on the full meat matrix
+      - lag=0 STRICT bit-identity to shipped Wave E.2 ATT and scalar SE
+        (test_a) plus mock-spy that the serial helper isn't invoked (test_a2)
       - serial centering = Binder TSL form (per-period within-stratum), NOT raw
       - AR(1) DGP serial-term behavioral inflation
       - panel-wide per-stratum FPC for the serial term
