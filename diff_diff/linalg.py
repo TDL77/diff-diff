@@ -538,10 +538,11 @@ def solve_ols(
           ``cluster_ids`` (use ``"hc2_bm"`` for clustered Bell-McCaffrey).
         - ``"hc2_bm"``: HC2 + Imbens-Kolesar (2016) Satterthwaite DOF one-way;
           Pustejovsky-Tipton (2018) CR2 Bell-McCaffrey with ``cluster_ids``.
-          **Not supported with weights** (either one-way or clustered):
-          raises ``NotImplementedError`` because the BM DOF helper is
-          inconsistent with ``solve_ols``'s WLS transform. Tracked in
-          ``TODO.md``.
+          With ``weights``, dispatches to the clubSandwich WLS-CR2 port —
+          supported for ``weight_type="pweight"`` only. ``aweight`` and
+          ``fweight`` raise ``NotImplementedError`` (port matches the
+          ``pweight`` convention only; aweight/fweight derivations are a
+          separate methodology task).
         - ``"conley"``: Conley (1999) spatial-HAC sandwich. Requires
           ``conley_coords`` (n × 2 array) and ``conley_cutoff_km`` (positive
           bandwidth, no default per Conley 1999 Section 5's sensitivity-grid
@@ -1118,13 +1119,13 @@ def _validate_vcov_args(
         combined with a ``vcov_type`` that is one-way only (``classical``,
         ``hc2``).
     NotImplementedError
-        If ``vcov_type == "hc2_bm"`` is combined with ``weights`` (with OR
-        without ``cluster_ids``). The weighted Bell-McCaffrey DOF requires
-        re-deriving the Satterthwaite ratio on the WLS-transformed design
-        ``X* = sqrt(w) X`` to match ``solve_ols``'s residual convention;
-        until that derivation is in place, the path raises rather than
-        shipping silently-inconsistent small-sample p-values. Tracked in
-        ``TODO.md``.
+        If ``vcov_type == "conley"`` is combined with ``weights`` (the
+        Bertanha-Imbens 2014 weighted-Conley methodology is a separate
+        follow-up). NOT raised here for ``hc2_bm + weights``: that
+        weight-type contract is enforced downstream in
+        ``_compute_robust_vcov_numpy`` (which has access to ``weight_type``
+        and rejects ``aweight`` / ``fweight`` while routing ``pweight``
+        through the clubSandwich WLS-CR2 port).
     """
     if vcov_type not in _VALID_VCOV_TYPES:
         raise ValueError(
@@ -1141,36 +1142,14 @@ def _validate_vcov_args(
             ),
         }[vcov_type]
         raise ValueError(msg)
-    if vcov_type == "hc2_bm" and weights is not None:
-        # Weighted Bell-McCaffrey (both one-way and cluster) is deferred to
-        # Phase 2+. The current `_compute_bm_dof_from_contrasts` builds the
-        # hat matrix from the unscaled design via `X (X'WX)^{-1} X' W`, but
-        # `solve_ols` solves the weighted problem by transforming to
-        # `X* = sqrt(w) X`, `y* = sqrt(w) y` and computing residuals on that
-        # transformed system. The transformed hat matrix
-        # `H* = sqrt(W) X (X'WX)^{-1} X' sqrt(W)` is symmetric idempotent and
-        # is the correct residual-maker for the Satterthwaite ratio
-        # `(tr G)^2 / tr(G^2)`; the asymmetric `H = X (X'WX)^{-1} X' W`
-        # currently produced here is not, so the BM DOF it yields is
-        # internally inconsistent with `solve_ols`'s WLS convention. Rather
-        # than ship silently-wrong small-sample p-values, we fail fast.
-        # Tracked in TODO.md under Methodology/Correctness (rederive the BM
-        # DOF on the transformed WLS design + add weighted parity tests).
-        if cluster_ids is not None:
-            raise NotImplementedError(
-                "vcov_type='hc2_bm' with both cluster_ids and weights is a "
-                "Phase 2+ follow-up. Use vcov_type='hc1' for weighted cluster-"
-                "robust, or drop weights for CR2 Bell-McCaffrey."
-            )
-        raise NotImplementedError(
-            "vcov_type='hc2_bm' with weights is a Phase 2+ follow-up: the "
-            "Bell-McCaffrey DOF helper builds the hat matrix on the "
-            "unscaled design, which is inconsistent with solve_ols's WLS "
-            "transformation (X* = sqrt(w) X). Shipping in this state would "
-            "produce silently-wrong small-sample p-values. Use vcov_type="
-            "'hc1' for weighted HC1, or drop weights for one-way HC2 + "
-            "Bell-McCaffrey. Tracked in TODO.md."
-        )
+    # Weighted Bell-McCaffrey (both one-way and cluster) is now supported via
+    # the clubSandwich WLS-CR2 port. See `_compute_cr2_bm` and
+    # `_compute_bm_dof_from_contrasts` for the algorithm: clubSandwich uses an
+    # asymmetric weighted hat `H_gg = X_g M_U X_g' W_g` (W, not sqrt(W)) with
+    # a W² bias-correction term `S_W = sum_g X_g' W_g² X_g` in the
+    # Satterthwaite numerator. Matches `clubSandwich::vcovCR(lm(weights=w),
+    # type="CR2") + coef_test(test="Satterthwaite")$df_Satt` at atol=1e-10.
+    # Unweighted CR2-BM behavior is unchanged (regression-safe).
     if vcov_type == "conley":
         # Conley + cluster_ids is now supported (combined spatial + cluster
         # product kernel; see ``docs/methodology/REGISTRY.md`` § ConleySpatialHAC
@@ -1283,8 +1262,9 @@ def compute_robust_vcov(
       Pustejovsky-Tipton (2018) CR2 Bell-McCaffrey cluster-robust estimator
       (matches R ``clubSandwich::vcovCR(..., type="CR2")``). Required by the
       Pierce-Schott (2016) TWFE application in de Chaisemartin et al. (2026)
-      with ``G=103``. Weighted clustered CR2 is the Phase 2+ follow-up and
-      raises ``NotImplementedError``.
+      with ``G=103``. **Weighted hc2_bm** (both one-way and clustered) is
+      supported for ``weight_type="pweight"`` only via the clubSandwich
+      WLS-CR2 port; ``aweight`` and ``fweight`` raise ``NotImplementedError``.
     - ``"conley"``: spatial HAC sandwich (Conley 1999 Eq 4.2). Requires
       ``conley_coords`` (n×2 array) and ``conley_cutoff_km`` (positive
       bandwidth). Two operating modes: cross-sectional (default) and panel
@@ -1306,9 +1286,12 @@ def compute_robust_vcov(
         OLS residuals.
     cluster_ids : ndarray of shape (n,), optional
         Cluster identifiers. Valid with ``vcov_type="hc1"`` (dispatches to CR1)
-        and ``vcov_type="hc2_bm"`` (dispatches to CR2 Bell-McCaffrey).
+        and ``vcov_type="hc2_bm"`` (dispatches to CR2 Bell-McCaffrey, including
+        the weighted-CR2 clubSandwich port for ``weight_type="pweight"``).
         Combining with ``classical`` or ``hc2`` raises ``ValueError``.
-        Combining with ``hc2_bm`` AND ``weights`` raises ``NotImplementedError``.
+        Combining ``hc2_bm`` with ``weights`` and ``weight_type ∈ {"aweight",
+        "fweight"}`` raises ``NotImplementedError`` — the port matches the
+        ``pweight`` convention only.
     weights : ndarray of shape (n,), optional
         Observation weights. If provided, computes weighted sandwich estimator.
     weight_type : str, default "pweight"
@@ -1486,10 +1469,16 @@ def _compute_hat_diagonals(
     return np.asarray(h_diag, dtype=np.float64)
 
 
-def _cr2_adjustment_matrix(I_minus_H_gg: np.ndarray, tol: float = 1e-10) -> np.ndarray:
-    """Symmetric matrix square root of ``(I - H_gg)^{-1}`` via eigendecomposition.
+def _cr2_adjustment_matrix(G_g: np.ndarray, tol: float = 1e-10) -> np.ndarray:
+    """Symmetric matrix square root of ``G_g^{-1}`` via eigendecomposition.
 
-    For a real symmetric positive-semidefinite ``I - H_gg``, eigendecompose as
+    For the unweighted case, ``G_g = I - H_gg``. For the WLS case (clubSandwich
+    convention), ``G_g = I - H_gg - H_gg' + X_g M_U S_W M_U X_g'`` where
+    ``H_gg = X_g M_U X_g' W_g`` (asymmetric weighted hat) and
+    ``S_W = sum_g X_g' W_g² X_g``. The algebra (symmetric eigendecomp +
+    pseudoinverse) is identical in both cases.
+
+    For real symmetric positive-semidefinite ``G_g``, eigendecompose as
     ``U diag(s) U'`` and return ``U diag(s^{-1/2}) U'`` with pseudoinverse
     handling: eigenvalues below ``tol`` are treated as zero (Moore-Penrose).
     Handles singleton clusters, absorbed cluster FEs (``H_gg`` has eigenvalue
@@ -1497,7 +1486,7 @@ def _cr2_adjustment_matrix(I_minus_H_gg: np.ndarray, tol: float = 1e-10) -> np.n
     R ``clubSandwich::vcovCR(..., type="CR2")``.
     """
     # Ensure symmetric — the bread_inv arithmetic can leave tiny asymmetry.
-    sym = 0.5 * (I_minus_H_gg + I_minus_H_gg.T)
+    sym = 0.5 * (G_g + G_g.T)
     eigvals, eigvecs = np.linalg.eigh(sym)
     inv_sqrt = np.where(eigvals > tol, 1.0 / np.sqrt(np.maximum(eigvals, tol)), 0.0)
     return (eigvecs * inv_sqrt) @ eigvecs.T
@@ -1508,43 +1497,90 @@ def _compute_cr2_bm(
     residuals: np.ndarray,
     cluster_ids: np.ndarray,
     bread_matrix: np.ndarray,
+    weights: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """CR2 Bell-McCaffrey cluster-robust variance with per-coefficient DOF.
 
-    Implements the formula of Bell-McCaffrey (2002) as refined by
-    Pustejovsky-Tipton (2018) / `clubSandwich::vcovCR(..., type="CR2")`.
+    Implements ``clubSandwich::vcovCR(..., type="CR2") + coef_test(test=
+    "Satterthwaite")`` for both unweighted and weighted ``lm`` fits. The
+    weighted form uses clubSandwich's specific WLS-CR2 algebra (which is
+    NOT a textbook PT2018 §3.3 transform-once derivation; see
+    docs/methodology/REGISTRY.md for the algorithm details).
 
-    For each cluster ``g``:
-      - ``H_gg = X_g bread_inv X_g'`` (n_g x n_g).
-      - ``A_g = (I - H_gg)^{-1/2}`` via symmetric eigendecomposition with
+    For each cluster ``g`` (with normalized weights ``W_norm = w / mean(w)``):
+      - ``H_gg = X_g M_U X_g' W_g`` (asymmetric weighted hat; W not sqrt(W))
+      - ``S_W = sum_g X_g' W_g² X_g`` (W² in the bias-correction term)
+      - ``G_g = I - H_gg - H_gg' + X_g M_U S_W M_U X_g'``
+      - ``A_g = G_g^{-1/2}`` via symmetric eigendecomposition with
         pseudoinverse handling (see :func:`_cr2_adjustment_matrix`).
-      - Per-cluster score ``s_g = X_g' A_g u_g``.
-    Meat = ``sum_g s_g s_g'``; VCOV = ``bread_inv meat bread_inv``.
+      - Per-cluster score ``s_g = X_g' W_g A_g u_g`` (u_g = raw residual)
 
-    Per-coefficient Satterthwaite DOF for contrast ``c_j = e_j``:
+    Unweighted special case (``weights=None``): ``W_norm=1``, ``S_W=X'X``,
+    ``M_U @ S_W @ M_U = M_U``, so ``G_g`` collapses to ``I - H_gg`` (the
+    symmetric form). Bit-equal to the prior unweighted behavior at machine
+    precision (atol=1e-14 regression-safety).
 
-        omega_g = A_g X_g bread_inv c_j  (length n_g)
-        trace(B) = sum_i (X_i' bread_inv c_j)^2
-        trace(B^2) = sum_{g, h} (omega_g' M_{g, h} omega_h)^2
+    Meat = ``sum_g s_g s_g'``; VCOV = ``M_U meat M_U`` (where ``M_U`` is the
+    normalized bread inverse; ``w_scale`` cancels in the final vcov).
 
-    where ``M = I - X bread_inv X'``. DOF_j = trace(B)^2 / trace(B^2).
+    Per-coefficient Satterthwaite DOF: see :func:`_cr2_bm_dof_inner` for the
+    unweighted simple formula and the weighted full P_array construction.
+
+    Parameters
+    ----------
+    X : ndarray of shape (n, k)
+    residuals : ndarray of shape (n,)
+        Raw residuals ``y - X beta_hat`` from the (weighted) fit.
+    cluster_ids : ndarray of shape (n,)
+    bread_matrix : ndarray of shape (k, k)
+        ``X'WX`` if weighted, ``X'X`` if unweighted.
+    weights : ndarray of shape (n,), optional
+        Original (un-normalized) weights. ``None`` for unweighted.
 
     Returns
     -------
     vcov : ndarray of shape (k, k)
     dof_vec : ndarray of shape (k,)
-
-    Notes
-    -----
-    Unweighted only. Weighted CR2 is a Phase 2+ follow-up; the signature would
-    need to thread ``weights`` through the hat-matrix and residual rebalancing
-    (per clubSandwich's WLS handling). The call site in
-    :func:`_compute_robust_vcov_numpy` raises before dispatching when weights
-    are present alongside ``vcov_type="hc2_bm"`` + cluster.
     """
     n, k = X.shape
     cluster_ids_arr = np.asarray(cluster_ids)
     unique_clusters = np.unique(cluster_ids_arr)
+    # When weights are provided, enforce subpopulation invariance: zero-weight
+    # rows must contribute nothing to the sandwich. The earlier "drop zero-
+    # total-weight clusters only" guard handled all-zero clusters but missed
+    # mixed-zero clusters (positive total weight, some zero-weight rows
+    # inside). In mixed-zero clusters, the zero-weight rows still entered the
+    # CR2 adjustment matrices (H_gg, G_g, A_g, bias_term) on the row side,
+    # silently changing SE/DOF — contradicting the linalg contract that
+    # zero-weight rows are inert. Fix: physically filter to `weights > 0`
+    # rows before all per-cluster computations. CI codex flagged this as P0
+    # on PR #475 round 2.
+    if weights is not None:
+        weights_arr = np.asarray(weights, dtype=np.float64)
+        positive_mask = weights_arr > 0
+        if not np.all(positive_mask):
+            X = X[positive_mask]
+            residuals = residuals[positive_mask]
+            cluster_ids_arr = cluster_ids_arr[positive_mask]
+            weights_arr = weights_arr[positive_mask]
+            weights = weights_arr  # Rebind for downstream w_scale/W_norm logic
+            n = X.shape[0]
+            # bread_matrix is invariant to zero-weight row removal: the caller
+            # computes `X.T @ (X * w[:, None])`, and zero-weight rows contribute
+            # zero to that sum. So bread_matrix passed in is already equivalent
+            # to bread_matrix on the filtered design. No rebuild needed.
+            # Recount unique clusters after filtering.
+            unique_clusters = np.unique(cluster_ids_arr)
+        eff_clusters = np.array(
+            [g for g in unique_clusters if float(np.sum(weights_arr[cluster_ids_arr == g])) > 0]
+        )
+        if len(eff_clusters) < 2:
+            raise ValueError(
+                f"Need at least 2 clusters with positive total weight for "
+                f"cluster-robust SEs, got {len(eff_clusters)} effective "
+                f"clusters out of {len(unique_clusters)} unique."
+            )
+        unique_clusters = eff_clusters
     G = len(unique_clusters)
     if G < 2:
         raise ValueError(f"Need at least 2 clusters for cluster-robust SEs, got {G}")
@@ -1559,43 +1595,79 @@ def _compute_cr2_bm(
             ) from e
         raise
 
-    # Precompute the full residual-maker M = I - H (n x n). O(n^2 k) build.
-    # For CR2 BM DOF, we need M_{g, h} blocks across cluster pairs, so the
-    # full matrix is the cleanest representation. Note: n should be small
-    # to modest for cluster-robust DiD use cases.
-    H = X @ bread_inv @ X.T
-    M = np.eye(n) - H
+    # Normalize weights: w_scale = mean(w[w>0]), W_norm = w / w_scale. Following
+    # clubSandwich convention, all internal algebra uses M_U = (X' W_norm X)^{-1}
+    # = w_scale * bread_inv. For unweighted (w_scale=1), M_U == bread_inv and the
+    # algorithm reduces bit-equally to the prior unweighted form.
+    if weights is not None:
+        weights_arr = np.asarray(weights, dtype=np.float64)
+        pos = weights_arr > 0
+        w_scale = float(np.mean(weights_arr[pos])) if np.any(pos) else 1.0
+        W_norm = weights_arr / w_scale
+        M_U = w_scale * bread_inv  # = (X' W_norm X)^{-1}
+    else:
+        w_scale = 1.0
+        W_norm = np.ones(n, dtype=np.float64)
+        M_U = bread_inv
 
-    # Per-cluster indices and adjustment matrices. Compute once, reuse for
-    # meat assembly and DOF loop.
+    # Per-cluster indices
     cluster_idx = {g: np.where(cluster_ids_arr == g)[0] for g in unique_clusters}
+
+    # S_W = sum_g X_g' diag(W_norm_g²) X_g (used for both vcov and DOF).
+    # For unweighted (W_norm=1): S_W = X'X = bread_matrix.
+    S_W = np.zeros((k, k))
+    for g in unique_clusters:
+        idx_g = cluster_idx[g]
+        X_g = X[idx_g]
+        S_W += X_g.T @ (X_g * (W_norm[idx_g] ** 2)[:, np.newaxis])
+    MUWTWUM = M_U @ S_W @ M_U
+
+    # Per-cluster adjustment matrices A_g via G_g (which collapses to
+    # `I - H_gg` in the unweighted special case).
     A_g_matrices: Dict[Any, np.ndarray] = {}
     for g in unique_clusters:
         idx_g = cluster_idx[g]
-        H_gg = H[np.ix_(idx_g, idx_g)]
+        X_g = X[idx_g]
+        # Asymmetric weighted hat block. For unweighted (W_norm=1): H_gg is the
+        # standard symmetric `X_g @ M_U @ X_g.T`.
+        H_gg = (X_g @ M_U @ X_g.T) * W_norm[idx_g][np.newaxis, :]
         I_g = np.eye(len(idx_g))
-        A_g_matrices[g] = _cr2_adjustment_matrix(I_g - H_gg)
+        bias_term = X_g @ MUWTWUM @ X_g.T
+        G_g = I_g - H_gg - H_gg.T + bias_term
+        A_g_matrices[g] = _cr2_adjustment_matrix(G_g)
 
     # --- VCOV (meat) ---
-    # Adjusted per-cluster scores, stacked as a (G, k) matrix so the meat is
-    # cluster_scores.T @ cluster_scores.
+    # Per-cluster score: s_g = X_g' diag(W_norm_g) A_g u_g.
     cluster_scores = np.zeros((G, k))
     for gi, g in enumerate(unique_clusters):
         idx_g = cluster_idx[g]
         u_g = residuals[idx_g]
         A_g = A_g_matrices[g]
-        # X_g' @ (A_g @ u_g) = score of shape (k,)
-        cluster_scores[gi] = X[idx_g].T @ (A_g @ u_g)
+        adjusted = A_g @ u_g
+        cluster_scores[gi] = X[idx_g].T @ (W_norm[idx_g] * adjusted)
     meat = cluster_scores.T @ cluster_scores
-    temp = np.linalg.solve(bread_matrix, meat)
-    vcov = np.linalg.solve(bread_matrix, temp.T).T
+    vcov = M_U @ meat @ M_U
 
     # --- Per-coefficient Bell-McCaffrey cluster DOF ---
-    # Delegate to the contrast-aware helper with `contrasts=I_k` so the
-    # per-coefficient case is `c = e_j` (the j-th basis vector). Bit-identity
-    # vs the prior inline loop holds at machine precision because the same
-    # X_bi / A_g_Xbi precomputes are reused under the same matmul ordering.
-    dof_vec = _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, bread_inv, np.eye(k))
+    # Delegate to the contrast-aware helper. The helper branches on `weights`:
+    # unweighted uses the simple `(tr B)² / tr(B²)` form (bit-equal to prior);
+    # weighted uses the full clubSandwich P_array construction.
+    if weights is None:
+        # Build the symmetric residual-maker M = I - H for the simple formula.
+        H = X @ M_U @ X.T
+        M = np.eye(n) - H
+        dof_vec = _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, M_U, np.eye(k))
+    else:
+        dof_vec = _cr2_bm_dof_inner_weighted(
+            X,
+            A_g_matrices,
+            cluster_idx,
+            M_U,
+            MUWTWUM,
+            W_norm,
+            np.eye(k),
+            w_scale=w_scale,
+        )
 
     return vcov, dof_vec
 
@@ -1665,11 +1737,196 @@ def _cr2_bm_dof_inner(
     return dof_vec
 
 
+def _cr2_bm_dof_inner_weighted(
+    X: np.ndarray,
+    A_g_matrices: Dict[Any, np.ndarray],
+    cluster_idx: Dict[Any, np.ndarray],
+    bread_inv: np.ndarray,
+    MUWTWUM: np.ndarray,
+    W_norm: np.ndarray,
+    contrasts: np.ndarray,
+    w_scale: float = 1.0,
+) -> np.ndarray:
+    """Per-contrast Satterthwaite DOF for WLS-CR2 via clubSandwich's P_array form.
+
+    Implements ``clubSandwich::vcovCR(..., type="CR2") + coef_test(test=
+    "Satterthwaite")`` for the weighted case. Source: jepusto/clubSandwich
+    `R/get_arrays.R::get_GH` (inverse_var=FALSE branch) +
+    `R/coef_test.R::Satterthwaite_df`.
+
+    For each cluster ``g``:
+      ``E_g  = X_g' diag(W_norm_g) A_g``                  (k × n_g)
+      ``ME_g = bread_inv @ E_g``                          (k × n_g)
+      ``MEU_g = ME_g @ X_g``                              (k × k)
+      ``MEF_g = ME_g @ diag(W_norm_g) @ X_g``             (k × k)
+      ``H1_g = MEU_g @ M_U_ct``,
+      ``H2_g = MEF_g @ M_U_ct``,
+      ``H3_g = MEU_g @ Omega_ct``
+    where ``M_U_ct = chol(bread_inv).T``, ``Omega = MUWTWUM``,
+    ``Omega_ct = chol(Omega).T``.
+
+    For each contrast ``c`` (column of ``contrasts``), build a ``(J × J)``
+    matrix ``P`` indexed by cluster pairs:
+      ``P[g, h] = (c' H3_g)(H3_h' c) - (c' H1_g)(H2_h' c) - (c' H2_g)(H1_h' c)``
+      ``P[g, g] += sum_n (c' ME_g[:, n])²``      (diagonal correction)
+
+    ``df_satt(c) = (tr P)² / sum(P²)``.
+
+    Note: the ``w_scale`` normalization cancels in this ratio (verified Step 0).
+    All intermediate matrices use ``bread_inv = (X' W_norm X)^{-1}`` and
+    ``W_norm = w / mean(w)``.
+    """
+    X.shape[1]
+    m = contrasts.shape[1]
+    unique_clusters = list(cluster_idx.keys())
+    len(unique_clusters)
+
+    # "Square-root" factors L such that L @ L.T equals the target matrix.
+    # Try Cholesky first (matches clubSandwich's `t(chol(...))` exactly when
+    # the matrix is PD — important for full-dummy FE designs where eigh-based
+    # symmetric square roots disagree with chol on off-diagonal H-array terms
+    # by enough to materially shift Satterthwaite DOF on high-leverage
+    # coefficients). Fall back to a symmetric-eigendecomposition pseudo-
+    # square-root only on rank-deficient designs (where chol raises), so the
+    # MultiPeriodDiD-style full-dummy designs that exposed the original
+    # singular-bread case still proceed.
+    _TOL = 1e-10
+
+    def _factor_psd(M):
+        sym = 0.5 * (M + M.T)
+        try:
+            return np.linalg.cholesky(sym)
+        except np.linalg.LinAlgError:
+            eigvals, eigvecs = np.linalg.eigh(sym)
+            sqrt_eig = np.where(eigvals > _TOL, np.sqrt(np.maximum(eigvals, _TOL)), 0.0)
+            return eigvecs * sqrt_eig[np.newaxis, :]
+
+    M_U_ct = _factor_psd(bread_inv)
+    Omega_ct = _factor_psd(MUWTWUM)
+
+    # Per-cluster (k × k) H-array slices and (k × n_g) G slices.
+    # Use clubSandwich's exact operation ordering: ME_g = M @ E_g where M is
+    # the UN-normalized bread inverse `(X' W_orig X)^{-1} = bread_inv / w_scale`,
+    # NOT `M_U_norm = bread_inv` (the normalized form). w_scale cancels in
+    # the final DOF ratio mathematically, but using the wrong M-convention
+    # shifts the float64 roundoff floor on high-leverage contrasts (e.g.,
+    # full-dummy FE coefficients) enough to produce 15-30% DOF discrepancies
+    # vs `clubSandwich::vcovCR + coef_test()$df_Satt`. Match R's exact
+    # operation ordering to reproduce R's roundoff structure.
+    M_unnorm = bread_inv / w_scale  # R's "M" = (X' W_orig X)^{-1}
+    H1_list: List[np.ndarray] = []
+    H2_list: List[np.ndarray] = []
+    H3_list: List[np.ndarray] = []
+    G_list: List[np.ndarray] = []
+    for g in unique_clusters:
+        idx_g = cluster_idx[g]
+        X_g = X[idx_g]
+        W_g_diag = W_norm[idx_g]  # length n_g
+        A_g = A_g_matrices[g]
+
+        # E_g = X_g.T @ diag(W_g) @ A_g  (k × n_g)
+        E_g = (X_g.T * W_g_diag[np.newaxis, :]) @ A_g
+        # R's ME_g uses M = bread_inv_unnormalized = bread_inv / w_scale.
+        ME_g = M_unnorm @ E_g  # (k × n_g)
+
+        MEU_g = ME_g @ X_g  # (k × k)
+        MEF_g = ME_g @ (W_g_diag[:, np.newaxis] * X_g)  # (k × k)
+
+        H1_list.append(MEU_g @ M_U_ct)
+        H2_list.append(MEF_g @ M_U_ct)
+        H3_list.append(MEU_g @ Omega_ct)
+        G_list.append(ME_g)  # (k × n_g)
+
+    # For each contrast c, build P (J × J) and compute df_satt.
+    # Also retain (tr P, ||P||²_F, max(|P|)) per contrast so we can detect
+    # noise-floor degeneracies and NaN-guard them in a second pass.
+    dof_vec = np.empty(m)
+    tr_P_arr = np.empty(m)
+    sum_P_sq_arr = np.empty(m)
+    max_abs_P_arr = np.empty(m)
+    for j in range(m):
+        c = contrasts[:, j]  # (k,)
+        # Precompute c-projections: (J,)-indexed length-k vectors
+        c_H1 = np.array([c @ H1 for H1 in H1_list])  # (J, k)
+        c_H2 = np.array([c @ H2 for H2 in H2_list])  # (J, k)
+        c_H3 = np.array([c @ H3 for H3 in H3_list])  # (J, k)
+
+        # P[g, h] = c_H3[g] · c_H3[h] - c_H1[g] · c_H2[h] - c_H2[g] · c_H1[h]
+        P = c_H3 @ c_H3.T - c_H1 @ c_H2.T - c_H2 @ c_H1.T  # (J, J)
+
+        # Diagonal correction: P[g, g] += sum_n (c' ME_g[:, n])²
+        for gi, G_g in enumerate(G_list):
+            c_ME_g = c @ G_g  # (n_g,)
+            P[gi, gi] += float(c_ME_g @ c_ME_g)
+
+        tr_P = float(np.trace(P))
+        sum_P_sq = float(np.sum(P * P))
+        max_abs_P = float(np.max(np.abs(P))) if P.size else 0.0
+        tr_P_arr[j] = tr_P
+        sum_P_sq_arr[j] = sum_P_sq
+        max_abs_P_arr[j] = max_abs_P
+        dof_vec[j] = (tr_P * tr_P) / sum_P_sq if sum_P_sq > 0 else np.nan
+
+    # Noise-floor NaN-guard. The Satterthwaite DOF formula `(tr P)² / sum(P²)`
+    # is scale-invariant, so if a coefficient's P matrix is dominated by
+    # float64 accumulation noise (`max(|P|)` is many orders of magnitude
+    # smaller than the largest contrast's `max(|P|)`), the DOF computed from
+    # noise/noise is unreliable and varies across BLAS implementations by
+    # 15-30%. Detection: a contrast's max(|P|) below `1e-10 ×` the largest
+    # contrast's max(|P|) signals the noise regime. R's clubSandwich gives
+    # different specific values in this regime due to its own BLAS reduction
+    # order; we return NaN with a warning rather than ship arbitrarily-
+    # different small-sample DOF on the user-facing surface.
+    # The noise-floor detector has two criteria, applied union-wise:
+    #   1. Batch-relative: a contrast's max(|P|) < 1e-10 × the largest contrast's
+    #      max(|P|). Useful when computing per-coefficient DOF for an entire design
+    #      (`contrasts=np.eye(k)`) — a single noise-floor coefficient stands out.
+    #   2. Absolute (single-contrast safe): max(|P|) < eps_floor based on the
+    #      bread matrix scale. Necessary because batch-relative reduces to
+    #      max|P| < 1e-10 × max|P| (i.e. False) for a single contrast, leaving
+    #      direct `_compute_cr2_bm_contrast_dof(...)` callers (e.g., MPD avg_att)
+    #      unprotected. Threshold: `(EPS × n × k × bread_inv_scale)²` covers the
+    #      worst-case dgemm accumulation roundoff floor for `H1/H2/H3 @ contrast`
+    #      products. CI codex flagged this as P2 (R8 round); regression test in
+    #      tests/test_methodology_wls_cr2.py::TestWLSCR2FEDoFNoiseGuard.
+    _EPS = np.finfo(np.float64).eps
+    n_obs, k_X = X.shape
+    bread_inv_scale = float(np.max(np.abs(bread_inv))) if bread_inv.size else 1.0
+    abs_noise_floor = (_EPS * n_obs * k_X * max(bread_inv_scale, 1.0)) ** 2
+
+    if m > 1:
+        max_P_overall = float(np.max(max_abs_P_arr))
+        relative_floor = 1e-10 * max_P_overall if max_P_overall > 0 else 0.0
+    else:
+        relative_floor = 0.0
+    noise_floor = max(relative_floor, abs_noise_floor)
+    degenerate = max_abs_P_arr < noise_floor
+    n_degenerate = int(np.sum(degenerate))
+    if n_degenerate > 0:
+        dof_vec[degenerate] = np.nan
+        warnings.warn(
+            f"Satterthwaite DOF for {n_degenerate} of {m} contrast(s) "
+            f"is at the float64 noise floor (max|P| < noise_floor = "
+            f"max({relative_floor:.3e}, {abs_noise_floor:.3e})); reporting "
+            f"NaN. This typically affects high-leverage FE-dummy "
+            f"coefficients whose contrast vector projects to near-zero on "
+            f"the design — the resulting DOF varies across BLAS "
+            f"implementations and is unreliable. The coefficient SEs "
+            f"remain valid; only the Satterthwaite DOF (and any t-test or "
+            f"CI that depends on it) is suppressed.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    return dof_vec
+
+
 def _compute_cr2_bm_contrast_dof(
     X: np.ndarray,
     cluster_ids: np.ndarray,
     bread_matrix: np.ndarray,
     contrasts: np.ndarray,
+    weights: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Per-contrast CR2 Bell-McCaffrey Satterthwaite DOF.
 
@@ -1686,12 +1943,15 @@ def _compute_cr2_bm_contrast_dof(
         Per-observation cluster identifiers. NOT subscripted by any
         column mask — cluster IDs are unchanged by column drops.
     bread_matrix : ndarray of shape (k, k)
-        ``X.T @ X`` (or ``X.T @ W @ X`` for survey-weighted — though the
-        weighted CR2 path is deferred to a follow-up PR).
+        ``X.T @ X`` (unweighted) or ``X.T @ W @ X`` (weighted).
     contrasts : ndarray of shape (k, m)
         Each column is a contrast vector ``c`` for the linear combination
         ``c' beta``. The per-coefficient case is recovered with
         ``contrasts=np.eye(k)``.
+    weights : ndarray of shape (n,), optional
+        Original (un-normalized) weights. ``None`` for unweighted; routes
+        through the bit-equal simple ``(tr B)² / tr(B²)`` formula. When
+        provided, routes through the clubSandwich WLS-CR2 P_array form.
 
     Returns
     -------
@@ -1706,6 +1966,31 @@ def _compute_cr2_bm_contrast_dof(
     n, k = X.shape
     cluster_ids_arr = np.asarray(cluster_ids)
     unique_clusters = np.unique(cluster_ids_arr)
+    # Subpopulation invariance: physically filter `weights > 0` rows before
+    # building per-cluster matrices. Mirrors the same fix in `_compute_cr2_bm`
+    # (CI codex P0 on PR #475 round 2). Zero-weight rows must be inert; the
+    # caller's bread_matrix = X.T @ (X * w[:, None]) is invariant to their
+    # removal, so no bread rebuild is needed.
+    if weights is not None:
+        weights_arr_eff = np.asarray(weights, dtype=np.float64)
+        positive_mask = weights_arr_eff > 0
+        if not np.all(positive_mask):
+            X = X[positive_mask]
+            cluster_ids_arr = cluster_ids_arr[positive_mask]
+            weights_arr_eff = weights_arr_eff[positive_mask]
+            weights = weights_arr_eff
+            n = X.shape[0]
+            unique_clusters = np.unique(cluster_ids_arr)
+        eff_clusters = np.array(
+            [g for g in unique_clusters if float(np.sum(weights_arr_eff[cluster_ids_arr == g])) > 0]
+        )
+        if len(eff_clusters) < 2:
+            raise ValueError(
+                f"Need at least 2 clusters with positive total weight for "
+                f"cluster-robust SEs, got {len(eff_clusters)} effective "
+                f"clusters out of {len(unique_clusters)} unique."
+            )
+        unique_clusters = eff_clusters
     if len(unique_clusters) < 2:
         raise ValueError(
             f"Need at least 2 clusters for cluster-robust SEs, got " f"{len(unique_clusters)}"
@@ -1723,17 +2008,48 @@ def _compute_cr2_bm_contrast_dof(
             ) from e
         raise
 
-    H = X @ bread_inv @ X.T
-    M = np.eye(n) - H
+    # Normalize weights (clubSandwich convention; w_scale cancels in DOF ratio).
+    # Use M_U = (X' W_norm X)^{-1} = w_scale * bread_inv throughout, matching
+    # clubSandwich's internal matrix used in the P_array construction.
+    if weights is not None:
+        weights_arr = np.asarray(weights, dtype=np.float64)
+        pos = weights_arr > 0
+        w_scale = float(np.mean(weights_arr[pos])) if np.any(pos) else 1.0
+        W_norm = weights_arr / w_scale
+        M_U = w_scale * bread_inv
+    else:
+        W_norm = np.ones(n, dtype=np.float64)
+        M_U = bread_inv
+
     cluster_idx = {g: np.where(cluster_ids_arr == g)[0] for g in unique_clusters}
+
+    # S_W = sum_g X_g' diag(W_norm_g²) X_g. For unweighted: S_W = X'X = bread_matrix.
+    S_W = np.zeros((k, k))
+    for g in unique_clusters:
+        idx_g = cluster_idx[g]
+        X_g = X[idx_g]
+        S_W += X_g.T @ (X_g * (W_norm[idx_g] ** 2)[:, np.newaxis])
+    MUWTWUM = M_U @ S_W @ M_U
+
     A_g_matrices: Dict[Any, np.ndarray] = {}
     for g in unique_clusters:
         idx_g = cluster_idx[g]
-        H_gg = H[np.ix_(idx_g, idx_g)]
+        X_g = X[idx_g]
+        # Asymmetric weighted hat (collapses to symmetric when W_norm=1).
+        H_gg = (X_g @ M_U @ X_g.T) * W_norm[idx_g][np.newaxis, :]
         I_g = np.eye(len(idx_g))
-        A_g_matrices[g] = _cr2_adjustment_matrix(I_g - H_gg)
+        bias_term = X_g @ MUWTWUM @ X_g.T
+        G_g = I_g - H_gg - H_gg.T + bias_term
+        A_g_matrices[g] = _cr2_adjustment_matrix(G_g)
 
-    return _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, bread_inv, contrasts)
+    if weights is None:
+        # Bit-equal to prior unweighted path: simple (tr B)² / tr(B²) form.
+        H = X @ M_U @ X.T
+        M = np.eye(n) - H
+        return _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, M_U, contrasts)
+    return _cr2_bm_dof_inner_weighted(
+        X, A_g_matrices, cluster_idx, M_U, MUWTWUM, W_norm, contrasts, w_scale=w_scale
+    )
 
 
 def _compute_bm_dof_from_contrasts(
@@ -1745,29 +2061,42 @@ def _compute_bm_dof_from_contrasts(
 ) -> np.ndarray:
     """Per-contrast Bell-McCaffrey (Imbens-Kolesar 2016) Satterthwaite DOF.
 
-    For each column ``c`` of ``contrasts`` (shape ``(k, m)``), define
-    ``q = X (X'WX)^{-1} c`` (length ``n``). Under a homoskedastic null, the
-    HC2 variance estimator for ``c' beta`` has a weighted-chi-squared
-    distribution; matching mean and variance via Satterthwaite gives
+    Two code paths depending on ``weights``:
+
+    **Unweighted** (``weights is None``): uses the simple Pustejovsky-Tipton
+    (2018) Theorem 1 form
 
         DOF(c) = (sum_i q(i)^2)^2 / sum_{i, k} a(i) a(k) M_{ik}^2
 
-    where ``M = I - H`` and ``a(i) = q(i)^2 / (1 - h_ii)``. Using the idempotent
-    identity ``M^2 = M``, ``trace(B) = sum_i q(i)^2`` matches the numerator.
+    where ``q = X (X'X)^{-1} c``, ``M = I - H``, ``a(i) = q(i)^2 / (1 - h_ii)``.
+    Using the idempotent identity ``M^2 = M``, ``trace(B) = sum_i q(i)^2``
+    matches the numerator. Allocates an ``(n, n)`` temporary for ``M`` so the
+    cost is ``O(n^2 k)`` for the hat build plus ``O(n^2 m)`` for the per-
+    contrast sums. Practical for ``n < 10_000``; larger designs should switch
+    to a scores-based formulation (tracked in TODO.md).
 
-    Allocates an ``(n, n)`` temporary for ``M`` so the cost is ``O(n^2 k)`` for
-    the hat build plus ``O(n^2 m)`` for the per-contrast sums. Practical for
-    ``n < 10_000``; larger designs should switch to a scores-based formulation
-    (tracked in TODO.md).
+    **Weighted** (``weights is not None``): dispatches to the clubSandwich
+    singleton-cluster CR2 reduction (each observation is its own cluster)
+    via :func:`_compute_cr2_bm_contrast_dof`. The simple formula above is
+    only correct in the unweighted case — empirically it diverges from
+    ``clubSandwich::vcovCR(cluster=1:n, type="CR2") + coef_test(test=
+    "Satterthwaite")$df_Satt`` by ~6% on heteroskedastic weights. The
+    P_array form matches clubSandwich at ``atol=1e-10`` (see the WLS-CR2
+    section in ``docs/methodology/REGISTRY.md``). Only ``weight_type=
+    "pweight"`` is supported; ``aweight`` / ``fweight`` are rejected by
+    ``_compute_robust_vcov_numpy`` upstream of this helper.
 
     Parameters
     ----------
     X : ndarray of shape (n, k)
     bread_matrix : ndarray of shape (k, k) == (X'WX) or (X'X)
-    h_diag : ndarray of shape (n,), hat-matrix diagonals (already weighted)
+    h_diag : ndarray of shape (n,), hat-matrix diagonals (already weighted).
+        Used only on the unweighted path; the weighted dispatch builds its
+        own per-cluster `H_gg` blocks via :func:`_compute_cr2_bm`.
     contrasts : ndarray of shape (k, m). Pass ``np.eye(k)`` for per-coefficient DOF.
-    weights : optional weights (shape ``(n,)``) used to build the weighted hat
-        matrix. When ``None``, unweighted.
+    weights : optional weights (shape ``(n,)``). When ``None``, uses the
+        simple ``(tr B)^2 / tr(B^2)`` formula. When provided, dispatches to
+        the clubSandwich singleton-cluster CR2 P_array form.
 
     Returns
     -------
@@ -1777,6 +2106,21 @@ def _compute_bm_dof_from_contrasts(
     n, k = X.shape
     if contrasts.ndim != 2 or contrasts.shape[0] != k:
         raise ValueError(f"contrasts must have shape (k={k}, m); got {contrasts.shape}")
+    if weights is not None:
+        # Weighted one-way HC2-BM uses clubSandwich's singleton-cluster CR2
+        # reduction (each obs is its own cluster). The simple (tr B)² / tr(B²)
+        # formula is only correct in the unweighted case — empirically it
+        # diverges from `clubSandwich::vcovCR(cluster=1:n, type="CR2") +
+        # coef_test(test="Satterthwaite")$df_Satt` by ~6% on heteroskedastic
+        # weights. The P_array form (via _cr2_bm_dof_inner_weighted) matches
+        # at atol=1e-10.
+        cluster_ids_singleton = np.arange(n)
+        return _compute_cr2_bm_contrast_dof(
+            X, cluster_ids_singleton, bread_matrix, contrasts, weights=weights
+        )
+
+    # Unweighted: keep the simple (tr B)² / tr(B²) formula for bit-equal
+    # backward compatibility with prior unweighted Bell-McCaffrey output.
     try:
         bread_inv_c = np.linalg.solve(bread_matrix, contrasts)
     except np.linalg.LinAlgError as e:
@@ -1788,11 +2132,7 @@ def _compute_bm_dof_from_contrasts(
         raise
     # q has shape (n, m); column j is X @ (bread_inv @ contrasts[:, j]).
     q = X @ bread_inv_c
-    # Build the weighted residual-maker M = I - H once.
-    if weights is not None:
-        H = X @ np.linalg.solve(bread_matrix, (X * weights[:, np.newaxis]).T)
-    else:
-        H = X @ np.linalg.solve(bread_matrix, X.T)
+    H = X @ np.linalg.solve(bread_matrix, X.T)
     M = np.eye(n) - H
     M_sq = M * M  # elementwise square
     one_minus_h = np.maximum(1.0 - h_diag, 1e-10)
@@ -1949,8 +2289,25 @@ def _compute_robust_vcov_numpy(
     # CR2 Bell-McCaffrey cluster-robust (vcov_type="hc2_bm" + cluster).
     # ------------------------------------------------------------------
     if vcov_type == "hc2_bm" and cluster_ids is not None:
-        # Weighted CR2 is Phase 2+; the public wrapper guards against it.
-        vcov_cr2, dof_cr2 = _compute_cr2_bm(X, residuals, cluster_ids, bread_matrix)
+        # The clubSandwich WLS-CR2 port matches the `pweight` (sampling-weight)
+        # convention only. clubSandwich's algebra puts `w` directly into the
+        # score (s_g = X_g' diag(W) A_g u_g), producing meat = sum w_g² ...
+        # — exactly diff-diff's `pweight` convention. `aweight` (analytical /
+        # inverse-variance) and `fweight` (frequency-expanded) require
+        # different CR2 derivations that are not in this port. Reject loudly.
+        if weights is not None and weight_type != "pweight":
+            raise NotImplementedError(
+                f"vcov_type='hc2_bm' with weight_type={weight_type!r} is not "
+                "supported. The clubSandwich WLS-CR2 port matches the "
+                "'pweight' (sampling-weight) convention only. For analytical "
+                "('aweight') or frequency ('fweight') weights with CR2 "
+                "Bell-McCaffrey, the derivation is a separate methodology "
+                "task. Use weight_type='pweight' or vcov_type='hc1' "
+                "(CR1 supports all three weight types)."
+            )
+        vcov_cr2, dof_cr2 = _compute_cr2_bm(
+            X, residuals, cluster_ids, bread_matrix, weights=weights
+        )
         if return_dof:
             return vcov_cr2, dof_cr2
         return vcov_cr2
@@ -1960,6 +2317,32 @@ def _compute_robust_vcov_numpy(
     # ------------------------------------------------------------------
     if vcov_type in ("hc2", "hc2_bm"):
         # cluster path handled above; here cluster_ids is None by construction.
+        # **Weighted hc2_bm one-way**: clubSandwich's CR2 with singleton clusters
+        # uses the bias-corrected adjustment `A_i = 1 / sqrt(G_i)` where
+        # `G_i = 1 - 2*h_ii + X_i' M_U S_W M_U X_i`, NOT the simple HC2
+        # leverage `1/sqrt(1-h_ii)`. The two agree unweighted (S_W = X'X, so
+        # the bias term collapses to h_ii) but diverge on weighted designs
+        # because S_W = sum_j w_j² X_j X_j' ≠ X'WX. To match
+        # `clubSandwich::vcovCR(cluster=1:n, type="CR2")`, route weighted
+        # hc2_bm through the singleton-cluster CR2 path so vcov and DOF are
+        # consistent (both use the clubSandwich algebra).
+        if vcov_type == "hc2_bm" and weights is not None:
+            # Same `weight_type` gating as the cluster-CR2 branch above:
+            # only pweight matches clubSandwich's WLS-CR2 algebra.
+            if weight_type != "pweight":
+                raise NotImplementedError(
+                    f"vcov_type='hc2_bm' with weight_type={weight_type!r} is "
+                    "not supported. The clubSandwich WLS-CR2 port matches "
+                    "the 'pweight' (sampling-weight) convention only. Use "
+                    "weight_type='pweight' or vcov_type='hc1' (CR1 supports "
+                    "all three weight types)."
+                )
+            vcov_cr2, dof_cr2 = _compute_cr2_bm(
+                X, residuals, np.arange(n), bread_matrix, weights=weights
+            )
+            if return_dof:
+                return vcov_cr2, dof_cr2
+            return vcov_cr2
         h_diag = _compute_hat_diagonals(X, bread_matrix, weights=weights)
         if np.any(h_diag > 1.0 + 1e-6):
             warnings.warn(
@@ -2592,11 +2975,13 @@ class LinearRegression:
         two conflict (e.g. ``robust=False, vcov_type="hc2"``), in which
         case ``__init__`` raises. See :func:`solve_ols` for the per-family
         semantics and unsupported combinations. For ``"hc2_bm"``: when
-        ``cluster_ids`` is provided, dispatches to CR2 Bell-McCaffrey; with
-        ``weights``, raises ``NotImplementedError`` (the BM DOF path is
-        currently inconsistent with the WLS transform). On top of the
-        sandwich, the class stores per-coefficient BM Satterthwaite DOF
-        (``self._bm_dof``) and threads it into ``get_inference``.
+        ``cluster_ids`` is provided, dispatches to CR2 Bell-McCaffrey;
+        with ``weights`` (one-way or clustered) dispatches to the
+        clubSandwich WLS-CR2 port — supported for
+        ``weight_type="pweight"`` only (``aweight`` / ``fweight`` raise
+        ``NotImplementedError``). On top of the sandwich, the class
+        stores per-coefficient BM Satterthwaite DOF (``self._bm_dof``)
+        and threads it into ``get_inference``.
 
         For ``"conley"`` (Conley 1999 spatial-HAC) two operating modes are
         supported on the `LinearRegression` / `compute_robust_vcov` surface:
@@ -2913,15 +3298,16 @@ class LinearRegression:
                 conley_lag_cutoff=self.conley_lag_cutoff,
             )
             # For hc2_bm, compute per-coefficient Bell-McCaffrey DOF. Both
-            # the one-way HC2+BM case and the cluster CR2 case are supported;
-            # the weighted cluster path (guarded in compute_robust_vcov) is
-            # Phase 2+ and is skipped here (falls through to self._bm_dof = None).
+            # the one-way HC2+BM case and the cluster CR2 case are supported,
+            # including the weighted clustered CR2 path via the clubSandwich
+            # WLS-CR2 port. The dispatcher already rejects non-pweight weight
+            # types for hc2_bm + weights, so reaching this block guarantees
+            # `_compute_cr2_bm` returns a finite per-coefficient DOF.
             if (
                 _fit_vcov_type == "hc2_bm"
                 and not _use_survey_vcov
                 and vcov is not None
                 and not np.all(np.isnan(coefficients))
-                and not (effective_cluster_ids is not None and _fit_weights is not None)
             ):
                 # Identified columns for DOF (rank-deficient case sets NaN coefs).
                 nan_mask = np.isnan(coefficients)
@@ -3302,7 +3688,22 @@ class LinearRegression:
             effective_df = self.survey_df_
         elif self._bm_dof is not None and 0 <= index < len(self._bm_dof):
             bm_val = self._bm_dof[index]
-            effective_df = None if (not np.isfinite(bm_val)) else float(bm_val)
+            if not np.isfinite(bm_val):
+                # NaN BM DOF means the noise-floor guard fired (typically a
+                # high-leverage FE-dummy contrast on weighted CR2-BM). Falling
+                # through to df=None would silently use the normal distribution
+                # and produce misleading p≈0 / zero-width CIs. Instead, return
+                # NaN inference fields for the affected coefficient.
+                return InferenceResult(
+                    coefficient=coef,
+                    se=se,
+                    t_stat=float("nan"),
+                    p_value=float("nan"),
+                    conf_int=(float("nan"), float("nan")),
+                    df=None,
+                    alpha=effective_alpha,
+                )
+            effective_df = float(bm_val)
         elif (
             hasattr(self, "survey_design")
             and self.survey_design is not None

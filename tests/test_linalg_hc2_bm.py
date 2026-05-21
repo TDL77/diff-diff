@@ -12,9 +12,11 @@ Phase 1a of the HeterogeneousAdoptionDiD implementation. Ships:
   backend for ``MultiPeriodDiD``'s post-period-average ATT inference under the
   cluster+hc2_bm combination.
 
-Weighted CR2 Bell-McCaffrey (``hc2_bm`` + ``cluster=`` + ``weights=``) remains
-deferred to a follow-up; the corresponding ``NotImplementedError`` gate in
-``_validate_vcov_args`` is exercised by ``TestInvalidInputs``.
+Weighted CR2 Bell-McCaffrey (``hc2_bm`` + ``weights=``, both one-way and
+clustered) is now supported via the clubSandwich WLS-CR2 port. Parity against
+``clubSandwich::vcovCR(lm(weights=w), type="CR2") + coef_test(test=
+"Satterthwaite")$df_Satt`` is locked in ``tests/test_methodology_wls_cr2.py``;
+this file's tests cover backward-compat (unweighted is bit-equal to prior).
 """
 
 from __future__ import annotations
@@ -297,59 +299,63 @@ class TestHC1Unchanged:
         explicit = compute_robust_vcov(X, resid, cluster_ids=cluster_ids, vcov_type="hc1")
         np.testing.assert_allclose(default, explicit, atol=1e-14, rtol=1e-14)
 
-    def test_hc2_bm_weighted_cluster_not_implemented(self, small_ols_dataset):
-        """Weighted CR2 Bell-McCaffrey is deferred to Phase 2+."""
-        X, y = small_ols_dataset
-        _, resid, _ = _fit_unweighted(X, y)
-        cluster_ids = np.arange(X.shape[0]) % 5
-        w = np.ones(X.shape[0])
-        with pytest.raises(NotImplementedError, match="weights"):
-            compute_robust_vcov(
-                X,
-                resid,
-                cluster_ids=cluster_ids,
-                vcov_type="hc2_bm",
-                weights=w,
-                weight_type="pweight",
-            )
+    def test_hc2_bm_weighted_cluster_gate_lifted(self, small_ols_dataset):
+        """Weighted CR2 Bell-McCaffrey (cluster + weights) is now supported via
+        the clubSandwich WLS-CR2 port. Smoke test: produces finite vcov + DOF.
 
-    def test_hc2_bm_weighted_one_way_not_implemented(self, small_ols_dataset):
-        """Weighted one-way Bell-McCaffrey is also deferred.
-
-        The BM DOF helper (`_compute_bm_dof_from_contrasts`) builds its hat
-        matrix from the unscaled design as `X (X'WX)^{-1} X' W`, but
-        `solve_ols` solves weighted regression by transforming to
-        `X* = sqrt(w) X`, `y* = sqrt(w) y`. The symmetric-idempotent residual
-        maker `M* = I - H*` with `H* = sqrt(W) X (X'WX)^{-1} X' sqrt(W)` is
-        the correct one for the Satterthwaite ratio; the asymmetric
-        `X (X'WX)^{-1} X' W` currently produced is neither the transformed
-        nor the original-scale formula. Rather than ship silently-wrong
-        small-sample p-values, `_validate_vcov_args` fails fast.
+        Numerical parity against ``clubSandwich::vcovCR(lm(weights=w),
+        type="CR2") + coef_test()$df_Satt`` is locked in
+        ``tests/test_methodology_wls_cr2.py``.
         """
         X, y = small_ols_dataset
-        _, resid, _ = _fit_unweighted(X, y)
-        w = np.ones(X.shape[0])
-        with pytest.raises(NotImplementedError, match="weights"):
-            compute_robust_vcov(
-                X,
-                resid,
-                vcov_type="hc2_bm",
-                weights=w,
-                weight_type="pweight",
-            )
-        # The failure must also hit the internal entry point so callers that
-        # reach the numpy backend directly via `solve_ols` do not bypass it.
-        from diff_diff.linalg import _compute_robust_vcov_numpy
+        cluster_ids = np.arange(X.shape[0]) % 5
+        rng = np.random.default_rng(7)
+        w = rng.uniform(0.5, 2.0, size=X.shape[0])
+        # Refit WLS to get correct residuals for the weighted CR2 path.
+        coef = np.linalg.solve(X.T @ (X * w[:, None]), X.T @ (w * y))
+        resid_w = y - X @ coef
+        vcov, dof = compute_robust_vcov(
+            X,
+            resid_w,
+            cluster_ids=cluster_ids,
+            vcov_type="hc2_bm",
+            weights=w,
+            weight_type="pweight",
+            return_dof=True,
+        )
+        assert np.all(np.isfinite(vcov)), "weighted CR2-BM vcov must be finite"
+        assert np.all(np.diag(vcov) > 0), "weighted CR2-BM vcov diag must be positive"
+        assert np.all(np.isfinite(dof)) and np.all(
+            dof > 0
+        ), "weighted CR2-BM DOF must be finite and positive"
 
-        with pytest.raises(NotImplementedError, match="weights"):
-            _compute_robust_vcov_numpy(
-                X,
-                resid,
-                None,
-                weights=w,
-                weight_type="pweight",
-                vcov_type="hc2_bm",
-            )
+    def test_hc2_bm_weighted_one_way_gate_lifted(self, small_ols_dataset):
+        """Weighted one-way HC2-BM (no cluster) is now supported.
+
+        Uses clubSandwich's singleton-cluster CR2 reduction (each obs is its
+        own cluster) for the DOF computation. The simple ``(tr B)² / tr(B²)``
+        unweighted formula DIVERGES from clubSandwich by ~6% on weighted
+        designs, so the weighted branch routes through the P_array form
+        instead.
+        """
+        X, y = small_ols_dataset
+        rng = np.random.default_rng(8)
+        w = rng.uniform(0.5, 2.0, size=X.shape[0])
+        coef = np.linalg.solve(X.T @ (X * w[:, None]), X.T @ (w * y))
+        resid_w = y - X @ coef
+        vcov, dof = compute_robust_vcov(
+            X,
+            resid_w,
+            vcov_type="hc2_bm",
+            weights=w,
+            weight_type="pweight",
+            return_dof=True,
+        )
+        assert np.all(np.isfinite(vcov)), "weighted HC2-BM vcov must be finite"
+        assert np.all(np.diag(vcov) > 0), "weighted HC2-BM vcov diag must be positive"
+        assert np.all(np.isfinite(dof)) and np.all(
+            dof > 0
+        ), "weighted HC2-BM DOF must be finite and positive"
 
 
 # =============================================================================
@@ -398,22 +404,29 @@ class TestSolveOlsValidationBypass:
         with pytest.raises(ValueError, match="hc2 is one-way only"):
             solve_ols(X, y, cluster_ids=cluster_ids, vcov_type="hc2")
 
-    def test_solve_ols_rejects_cluster_weights_hc2_bm(self):
+    def test_solve_ols_accepts_cluster_weights_hc2_bm(self):
+        """Weighted CR2 BM via solve_ols is supported post-clubSandwich port.
+
+        Smoke test only — numerical parity locked in
+        ``tests/test_methodology_wls_cr2.py``.
+        """
         rng = np.random.default_rng(3)
         n = 20
         X = np.column_stack([np.ones(n), rng.uniform(0, 1, n)])
         y = X @ np.array([1.0, 0.5]) + rng.normal(0, 0.1, n)
         cluster_ids = np.arange(n) % 4
         weights = rng.uniform(0.5, 2.0, size=n)
-        with pytest.raises(NotImplementedError, match="weights"):
-            solve_ols(
-                X,
-                y,
-                cluster_ids=cluster_ids,
-                vcov_type="hc2_bm",
-                weights=weights,
-                weight_type="pweight",
-            )
+        coef, _resid, vcov = solve_ols(
+            X,
+            y,
+            cluster_ids=cluster_ids,
+            vcov_type="hc2_bm",
+            weights=weights,
+            weight_type="pweight",
+            return_vcov=True,
+        )
+        assert vcov is not None and np.all(np.isfinite(vcov))
+        assert np.all(np.diag(vcov) > 0)
 
     def test_linear_regression_rejects_cluster_plus_hc2(self):
         """LinearRegression is an estimator-level entry; it must also raise."""
@@ -554,10 +567,16 @@ class TestCR2BMCluster:
             if name == "meta":
                 continue
             # Skip scenarios that don't fit this test's `y ~ x` two-column
-            # contract (e.g. `absorbed_fe_did` is a multi-column DiD design
-            # tested separately via the DiD estimator path in
-            # `test_estimators_vcov_type.py::TestDiDAbsorbedFERParity`).
-            if "x" not in d:
+            # unweighted-cluster contract. Absorbed-FE / MPD / TWFE / SA / WLS
+            # scenarios are tested separately via their own parity tests
+            # (e.g. `test_estimators_vcov_type.py::TestDiDAbsorbedFERParity`
+            # for absorbed_fe_did; `tests/test_methodology_wls_cr2.py` for
+            # the `weighted_*` scenarios).
+            if "x" not in d or "cluster" not in d or "vcov_shape" not in d:
+                continue
+            # The weighted-cluster fixtures use the same `cluster + x` keys
+            # but with `weights` present and a 3-column `[1, x, z]` design.
+            if "weights" in d:
                 continue
             x = np.array(d["x"])
             y = np.array(d["y"])

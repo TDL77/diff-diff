@@ -1891,8 +1891,13 @@ class MultiPeriodDiD(DifferenceInDifferences):
                 else:
                     # Cluster-aware CR2 BM Satterthwaite DOF for per-coefficient
                     # AND post-period-average compound contrast (Gate 6 lift).
-                    # Weighted CR2-BM is a separate gate; survey paths never
-                    # reach this block (outer `not _use_survey_vcov` guard).
+                    # This branch is guarded above by `not _use_survey_vcov`,
+                    # so when reached, `survey_weights` is None (survey designs
+                    # always route through the TSL path). The clubSandwich
+                    # WLS-CR2 port lifted `_compute_cr2_bm_contrast_dof` to
+                    # accept `weights=`, but no MPD entry point currently
+                    # passes non-None weights here — `weights=None` is the
+                    # de facto contract on this code path today.
                     _dof_all = _compute_cr2_bm_contrast_dof(
                         X_kept,
                         effective_cluster_ids,
