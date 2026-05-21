@@ -272,7 +272,7 @@ Footnote 15 cross-references Callaway and Sant'Anna (2018), later published 2021
 
 ### Relation to Existing diff-diff Estimators
 - Already implemented as `diff_diff.ChaisemartinDHaultfoeuille` (8,783 LoC).
-- Library covers binary `DID_M` / `DID_+` / `DID_-` and the multi-lag placebo `DID_M^pl` from the 2020 AER paper.
+- Library covers binary `DID_M` / `DID_+` / `DID_-` from the 2020 AER paper. The single-lag placebo `DID_M^pl` is shipped on the Phase 1 (`L_max=None`) path with point estimate only (placebo inference fields are NaN — see the Requirements checklist above). Multi-lag placebos require the Phase 2 dynamic-companion `DID^{pl}_l` machinery (`L_max >= 1`), covered in the separate 2022 paper review.
 - The Phase 2 event-study path (`DID_l`, `DID_{g,l}`, `DID^{pl}_l`, normalized `DID^n_l`, cost-benefit `delta`, sup-t simultaneous bands) implements the 2022, revised July 2023 NBER WP 29873 dynamic companion - see the separate review for that paper.
 - Library does NOT cover all Section IV extensions in this repository: fuzzy DID is a separate dCDH 2018 paper (not in scope here), and the covariate-adjusted path is partial.
 - 6 documented deviations from R `DIDmultiplegtDYN` (see REGISTRY § ChaisemartinDHaultfoeuille for the full text and citations):
@@ -295,7 +295,7 @@ Footnote 15 cross-references Callaway and Sant'Anna (2018), later published 2021
   - **Online Appendix Section 4:** `DID_M` extension to nonbinary discrete treatments. Referenced at page 2979.
   - **Online Appendix Section 6:** paper-by-paper review of the 33 AER 2010-2012 papers. Referenced at page 2983.
   - **Online Appendix Section 2:** fuzzy-design extensions. Referenced at page 2981.
-- **Closed-form analytical variance for `DID_M`:** Not given in the main text. The 2022, revised July 2023 NBER WP 29873 companion paper materializes the cohort-recentered plug-in variance (Web Appendix Section 3.7.3); the 2020 AER paper relies on clustered bootstrap.
+- **Closed-form analytical variance for `DID_M`:** Not given in the AER 2020 main text. The dynamic companion (NBER WP 29873, revised July 2023) materializes the cohort-recentered plug-in variance (Web Appendix Section 3.7.3); the AER 2020 paper's empirical applications themselves report cluster-robust SEs (county-level in Application 1, worker-level in Application 2) for the `DID_M` table entries, with clustered bootstrap reserved for the cross-estimator difference tests `beta_hat_fe - DID_M` / `beta_hat_fd - DID_M` (footnotes 23-24). See the Standard Errors section above for the paper-vs-library SE breakdown.
 - **Bootstrap iteration count:** Not specified in the main paper. Standard practice (199, 499, or 999) is reasonable default. The Stata `did_multiplegt` package help files presumably specify a default.
 - **Bootstrap weight distribution:** Not specified in the main paper. The accompanying Stata implementation uses clustered bootstrap; whether it is Rademacher, Mammen, Webb, or pairs is not documented in the extracted main-text range.
 - **Relation to Imai & Kim (2018) multiperiod DID:** Discussed on page 2979 - `DID_M` is "related to" the Imai-Kim multiperiod DID, but the Imai-Kim estimator is a weighted average of `DID_{+,t}` only (no leavers component) and does not extend to nonbinary treatments. The Imai-Kim authors do not establish properties of their estimator. The relation is detailed in online Appendix Section 4.
