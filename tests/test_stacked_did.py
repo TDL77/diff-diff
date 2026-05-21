@@ -1296,39 +1296,10 @@ class TestStackedDiDVcovType:
         np.testing.assert_allclose(res.overall_att, BASELINE_ATT, atol=1e-13)
         np.testing.assert_allclose(res.overall_se, BASELINE_SE, atol=1e-10)
 
-    def test_hc2_bm_rank_deficient_design_keeps_bm_dof_on_identified_contrasts(
-        self, staggered_data
-    ):
-        """Per local codex R2 P1: when a nuisance column is collinear and
-        dropped by solve_ols's rank-deficient handler, the target delta_h
-        coefficients should STILL get Bell-McCaffrey contrast DOF — not
-        downgrade silently to normal-theory inference.
-
-        Construction: clone the panel and add a perfectly collinear
-        duplicate of the outcome's pre-period mean as an extra control
-        column. solve_ols will drop one of the redundant columns. The
-        target event-study delta_h coefficients remain identified, so
-        their inference must still use BM DOF.
-
-        We verify by fitting (a) the original panel and (b) the
-        duplicate-augmented panel, both with vcov_type='hc2_bm'. The
-        delta_h CIs should match between the two (the dropped collinear
-        column doesn't affect identification of delta_h), and on the
-        augmented panel the CI half-width must still encode a BM DOF (not
-        the normal-distribution z=1.96).
-
-        Note: StackedDiD's design matrix is built internally and doesn't
-        directly accept extra columns. A simpler way to induce rank
-        deficiency is to duplicate a unit (so two of the unit FE in the
-        stacked design become collinear). But StackedDiD doesn't include
-        explicit unit FE in the regression — those are subsumed into the
-        Q-weighted design. So the cleanest test is to verify the code
-        path doesn't crash + still emits BM DOF when solve_ols
-        rank-deficient handling COULD fire, even if it doesn't on this
-        specific fixture. We pin: (i) no UserWarning about falling back
-        to normal distribution; (ii) CI half-width / SE > z_0.975
-        (proves a t-distribution was used, not normal).
-        """
+    def test_hc2_bm_uses_t_distribution_not_normal_on_well_conditioned_design(self, staggered_data):
+        """Smoke-test on a well-conditioned design: hc2_bm CIs use t(BM DOF),
+        not normal-theory z=1.96. End-to-end check that BM DOF threading
+        from PR R1 fix is wired through to safe_inference."""
         from scipy.stats import norm
 
         z_975 = norm.ppf(0.975)  # ~1.96
@@ -1344,20 +1315,14 @@ class TestStackedDiDVcovType:
                 first_treat="first_treat",
                 aggregate="event_study",
             )
-        # No fallback-to-normal warning on the standard fixture (well-
-        # conditioned design).
-        fallback_warns = [
-            w
-            for w in caught
-            if "Falling back to normal distribution" in str(w.message)
-            or "anti-conservative" in str(w.message)
-        ]
+        # No fallback warning on a well-conditioned design.
+        fallback_warns = [w for w in caught if "Bell-McCaffrey contrast DOF" in str(w.message)]
         assert len(fallback_warns) == 0, (
-            f"hc2_bm should not fall back to normal-theory on a well-conditioned "
-            f"design; got {len(fallback_warns)} fallback warning(s)"
+            f"hc2_bm should not warn on a well-conditioned design; "
+            f"got {len(fallback_warns)} warning(s)"
         )
-        # Verify t-distribution was used: CI half-width / SE > z_0.975 for
-        # any post-treatment effect (BM DOF inflates the critical value).
+        # CI half-width / SE > z_0.975 for at least one post-treatment effect
+        # AND for the overall ATT (BM DOF inflates the critical value).
         any_t_dist_used = False
         for h in [0, 1, 2]:
             if h in res.event_study_effects:
@@ -1366,20 +1331,112 @@ class TestStackedDiDVcovType:
                     continue
                 half_width = es["conf_int"][1] - es["effect"]
                 t_crit = half_width / es["se"]
-                if t_crit > z_975 * 1.0001:  # > z + epsilon ⇒ t-distribution
+                if t_crit > z_975 * 1.0001:
                     any_t_dist_used = True
                     break
         assert any_t_dist_used, (
             "hc2_bm CIs should use t(BM DOF), not normal — at least one "
             "post-treatment event_study CI half-width must exceed z_0.975 * SE"
         )
-        # Also: overall ATT must use t-distribution
         overall_half_width = res.overall_conf_int[1] - res.overall_att
         overall_t_crit = overall_half_width / res.overall_se
-        assert overall_t_crit > z_975 * 1.0001, (
-            f"Overall ATT CI must use t(BM DOF) under hc2_bm; got t_crit="
-            f"{overall_t_crit}, expected > z_0.975={z_975}"
+        assert overall_t_crit > z_975 * 1.0001
+
+    def test_hc2_bm_rank_deficient_keeps_bm_dof_on_identified_contrasts(
+        self, staggered_data, monkeypatch
+    ):
+        """Per local codex R2 P1 (and R5 P3 test-coverage clarification):
+        when solve_ols's rank-deficient handler drops a column (returns
+        NaN in coef[j] for that column), the SURVIVING delta_h coefficients
+        should still get BM DOF (t-distribution). The dropped coefficient
+        gets NaN inference; identified ones keep finite t-distribution CIs.
+
+        Forces rank deficiency by monkeypatching solve_ols to return a coef
+        vector with one NaN entry at a non-target column (specifically: the
+        intercept column, which is NOT one of the event-study delta_h
+        targets). This exercises the reduced-design code path at
+        stacked_did.py:529-577 added in the R2 P1 fix.
+
+        Verifies:
+          1. The fit doesn't emit the fallback warning (BM DOF computed
+             successfully on the reduced design).
+          2. event_study_effects[h] for identified delta_h have finite
+             inference using t-distribution (CI half-width > z_0.975 * SE).
+          3. The dropped coefficient (intercept) gets NaN inference IF the
+             estimator surfaces it — for StackedDiD it doesn't, since only
+             delta_h coefficients are exposed via event_study_effects.
+        """
+        import importlib
+
+        from scipy.stats import norm
+
+        # Use importlib to get the MODULE (not the same-name function exported
+        # at the diff_diff package level).
+        sd_module = importlib.import_module("diff_diff.stacked_did")
+
+        z_975 = norm.ppf(0.975)
+
+        # Wrap solve_ols to inject NaN at the intercept column (index 0).
+        # The intercept is NOT a target delta_h, so dropping it shouldn't
+        # affect event-study identification — just exercises the
+        # rank-deficient code path.
+        _orig_solve_ols = sd_module.solve_ols
+
+        def _fake_solve_ols(*args, **kwargs):
+            coef, residuals, vcov = _orig_solve_ols(*args, **kwargs)
+            # Inject NaN at intercept (column 0) to simulate rank deficiency
+            coef_modified = coef.copy()
+            coef_modified[0] = np.nan
+            # Also NaN-out vcov row/col 0 to match what _expand_vcov_with_nan
+            # would produce for a dropped column.
+            if vcov is not None:
+                vcov_modified = vcov.copy()
+                vcov_modified[0, :] = np.nan
+                vcov_modified[:, 0] = np.nan
+            else:
+                vcov_modified = vcov
+            return coef_modified, residuals, vcov_modified
+
+        monkeypatch.setattr(sd_module, "solve_ols", _fake_solve_ols)
+
+        est = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc2_bm")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = est.fit(
+                staggered_data,
+                outcome="outcome",
+                unit="unit",
+                time="period",
+                first_treat="first_treat",
+                aggregate="event_study",
+            )
+        # The reduced-design code path should fire without emitting the
+        # fallback warning (the helper succeeds on the kept-column subset).
+        fallback_warns = [w for w in caught if "Bell-McCaffrey contrast DOF" in str(w.message)]
+        assert len(fallback_warns) == 0, (
+            f"Rank-deficient handling should subset to kept columns and "
+            f"succeed; got {len(fallback_warns)} fallback warning(s): "
+            f"{[str(w.message) for w in fallback_warns]}"
         )
+        # All event-study delta_h coefficients (none dropped here) should
+        # have finite t-distribution inference.
+        for h, eff in res.event_study_effects.items():
+            if h == -1:
+                continue
+            if eff["n_obs"] == 0 or eff["se"] == 0:
+                continue
+            assert np.isfinite(eff["effect"]), f"delta_{h} effect should survive"
+            assert np.isfinite(eff["se"])
+            assert np.isfinite(eff["t_stat"]), f"delta_{h} t_stat should be finite (t-dist)"
+            half_width = eff["conf_int"][1] - eff["effect"]
+            t_crit = half_width / eff["se"]
+            assert t_crit > z_975 * 1.0001, (
+                f"delta_{h} CI must use t(BM DOF) on rank-deficient design; " f"got t_crit={t_crit}"
+            )
+        # Overall ATT also keeps t-distribution
+        if np.isfinite(res.overall_se) and res.overall_se > 0:
+            overall_t_crit = (res.overall_conf_int[1] - res.overall_att) / res.overall_se
+            assert overall_t_crit > z_975 * 1.0001
 
     def test_hc2_bm_nan_dof_fails_closed_with_all_nan_inference(self, staggered_data, monkeypatch):
         """Per local codex R3 P1: when BM contrast DOF returns NaN (noise-
