@@ -1209,13 +1209,15 @@ class WooldridgeDiD:
         )
 
         # 9. Optional multiplier bootstrap (overrides analytic SE for overall ATT).
-        # Always clusters at the unit level (via ``cluster_ids_bootstrap``)
-        # regardless of the analytical sandwich's cluster setting, so the
-        # bootstrap remains intrinsically clustered even when ``vcov_type in
-        # {"hc2","classical"}`` drops the auto-cluster for the analytical
-        # vcov. The fit() guard at the top rejects ``n_bootstrap > 0`` +
-        # one-way + ``cluster=None``, so under any combination that reaches
-        # here, clustering at the unit level matches user intent.
+        # Clusters at ``self.cluster if self.cluster else unit`` (via the
+        # ``cluster_ids_bootstrap`` variable set just below the cluster-
+        # handling block at the top of _fit_ols) — i.e., the bootstrap
+        # honors the user's explicit ``cluster=X`` and falls back to unit
+        # only when ``cluster=None`` (the panel's natural unit of variation).
+        # The fit() guard at the top rejects ``n_bootstrap > 0`` +
+        # ``vcov_type in {"hc2","classical"}`` regardless of cluster, so
+        # under any combination that reaches here, the bootstrap cluster
+        # matches the analytical cluster on hc1/hc2_bm paths.
         if self.n_bootstrap > 0:
             rng = np.random.default_rng(self.seed)
             unique_boot_clusters = np.unique(cluster_ids_bootstrap)

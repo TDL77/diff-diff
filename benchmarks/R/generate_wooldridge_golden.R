@@ -5,12 +5,19 @@
 # panel from `benchmarks/data/wooldridge_test_panel.csv`.
 #
 # Variants generated:
-#   - hc1 (CR1 Liang-Zeger cluster-robust at unit; matches `type="CR1S"` —
-#     Stata-style G/(G-1) * (n-1)/(n-p) correction)
-#   - hc2_bm (CR2 Bell-McCaffrey at unit; per-coef DOF via coef_test()$df_Satt;
-#     overall ATT BM contrast DOF via Wald_test(test="HTZ")$df_denom)
-#   - classical (lm() summary's heteroskedasticity-only SE)
-#   - hc2 (sandwich::vcovHC type="HC2"; no clustering)
+#   - hc1: CR1 Liang-Zeger cluster-robust at unit via clubSandwich `type="CR1S"`
+#     (Stata-style G/(G-1) * (n-1)/(n-p) correction on the full-dummy lm design).
+#     REFERENCE ONLY — diff-diff's WooldridgeDiD(vcov_type='hc1') uses the
+#     within-transformed design and is NOT pinned at parity here. See REGISTRY
+#     "Variance families" → "Deviation from R" for the (n-1)/(n-k) factor
+#     difference. The hc1 SE in this JSON is for diagnostic comparison only;
+#     do NOT add a Python parity test against it.
+#   - hc2_bm: CR2 Bell-McCaffrey cluster-robust at unit (per-coef DOF via
+#     coef_test()$df_Satt; overall ATT BM contrast DOF via Wald_test(test="HTZ")$df_denom).
+#   - classical: lm() summary's homoskedastic OLS SE (no robust correction).
+#     Python's vcov_type='classical' drops the unit auto-cluster to match this.
+#   - hc2: sandwich::vcovHC type="HC2" with NO clustering. Python's
+#     vcov_type='hc2' also drops the unit auto-cluster to match.
 #
 # clubSandwich >= 0.7.0 required (matches PR #475 / PR #479 pin).
 
@@ -140,7 +147,8 @@ overall_se_hc2_bm <- sqrt(
   t(overall_contrast) %*% vcov_cr2 %*% overall_contrast
 )[1, 1]
 
-# 3. classical (lm summary SE; OLS sigma^2 * (X'X)^-1)
+# 3. classical (lm summary SE — homoskedastic OLS sigma^2 * (X'X)^-1; no
+#    robust correction. Python WooldridgeDiD(vcov_type='classical') matches.)
 vcov_classical <- vcov(fit)
 se_classical <- sqrt(diag(vcov_classical)[int_idx])
 overall_se_classical <- sqrt(
