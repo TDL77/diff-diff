@@ -96,7 +96,13 @@ n_total_coef <- length(coef_names)
 overall_contrast <- numeric(n_total_coef)
 overall_contrast[int_idx] <- contrast_weights
 
-# 1. hc1 + CR1S (Stata-style cluster-robust; matches diff-diff's hc1+cluster)
+# 1. hc1 + CR1S (Stata-style cluster-robust on the full-dummy `lm` design).
+#    REFERENCE ONLY — see header: diff-diff's WooldridgeDiD(vcov_type='hc1')
+#    uses the within-transformed design with a different (n-1)/(n-k)
+#    correction and is NOT pinned at parity against these numbers. The hc1
+#    JSON output is retained for diagnostic comparison; tests never assert
+#    parity. See REGISTRY "Variance families" → "Deviation from R" for the
+#    derivation of the gap.
 vcov_cr1s <- vcovCR(fit, cluster = df$unit, type = "CR1S")
 se_hc1 <- sqrt(diag(vcov_cr1s)[int_idx])
 overall_se_hc1 <- sqrt(
@@ -109,29 +115,12 @@ se_hc2_bm <- sqrt(diag(vcov_cr2)[int_idx])
 coef_test_out <- coef_test(fit, vcov = vcov_cr2, test = "Satterthwaite")
 df_satt_hc2_bm <- coef_test_out$df[int_idx]
 
-# Overall ATT BM contrast DOF via Wald_test (HTZ reduces to Satterthwaite on
-# 1-row constraint matrices; df_denom is the BM contrast DOF).
+# Overall ATT BM contrast DOF via Wald_test (HTZ on a 1-row constraint matrix
+# reduces to the Satterthwaite t-test; df_denom is the scalar-contrast BM
+# DOF). For an arbitrary linear contrast we pass the matrix directly via
+# `constraints = matrix(...)`; this is the form Python's
+# _compute_cr2_bm_contrast_dof emits for the post-period overall ATT.
 constraint_matrix <- matrix(overall_contrast, nrow = 1)
-overall_dof_hc2_bm <- tryCatch(
-  {
-    wt <- Wald_test(
-      fit,
-      constraints = constrain_equal(int_idx, reg_ex = FALSE),
-      vcov = vcov_cr2,
-      test = "HTZ"
-    )
-    # HTZ test on multi-row constraints reports a single F + df_num/df_denom
-    # row; df_denom is the Bell-McCaffrey-style aggregated DOF.
-    wt$df_denom
-  },
-  error = function(e) NA_real_
-)
-
-# For the OVERALL ATT scalar contrast (1-row weights vector), build directly:
-# Wald_test with `constraints` requiring a list of `constrain_*` calls
-# (clubSandwich >= 0.5.0); for an arbitrary linear contrast pass the matrix
-# directly via `constraints = matrix(...)`. The `df_denom` is the BM
-# Satterthwaite DOF for the scalar contrast.
 overall_wt <- tryCatch(
   Wald_test(
     fit,
