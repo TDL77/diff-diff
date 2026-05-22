@@ -507,7 +507,9 @@ class TestTwoStageDiDVariance:
             "diff_diff.two_stage.sparse_factorized",
             side_effect=RuntimeError("test failure"),
         ):
-            with pytest.warns(UserWarning, match="sparse factorization.*falling back to dense lstsq"):
+            with pytest.warns(
+                UserWarning, match="sparse factorization.*falling back to dense lstsq"
+            ):
                 results = TwoStageDiD().fit(
                     data,
                     outcome="outcome",
@@ -534,7 +536,9 @@ class TestTwoStageDiDVariance:
             "diff_diff.two_stage_bootstrap.sparse_factorized",
             side_effect=RuntimeError("test failure"),
         ):
-            with pytest.warns(UserWarning, match="sparse factorization.*falling back to dense lstsq"):
+            with pytest.warns(
+                UserWarning, match="sparse factorization.*falling back to dense lstsq"
+            ):
                 results = TwoStageDiD(n_bootstrap=4, seed=42).fit(
                     data,
                     outcome="outcome",
@@ -1488,10 +1492,7 @@ class TestTwoStageStage2BreadWarning:
                     time="time",
                     first_treat="first_treat",
                 )
-        fallback = [
-            w for w in caught
-            if "TwoStageDiD TSL variance" in str(w.message)
-        ]
+        fallback = [w for w in caught if "TwoStageDiD TSL variance" in str(w.message)]
         assert len(fallback) >= 1, (
             "Expected TSL-variance bread fallback warning when np.linalg.solve "
             f"was forced to raise; got warnings: "
@@ -1534,10 +1535,7 @@ class TestTwoStageStage2BreadWarning:
                     time="time",
                     first_treat="first_treat",
                 )
-        fallback = [
-            w for w in caught
-            if "TwoStageDiD multiplier bootstrap bread" in str(w.message)
-        ]
+        fallback = [w for w in caught if "TwoStageDiD multiplier bootstrap bread" in str(w.message)]
         assert len(fallback) >= 1, (
             "Expected bootstrap-bread fallback warning when np.linalg.solve "
             f"was forced to raise; got warnings: "
@@ -1546,3 +1544,369 @@ class TestTwoStageStage2BreadWarning:
         msg = str(fallback[0].message)
         assert "np.linalg.lstsq" in msg
         assert "X_2'WX_2" in msg
+
+
+# =============================================================================
+# TestTwoStageDiDWaveE3ParityAlwaysTreated
+# =============================================================================
+
+
+def _build_parity_panel(
+    sharp_psu0: bool = False,
+    include_always_treated: bool = True,
+    seed: int = 17,
+) -> pd.DataFrame:
+    """Build a 6-PSU x 4-period staggered panel for Wave E.3 parity tests.
+
+    PSU layout:
+      - PSUs 0, 1, 2 in stratum 0; PSUs 3, 4, 5 in stratum 1.
+      - Each PSU contains 2 units by default; each unit has 4 observations
+        (one per period).
+      - Unit 0 (PSU 0): always-treated (first_treat=1) when
+        ``include_always_treated=True``; never-treated otherwise.
+      - Other units: alternating never-treated / staggered-onset.
+
+    When ``sharp_psu0=True``, drop unit 1 (PSU 0) so the always-treated
+    unit is the sole occupant of PSU 0. Under pre-PR TwoStageDiD this
+    triggers the design-subset bug: dropping unit 0 from PSU 0 also drops
+    PSU 0 from `resolved_survey.psu` so the reported `n_psu` falls from 6
+    to 5. Wave E.3 parity contract: `n_psu` remains 6.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    unit_id = 0
+    for psu in range(6):
+        stratum = 0 if psu < 3 else 1
+        N_h = 100  # FPC: hypothetical stratum size
+        for _ in range(2):
+            if unit_id == 0:
+                first_treat = 1 if include_always_treated else 0
+            elif unit_id % 2 == 0:
+                first_treat = 0  # never-treated
+            else:
+                # Staggered onsets at period 2 or 3 (within observed periods 1-4)
+                first_treat = 2 + (unit_id % 2)
+            for t in range(1, 5):
+                y = (
+                    1.5 * (unit_id % 4)
+                    + 0.3 * t
+                    + (1.0 if first_treat > 0 and t >= first_treat else 0.0)
+                    + rng.normal(0, 0.5)
+                )
+                rows.append(
+                    dict(
+                        id=unit_id,
+                        t=t,
+                        y=y,
+                        g=first_treat if first_treat > 0 else 0,
+                        psu=psu,
+                        stratum=stratum,
+                        N_h=N_h,
+                        w=1.0,
+                    )
+                )
+            unit_id += 1
+    df = pd.DataFrame(rows)
+    if sharp_psu0:
+        # Drop unit 1 (also in PSU 0) so PSU 0's only resident is the
+        # always-treated unit 0. Post-drop fit sample loses PSU 0 entirely.
+        df = df[~((df["psu"] == 0) & (df["id"] == 1))].copy()
+    return df
+
+
+class TestTwoStageDiDWaveE3ParityAlwaysTreated:
+    """Wave E.3 parity contract: TwoStageDiD's always-treated drop retains
+    the FULL-DOMAIN survey design (n_psu, n_strata, df_survey, strata, fpc).
+
+    Mirrors PR #482 SpilloverDiD Wave E.3 (merge 24de9062) which established
+    the same invariant for SpilloverDiD's finite_mask / subpopulation drops.
+    Adopts the R `survey::svyrecvar(subset())` convention (Lumley 2010 §2.5)
+    and the in-library precedents at `imputation.py:2175-2183`
+    (PreTrendsImputation) and `prep.py:1401-1432` (DCDH cell variance).
+
+    Scope: this PR tests only `vcov_type` paths reachable from TwoStageDiD's
+    public API — stratified-PSU meat via `_compute_stratified_meat_from_psu_scores`
+    (with or without FPC) and unstratified `S.T @ S`. TwoStageDiD does NOT
+    currently expose `vcov_type="conley"`; that follow-up is tracked
+    separately at TODO.md.
+    """
+
+    def test_a_no_always_treated_baseline_survey_path(self):
+        """Sanity: no-always-treated fit reports n_psu reflecting the data's
+        full PSU set (no artificial reduction). Locks the zero-pad-of-all-True
+        mask = no-op invariant; the parity code path runs but is a no-op."""
+        from diff_diff.survey import SurveyDesign
+
+        data = _build_parity_panel(sharp_psu0=False, include_always_treated=False)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = TwoStageDiD()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = est.fit(
+                data,
+                outcome="y",
+                unit="id",
+                time="t",
+                first_treat="g",
+                survey_design=design,
+            )
+        assert result.survey_metadata is not None
+        # Full-domain PSU count from data
+        n_psu_data = int(data["psu"].nunique())
+        n_strata_data = int(data["stratum"].nunique())
+        assert result.survey_metadata.n_psu == n_psu_data
+        assert result.survey_metadata.df_survey == n_psu_data - n_strata_data
+        # ATT + SE finite
+        assert np.isfinite(result.overall_att)
+        assert np.isfinite(result.overall_se)
+
+    def test_b_full_domain_df_survey_under_always_treated_drop(self):
+        """Wave E.3 parity contract: when the always-treated drop removes a
+        PSU entirely from the fit sample, reported df_survey reflects the
+        FULL-DOMAIN n_psu - n_strata, NOT the post-drop count."""
+        from diff_diff.survey import SurveyDesign
+
+        data = _build_parity_panel(sharp_psu0=True, include_always_treated=True)
+        n_psu_full = int(data["psu"].nunique())  # = 6 (PSU 0 still in data via unit 0)
+        n_strata_full = int(data["stratum"].nunique())  # = 2
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = TwoStageDiD()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = est.fit(
+                data,
+                outcome="y",
+                unit="id",
+                time="t",
+                first_treat="g",
+                survey_design=design,
+            )
+        assert result.survey_metadata is not None
+        # Wave E.3 parity contract: post-drop fit sample is missing PSU 0
+        # (always-treated unit was its sole occupant), but full-domain count
+        # is retained.
+        assert result.survey_metadata.df_survey == n_psu_full - n_strata_full, (
+            f"Wave E.3 parity: df_survey should reflect full domain "
+            f"({n_psu_full - n_strata_full}); got {result.survey_metadata.df_survey}"
+        )
+        # Defensive: gate that the always-treated drop did not remove all
+        # treated units (front-door check per
+        # `feedback_front_door_gate_active_sample_mirror`).
+        assert result.n_treated_obs > 0
+
+    def test_c_full_domain_n_psu_reporting(self):
+        """Companion to (b): reported n_psu reflects the FULL-DOMAIN count
+        even when the always-treated drop empties a PSU from the fit sample."""
+        from diff_diff.survey import SurveyDesign
+
+        data = _build_parity_panel(sharp_psu0=True, include_always_treated=True)
+        n_psu_full = int(data["psu"].nunique())  # = 6
+
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = TwoStageDiD()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = est.fit(
+                data,
+                outcome="y",
+                unit="id",
+                time="t",
+                first_treat="g",
+                survey_design=design,
+            )
+        assert result.survey_metadata is not None
+        assert result.survey_metadata.n_psu == n_psu_full, (
+            f"Wave E.3 parity: n_psu should reflect full domain ({n_psu_full}); "
+            f"got {result.survey_metadata.n_psu}"
+        )
+
+    def test_d_zero_pad_psu_score_spy(self):
+        """Mock-spy on `_compute_stratified_meat_from_psu_scores`: capture the
+        per-PSU score matrix and assert the row corresponding to the
+        drop-only PSU (PSU 0) is exactly zero (zero-padded by the parity path).
+        Locks the score-zero-pad invariant directly at the meat boundary."""
+        from unittest.mock import patch
+
+        import diff_diff.survey as survey_mod
+        from diff_diff.survey import SurveyDesign
+
+        data = _build_parity_panel(sharp_psu0=True, include_always_treated=True)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+
+        captured = {}
+        real_helper = survey_mod._compute_stratified_meat_from_psu_scores
+
+        def spy(*, psu_scores, psu_strata, fpc_per_psu, lonely_psu):
+            captured["psu_scores"] = np.asarray(psu_scores).copy()
+            captured["psu_strata"] = np.asarray(psu_strata).copy()
+            return real_helper(
+                psu_scores=psu_scores,
+                psu_strata=psu_strata,
+                fpc_per_psu=fpc_per_psu,
+                lonely_psu=lonely_psu,
+            )
+
+        with patch.object(survey_mod, "_compute_stratified_meat_from_psu_scores", side_effect=spy):
+            est = TwoStageDiD()
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                est.fit(
+                    data,
+                    outcome="y",
+                    unit="id",
+                    time="t",
+                    first_treat="g",
+                    survey_design=design,
+                )
+
+        psu_scores = captured["psu_scores"]
+        # Per-PSU score matrix has shape (G_full, k); G_full = 6 (full domain),
+        # not 5 (post-drop fit sample).
+        assert psu_scores.shape[0] == 6, (
+            f"Wave E.3 parity: stratified meat should receive full-domain "
+            f"G_full=6 per-PSU scores; got {psu_scores.shape[0]}"
+        )
+        # The score row for PSU 0 (the drop-only PSU) is exactly zero — its
+        # only resident was the always-treated unit, dropped from stage-1/2.
+        # PSU labels are sorted by np.unique → PSU 0 is row 0.
+        assert np.allclose(psu_scores[0], 0.0), (
+            "Wave E.3 parity: drop-only PSU row should be zero-padded; "
+            f"got psu_scores[0]={psu_scores[0]}"
+        )
+
+    def test_e_subpopulation_plus_always_treated_composition(self):
+        """Two zero-pad mechanisms compose cleanly: (i) SurveyDesign.subpopulation()
+        excludes some rows via zero weights, (ii) always-treated drop removes
+        the unit physically. Both should preserve full-domain n_psu / df_survey."""
+        from diff_diff.survey import SurveyDesign
+
+        data = _build_parity_panel(sharp_psu0=True, include_always_treated=True)
+        n_psu_full = int(data["psu"].nunique())
+        n_strata_full = int(data["stratum"].nunique())
+
+        base_design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        # Subpopulation: exclude PSU 5's two units (mask=False there);
+        # always-treated unit 0 is INSIDE the subpopulation domain.
+        subpop_mask = data["psu"] != 5
+        subpop_design, data_subpop = base_design.subpopulation(data, subpop_mask)
+
+        est = TwoStageDiD()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = est.fit(
+                data_subpop,
+                outcome="y",
+                unit="id",
+                time="t",
+                first_treat="g",
+                survey_design=subpop_design,
+            )
+
+        # Always-treated warning must still fire (composition does not silence it).
+        at_warnings = [w for w in caught if "treated in all observed periods" in str(w.message)]
+        assert len(at_warnings) >= 1, (
+            f"Expected always-treated warning under subpop+always-treated; "
+            f"got: {[str(w.message) for w in caught]}"
+        )
+
+        assert result.survey_metadata is not None
+        # Full-domain n_psu / df_survey retained (subpopulation = zero-weight
+        # padding, doesn't reduce design dimension).
+        assert result.survey_metadata.n_psu == n_psu_full
+        assert result.survey_metadata.df_survey == n_psu_full - n_strata_full
+
+    def test_f_cluster_as_psu_plus_always_treated(self):
+        """Cluster-injection path (user-specified `cluster=` without explicit
+        survey_design.psu): cluster column is injected as effective PSU.
+        Wave E.3 parity must preserve full-domain n_psu count even when
+        always-treated drop removes a cluster from the fit sample."""
+        from diff_diff.survey import SurveyDesign
+
+        data = _build_parity_panel(sharp_psu0=True, include_always_treated=True)
+        n_psu_full = int(data["psu"].nunique())  # PSU column used as cluster
+        n_strata_full = int(data["stratum"].nunique())
+
+        # Survey design has strata + fpc but NO explicit psu — cluster=
+        # injects "psu" column as effective PSU.
+        design = SurveyDesign(weights="w", strata="stratum", fpc="N_h")
+        est = TwoStageDiD(cluster="psu")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = est.fit(
+                data,
+                outcome="y",
+                unit="id",
+                time="t",
+                first_treat="g",
+                survey_design=design,
+            )
+        assert result.survey_metadata is not None
+        # Cluster-as-PSU injection produces full-domain n_psu (post-injection
+        # count includes drop-only PSUs).
+        assert result.survey_metadata.n_psu == n_psu_full, (
+            f"Wave E.3 parity (cluster-injection): n_psu should reflect "
+            f"full domain ({n_psu_full}); got {result.survey_metadata.n_psu}"
+        )
+        assert result.survey_metadata.df_survey == n_psu_full - n_strata_full
+
+    def test_g_no_survey_path_unchanged_under_always_treated(self):
+        """Pure unweighted path: always-treated drop with `survey_design=None`
+        must produce IDENTICAL results to a fit on data that excludes the
+        always-treated unit upstream (the parity zero-pad path is gated on
+        `resolved_survey is not None` so the unweighted path is unaffected)."""
+        data_with_at = _build_parity_panel(sharp_psu0=True, include_always_treated=True)
+        data_without_at = data_with_at[data_with_at["id"] != 0].copy()
+
+        est = TwoStageDiD()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result_with_at = est.fit(
+                data_with_at,
+                outcome="y",
+                unit="id",
+                time="t",
+                first_treat="g",
+            )
+            result_without_at = est.fit(
+                data_without_at,
+                outcome="y",
+                unit="id",
+                time="t",
+                first_treat="g",
+            )
+        # Always-treated drop equivalence on the unweighted path: fitting
+        # with the always-treated unit (which gets dropped internally) is
+        # equivalent to fitting on the pre-filtered dataset.
+        np.testing.assert_allclose(
+            result_with_at.overall_att, result_without_at.overall_att, rtol=1e-10
+        )
+        np.testing.assert_allclose(
+            result_with_at.overall_se, result_without_at.overall_se, rtol=1e-10
+        )
+
+    def test_h_psu_entirely_always_treated_unidentified_gate(self):
+        """Optional sharper case: a PSU containing ONLY always-treated units
+        is dropped entirely from the fit sample. Verify (i) the variance
+        computation proceeds (zero-padded PSU 0 + 5 active PSUs gives G=6,
+        sufficient for stratified-PSU variance identification; the meat row
+        for PSU 0 is zero but its existence preserves the n_psu count),
+        (ii) reported n_psu = full domain."""
+        from diff_diff.survey import SurveyDesign
+
+        data = _build_parity_panel(sharp_psu0=True, include_always_treated=True)
+        design = SurveyDesign(weights="w", strata="stratum", psu="psu", fpc="N_h")
+        est = TwoStageDiD()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = est.fit(
+                data,
+                outcome="y",
+                unit="id",
+                time="t",
+                first_treat="g",
+                survey_design=design,
+            )
+        assert np.isfinite(result.overall_se)
+        assert result.survey_metadata is not None
+        assert result.survey_metadata.n_psu == 6

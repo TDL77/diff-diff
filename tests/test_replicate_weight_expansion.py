@@ -378,7 +378,18 @@ class TestTwoStageDiDReplicate:
             assert np.isfinite(eff["se"]) and eff["se"] > 0, f"period {e}: SE not finite"
 
     def test_two_stage_always_treated(self):
-        """Replicate weights should be subsetted when always-treated units are excluded."""
+        """Replicate weights subsetted to post-always-treated-drop sample.
+
+        Wave E.3 parity: the main fit retains full-domain `resolved_survey`
+        but subsets `survey_weights` to the post-drop OLS sample. The
+        replicate refit callback receives FULL-DOMAIN replicate weights and
+        must apply the SAME `keep_mask` subsetting before threading into
+        stage-1 / stage-2. Without the subset, `solve_ols` rejects the
+        length mismatch and `compute_replicate_refit_variance` swallows the
+        ValueError so replicate inference NaNs out. This test exercises the
+        full replicate variance pipeline (not just the point estimate) under
+        the always-treated drop to lock the parity contract end-to-end.
+        """
         data = _make_staggered_panel()
         # Add always-treated units (first_treat <= min time)
         for i in range(50, 55):
@@ -394,7 +405,87 @@ class TestTwoStageDiDReplicate:
         result = TwoStageDiD(n_bootstrap=0).fit(
             data, "outcome", "unit", "time", "first_treat", survey_design=sd,
         )
+        # ATT comes from the main fit (always finite once always-treated drop runs)
         assert np.isfinite(result.overall_att)
+        # SE comes from the replicate refit variance: requires the refit
+        # callback to align replicate weights with the post-drop sample.
+        # Pre-Wave-E.3-parity-fix, replicate refits raised ValueError on
+        # length mismatch, `compute_replicate_refit_variance` swallowed
+        # them, and `overall_se` came out NaN with all replicate-based
+        # inference fields NaN.
+        assert np.isfinite(result.overall_se), (
+            "Replicate SE must be finite under always-treated drop. "
+            "If NaN, the replicate refit callback is failing to align "
+            "weights with the post-drop sample — Wave E.3 parity bug."
+        )
+        assert np.isfinite(result.overall_p_value)
+        assert result.overall_conf_int is not None
+        assert np.all(np.isfinite(result.overall_conf_int))
+
+    def test_two_stage_always_treated_event_study_and_group_replicate(self):
+        """Replicate refit covers event-study + group surfaces under
+        always-treated drop. Companion to ``test_two_stage_always_treated``
+        which asserts the overall ATT surface only; the Wave E.3 parity
+        fix to ``_refit_ts`` aligns ``w_r`` with ``keep_mask`` for ALL
+        three stage-2 surfaces (``_stage2_static`` / ``_stage2_event_study``
+        / ``_stage2_group``), so this test exercises the event-study +
+        group replicate refit branches end-to-end with the same
+        always-treated fixture."""
+        data = _make_staggered_panel()
+        for i in range(50, 55):
+            for t in range(1, 9):
+                data = pd.concat([data, pd.DataFrame([{
+                    "unit": i, "time": t, "first_treat": 1,
+                    "outcome": 12.0 + np.random.normal(0, 0.3),
+                    "weight": 1.5, "treated": 1, "post": 1,
+                }])], ignore_index=True)
+        rep_cols = _add_jk1_replicates(data, n_rep=10, unit_col="unit")
+        sd = SurveyDesign(weights="weight", replicate_weights=rep_cols, replicate_method="JK1")
+        result = TwoStageDiD(n_bootstrap=0).fit(
+            data, "outcome", "unit", "time", "first_treat",
+            aggregate="all", survey_design=sd,
+        )
+        # Event-study surface: at least one non-reference horizon must have
+        # replicate-derived finite SE / p_value / conf_int (the replicate
+        # override path at `two_stage.py` updates SE + t_stat + p_value +
+        # conf_int separately for each non-reference horizon via the same
+        # _refit_ts callback, so all four fields must be locked).
+        assert result.event_study_effects is not None
+        non_ref_es = {
+            e: eff for e, eff in result.event_study_effects.items()
+            if eff["effect"] != 0.0 and np.isfinite(eff["effect"])
+        }
+        assert len(non_ref_es) > 0, "no non-reference event-study effects"
+        for e, eff in non_ref_es.items():
+            assert np.isfinite(eff["se"]) and eff["se"] > 0, (
+                f"event-study horizon {e}: replicate SE must be finite "
+                f"under always-treated drop"
+            )
+            assert np.isfinite(eff["p_value"]), (
+                f"event-study horizon {e}: replicate p_value must be finite"
+            )
+            assert eff["conf_int"] is not None and np.all(np.isfinite(eff["conf_int"])), (
+                f"event-study horizon {e}: replicate conf_int bounds must be finite"
+            )
+        # Group surface: at least one cohort with finite replicate SE /
+        # p_value / conf_int (same override path applies to group effects).
+        assert result.group_effects is not None
+        finite_groups = {
+            g: eff for g, eff in result.group_effects.items()
+            if np.isfinite(eff["effect"])
+        }
+        assert len(finite_groups) > 0, "no finite group effects"
+        for g, eff in finite_groups.items():
+            assert np.isfinite(eff["se"]) and eff["se"] > 0, (
+                f"cohort {g}: replicate SE must be finite under "
+                f"always-treated drop"
+            )
+            assert np.isfinite(eff["p_value"]), (
+                f"cohort {g}: replicate p_value must be finite"
+            )
+            assert eff["conf_int"] is not None and np.all(np.isfinite(eff["conf_int"])), (
+                f"cohort {g}: replicate conf_int bounds must be finite"
+            )
 
     def test_two_stage_bootstrap_rejected(self):
         data = _make_staggered_panel()
