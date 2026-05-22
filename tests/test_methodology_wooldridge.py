@@ -1469,6 +1469,57 @@ class TestW2025Section8HeterogeneousTrends:
             "leads."
         )
 
+    def test_plot_event_study_cohort_share_to_cell_round_trip_restores_placebo_leads(
+        self,
+    ) -> None:
+        """CI R2 P1 fix: ``plot_event_study()`` reverse direction (cohort_share → cell).
+
+        Codex caught a stale-cache hazard: my earlier fix re-aggregated
+        on ``weights="cohort_share"`` but skipped re-aggregation on the
+        default ``weights="cell"`` path when the cached ``event_study_effects``
+        was already populated. A user calling ``plot_event_study(weights=
+        "cohort_share")`` (which restricts to k>=0) and then
+        ``plot_event_study()`` (default cell weights) would silently
+        plot the stale cohort-share-keyed data. The fix unconditionally
+        re-aggregates on every call.
+
+        This test exercises the reverse direction by:
+        1. First call: ``plot_event_study(weights="cohort_share")`` —
+           caches cohort-share keys (k >= 0 only)
+        2. Second call: ``plot_event_study()`` (default cell weights) —
+           must restore the full event range including k < 0 placebo leads
+        """
+        from unittest.mock import patch
+
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 16)
+        panel = _make_three_cohort_four_period_panel(rng, n_per_cohort=80, sigma=0.05)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            res = WooldridgeDiD(method="ols", control_group="never_treated").fit(
+                panel, outcome="y", unit="unit", time="time", cohort="cohort"
+            )
+        # Step 1: plot under cohort_share — caches k>=0 keys
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            with patch("diff_diff.visualization.plot_event_study"):
+                res.plot_event_study(weights="cohort_share")
+        assert res.event_study_effects is not None
+        cohort_share_keys = sorted(res.event_study_effects.keys())
+        assert all(k >= 0 for k in cohort_share_keys), (
+            f"DGP precondition: cohort_share path must restrict to k>=0; "
+            f"got {cohort_share_keys}"
+        )
+        # Step 2: plot under default weights="cell" — must restore k<0 leads
+        with patch("diff_diff.visualization.plot_event_study"):
+            res.plot_event_study()  # default weights="cell"
+        assert res.event_study_effects is not None
+        cell_keys = sorted(res.event_study_effects.keys())
+        assert any(k < 0 for k in cell_keys), (
+            f"plot_event_study() (cell weights) after a cohort_share "
+            f"call must restore k<0 placebo leads; got {cell_keys}. "
+            f"Stale cohort_share cache was reused — CI R2 P1 fix regressed."
+        )
+
     def test_cohort_trends_true_plus_bootstrap_preserves_bootstrap_se(self) -> None:
         """R5 P1 fix: ``cohort_trends=True`` + ``n_bootstrap > 0`` runs cleanly.
 

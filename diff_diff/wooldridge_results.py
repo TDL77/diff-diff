@@ -694,7 +694,7 @@ class WooldridgeDiDResults:
         return pd.DataFrame(rows)
 
     def plot_event_study(self, weights: str = "cell", **kwargs) -> None:
-        """Event study plot. Calls ``aggregate('event', weights=weights)`` if needed.
+        """Event study plot. Always calls ``aggregate('event', weights=weights)``.
 
         Parameters
         ----------
@@ -707,19 +707,24 @@ class WooldridgeDiDResults:
             contract documented in REGISTRY.
         **kwargs
             Forwarded to ``diff_diff.visualization.plot_event_study``.
+
+        Notes
+        -----
+        The wrapper unconditionally re-aggregates the event study under
+        the requested ``weights`` scheme. This avoids the stale-cache
+        hazard where a prior ``plot_event_study(weights="cohort_share")``
+        call would leave the cached ``event_study_effects`` restricted
+        to ``k >= 0`` (per the Eq. 7.6 scope), and a subsequent
+        ``plot_event_study()`` (default ``weights="cell"``) call would
+        silently reuse the cohort-share-keyed cache instead of restoring
+        the full event range including pre-period placebo leads.
         """
-        # Recompute under the active weighting scheme if the cached
-        # event_study_effects was built under a different scheme — or
-        # has not been built yet. Aggregating under "cell" then under
-        # "cohort_share" (or vice versa) replaces ``event_study_effects``
-        # in place per the existing aggregate() contract.
-        if self.event_study_effects is None:
-            self.aggregate("event", weights=weights)
-        elif weights == "cohort_share":
-            # Force re-aggregation so the cohort-share contract is
-            # honored from a wrapper call that may have been preceded
-            # by an aggregate("event", weights="cell") at fit time.
-            self.aggregate("event", weights=weights)
+        # Always re-aggregate under the requested weighting scheme. The
+        # aggregate() method replaces ``event_study_effects`` in place
+        # per the existing contract, so this is cheap and avoids
+        # cohort_share→cell (or any cross-scheme) stale-cache bugs.
+        self.aggregate("event", weights=weights)
+
         from diff_diff.visualization import plot_event_study  # type: ignore
 
         effects = {k: v["att"] for k, v in (self.event_study_effects or {}).items()}
