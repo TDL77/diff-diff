@@ -1499,16 +1499,19 @@ where `g(·)` is the link inverse (logistic or exp), `η_i` is the individual li
 - **Note:** Bootstrap is supported only with `vcov_type ∈ {"hc1","hc2_bm"}` (one-way `classical`/`hc2` + bootstrap is rejected at `fit()` per the previous bullet). On the supported paths, the bootstrap clusters at `self.cluster if self.cluster else unit` — i.e., it matches the user's explicit cluster column if set, falling back to unit otherwise (the panel's natural unit of variation). The bootstrap SE overrides the analytical SE for `overall_*` on `n_bootstrap > 0` paths; per-cell `(g, t)` SEs still come from the analytical vcov.
 
 *Aggregations (matching `jwdid_estat`):*
-- `simple`: Weighted average across all post-treatment (g, t) cells with weights `n_{g,t}`:
+- `simple`: Weighted average across all post-treatment (g, t) cells. Default
+  `weights="cell"` uses cell-count `n_{g,t}`:
 
       ATT_overall = Σ_{(g,t): t≥g} n_{g,t} · ATT(g,t) / Σ_{(g,t): t≥g} n_{g,t}
 
   Cell weight `n_{g,t}` = count of obs in cohort g at time t in estimation sample.
-  - **Note:** Cell-level weighting (n_{g,t} observation counts) matches Stata `jwdid_estat` behavior. Differs from W2025 Eqs. 7.2-7.4 cohort-share weights (simple-overall path) that account for the number of post-treatment periods per cohort, and also differs from W2025 Eq. 7.6 cohort-share-by-exposure weights `ω̂_{ge} = N_g / (N_q + ··· + N_{T-e})` (event-time path via `aggregate("event")`). Both `simple` and `event` aggregations reuse the same `_gt_weights` cell-count array, so the deviation applies uniformly across both paths. See `docs/methodology/papers/wooldridge-2025-review.md` § Deviations for context.
+  - **Note:** `aggregate(type="simple", weights="cell")` (default) matches Stata `jwdid_estat` behavior. The opt-in `weights="cohort_share"` exposes the paper W2025 Eq. 7.4 cohort-share form `ω̂_g ∝ N_g`; the two coincide on balanced panels with uniform within-cohort cell counts (paper Section 7.5 footnote). The cohort-share path raises `ValueError` for `type="group"` and `type="calendar"` (no paper formula). See `docs/methodology/papers/wooldridge-2025-review.md` § Section 7 for derivation.
+  - **Note:** `weights="cohort_share"` inference contract: the analytical SE returned under cohort-share aggregation is **conditional on the observed cohort shares ω̂_g / ω̂_{ge}**, treating them as fixed. Per paper W2025 Section 7.5, unconditional inference should also account for sampling uncertainty in the cohort shares themselves (the `N_g` are random in a stochastic sample). The library **fail-closes** the t-stat / p-value / conf-int fields to NaN under `weights="cohort_share"` and emits a `UserWarning` documenting the limitation; the point estimate and the conditional-on-shares SE are still computed and returned for reference. Proper APE/GMM-style aggregate inference (Wooldridge 2023 Section 4 framework) is tracked as a deferred follow-up in TODO.md.
+  - **Note:** `weights="cohort_share"` is **NOT supported on survey-weighted fits** (raises `ValueError` when `survey_design` is supplied). The library populates `_n_g_per_cohort` from `unit.nunique()` (raw counts); composing these with the design-weighted ATTs would target a mixed estimand inconsistent with paper W2025 Section 7's design-population cohort-share form. Design-consistent cohort totals (survey-weighted unit totals per cohort) are tracked as a deferred follow-up in TODO.md.
 
-- `group`: Weighted average across t for each cohort g
-- `calendar`: Weighted average across g for each calendar time t
-- `event`: Weighted average across (g, t) cells by relative period k = t - g
+- `group`: Weighted average across t for each cohort g (cell-count weights only — paper W2025 has no closed-form cohort-share weights for this aggregation type)
+- `calendar`: Weighted average across g for each calendar time t (cell-count weights only)
+- `event`: Weighted average across (g, t) cells by relative period k = t - g. Default `weights="cell"`; opt-in `weights="cohort_share"` exposes paper Eq. 7.6 cohort-share-by-exposure form `ω̂_{ge} ∝ N_g` with per-event-time normalization across cohorts present at event-time `e`. The cohort-share event path is **restricted to `k >= 0`** (post-treatment exposure times only); paper Eq. 7.6 is defined for post-treatment exposure, and pre-treatment leads use a separate Eq. 7.7 `nw_it`-based construction not yet exposed in the library. Under the default `weights="cell"`, negative-`k` placebo cells (e.g., from OLS + `control_group="never_treated"` or `anticipation > 0`) remain in the event aggregation for the placebo-test use case.
 
 *Covariates:*
 - `exovar`: Time-invariant covariates, added without demeaning (corresponds to W2025 Eq. 5.2 `x_i`)
@@ -1560,6 +1563,28 @@ where `g(·)` is the link inverse (logistic or exp), `η_i` is the individual li
 - **Note:** Only `pweight` (probability weights) are supported; `fweight`/`aweight` raise `ValueError` because the composed survey/QMLE weighting changes their semantics.
 - **Note:** Replicate-weight variance is not yet supported (`NotImplementedError`). Use TSL (strata/PSU/FPC) instead.
 - **Note:** Bootstrap inference (`n_bootstrap > 0`) cannot be combined with `survey_design` — no survey-aware bootstrap variant is implemented.
+
+**Heterogeneous cohort trends (paper W2025 Section 8 / Eq. 8.1):**
+- `WooldridgeDiD(cohort_trends=True)` adds linear `dg_i · t` interactions to the design matrix for each treated cohort. Under the heterogeneous-trends DGP `y = c_i + α_t + δ_g · t + τ · w_{it} + u_{it}`, the parameter recovers `τ` even when parallel trends fails (paper Eq. 8.3 commentary on the Walmart application: "the estimated effects are much smaller than either the lags only or leads and lags estimates").
+- **Identification (paper Section 8 / Eq. 8.1):** each treated cohort must have at least 2 pre-treatment periods (`t < g - anticipation`) for `dg_i · t` to be separately identified from cohort + time FE. `fit()` raises `ValueError` when the contract is violated.
+- **OLS-path only:** `cohort_trends=True` is rejected at `__init__` for `method ∈ {"logit", "poisson"}` per paper Section 8's OLS scope. `NotImplementedError` cites the paper section explicitly.
+- **Auto-routes to full-dummy mode** regardless of `vcov_type` (matching the absorb→fixed_effects auto-route pattern). Composing `dg_i · t` with the within-transformation yields `(dg_i − mean(dg_i)) · (t − mean(t))`, which is algebraically correct but non-trivial to verify on every panel shape; routing to the existing full-dummy auto-route used by `vcov_type ∈ {classical, hc2, hc2_bm}` keeps math closure verified against PR #483's R-parity goldens. UX implication: `cohort_trends=True` is silently more expensive than `cohort_trends=False` (carries N unit dummies); for very high-cardinality panels, the design-size warning at `wooldridge.py` fires.
+- **`vcov_type="hc1"` finite-sample correction under `cohort_trends=True`:** the full-dummy auto-route changes the HC1 finite-sample factor from `(n-1)/(n-k_within)` (within-transform default) to `(n-1)/(n-k_total)` (full-dummy: counts intercept + treatment + unit + time + cohort-trend columns). On typical panels where `n >> k_total` the gap is small (<2%); on small panels it can reach ~10%. This is a documented opt-in deviation specific to `cohort_trends=True` — users who need the within-transform HC1 finite-sample factor with cohort trends should use `vcov_type="hc1"` + `cohort_trends=False` and supply the cohort-trend interactions through a custom design (out-of-scope for the standard library surface).
+- **Result attribute:** `WooldridgeDiDResults.cohort_trend_coefs: Dict[g → δ_g]` populated under `cohort_trends=True`; empty dict otherwise.
+- **Note:** Polynomial-trend extensions (`"quadratic"`, `"cubic"` per paper p. 2572 footnote) are NOT yet exposed — `cohort_trends` is a binary `True/False` flag for linear `dg_i · t` only.
+- **Note:** `cohort_trends=True` + `survey_design` is **NOT yet supported** (raises `NotImplementedError` at `fit()`). The full-dummy auto-route composed with the survey TSL variance has not been validated against R-parity goldens. Tracked in TODO follow-up.
+
+### Deviations from the paper / from R / library extensions
+
+Consolidated list of substantive deviations from the W2025 paper and from R `etwfe`. Each is documented in the relevant section above with a labeled `**Note:**` or `**Deviation from R:**` line. AI PR reviewer recognizes these as documented (P3 informational) per the project's documented-deviation convention.
+
+1. **Cell-count default for aggregation** (vs paper Eq. 7.4 / 7.6 cohort-share). `aggregate(weights="cell")` (default) matches Stata `jwdid_estat`. The opt-in `weights="cohort_share"` exposes the paper-Eq. 7.4 / 7.6 forms. Cohort-share is supported only for `type="simple"` and `type="event"`. See § Aggregations Note.
+2. **HC1 finite-sample correction `(n-1)/(n-k_within)`** (vs R `lm + clubSandwich::vcovCR(type="CR1S")` which uses `(n-1)/(n-k_total)`). On 240-obs / 51-col fixture ~11%; on typical panels <2%. See § Variance families Deviation from R.
+3. **QMLE sandwich `(G/(G-1)) · ((n-1)/(n-k))`** (vs Stata `jwdid` `G/(G-1)` only). Conservative; for typical panels n >> k the difference is negligible. Tracked in TODO row 94. See § Method Note.
+4. **Nonlinear methods via direct QMLE** (vs R `etwfe` fixest backend). Avoids statsmodels/fixest dependency. See § Method Deviation from R.
+5. **Logit cohort+time additive dummies** (not unit FE) to avoid incidental-parameters bias in short panels. Matches Stata `jwdid method(logit)`. See § Edge cases Note.
+6. **Anticipation + aggregation**: `aggregate(type="simple", weights="cell")` uses `t >= g` as the post-treatment threshold regardless of `anticipation`. Anticipation-window leads are estimated as placebos but excluded from `overall_att`. See § Edge cases Note.
+7. **Response-scale ATT vs R `etwfe` log-link coefficients** (Poisson + logit): diff-diff's `WooldridgeDiD(method="poisson" | "logit")` returns ATT on the response scale (counterfactual mean difference per paper W2023 ASF / APE framework); R `etwfe(family="poisson" | "logit")` returns the cell-level log-link / log-odds coefficient. Numerical cell-level R-parity for nonlinear paths requires either `emfx()`-based APE extraction on the R side or link-function inversion with baseline-mean adjustment; deferred (TODO row added in PR-B). See `tests/test_methodology_wooldridge.py::TestWooldridgeParityRPoisson` / `TestWooldridgeParityRLogit` for the current surface-test scope.
 
 ---
 

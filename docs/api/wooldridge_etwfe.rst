@@ -1,7 +1,7 @@
 Wooldridge Extended Two-Way Fixed Effects (ETWFE)
 ===================================================
 
-Extended Two-Way Fixed Effects estimator from Wooldridge (2021, 2023),
+Extended Two-Way Fixed Effects estimator from Wooldridge (2025, 2023),
 based on the Stata ``jwdid`` package specification (Friosavila 2021),
 with documented SE/aggregation deviations noted in the Methodology Registry.
 
@@ -11,7 +11,9 @@ This module implements ETWFE via a single saturated regression that:
 2. **Supports linear (OLS), Poisson QMLE, and logit** link functions
 3. **Uses ASF-based ATT** for nonlinear models: E[f(η₁)] − E[f(η₀)]
 4. **Computes delta-method SEs** for all aggregations (event, group, calendar, simple)
-5. **Follows the Stata jwdid specification** for OLS and nonlinear paths (see Methodology Registry for documented SE/aggregation deviations)
+5. **Supports paper W2025 cohort-share aggregation** via ``aggregate(weights="cohort_share")`` (Eqs. 7.4 + 7.6; default is cell-count matching Stata ``jwdid_estat``)
+6. **Supports paper W2025 Section 8 heterogeneous cohort trends** via ``cohort_trends=True`` (OLS path only; auto-routes to full-dummy mode)
+7. **Follows the Stata jwdid specification** for OLS defaults and nonlinear paths (see Methodology Registry for documented SE/aggregation deviations)
 
 **When to use WooldridgeDiD:**
 
@@ -19,14 +21,19 @@ This module implements ETWFE via a single saturated regression that:
 - Nonlinear outcomes (binary, count, non-negative continuous)
 - You want a single-regression approach matching Stata's ``jwdid``
 - You need event-study, group, calendar, or simple ATT aggregations
+- You need paper W2025 cohort-share aggregation weights as an alternative
+  to the default cell-count weighting
+- You need heterogeneous cohort-specific linear trends when parallel
+  trends is violated (paper W2025 Section 8)
 
 **References:**
 
-- Wooldridge, J. M. (2021). Two-Way Fixed Effects, the Two-Way Mundlak
-  Regression, and Difference-in-Differences Estimators. *SSRN 3906345*.
+- Wooldridge, J. M. (2025). Two-way fixed effects, the two-way Mundlak
+  regression, and difference-in-differences estimators. *Empirical
+  Economics*, 69(5), 2545-2587. DOI 10.1007/s00181-025-02807-z.
 - Wooldridge, J. M. (2023). Simple approaches to nonlinear
   difference-in-differences with panel data. *The Econometrics Journal*,
-  26(3), C31–C66.
+  26(3), C31-C66.
 - Friosavila, F. (2021). ``jwdid``: Stata module for ETWFE. SSC s459114.
 
 .. module:: diff_diff.wooldridge
@@ -117,7 +124,7 @@ Logit for binary outcomes
 Aggregation Methods
 -------------------
 
-Call ``.aggregate(type)`` before ``.summary(type)``:
+Call ``.aggregate(type, weights=...)`` before ``.summary(type)``:
 
 .. list-table::
    :header-rows: 1
@@ -138,6 +145,21 @@ Call ``.aggregate(type)`` before ``.summary(type)``:
    * - ``'simple'``
      - Overall weighted average ATT
      - ``estat simple``
+
+**Weighting schemes** (``weights="cell"`` default, ``weights="cohort_share"``
+opt-in):
+
+- ``weights="cell"`` (default) — cell-count ``n_{g,t}`` weighting; matches
+  Stata ``jwdid_estat``. Supported for all four aggregation types.
+- ``weights="cohort_share"`` — paper W2025 Eq. 7.4 (simple) and Eq. 7.6
+  (event, restricted to ``k >= 0``) cohort-share weighting. Supported
+  only for ``type="simple"`` and ``type="event"``; raises on
+  ``type ∈ {"group","calendar"}`` (no paper closed-form). Inference
+  fields (t-stat / p-value / conf-int) are fail-closed to ``NaN``
+  with a ``UserWarning`` documenting the conditional-on-shares
+  limitation (paper W2025 Section 7.5). Raises on
+  ``survey_design is not None`` (design-consistent cohort totals
+  pending follow-up).
 
 Comparison with Other Staggered Estimators
 ------------------------------------------
