@@ -43,7 +43,7 @@ def _compute_weighted_agg(
     gt_keys: List,
     gt_vcov: Optional[np.ndarray],
     alpha: float,
-    df: Optional[int] = None,
+    df: Optional[float] = None,
 ) -> Dict:
     """Compute simple (overall) weighted average ATT and SE via delta method."""
     post_keys = [(g, t) for (g, t) in gt_keys if t >= g]
@@ -82,8 +82,8 @@ def _resolve_survey_for_wooldridge(survey_design, sample, cluster_ids, cluster_n
         compute_survey_metadata,
     )
 
-    resolved, survey_weights, survey_weight_type, survey_metadata = (
-        _resolve_survey_for_fit(survey_design, sample)
+    resolved, survey_weights, survey_weight_type, survey_metadata = _resolve_survey_for_fit(
+        survey_design, sample
     )
     if resolved is not None and resolved.uses_replicate_variance:
         raise NotImplementedError(
@@ -97,9 +97,7 @@ def _resolve_survey_for_wooldridge(survey_design, sample, cluster_ids, cluster_n
             f"assumes probability weights (pweight)."
         )
     if resolved is not None:
-        effective_cluster = _resolve_effective_cluster(
-            resolved, cluster_ids, cluster_name
-        )
+        effective_cluster = _resolve_effective_cluster(resolved, cluster_ids, cluster_name)
         if effective_cluster is not None:
             resolved = _inject_cluster_as_psu(resolved, effective_cluster)
             if resolved.psu is not None and survey_metadata is not None:
@@ -297,6 +295,29 @@ class WooldridgeDiD:
         Random seed for reproducibility.
     rank_deficient_action : {"warn", "error", "silent"}
         How to handle rank-deficient design matrices.
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm"}, default "hc1"
+        Variance-covariance family for the analytical sandwich, OLS path only.
+        ``hc1`` (default) preserves the prior bit-equal CR1 Liang-Zeger
+        cluster-robust behavior via the within-transform path. ``hc2_bm``
+        auto-routes to a full-dummy saturated design (intercept + treatment
+        cells + unit dummies + time dummies) — FWL preserves cohort coefficients
+        but NOT the hat matrix, so HC2 leverage and Bell-McCaffrey Satterthwaite
+        DOF must be computed on the full FE projection (matches
+        ``clubSandwich::vcovCR(lm(...), type="CR2") + coef_test()$df_Satt``).
+        ``classical`` / ``hc2`` are supported via the same full-dummy route AND
+        an auto-drop of the unit auto-cluster (one-way families don't compose
+        with cluster_ids per the linalg validator). Explicit ``cluster="X"`` +
+        one-way ``vcov_type`` raises at the validator.
+
+        ``conley`` is REJECTED at ``__init__`` (would require threading
+        ``conley_*`` params through ``solve_ols``; tracked in TODO.md).
+        ``method`` in ``{"logit","poisson"}`` + ``vcov_type != "hc1"`` is
+        REJECTED at ``__init__``: the GLM QMLE sandwich path uses pseudo-
+        residuals, and CR2-BM composition with QMLE on canonical-link pseudo-
+        residuals needs derivation + R parity (tracked in TODO.md). Survey
+        designs combined with ``vcov_type != "hc1"`` raise
+        ``NotImplementedError`` at ``fit()`` because the survey TSL / replicate-
+        refit variance overrides the analytical sandwich.
     """
 
     def __init__(
@@ -311,7 +332,53 @@ class WooldridgeDiD:
         bootstrap_weights: str = "rademacher",
         seed: Optional[int] = None,
         rank_deficient_action: str = "warn",
+        vcov_type: str = "hc1",
     ) -> None:
+        self._validate_constructor_args(
+            method=method,
+            control_group=control_group,
+            anticipation=anticipation,
+            bootstrap_weights=bootstrap_weights,
+            vcov_type=vcov_type,
+        )
+
+        self.method = method
+        self.control_group = control_group
+        self.anticipation = anticipation
+        self.demean_covariates = demean_covariates
+        self.alpha = alpha
+        self.cluster = cluster
+        self.n_bootstrap = n_bootstrap
+        self.bootstrap_weights = bootstrap_weights
+        self.seed = seed
+        self.rank_deficient_action = rank_deficient_action
+        self.vcov_type = vcov_type
+        # Track whether the user explicitly opted out of the "hc1" default.
+        # The auto-cluster-at-unit default in `_fit_ols` is suppressed only
+        # when the user explicitly opts into a one-way family (``hc2``,
+        # ``classical``). ``hc1`` and ``hc2_bm`` preserve the auto-cluster
+        # (route to CR1 / CR2 Bell-McCaffrey at unit respectively). Mirrors
+        # the SunAbraham PR #472 pattern at ``sun_abraham.py:572``.
+        self._vcov_type_explicit = vcov_type != "hc1"
+
+        self.is_fitted_: bool = False
+        self._results: Optional[WooldridgeDiDResults] = None
+
+    @staticmethod
+    def _validate_constructor_args(
+        *,
+        method: str,
+        control_group: str,
+        anticipation: int,
+        bootstrap_weights: str,
+        vcov_type: str,
+    ) -> None:
+        """Shared validation for both ``__init__`` and ``set_params``.
+
+        Catches the input-contract surface (allowed sets, ranges, and the
+        ``method`` × ``vcov_type`` interaction) without depending on instance
+        state, so ``set_params`` can re-run it after mutation.
+        """
         if method not in _VALID_METHODS:
             raise ValueError(f"method must be one of {_VALID_METHODS}, got {method!r}")
         if control_group not in _VALID_CONTROL_GROUPS:
@@ -325,20 +392,31 @@ class WooldridgeDiD:
                 f"bootstrap_weights must be one of {_VALID_BOOTSTRAP_WEIGHTS}, "
                 f"got {bootstrap_weights!r}"
             )
-
-        self.method = method
-        self.control_group = control_group
-        self.anticipation = anticipation
-        self.demean_covariates = demean_covariates
-        self.alpha = alpha
-        self.cluster = cluster
-        self.n_bootstrap = n_bootstrap
-        self.bootstrap_weights = bootstrap_weights
-        self.seed = seed
-        self.rank_deficient_action = rank_deficient_action
-
-        self.is_fitted_: bool = False
-        self._results: Optional[WooldridgeDiDResults] = None
+        if vcov_type not in ("classical", "hc1", "hc2", "hc2_bm"):
+            if vcov_type == "conley":
+                raise ValueError(
+                    "vcov_type='conley' is not yet wired up for WooldridgeDiD: "
+                    "would require threading conley_coords / conley_cutoff_km / "
+                    "conley_metric / conley_kernel / conley_time / conley_unit / "
+                    "conley_lag_cutoff through the solve_ols call. "
+                    "Tracked in TODO.md (WooldridgeDiD Conley follow-up row)."
+                )
+            raise ValueError(
+                f"vcov_type must be one of "
+                f"{{'classical','hc1','hc2','hc2_bm'}}; got '{vcov_type}'"
+            )
+        if method != "ols" and vcov_type != "hc1":
+            raise NotImplementedError(
+                f"WooldridgeDiD(method={method!r}, vcov_type={vcov_type!r}) is "
+                "not yet supported. The logit / poisson paths use a QMLE "
+                "sandwich with pseudo-residuals (probs*(1-probs) or mu_hat "
+                "weights); composing HC2 leverage and Bell-McCaffrey "
+                "Satterthwaite DOF with QMLE on canonical-link pseudo-"
+                "residuals needs derivation + R parity against "
+                "clubSandwich::vcovCR(glm(...)). Tracked in TODO.md "
+                "(WooldridgeDiD logit/poisson vcov_type follow-up row). "
+                "Use vcov_type='hc1' (default) for non-OLS methods."
+            )
 
     @property
     def results_(self) -> WooldridgeDiDResults:
@@ -359,29 +437,45 @@ class WooldridgeDiD:
             "bootstrap_weights": self.bootstrap_weights,
             "seed": self.seed,
             "rank_deficient_action": self.rank_deficient_action,
+            "vcov_type": self.vcov_type,
         }
 
     def set_params(self, **params: Any) -> "WooldridgeDiD":
-        """Set estimator parameters (sklearn-compatible). Returns self."""
-        for key, value in params.items():
+        """Set estimator parameters (sklearn-compatible). Returns self.
+
+        Atomic: if validation rejects the incoming combination (unknown
+        parameter, invalid value, or the ``method`` × ``vcov_type``
+        interaction guard fires), ``self`` is unchanged so a caller that
+        catches ``ValueError`` / ``NotImplementedError`` can keep using
+        the estimator with its previous configuration. Mirrors the
+        ``DifferenceInDifferences.set_params`` pattern at
+        ``estimators.py:995-1023``.
+        """
+        # First pass: validate all incoming keys are known attributes so
+        # we don't partially apply a batch that ends in "Unknown parameter".
+        for key in params:
             if not hasattr(self, key):
                 raise ValueError(f"Unknown parameter: {key!r}")
+
+        # Compute pending values by overlaying ``params`` on the current
+        # configuration; validate on those locals (catches invalid sets +
+        # the method × vcov_type interaction) BEFORE mutating ``self``.
+        pending = {
+            "method": params.get("method", self.method),
+            "control_group": params.get("control_group", self.control_group),
+            "anticipation": params.get("anticipation", self.anticipation),
+            "bootstrap_weights": params.get(
+                "bootstrap_weights", self.bootstrap_weights
+            ),
+            "vcov_type": params.get("vcov_type", self.vcov_type),
+        }
+        self._validate_constructor_args(**pending)
+
+        # All validation passed — apply mutations atomically.
+        for key, value in params.items():
             setattr(self, key, value)
-        # Re-run validation after setting params
-        if self.method not in _VALID_METHODS:
-            raise ValueError(f"method must be one of {_VALID_METHODS}, got {self.method!r}")
-        if self.control_group not in _VALID_CONTROL_GROUPS:
-            raise ValueError(
-                f"control_group must be one of {_VALID_CONTROL_GROUPS}, "
-                f"got {self.control_group!r}"
-            )
-        if self.anticipation < 0:
-            raise ValueError(f"anticipation must be >= 0, got {self.anticipation}")
-        if self.bootstrap_weights not in _VALID_BOOTSTRAP_WEIGHTS:
-            raise ValueError(
-                f"bootstrap_weights must be one of {_VALID_BOOTSTRAP_WEIGHTS}, "
-                f"got {self.bootstrap_weights!r}"
-            )
+        # Recompute the explicit-vcov flag after any vcov_type mutation.
+        self._vcov_type_explicit = self.vcov_type != "hc1"
         return self
 
     def fit(
@@ -442,6 +536,45 @@ class WooldridgeDiD:
             raise ValueError(
                 "Bootstrap inference is not supported with survey_design. "
                 "Set n_bootstrap=0 for analytic survey SEs."
+            )
+
+        # 0d. Reject survey_design + non-hc1 analytical family. The survey-
+        # design TSL (or replicate-weight refit) variance overrides the
+        # analytical sandwich, so the requested HC2/HC2-BM/classical family
+        # would be silently discarded. Mirrors the SunAbraham PR #472 pattern
+        # at ``sun_abraham.py:688-705``. Use vcov_type='hc1' (default) for
+        # survey designs.
+        if survey_design is not None and self.vcov_type != "hc1":
+            raise NotImplementedError(
+                f"WooldridgeDiD(vcov_type={self.vcov_type!r}) with "
+                "survey_design is not yet supported: the survey-design TSL "
+                "(or replicate-weight refit) variance overrides the analytical "
+                "sandwich, so the requested HC2/HC2-BM/classical family would "
+                "be silently discarded. Use vcov_type='hc1' (default) for "
+                "survey designs; the survey TSL machinery computes the "
+                "design-based variance independently."
+            )
+
+        # 0e. Reject bootstrap + one-way analytical vcov_type. The multiplier
+        # bootstrap is intrinsically clustered (draws per-cluster weights);
+        # one-way ``vcov_type in {"hc2","classical"}`` either drops the unit
+        # auto-cluster (``cluster=None`` → bootstrap has no cluster to draw
+        # at) OR is rejected by the linalg validator (``cluster=X`` + one-way
+        # + cluster_ids). Both fail paths produce a less-informative downstream
+        # error, so reject at the estimator boundary across both. The user
+        # must drop bootstrap (``n_bootstrap=0``) or pick a cluster-compatible
+        # ``vcov_type`` (``hc1`` or ``hc2_bm``).
+        if self.n_bootstrap > 0 and self.vcov_type in ("hc2", "classical"):
+            raise ValueError(
+                f"WooldridgeDiD(vcov_type={self.vcov_type!r}, "
+                f"n_bootstrap={self.n_bootstrap}) is not supported: the "
+                "multiplier bootstrap is intrinsically clustered, but the "
+                "one-way vcov_type does not compose with cluster_ids — "
+                "either the unit auto-cluster is dropped (when cluster=None) "
+                "leaving the bootstrap with no cluster to draw weights at, "
+                "or the linalg validator rejects one-way + cluster_ids at "
+                "fit (when cluster=X). Use vcov_type='hc1' / 'hc2_bm' for "
+                "the analytical sandwich, or set n_bootstrap=0."
             )
 
         # 1. Filter to analysis sample
@@ -644,12 +777,42 @@ class WooldridgeDiD:
         groups: List[Any],
         survey_design=None,
     ) -> WooldridgeDiDResults:
-        """OLS path: within-transform FE, solve_ols, cluster SE."""
+        """OLS path: within-transform FE, solve_ols, cluster SE.
+
+        Branches on ``self.vcov_type``: ``hc1`` (default) preserves the prior
+        within-transform path bit-equally; ``hc2``/``hc2_bm``/``classical``
+        auto-route to a full-dummy saturated design because FWL preserves
+        cohort coefficients but NOT the hat matrix (HC2 leverage and
+        Bell-McCaffrey Satterthwaite DOF require the full FE projection).
+        Mirrors the SunAbraham PR #472 pattern at ``sun_abraham.py:1364``.
+        """
         # Reset index so numpy positional indexing matches pandas groupby
         sample = sample.reset_index(drop=True)
-        # Cluster IDs (default: unit level) — needed before survey resolution
-        cluster_col = self.cluster if self.cluster else unit
-        cluster_ids = sample[cluster_col].values
+        # Cluster IDs: default to unit level for hc1/hc2_bm; drop the auto-
+        # cluster when the user opts into one-way ``vcov_type in {"hc2",
+        # "classical"}`` explicitly (one-way families don't compose with
+        # cluster_ids per the linalg validator). Explicit ``self.cluster=X``
+        # always wins. Mirrors SunAbraham PR #472 at ``sun_abraham.py:792-797``.
+        if self.cluster is not None:
+            cluster_col: Optional[str] = self.cluster
+            cluster_ids: Optional[np.ndarray] = sample[cluster_col].values
+        elif self.vcov_type in ("hc2", "classical") and self._vcov_type_explicit:
+            cluster_col = None
+            cluster_ids = None
+        else:
+            cluster_col = unit
+            cluster_ids = sample[cluster_col].values
+        # Bootstrap cluster level: user's ``self.cluster`` if set, else unit
+        # (the panel's natural unit of variation). This preserves the prior
+        # behavior — bootstrap matches the analytical cluster on hc1/hc2_bm
+        # paths and falls back to unit when the analytical sandwich drops the
+        # auto-cluster under explicit one-way. The fit() guard rejects
+        # ``n_bootstrap > 0`` + one-way + ``cluster=None``, so the fallback to
+        # unit only kicks in when the user explicitly set ``cluster=X``
+        # (already handled above) — in that explicit-one-way + explicit-cluster
+        # case the bootstrap matches the analytical cluster too.
+        bootstrap_cluster_col = self.cluster if self.cluster else unit
+        cluster_ids_bootstrap = sample[bootstrap_cluster_col].values
 
         # Resolve survey design, inject cluster as PSU only when user explicitly set cluster=
         survey_cluster_ids = cluster_ids if self.cluster else None
@@ -657,57 +820,111 @@ class WooldridgeDiD:
             _resolve_survey_for_wooldridge(survey_design, sample, survey_cluster_ids, self.cluster)
         )
 
-        # 4. Within-transform: absorb unit + time FE
-        all_vars = [outcome] + [f"_x{i}" for i in range(X_design.shape[1])]
-        tmp = sample[[unit, time]].copy()
-        tmp[outcome] = sample[outcome].values
-        for i in range(X_design.shape[1]):
-            tmp[f"_x{i}"] = X_design[:, i]
+        # Branch design build on vcov_type. ``hc1`` keeps within-transform
+        # (FWL preserves the CR1 cluster-robust score → bit-equal to prior
+        # at atol=1e-14). The full-dummy branch handles hc2 / hc2_bm /
+        # classical, which need the hat matrix on the full FE projection
+        # (FWL does not preserve it). ``coef_offset`` shifts gt_effects
+        # indexing to account for the intercept under full-dummy.
+        use_full_dummy = self.vcov_type in ("hc2", "hc2_bm", "classical")
 
-        # Use iterative alternating projections for demeaning (exact for
-        # both balanced and unbalanced panels).  Survey weights change the
-        # weighted FWL projection — all columns (treatment interactions +
-        # covariates) are demeaned together.
-        wt_weights = survey_weights if survey_weights is not None else np.ones(len(tmp))
+        if use_full_dummy:
+            # Full-dummy build: [intercept, X_design, unit_dummies,
+            # time_dummies]. Survey + non-hc1 was rejected at fit(), so
+            # survey_weights / resolved are None here. ``coef_offset = 1``
+            # shifts the gt_effects loop to skip the intercept.
+            n_obs = len(sample)
+            n_units_fe = int(sample[unit].nunique())
+            n_times_fe = int(sample[time].nunique())
+            dense_cells = n_obs * (1 + X_design.shape[1] + (n_units_fe - 1) + (n_times_fe - 1))
+            if dense_cells > 50_000_000:
+                warnings.warn(
+                    f"WooldridgeDiD(vcov_type={self.vcov_type!r}) builds a "
+                    f"dense full-dummy saturated design (~{dense_cells:,} "
+                    "float64 cells, >50M). FWL preserves coefficients but not "
+                    "the hat matrix, so HC2/HC2-BM/classical requires the full-"
+                    "dummy projection (within-transform would produce a "
+                    "methodologically different statistic). For very high-"
+                    "cardinality panels, consider vcov_type='hc1' (within-"
+                    "transform) or reducing the panel size.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+            intercept_col = np.ones((n_obs, 1))
+            unit_dummies = pd.get_dummies(
+                sample[unit], prefix=f"_fe_{unit}", drop_first=True
+            ).values.astype(float)
+            time_dummies = pd.get_dummies(
+                sample[time], prefix=f"_fe_{time}", drop_first=True
+            ).values.astype(float)
+            X = np.hstack([intercept_col, X_design, unit_dummies, time_dummies])
+            y = sample[outcome].values.astype(float)
+            coef_offset = 1
+        else:
+            # Within-transform path (hc1 default; preserves prior bit-equal
+            # behavior). 4. Within-transform: absorb unit + time FE
+            all_vars = [outcome] + [f"_x{i}" for i in range(X_design.shape[1])]
+            tmp = sample[[unit, time]].copy()
+            tmp[outcome] = sample[outcome].values
+            for i in range(X_design.shape[1]):
+                tmp[f"_x{i}"] = X_design[:, i]
 
-        # Guard: zero-weight unit/time groups cause 0/0 in within_transform
-        if survey_weights is not None and np.any(survey_weights == 0):
-            sw_series = pd.Series(survey_weights, index=sample.index)
-            for grp_col, grp_label in [(unit, "unit"), (time, "time period")]:
-                grp_sums = sw_series.groupby(sample[grp_col]).sum()
-                zero_grps = grp_sums[grp_sums == 0].index.tolist()
-                if zero_grps:
-                    raise ValueError(
-                        f"Survey weights sum to zero for {grp_label}(s) "
-                        f"{zero_grps[:3]}. Cannot compute weighted "
-                        f"within-transformation. Remove zero-weight "
-                        f"{grp_label}s or use non-zero weights."
-                    )
+            # Use iterative alternating projections for demeaning (exact for
+            # both balanced and unbalanced panels).  Survey weights change
+            # the weighted FWL projection — all columns (treatment
+            # interactions + covariates) are demeaned together.
+            wt_weights = survey_weights if survey_weights is not None else np.ones(len(tmp))
 
-        transformed = within_transform(
-            tmp, all_vars, unit=unit, time=time, suffix="_demeaned",
-            weights=wt_weights,
-        )
+            # Guard: zero-weight unit/time groups cause 0/0 in within_transform
+            if survey_weights is not None and np.any(survey_weights == 0):
+                sw_series = pd.Series(survey_weights, index=sample.index)
+                for grp_col, grp_label in [(unit, "unit"), (time, "time period")]:
+                    grp_sums = sw_series.groupby(sample[grp_col]).sum()
+                    zero_grps = grp_sums[grp_sums == 0].index.tolist()
+                    if zero_grps:
+                        raise ValueError(
+                            f"Survey weights sum to zero for {grp_label}(s) "
+                            f"{zero_grps[:3]}. Cannot compute weighted "
+                            f"within-transformation. Remove zero-weight "
+                            f"{grp_label}s or use non-zero weights."
+                        )
 
-        y = transformed[f"{outcome}_demeaned"].values
-        X_cols = [f"_x{i}_demeaned" for i in range(X_design.shape[1])]
-        X = transformed[X_cols].values
+            transformed = within_transform(
+                tmp,
+                all_vars,
+                unit=unit,
+                time=time,
+                suffix="_demeaned",
+                weights=wt_weights,
+            )
 
-        # 6. Solve OLS (skip cluster-robust vcov when survey will provide TSL vcov)
+            y = transformed[f"{outcome}_demeaned"].values
+            X_cols = [f"_x{i}_demeaned" for i in range(X_design.shape[1])]
+            X = transformed[X_cols].values
+            coef_offset = 0
+
+        # 6. Solve OLS (skip cluster-robust vcov when survey will provide TSL vcov).
+        # Pass ``column_names=col_names`` only on the within-transform branch;
+        # under full-dummy ``X`` has additional intercept + FE columns whose
+        # names aren't in ``col_names``, and ``solve_ols`` only uses names for
+        # rank-deficiency error messages (cosmetic). Omitting under full-dummy
+        # keeps rank-deficiency reporting consistent with the column count.
         coefs, resids, vcov = solve_ols(
             X,
             y,
             cluster_ids=cluster_ids,
             return_vcov=(resolved is None),
             rank_deficient_action=self.rank_deficient_action,
-            column_names=col_names,
+            column_names=col_names if not use_full_dummy else None,
             weights=survey_weights,
             weight_type=survey_weight_type,
+            vcov_type=self.vcov_type,
         )
 
         # Survey TSL vcov replaces cluster-robust vcov
         if resolved is not None:
             from diff_diff.survey import compute_survey_vcov
+
             nan_mask_ols = np.isnan(coefs)
             if np.any(nan_mask_ols):
                 kept = ~nan_mask_ols
@@ -718,40 +935,276 @@ class WooldridgeDiD:
             else:
                 vcov = compute_survey_vcov(X, resids, resolved)
 
-        # 7. Extract β_{g,t} and build gt_effects dict
+        # 7. Extract β_{g,t} and build gt_effects dict. Under full-dummy
+        # (``coef_offset = 1``), treatment cells occupy columns
+        # ``1..1+n_int-1`` (intercept at 0); under within-transform
+        # (``coef_offset = 0``), treatment cells occupy columns
+        # ``0..n_int-1``. The shift only affects this loop's indexing into
+        # ``coefs`` / ``vcov`` — the (g, t) key space and the order of
+        # ``gt_keys`` are identical across branches.
+        #
+        # First pass: collect non-dropped (g, t) cells + att + se. Per-cell
+        # df_Satt is computed in a single batched call below (BM DOF section)
+        # so per-cell inference fields use the Satterthwaite DOF rather than
+        # df_inf=None (normal-theory).
         gt_effects: Dict[Tuple, Dict] = {}
         gt_weights: Dict[Tuple, int] = {}
+        gt_coef_index_map: Dict[Tuple, int] = {}  # (g, t) -> full-coef-space index
         for idx, (g, t) in enumerate(gt_keys):
-            if idx >= len(coefs):
+            coef_idx = idx + coef_offset
+            if coef_idx >= len(coefs):
                 break
             # Skip cells whose coefficient was dropped (rank deficiency)
-            if np.isnan(coefs[idx]):
+            if np.isnan(coefs[coef_idx]):
                 continue
-            att = float(coefs[idx])
-            se = float(np.sqrt(max(vcov[idx, idx], 0.0))) if vcov is not None else float("nan")
-            t_stat, p_value, conf_int = safe_inference(att, se, alpha=self.alpha, df=df_inf)
+            att = float(coefs[coef_idx])
+            se = (
+                float(np.sqrt(max(vcov[coef_idx, coef_idx], 0.0)))
+                if vcov is not None
+                else float("nan")
+            )
             gt_effects[(g, t)] = {
                 "att": att,
                 "se": se,
-                "t_stat": t_stat,
-                "p_value": p_value,
-                "conf_int": conf_int,
+                "t_stat": float("nan"),
+                "p_value": float("nan"),
+                "conf_int": (float("nan"), float("nan")),
             }
             gt_weights[(g, t)] = int(((sample[cohort] == g) & (sample[time] == t)).sum())
+            gt_coef_index_map[(g, t)] = coef_idx
 
-        # Extract vcov submatrix for identified β_{g,t} only (skip NaN/dropped)
+        # Extract vcov submatrix for identified β_{g,t} only (skip NaN/dropped).
+        # Shift by coef_offset so the submatrix lands on treatment cells
+        # under full-dummy.
         gt_keys_ordered = list(gt_effects.keys())
         if vcov is not None and gt_keys_ordered:
-            # Map from gt_keys_ordered to original indices in the coef vector
-            orig_indices = [i for i, k in enumerate(gt_keys) if k in gt_effects]
+            orig_indices = [i + coef_offset for i, k in enumerate(gt_keys) if k in gt_effects]
             gt_vcov = vcov[np.ix_(orig_indices, orig_indices)]
         else:
             gt_vcov = None
 
-        # 8. Simple aggregation (always computed)
-        overall = _compute_weighted_agg(
-            gt_effects, gt_weights, gt_keys_ordered, gt_vcov, self.alpha, df=df_inf
-        )
+        # 8. Bell-McCaffrey contrast DOF threading for hc2_bm. Computes (in
+        # one batched call) the per-coefficient ``df_Satt`` for every
+        # present ``(g, t)`` cell AND the post-period-average overall ATT
+        # contrast DOF. Per-cell DOFs are applied to ``gt_effects`` inference
+        # below (8a); the overall DOF is applied to the simple aggregation
+        # (8b). BM artifacts (X, cluster_ids, bread, coef_index_map) are
+        # also stashed on the Results object so that downstream
+        # ``aggregate("group" | "calendar" | "event")`` can compute contrast-
+        # specific DOFs lazily without recomputing the full-dummy fit.
+        # Mirrors the SunAbraham PR #472 pattern at
+        # ``sun_abraham.py:1008-1097`` and the StackedDiD PR #479 R3 fix.
+        # Per ``feedback_bm_contrast_dof_fail_closed``: when DOF is
+        # unavailable (helper raises or returns non-finite), affected
+        # user-facing inference is NaN rather than falling back to
+        # ``safe_inference(df=None)`` (silent normal-theory).
+        overall_att_bm_dof: Optional[float] = None
+        per_cell_bm_dof: Dict[Tuple, float] = {}
+        bm_artifacts: Optional[
+            Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[Tuple, int]]
+        ] = None
+        # Residual DOF for one-way ``vcov_type in {"classical","hc2"}`` paths
+        # (full-dummy, no survey). Matches R's ``lm()`` / ``coef_test()`` use
+        # of ``n - rank(X)`` for the t-distribution under both classical OLS
+        # SE and ``sandwich::vcovHC(type="HC2")``. ``None`` on hc1 /
+        # hc2_bm / surveyed paths (those use their own DOF threading or
+        # df_inf). Mirrors R's t-distribution convention so per-cell +
+        # aggregate p-values/CIs are not normal-theory under small samples.
+        df_one_way: Optional[float] = None
+        if (
+            self.vcov_type in ("classical", "hc2")
+            and use_full_dummy
+            and resolved is None
+            and vcov is not None
+        ):
+            n_kept = int((~np.isnan(coefs)).sum())
+            df_candidate = X.shape[0] - n_kept
+            df_one_way = float(df_candidate) if df_candidate > 0 else float("nan")
+        if (
+            self.vcov_type == "hc2_bm"
+            and use_full_dummy
+            and resolved is None
+            and vcov is not None
+            and gt_keys_ordered
+            and cluster_ids is not None
+        ):
+            from diff_diff.linalg import _compute_cr2_bm_contrast_dof
+
+            # Honor rank deficiency: solve_ols sets coefs[i] = NaN for dropped
+            # columns. The full-design bread (X.T @ X) is singular on the
+            # dropped columns, so _compute_cr2_bm_contrast_dof would
+            # LinAlgError on it. Reduce X / bread / contrasts to the kept-
+            # column subspace before computing BM DOF (matches the existing
+            # MPD pattern at estimators.py:1860-1913 and SA's full-dummy
+            # behavior). Identified (g, t) cells survive; cells whose
+            # treatment-cell coefficient was dropped get per_cell_bm_dof=NaN
+            # and the gt_effects loop fail-closes their inference.
+            nan_mask = np.isnan(coefs)
+            kept_indices = np.where(~nan_mask)[0]
+            kept_set = set(int(i) for i in kept_indices.tolist())
+            X_red = X[:, kept_indices]
+            bread_red = X_red.T @ X_red
+            # Map full-coef index → reduced-coef index for kept columns only.
+            full_to_reduced: Dict[int, int] = {
+                int(full_idx): red_pos for red_pos, full_idx in enumerate(kept_indices)
+            }
+            # Reduced coef-index map for (g, t) cells whose coefficient was
+            # kept; cells with dropped coefficients are absent here and will
+            # be fail-closed at gt_effects inference + aggregate() time.
+            reduced_coef_idx_map: Dict[Tuple, int] = {
+                k: full_to_reduced[v]
+                for k, v in gt_coef_index_map.items()
+                if int(v) in kept_set
+            }
+            n_red = X_red.shape[1]
+            # Per-cell one-hot contrasts (kept cells only). Dropped cells get
+            # NaN per_cell_bm_dof (caller fail-closes inference fields).
+            per_cell_keys_kept = [k for k in gt_keys_ordered if k in reduced_coef_idx_map]
+            per_cell_keys_dropped = [
+                k for k in gt_keys_ordered if k not in reduced_coef_idx_map
+            ]
+            # Overall ATT contrast across post-period kept cells.
+            post_keys = [(g, t) for (g, t) in gt_keys_ordered if t >= g]
+            post_keys_kept = [k for k in post_keys if k in reduced_coef_idx_map]
+            w_total_post = sum(gt_weights.get(k, 0) for k in post_keys_kept)
+            overall_contrast = np.zeros(n_red)
+            if w_total_post > 0:
+                for k in post_keys_kept:
+                    overall_contrast[reduced_coef_idx_map[k]] = (
+                        gt_weights[k] / w_total_post
+                    )
+            include_overall = w_total_post > 0 and bool(np.any(overall_contrast != 0))
+            cols: List[np.ndarray] = []
+            for k in per_cell_keys_kept:
+                col = np.zeros(n_red)
+                col[reduced_coef_idx_map[k]] = 1.0
+                cols.append(col)
+            if include_overall:
+                cols.append(overall_contrast)
+            if cols:
+                contrasts_matrix = np.column_stack(cols)
+                try:
+                    dof_vec = _compute_cr2_bm_contrast_dof(
+                        X_red, cluster_ids, bread_red, contrasts_matrix
+                    )
+                    for i, k in enumerate(per_cell_keys_kept):
+                        candidate = float(dof_vec[i])
+                        per_cell_bm_dof[k] = (
+                            candidate if np.isfinite(candidate) else float("nan")
+                        )
+                    if include_overall:
+                        candidate = float(dof_vec[-1])
+                        overall_att_bm_dof = (
+                            candidate if np.isfinite(candidate) else float("nan")
+                        )
+                except (ValueError, np.linalg.LinAlgError) as exc:
+                    warnings.warn(
+                        f"WooldridgeDiD(vcov_type='hc2_bm') analytical "
+                        f"inference could not compute Bell-McCaffrey "
+                        f"contrast DOF ({type(exc).__name__}: {exc}). "
+                        "Affected per-cell and overall inference (t_stat / "
+                        "p_value / conf_int) will be NaN to preserve the "
+                        "hc2_bm contract.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                    for k in per_cell_keys_kept:
+                        per_cell_bm_dof[k] = float("nan")
+                    if include_overall:
+                        overall_att_bm_dof = float("nan")
+            # Cells whose coefficient was dropped get NaN regardless of
+            # whether the batched call succeeded.
+            for k in per_cell_keys_dropped:
+                per_cell_bm_dof[k] = float("nan")
+            # Stash REDUCED artifacts for ``aggregate()`` so the lazy
+            # contrast DOF computation operates in the same reduced
+            # coefficient space and avoids the singular full-design bread.
+            bm_artifacts = (X_red, cluster_ids, bread_red, reduced_coef_idx_map)
+
+        # 8a. Apply DOF threading (or fail-closed NaN) to ``gt_effects``:
+        # hc2_bm uses per-cell BM Satterthwaite DOF; classical/hc2 (one-way,
+        # no survey) use the residual ``df_one_way = n - rank(X)`` so
+        # p-values/CIs match R ``lm()`` / ``coef_test()`` t-distribution
+        # instead of normal-theory; hc1 / surveyed paths use ``df_inf``
+        # (survey df or None). Per ``feedback_bm_contrast_dof_fail_closed``:
+        # NaN BM DOF emits NaN inference fields (never normal-theory).
+        for (g, t), eff in gt_effects.items():
+            if self.vcov_type == "hc2_bm" and use_full_dummy and resolved is None:
+                cell_dof = per_cell_bm_dof.get((g, t), float("nan"))
+                if np.isfinite(cell_dof):
+                    t_stat, p_value, conf_int = safe_inference(
+                        eff["att"], eff["se"], alpha=self.alpha, df=cell_dof
+                    )
+                else:
+                    t_stat = float("nan")
+                    p_value = float("nan")
+                    conf_int = (float("nan"), float("nan"))
+            elif (
+                self.vcov_type in ("classical", "hc2")
+                and use_full_dummy
+                and resolved is None
+                and df_one_way is not None
+                and np.isfinite(df_one_way)
+            ):
+                t_stat, p_value, conf_int = safe_inference(
+                    eff["att"], eff["se"], alpha=self.alpha, df=df_one_way
+                )
+            else:
+                t_stat, p_value, conf_int = safe_inference(
+                    eff["att"], eff["se"], alpha=self.alpha, df=df_inf
+                )
+            eff["t_stat"] = t_stat
+            eff["p_value"] = p_value
+            eff["conf_int"] = conf_int
+
+        # 8b. Simple aggregation (always computed). DOF threading mirrors 8a:
+        # hc2_bm uses the overall ATT BM contrast DOF (fail-closed NaN if
+        # unavailable); classical/hc2 (one-way, no survey) use the residual
+        # ``df_one_way``; hc1 / surveyed paths use ``df_inf`` (survey df or
+        # None).
+        if self.vcov_type == "hc2_bm" and use_full_dummy and resolved is None:
+            if overall_att_bm_dof is not None and np.isfinite(overall_att_bm_dof):
+                overall = _compute_weighted_agg(
+                    gt_effects,
+                    gt_weights,
+                    gt_keys_ordered,
+                    gt_vcov,
+                    self.alpha,
+                    df=overall_att_bm_dof,
+                )
+            else:
+                # BM DOF unavailable: preserve att + se from a finite-df run
+                # (so the user-facing att/se still match the sandwich), then
+                # NaN-out the inference fields.
+                overall = _compute_weighted_agg(
+                    gt_effects,
+                    gt_weights,
+                    gt_keys_ordered,
+                    gt_vcov,
+                    self.alpha,
+                    df=df_inf,
+                )
+                overall = {
+                    "att": overall["att"],
+                    "se": overall["se"],
+                    "t_stat": float("nan"),
+                    "p_value": float("nan"),
+                    "conf_int": (float("nan"), float("nan")),
+                }
+        elif (
+            self.vcov_type in ("classical", "hc2")
+            and use_full_dummy
+            and resolved is None
+            and df_one_way is not None
+            and np.isfinite(df_one_way)
+        ):
+            overall = _compute_weighted_agg(
+                gt_effects, gt_weights, gt_keys_ordered, gt_vcov, self.alpha, df=df_one_way
+            )
+        else:
+            overall = _compute_weighted_agg(
+                gt_effects, gt_weights, gt_keys_ordered, gt_vcov, self.alpha, df=df_inf
+            )
 
         # Metadata
         n_treated = int(sample[sample[cohort] > 0][unit].nunique())
@@ -775,17 +1228,40 @@ class WooldridgeDiD:
             alpha=self.alpha,
             anticipation=self.anticipation,
             survey_metadata=survey_metadata,
+            vcov_type=self.vcov_type,
+            # Cluster metadata: ``None`` under survey TSL because the
+            # analytical sandwich (and its cluster_ids) was overridden by
+            # the survey variance; ``survey_metadata`` carries the
+            # design-side stratification/PSU instead. Under non-survey, the
+            # analytical cluster (default unit, dropped for explicit one-way).
+            cluster_name=(None if resolved is not None else cluster_col),
+            n_clusters=(
+                None
+                if resolved is not None
+                else (int(np.unique(cluster_ids).size) if cluster_ids is not None else None)
+            ),
             _gt_weights=gt_weights,
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
             _df_survey=df_inf,
+            _bm_per_cell_dof=per_cell_bm_dof,
+            _bm_artifacts=bm_artifacts,
+            _df_one_way=df_one_way,
         )
 
-        # 9. Optional multiplier bootstrap (overrides analytic SE for overall ATT)
+        # 9. Optional multiplier bootstrap (overrides analytic SE for overall ATT).
+        # Clusters at ``self.cluster if self.cluster else unit`` (via the
+        # ``cluster_ids_bootstrap`` variable set just below the cluster-
+        # handling block at the top of _fit_ols) — i.e., the bootstrap
+        # honors the user's explicit ``cluster=X`` and falls back to unit
+        # only when ``cluster=None`` (the panel's natural unit of variation).
+        # The fit() guard at the top rejects ``n_bootstrap > 0`` +
+        # ``vcov_type in {"hc2","classical"}`` regardless of cluster, so
+        # under any combination that reaches here, the bootstrap cluster
+        # matches the analytical cluster on hc1/hc2_bm paths.
         if self.n_bootstrap > 0:
             rng = np.random.default_rng(self.seed)
-            # Draw weights at the analytic cluster level (not always unit)
-            unique_boot_clusters = np.unique(cluster_ids)
+            unique_boot_clusters = np.unique(cluster_ids_bootstrap)
             n_boot_clusters = len(unique_boot_clusters)
             post_keys = [(g, t) for (g, t) in gt_keys_ordered if t >= g]
             w_total_b = sum(gt_weights.get(k, 0) for k in post_keys)
@@ -805,21 +1281,29 @@ class WooldridgeDiD:
                         p=[phi / np.sqrt(5), (phi - 1) / np.sqrt(5)],
                         size=n_boot_clusters,
                     )
-                obs_weights = cl_weights[np.searchsorted(unique_boot_clusters, cluster_ids)]
+                obs_weights = cl_weights[
+                    np.searchsorted(unique_boot_clusters, cluster_ids_bootstrap)
+                ]
                 y_boot = y + obs_weights * resids
+                # Thread vcov_type for grep consistency (no-op at runtime
+                # because ``return_vcov=False``). Pass the analytical
+                # ``cluster_ids`` (which may be ``None`` under one-way
+                # explicit + ``cluster=None`` — the fit() guard prevents
+                # that combination from reaching here).
                 coefs_b, _, _ = solve_ols(
                     X,
                     y_boot,
                     cluster_ids=cluster_ids,
                     return_vcov=False,
                     rank_deficient_action="silent",
+                    vcov_type=self.vcov_type,
                 )
                 if w_total_b > 0:
                     att_b = (
                         sum(
-                            gt_weights.get(k, 0) * float(coefs_b[i])
+                            gt_weights.get(k, 0) * float(coefs_b[i + coef_offset])
                             for i, k in enumerate(gt_keys)
-                            if k in post_keys and i < len(coefs_b)
+                            if k in post_keys and i + coef_offset < len(coefs_b)
                         )
                         / w_total_b
                     )
@@ -906,6 +1390,7 @@ class WooldridgeDiD:
             # Bread: (X_tilde'WX_tilde)^{-1} = (X'diag(w*V)X)^{-1}
             # Scores: w*X_tilde*r_tilde = w*X*(y-mu)
             from diff_diff.survey import compute_survey_vcov
+
             V = probs * (1 - probs)
             sqrt_V = np.sqrt(np.clip(V, 1e-20, None))
             X_tilde = X_with_intercept * sqrt_V[:, None]
@@ -1031,7 +1516,9 @@ class WooldridgeDiD:
             overall_att = sum(gt_weights[k] * gt_effects[k]["att"] for k in post_keys) / w_total
             agg_grad = sum((gt_weights[k] / w_total) * gt_grads[k] for k in post_keys)
             overall_se = float(np.sqrt(max(agg_grad @ _vcov_se @ agg_grad, 0.0)))
-            t_stat, p_value, conf_int = safe_inference(overall_att, overall_se, alpha=self.alpha, df=df_inf)
+            t_stat, p_value, conf_int = safe_inference(
+                overall_att, overall_se, alpha=self.alpha, df=df_inf
+            )
             overall = {
                 "att": overall_att,
                 "se": overall_se,
@@ -1061,6 +1548,17 @@ class WooldridgeDiD:
             alpha=self.alpha,
             anticipation=self.anticipation,
             survey_metadata=survey_metadata,
+            # vcov_type is locked to "hc1" on the nonlinear paths (the
+            # __init__ guard rejects non-hc1 + method != "ols"). Surface
+            # cluster_name / n_clusters for shared introspection contract
+            # with the OLS path. Under survey TSL the analytical sandwich
+            # (including its cluster_ids) is replaced — surface ``None``
+            # so downstream introspection doesn't claim a unit-cluster
+            # that wasn't actually applied; survey_metadata carries the
+            # design-side structure instead.
+            vcov_type=self.vcov_type,
+            cluster_name=(None if _has_survey else cluster_col),
+            n_clusters=(None if _has_survey else int(np.unique(cluster_ids).size)),
             _gt_weights=gt_weights,
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
@@ -1118,7 +1616,8 @@ class WooldridgeDiD:
         _has_survey = resolved is not None
 
         beta, mu_hat = solve_poisson(
-            X_full, y,
+            X_full,
+            y,
             rank_deficient_action=self.rank_deficient_action,
             weights=survey_weights,
         )
@@ -1137,6 +1636,7 @@ class WooldridgeDiD:
         if _has_survey:
             # X_tilde trick for nonlinear survey vcov (V = mu for Poisson)
             from diff_diff.survey import compute_survey_vcov
+
             sqrt_V = np.sqrt(np.clip(mu_hat, 1e-20, None))
             X_tilde = X_full * sqrt_V[:, None]
             r_tilde = resids / sqrt_V
@@ -1268,7 +1768,9 @@ class WooldridgeDiD:
             overall_att = sum(gt_weights[k] * gt_effects[k]["att"] for k in post_keys) / w_total
             agg_grad = sum((gt_weights[k] / w_total) * gt_grads[k] for k in post_keys)
             overall_se = float(np.sqrt(max(agg_grad @ _vcov_se @ agg_grad, 0.0)))
-            t_stat, p_value, conf_int = safe_inference(overall_att, overall_se, alpha=self.alpha, df=df_inf)
+            t_stat, p_value, conf_int = safe_inference(
+                overall_att, overall_se, alpha=self.alpha, df=df_inf
+            )
             overall = {
                 "att": overall_att,
                 "se": overall_se,
@@ -1298,6 +1800,15 @@ class WooldridgeDiD:
             alpha=self.alpha,
             anticipation=self.anticipation,
             survey_metadata=survey_metadata,
+            # vcov_type locked to "hc1" on Poisson path (the __init__ guard
+            # rejects non-hc1 + method != "ols"). Surface cluster_name /
+            # n_clusters for shared introspection contract. Under survey
+            # TSL the analytical sandwich is replaced — surface ``None``
+            # so downstream introspection doesn't claim a unit-cluster
+            # that wasn't actually applied.
+            vcov_type=self.vcov_type,
+            cluster_name=(None if _has_survey else cluster_col),
+            n_clusters=(None if _has_survey else int(np.unique(cluster_ids).size)),
             _gt_weights=gt_weights,
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,

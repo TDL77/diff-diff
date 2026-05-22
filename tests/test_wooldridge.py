@@ -1,5 +1,7 @@
 """Tests for WooldridgeDiD estimator and WooldridgeDiDResults."""
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -1640,3 +1642,577 @@ class TestCohortNaNWarning:
                 df, unit="unit", time="time", cohort="cohort",
                 control_group="never_treated", anticipation=0,
             )
+
+
+def _make_vcov_panel(n_units=40, n_periods=6, seed=202605211230):
+    """Fixed-seed staggered panel for vcov_type tests.
+
+    Three cohorts (0=never, 3, 5), heterogeneous treatment effects (stronger
+    for cohort=3), 40 units × 6 periods. Heterogeneous effects per
+    ``feedback_homogeneous_dgp_no_twfe_bias`` — required for meaningful
+    TWFE-style bias-vs-corrected comparisons. The fixed seed and panel
+    shape are pinned by
+    ``TestWooldridgeVcovType::test_hc1_se_bit_equal_to_pre_pr_baseline``
+    against a hardcoded SE captured on the Phase 1b PR 3/8 branch
+    (commit-SHA-equivalent to ``origin/main`` at fork time: ``24de9062``).
+    """
+    rng = np.random.default_rng(seed)
+    units = np.repeat(np.arange(n_units), n_periods)
+    periods = np.tile(np.arange(1, n_periods + 1), n_units)
+    cohort_choices = [0, 3, 5]
+    cohorts = rng.choice(cohort_choices, size=n_units, p=[0.4, 0.3, 0.3])
+    cohort_per_obs = cohorts[units]
+    tau = np.where(
+        (cohort_per_obs > 0) & (periods >= cohort_per_obs),
+        0.4 + 0.25 * (periods - cohort_per_obs) + 0.3 * (cohort_per_obs == 3),
+        0.0,
+    )
+    y = 0.7 + 0.1 * periods + 0.05 * units + tau + 0.15 * rng.normal(size=len(units))
+    return pd.DataFrame(
+        {"unit": units, "time": periods, "cohort": cohort_per_obs, "y": y}
+    )
+
+
+class TestWooldridgeVcovType:
+    """Phase 1b PR 3/8: vcov_type input contract + branching for OLS path."""
+
+    def test_default_vcov_type_is_hc1(self):
+        est = WooldridgeDiD()
+        assert est.vcov_type == "hc1"
+        assert est._vcov_type_explicit is False
+
+    def test_hc1_se_bit_equal_to_pre_pr_baseline(self):
+        """HC1 within-transform path must match pre-PR baseline at atol=1e-14.
+
+        Baseline captured on the Phase 1b PR 3/8 branch with
+        ``_make_vcov_panel(seed=202605211230)``. FWL preserves the CR1
+        cluster-robust score, so the new ``vcov_type`` branching keeps HC1
+        bit-equal to the prior hard-coded HC1 behavior.
+        """
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc1").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        assert res.overall_att == pytest.approx(0.9178849934516247, abs=1e-14)
+        assert res.overall_se == pytest.approx(0.03149488781317814, abs=1e-14)
+
+    def test_hc2_bm_finite_and_inflates_over_hc1(self):
+        df = _make_vcov_panel()
+        res_hc1 = WooldridgeDiD(method="ols", vcov_type="hc1").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res_bm = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        for k, eff in res_bm.group_time_effects.items():
+            assert np.isfinite(eff["se"])
+        assert np.isfinite(res_bm.overall_se)
+        assert res_bm.overall_se > res_hc1.overall_se
+        # ATT identity across vcov branches (only SE differs)
+        assert res_bm.overall_att == pytest.approx(res_hc1.overall_att, abs=1e-10)
+
+    def test_atts_identical_across_vcov_branches(self):
+        """Per-cell ATT estimates must be identical across all 4 vcov branches
+        (within-transform hc1 vs full-dummy hc2_bm/hc2/classical)."""
+        df = _make_vcov_panel()
+        results = {}
+        for vt in ("hc1", "hc2_bm", "hc2", "classical"):
+            results[vt] = WooldridgeDiD(method="ols", vcov_type=vt).fit(
+                df, outcome="y", unit="unit", time="time", cohort="cohort"
+            )
+        ref = results["hc1"]
+        for vt in ("hc2_bm", "hc2", "classical"):
+            assert results[vt].overall_att == pytest.approx(ref.overall_att, abs=1e-10)
+            for k in ref.group_time_effects:
+                assert results[vt].group_time_effects[k]["att"] == pytest.approx(
+                    ref.group_time_effects[k]["att"], abs=1e-10
+                ), f"per-cell ATT diverged for vcov_type={vt!r} at cell {k}"
+
+    def test_classical_with_explicit_user_cluster_rejected_by_linalg(self):
+        df = _make_vcov_panel()
+        est = WooldridgeDiD(method="ols", vcov_type="classical", cluster="unit")
+        with pytest.raises(ValueError):
+            est.fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+
+    def test_classical_drops_auto_cluster(self):
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="classical").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        assert np.isfinite(res.overall_se)
+        assert res.cluster_name is None
+        assert res.n_clusters is None
+
+    def test_hc2_drops_auto_cluster(self):
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc2").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        assert np.isfinite(res.overall_se)
+        assert res.cluster_name is None
+        assert res.n_clusters is None
+
+    def test_conley_rejected_at_init_with_deferral(self):
+        with pytest.raises(ValueError, match="conley"):
+            WooldridgeDiD(vcov_type="conley")
+
+    def test_invalid_vcov_type_rejected(self):
+        with pytest.raises(ValueError, match="hc4"):
+            WooldridgeDiD(vcov_type="hc4")
+
+    def test_logit_plus_hc2_bm_rejected_at_init(self):
+        with pytest.raises(NotImplementedError, match=r"method='logit'"):
+            WooldridgeDiD(method="logit", vcov_type="hc2_bm")
+
+    def test_poisson_plus_hc2_bm_rejected_at_init(self):
+        with pytest.raises(NotImplementedError, match=r"method='poisson'"):
+            WooldridgeDiD(method="poisson", vcov_type="hc2_bm")
+
+    def test_logit_plus_hc1_default_preserved(self):
+        # method='logit' + vcov_type='hc1' (default) must NOT raise —
+        # preserves the prior nonlinear path bit-equally.
+        est = WooldridgeDiD(method="logit", vcov_type="hc1")
+        assert est.method == "logit"
+        assert est.vcov_type == "hc1"
+
+    def test_survey_design_plus_hc2_bm_rejected(self):
+        from diff_diff.survey import SurveyDesign
+
+        df = _make_vcov_panel()
+        df["w"] = 1.0
+        design = SurveyDesign(weights="w", weight_type="pweight")
+        est = WooldridgeDiD(method="ols", vcov_type="hc2_bm")
+        with pytest.raises(NotImplementedError, match=r"survey_design"):
+            est.fit(
+                df, outcome="y", unit="unit", time="time", cohort="cohort",
+                survey_design=design,
+            )
+
+    def test_survey_design_plus_classical_rejected(self):
+        from diff_diff.survey import SurveyDesign
+
+        df = _make_vcov_panel()
+        df["w"] = 1.0
+        design = SurveyDesign(weights="w", weight_type="pweight")
+        est = WooldridgeDiD(method="ols", vcov_type="classical")
+        with pytest.raises(NotImplementedError, match=r"survey_design"):
+            est.fit(
+                df, outcome="y", unit="unit", time="time", cohort="cohort",
+                survey_design=design,
+            )
+
+    def test_bootstrap_plus_one_way_rejected_regardless_of_cluster(self):
+        """Bootstrap + one-way analytical vcov_type is rejected at the
+        estimator boundary regardless of ``self.cluster`` — under
+        ``cluster=None`` the auto-cluster is dropped (no cluster for the
+        bootstrap to draw at); under ``cluster=X`` the linalg validator
+        rejects one-way + cluster_ids. Both fail paths produce a less-
+        informative downstream error, so the estimator rejects up front."""
+        df = _make_vcov_panel()
+        # Case 1: cluster=None (default) — bootstrap reject fires
+        est = WooldridgeDiD(method="ols", vcov_type="classical", n_bootstrap=10, seed=0)
+        with pytest.raises(ValueError, match=r"multiplier bootstrap"):
+            est.fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        # Case 2: cluster=X — also rejected at the estimator boundary (would
+        # otherwise hit the linalg validator with a less-informative message)
+        est_cl = WooldridgeDiD(
+            method="ols", vcov_type="hc2", n_bootstrap=10, cluster="unit", seed=0
+        )
+        with pytest.raises(ValueError, match=r"multiplier bootstrap"):
+            est_cl.fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+
+    def test_hc2_bm_plus_bootstrap_finite_inference(self):
+        """Positive regression: ``vcov_type='hc2_bm'`` + ``n_bootstrap > 0``
+        runs through the new full-dummy branch's bootstrap closure (with
+        ``coef_offset=1`` for the post-period ATT reconstruction) without
+        regressing. Asserts finite ``overall_se`` (overridden by the
+        multiplier bootstrap), stable ``overall_att`` (matches the
+        analytical fit at machine precision since the bootstrap only
+        overrides SE), and finite event-study aggregation."""
+        df = _make_vcov_panel()
+        # Analytical hc2_bm fit for ATT reference.
+        res_analytical = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        # Bootstrap fit on the same data + seed.
+        res_boot = WooldridgeDiD(
+            method="ols", vcov_type="hc2_bm", n_bootstrap=50, seed=0
+        ).fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        # ATT is unchanged by the bootstrap (only SE is overridden)
+        assert res_boot.overall_att == pytest.approx(
+            res_analytical.overall_att, abs=1e-10
+        )
+        # SE finite + sensible (positive, smaller than the panel SD of y)
+        assert np.isfinite(res_boot.overall_se)
+        assert res_boot.overall_se > 0
+        assert res_boot.overall_se < df["y"].std()
+        # Bootstrap overrides analytical inference for overall ATT
+        assert np.isfinite(res_boot.overall_t_stat)
+        assert np.isfinite(res_boot.overall_p_value)
+        # Per-cell SEs still come from the analytical full-dummy CR2-BM path
+        # (bootstrap only overrides overall_*); locks the coef_offset
+        # bootstrap indexing didn't regress the per-cell analytical path.
+        for k, eff in res_boot.group_time_effects.items():
+            assert np.isfinite(eff["se"])
+            assert eff["att"] == pytest.approx(
+                res_analytical.group_time_effects[k]["att"], abs=1e-10
+            )
+        # Event-study aggregate also produces finite inference under bootstrap
+        res_boot.aggregate("event")
+        assert res_boot.event_study_effects is not None
+        for k, eff in res_boot.event_study_effects.items():
+            assert np.isfinite(eff["att"])
+            assert np.isfinite(eff["se"])
+            assert np.isfinite(eff["t_stat"])
+
+    def test_hc2_bm_plus_bootstrap_rank_deficient(self):
+        """hc2_bm + bootstrap on a rank-deficient design (all-eventually-
+        treated panel where late cohorts drop out of solve_ols) — bootstrap
+        loop must still run because cluster_ids_bootstrap defaults to unit
+        (cluster_ids itself is non-None on hc2_bm). Locks that the
+        coef_offset + dropped-cell indexing in the bootstrap closure
+        survives rank deficiency."""
+        rng = np.random.default_rng(42)
+        n_units, n_periods = 20, 8
+        units = np.repeat(np.arange(n_units), n_periods)
+        periods = np.tile(np.arange(1, n_periods + 1), n_units)
+        cohorts = rng.choice([3, 5, 7], size=n_units)
+        cohort_per_obs = cohorts[units]
+        tau = np.where(
+            periods >= cohort_per_obs, 0.5 + 0.2 * (periods - cohort_per_obs), 0.0
+        )
+        y = 1.0 + 0.1 * periods + tau + 0.1 * rng.normal(size=len(units))
+        df = pd.DataFrame(
+            {"unit": units, "time": periods, "cohort": cohort_per_obs, "y": y}
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = WooldridgeDiD(
+                method="ols", vcov_type="hc2_bm", n_bootstrap=50, seed=0
+            ).fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        assert np.isfinite(res.overall_att)
+        assert np.isfinite(res.overall_se)
+        assert res.overall_se > 0
+
+    def test_get_params_includes_vcov_type(self):
+        est = WooldridgeDiD(vcov_type="hc2_bm")
+        params = est.get_params()
+        assert params["vcov_type"] == "hc2_bm"
+        # Round-trip via get_params → __init__
+        est2 = WooldridgeDiD(**params)
+        assert est2.vcov_type == "hc2_bm"
+
+    def test_set_params_revalidates_vcov_type(self):
+        est = WooldridgeDiD()
+        with pytest.raises(ValueError, match="hc4"):
+            est.set_params(vcov_type="hc4")
+
+    def test_set_params_catches_method_vcov_interaction(self):
+        est = WooldridgeDiD(method="ols", vcov_type="hc1")
+        with pytest.raises(NotImplementedError):
+            est.set_params(method="logit", vcov_type="hc2_bm")
+
+    def test_set_params_is_atomic_on_validation_failure(self):
+        """Per codex R5 P1: rejected set_params must leave the estimator
+        unchanged so subsequent fit() runs on the validated configuration,
+        not a half-mutated one. Without atomicity, a caller that catches
+        the exception could later run e.g. a logit HC1 fit while
+        ``self.vcov_type`` silently reads ``'hc2_bm'``."""
+        est = WooldridgeDiD(method="ols", vcov_type="hc1")
+        original_params = est.get_params()
+        # Reject: method=logit + vcov_type=hc2_bm (interaction guard)
+        with pytest.raises(NotImplementedError):
+            est.set_params(method="logit", vcov_type="hc2_bm")
+        # Estimator must be unchanged
+        assert est.get_params() == original_params
+        assert est.method == "ols"
+        assert est.vcov_type == "hc1"
+        assert est._vcov_type_explicit is False
+        # Reject: unknown vcov_type. Try changing multiple params at once
+        # to verify atomicity catches partial application.
+        with pytest.raises(ValueError, match="hc4"):
+            est.set_params(method="poisson", vcov_type="hc4")
+        # method must NOT have changed to "poisson" — the validator rejected
+        # the batch before any setattr() ran.
+        assert est.method == "ols"
+        assert est.vcov_type == "hc1"
+        # Unknown parameter key: same atomicity guarantee.
+        with pytest.raises(ValueError, match="bogus_param"):
+            est.set_params(vcov_type="hc2_bm", bogus_param=42)
+        assert est.vcov_type == "hc1"
+        assert est._vcov_type_explicit is False
+
+    def test_survey_design_clears_cluster_metadata(self):
+        """Per codex R5 P2: under survey TSL the analytical sandwich (and
+        its cluster_ids) is replaced — cluster_name / n_clusters should be
+        ``None`` (the survey design's stratification lives in
+        ``survey_metadata``), not a misleading echo of the default unit
+        cluster."""
+        from diff_diff.survey import SurveyDesign
+
+        df = _make_vcov_panel()
+        df["w"] = 1.0
+        design = SurveyDesign(weights="w", weight_type="pweight")
+        # OLS + survey + default hc1: the analytical fall-through would
+        # have surfaced cluster_name='unit', n_clusters=N — but survey TSL
+        # replaces that vcov, so the dataclass must report None.
+        res = WooldridgeDiD(method="ols", vcov_type="hc1").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort",
+            survey_design=design,
+        )
+        assert res.survey_metadata is not None
+        assert res.cluster_name is None
+        assert res.n_clusters is None
+
+    def test_set_params_updates_vcov_type_explicit_flag(self):
+        est = WooldridgeDiD(vcov_type="hc1")
+        assert est._vcov_type_explicit is False
+        est.set_params(vcov_type="hc2_bm")
+        assert est._vcov_type_explicit is True
+        est.set_params(vcov_type="hc1")
+        assert est._vcov_type_explicit is False
+
+    def test_results_carries_vcov_type(self):
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        assert res.vcov_type == "hc2_bm"
+
+    def test_results_carries_cluster_name_for_clustered_fit(self):
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc1").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        assert res.cluster_name == "unit"
+        assert res.n_clusters is not None
+        assert res.n_clusters > 0
+
+    def test_explicit_user_cluster_preserved_under_hc1(self):
+        df = _make_vcov_panel()
+        # Synthetic state column with 4 levels — 10 units per state on the
+        # 40-unit panel
+        df["state"] = (df["unit"] // 10).astype(int)
+        res = WooldridgeDiD(method="ols", vcov_type="hc1", cluster="state").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        assert res.cluster_name == "state"
+        assert res.n_clusters == 4
+
+    def test_fit_clone_idempotent_on_vcov_type(self):
+        """fit, clone via get_params, refit — SE must be bit-equal."""
+        df = _make_vcov_panel()
+        est = WooldridgeDiD(method="ols", vcov_type="hc2_bm")
+        res1 = est.fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        est2 = WooldridgeDiD(**est.get_params())
+        res2 = est2.fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        assert res1.overall_se == pytest.approx(res2.overall_se, abs=1e-14)
+        assert res1.overall_att == pytest.approx(res2.overall_att, abs=1e-14)
+
+    def test_bm_dof_nan_fails_closed(self, monkeypatch):
+        """When ``_compute_cr2_bm_contrast_dof`` returns NaN, BOTH per-cell
+        AND overall ATT inference fields (t_stat / p_value / conf_int) MUST
+        be NaN — do NOT fall back to ``safe_inference(df=None)`` which
+        silently uses normal-theory. Per ``feedback_bm_contrast_dof_fail_closed``.
+        """
+        df = _make_vcov_panel()
+        import diff_diff.linalg as linalg_mod
+
+        def _fake_dof(X, cluster_ids, bread, contrasts):
+            return np.full(contrasts.shape[1], np.nan)
+
+        monkeypatch.setattr(linalg_mod, "_compute_cr2_bm_contrast_dof", _fake_dof)
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        # Overall: att + se preserved (sandwich is finite); inference NaN
+        assert np.isfinite(res.overall_att)
+        assert np.isfinite(res.overall_se)
+        assert np.isnan(res.overall_t_stat)
+        assert np.isnan(res.overall_p_value)
+        assert np.isnan(res.overall_conf_int[0])
+        assert np.isnan(res.overall_conf_int[1])
+        # Per-cell: same pattern (att + se preserved, inference NaN)
+        for (g, t), eff in res.group_time_effects.items():
+            assert np.isfinite(eff["att"]), f"cell ({g},{t}) att should be finite"
+            assert np.isfinite(eff["se"]), f"cell ({g},{t}) se should be finite"
+            assert np.isnan(eff["t_stat"]), f"cell ({g},{t}) t_stat should be NaN"
+            assert np.isnan(eff["p_value"]), f"cell ({g},{t}) p_value should be NaN"
+            assert np.isnan(eff["conf_int"][0]), f"cell ({g},{t}) conf_int[0] should be NaN"
+            assert np.isnan(eff["conf_int"][1]), f"cell ({g},{t}) conf_int[1] should be NaN"
+
+    def test_aggregate_group_under_hc2_bm_uses_bm_contrast_dof(self):
+        """aggregate('group') under hc2_bm produces finite p-values using
+        Bell-McCaffrey contrast DOFs; reverts to NaN under monkeypatch-
+        induced fail-closed."""
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("group")
+        assert res.group_effects is not None
+        for g, eff in res.group_effects.items():
+            assert np.isfinite(eff["att"])
+            assert np.isfinite(eff["se"])
+            assert np.isfinite(eff["t_stat"]), f"group {g} t_stat NaN — BM DOF threading regressed"
+            assert np.isfinite(eff["p_value"])
+            assert np.isfinite(eff["conf_int"][0])
+            assert np.isfinite(eff["conf_int"][1])
+
+    def test_aggregate_event_under_hc2_bm_uses_bm_contrast_dof(self):
+        """aggregate('event') under hc2_bm produces finite p-values using
+        Bell-McCaffrey contrast DOFs."""
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("event")
+        assert res.event_study_effects is not None
+        for k, eff in res.event_study_effects.items():
+            assert np.isfinite(eff["att"])
+            assert np.isfinite(eff["se"])
+            assert np.isfinite(eff["t_stat"]), f"event k={k} t_stat NaN — BM DOF threading regressed"
+            assert np.isfinite(eff["p_value"])
+            assert np.isfinite(eff["conf_int"][0])
+            assert np.isfinite(eff["conf_int"][1])
+
+    def test_aggregate_calendar_under_hc2_bm_uses_bm_contrast_dof(self):
+        """aggregate('calendar') under hc2_bm produces finite p-values using
+        Bell-McCaffrey contrast DOFs."""
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("calendar")
+        assert res.calendar_effects is not None
+        for t, eff in res.calendar_effects.items():
+            assert np.isfinite(eff["att"])
+            assert np.isfinite(eff["se"])
+            assert np.isfinite(eff["t_stat"]), f"calendar t={t} t_stat NaN — BM DOF threading regressed"
+            assert np.isfinite(eff["p_value"])
+            assert np.isfinite(eff["conf_int"][0])
+            assert np.isfinite(eff["conf_int"][1])
+
+    def test_hc2_bm_handles_rank_deficient_all_eventually_treated(self):
+        """All-eventually-treated panel with not_yet_treated control: late
+        cohorts have no valid post-treatment comparison and get dropped by
+        solve_ols's rank-deficiency handling. hc2_bm must compute BM DOF
+        on the REDUCED design (kept-column subspace) — operating on the
+        unreduced full-dummy bread would LinAlgError and fail-close every
+        inference field to NaN (codex R3 P1). Per-cell + aggregate
+        inference on identified cells must remain finite."""
+        rng = np.random.default_rng(42)
+        n_units, n_periods = 20, 8
+        units = np.repeat(np.arange(n_units), n_periods)
+        periods = np.tile(np.arange(1, n_periods + 1), n_units)
+        cohorts = rng.choice([3, 5, 7], size=n_units)
+        cohort_per_obs = cohorts[units]
+        tau = np.where(
+            periods >= cohort_per_obs, 0.5 + 0.2 * (periods - cohort_per_obs), 0.0
+        )
+        y = 1.0 + 0.1 * periods + tau + 0.1 * rng.normal(size=len(units))
+        df = pd.DataFrame(
+            {"unit": units, "time": periods, "cohort": cohort_per_obs, "y": y}
+        )
+        # Expect a rank-deficient warning from solve_ols (late-cohort drop).
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+                df, outcome="y", unit="unit", time="time", cohort="cohort"
+            )
+        # Per-cell inference: all identified cells finite (att + se + p +
+        # CI). solve_ols already excluded the dropped cells from
+        # group_time_effects, so every key here is identified.
+        assert len(res.group_time_effects) > 0
+        for k, eff in res.group_time_effects.items():
+            assert np.isfinite(eff["att"]), f"({k}) att NaN"
+            assert np.isfinite(eff["se"]), f"({k}) se NaN"
+            assert np.isfinite(eff["t_stat"]), f"({k}) t_stat NaN — BM DOF not threaded on reduced design"
+            assert np.isfinite(eff["p_value"]), f"({k}) p_value NaN"
+            assert np.isfinite(eff["conf_int"][0])
+            assert np.isfinite(eff["conf_int"][1])
+        # Overall ATT inference: finite end-to-end.
+        assert np.isfinite(res.overall_t_stat)
+        assert np.isfinite(res.overall_p_value)
+        # All three aggregations (group/calendar/event) must produce finite
+        # inference on identified contrasts under the reduced-design BM path.
+        for agg_type in ("group", "calendar", "event"):
+            res.aggregate(agg_type)
+        assert res.event_study_effects is not None
+        for k, eff in res.event_study_effects.items():
+            assert np.isfinite(eff["t_stat"]), f"event k={k} t_stat NaN — aggregate BM DOF on reduced design regressed"
+            assert np.isfinite(eff["p_value"])
+        assert res.group_effects is not None
+        for g, eff in res.group_effects.items():
+            assert np.isfinite(eff["t_stat"]), f"group g={g} t_stat NaN — aggregate BM DOF on reduced design regressed"
+            assert np.isfinite(eff["p_value"])
+        assert res.calendar_effects is not None
+        # Calendar entries with at least one identified treated cell should
+        # have finite BM inference; entirely-pre-treatment calendar periods
+        # are absent from calendar_effects (their cells aren't post-treatment).
+        for t, eff in res.calendar_effects.items():
+            assert np.isfinite(eff["t_stat"]), f"calendar t={t} t_stat NaN — aggregate BM DOF on reduced design regressed"
+            assert np.isfinite(eff["p_value"])
+
+    def test_hc2_bm_handles_rank_deficient_with_unit_invariant_exovar(self):
+        """Unit-invariant exovar covariate is collinear with unit FE under
+        full-dummy: solve_ols drops it as rank-deficient. hc2_bm must
+        compute BM DOF on the reduced design (P1 codex R3 regression)."""
+        df = _make_vcov_panel(n_units=30, n_periods=6, seed=20260521)
+        # Unit-invariant covariate: x = f(unit) only → collinear with unit FE
+        df["x_unit"] = df["unit"].astype(float)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+                df,
+                outcome="y",
+                unit="unit",
+                time="time",
+                cohort="cohort",
+                exovar=["x_unit"],
+            )
+        # Per-cell + overall inference finite on identified cells
+        assert len(res.group_time_effects) > 0
+        for k, eff in res.group_time_effects.items():
+            assert np.isfinite(eff["att"]), f"({k}) att NaN"
+            assert np.isfinite(eff["se"]), f"({k}) se NaN"
+            assert np.isfinite(eff["t_stat"]), f"({k}) t_stat NaN under rank-deficient exovar — BM DOF not threaded"
+            assert np.isfinite(eff["p_value"])
+        assert np.isfinite(res.overall_t_stat)
+        assert np.isfinite(res.overall_p_value)
+        # Group + calendar + event aggregates should all produce finite
+        # inference under the reduced-design BM path.
+        for agg_type in ("group", "calendar", "event"):
+            res.aggregate(agg_type)
+        for g, eff in (res.group_effects or {}).items():
+            assert np.isfinite(eff["t_stat"]), f"group g={g} t_stat NaN under rank-deficient exovar"
+        for t, eff in (res.calendar_effects or {}).items():
+            assert np.isfinite(eff["t_stat"]), f"calendar t={t} t_stat NaN under rank-deficient exovar"
+        for k, eff in (res.event_study_effects or {}).items():
+            assert np.isfinite(eff["t_stat"]), f"event k={k} t_stat NaN under rank-deficient exovar"
+
+    def test_aggregate_under_hc2_bm_fail_closed_on_dof_helper_error(self, monkeypatch):
+        """When _compute_cr2_bm_contrast_dof raises in aggregate(), the
+        affected aggregate inference fields are NaN (fail-closed),
+        att + se preserved."""
+        df = _make_vcov_panel()
+        res = WooldridgeDiD(method="ols", vcov_type="hc2_bm").fit(
+            df, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        # Patch the helper AFTER fit so that aggregate() retry fails.
+        import diff_diff.linalg as linalg_mod
+
+        def _raise(X, cluster_ids, bread, contrasts):
+            raise ValueError("induced failure for fail-closed test")
+
+        monkeypatch.setattr(linalg_mod, "_compute_cr2_bm_contrast_dof", _raise)
+        with pytest.warns(UserWarning, match=r"could not compute Bell-McCaffrey"):
+            res.aggregate("group")
+        assert res.group_effects is not None
+        for g, eff in res.group_effects.items():
+            assert np.isfinite(eff["att"])
+            assert np.isfinite(eff["se"])
+            assert np.isnan(eff["t_stat"])
+            assert np.isnan(eff["p_value"])
+            assert np.isnan(eff["conf_int"][0])
+            assert np.isnan(eff["conf_int"][1])
