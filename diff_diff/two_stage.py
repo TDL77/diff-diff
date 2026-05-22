@@ -1674,12 +1674,17 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         # `n_psu` / `n_strata` / `df_survey` reflect the full design.
         # Replicate-variance fits do NOT pad — Replicate refits per-replicate
         # already handle the resampling at the survey-design level.
-        score_pad_mask_arg = (
-            keep_mask.values if resolved_survey is not None and not _uses_replicate_ts else None
+        # We gate the padding kwargs on `n_always_treated > 0` so the
+        # zero-pad branch in `_compute_gmm_variance` (np.unique +
+        # np.searchsorted + full-size c_by_cluster / s2_by_cluster copies)
+        # only fires when always-treated rows were actually dropped —
+        # baseline survey fits with no drop pass `None / None` and take
+        # the bit-identical pre-PR path.
+        _wave_e3_pad_active = (
+            resolved_survey is not None and not _uses_replicate_ts and n_always_treated > 0
         )
-        cluster_ids_full_arg = (
-            cluster_ids_full if resolved_survey is not None and not _uses_replicate_ts else None
-        )
+        score_pad_mask_arg = keep_mask.values if _wave_e3_pad_active else None
+        cluster_ids_full_arg = cluster_ids_full if _wave_e3_pad_active else None
 
         # Always compute overall ATT (static specification)
         overall_att, overall_se = self._stage2_static(

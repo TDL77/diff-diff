@@ -390,13 +390,16 @@ class TestTwoStageDiDReplicate:
         full replicate variance pipeline (not just the point estimate) under
         the always-treated drop to lock the parity contract end-to-end.
         """
+        # Seeded RNG for deterministic always-treated outcomes (regression
+        # tests should not depend on numpy global RNG state at import time).
+        rng = np.random.default_rng(101)
         data = _make_staggered_panel()
         # Add always-treated units (first_treat <= min time)
         for i in range(50, 55):
             for t in range(1, 9):
                 data = pd.concat([data, pd.DataFrame([{
                     "unit": i, "time": t, "first_treat": 1,
-                    "outcome": 12.0 + np.random.normal(0, 0.3),
+                    "outcome": 12.0 + rng.normal(0, 0.3),
                     "weight": 1.5, "treated": 1, "post": 1,
                 }])], ignore_index=True)
         rep_cols = _add_jk1_replicates(data, n_rep=10, unit_col="unit")
@@ -431,12 +434,14 @@ class TestTwoStageDiDReplicate:
         / ``_stage2_group``), so this test exercises the event-study +
         group replicate refit branches end-to-end with the same
         always-treated fixture."""
+        # Seeded RNG for deterministic always-treated outcomes.
+        rng = np.random.default_rng(202)
         data = _make_staggered_panel()
         for i in range(50, 55):
             for t in range(1, 9):
                 data = pd.concat([data, pd.DataFrame([{
                     "unit": i, "time": t, "first_treat": 1,
-                    "outcome": 12.0 + np.random.normal(0, 0.3),
+                    "outcome": 12.0 + rng.normal(0, 0.3),
                     "weight": 1.5, "treated": 1, "post": 1,
                 }])], ignore_index=True)
         rep_cols = _add_jk1_replicates(data, n_rep=10, unit_col="unit")
