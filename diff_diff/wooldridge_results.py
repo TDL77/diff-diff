@@ -693,10 +693,33 @@ class WooldridgeDiDResults:
         rows = mapping.get(aggregation, [])
         return pd.DataFrame(rows)
 
-    def plot_event_study(self, **kwargs) -> None:
-        """Event study plot. Calls aggregate('event') if needed."""
+    def plot_event_study(self, weights: str = "cell", **kwargs) -> None:
+        """Event study plot. Calls ``aggregate('event', weights=weights)`` if needed.
+
+        Parameters
+        ----------
+        weights : "cell" | "cohort_share", default "cell"
+            Aggregation weighting scheme threaded into the underlying
+            ``aggregate("event", ...)`` call. ``"cohort_share"`` produces
+            paper W2025 Eq. 7.6 cohort-share-by-exposure weights
+            (post-treatment ``k >= 0`` only); inference fields are
+            fail-closed to NaN per the Section 7.5 conditional-on-shares
+            contract documented in REGISTRY.
+        **kwargs
+            Forwarded to ``diff_diff.visualization.plot_event_study``.
+        """
+        # Recompute under the active weighting scheme if the cached
+        # event_study_effects was built under a different scheme — or
+        # has not been built yet. Aggregating under "cell" then under
+        # "cohort_share" (or vice versa) replaces ``event_study_effects``
+        # in place per the existing aggregate() contract.
         if self.event_study_effects is None:
-            self.aggregate("event")
+            self.aggregate("event", weights=weights)
+        elif weights == "cohort_share":
+            # Force re-aggregation so the cohort-share contract is
+            # honored from a wrapper call that may have been preceded
+            # by an aggregate("event", weights="cell") at fit time.
+            self.aggregate("event", weights=weights)
         from diff_diff.visualization import plot_event_study  # type: ignore
 
         effects = {k: v["att"] for k, v in (self.event_study_effects or {}).items()}

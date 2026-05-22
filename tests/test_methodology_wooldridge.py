@@ -1375,6 +1375,100 @@ class TestW2025Section8HeterogeneousTrends:
                 survey_design=survey,
             )
 
+    def test_cohort_trends_true_plus_aggregate_group(self) -> None:
+        """CI R1 P1 fix: ``cohort_trends=True`` + ``aggregate('group')`` runs cleanly.
+
+        Closes the parameter-interaction coverage gap codex flagged:
+        cohort_trends was only tested with event and simple
+        aggregations. The group aggregation operates on per-cohort
+        cells; cohort-trend columns are excluded by construction.
+        """
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 13)
+        panel = _make_heterogeneous_trends_panel(rng, n_per_cohort=80, sigma=0.05)
+        res = WooldridgeDiD(method="ols", cohort_trends=True).fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("group")
+        assert res.group_effects is not None
+        finite_count = 0
+        for g, eff in res.group_effects.items():
+            if np.isfinite(eff["att"]):
+                assert np.isfinite(eff["se"]) and eff["se"] > 0
+                finite_count += 1
+        assert finite_count >= 1
+
+    def test_cohort_trends_true_plus_aggregate_calendar(self) -> None:
+        """CI R1 P1 fix: ``cohort_trends=True`` + ``aggregate('calendar')`` runs cleanly."""
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 14)
+        panel = _make_heterogeneous_trends_panel(rng, n_per_cohort=80, sigma=0.05)
+        res = WooldridgeDiD(method="ols", cohort_trends=True).fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        res.aggregate("calendar")
+        assert res.calendar_effects is not None
+        finite_count = 0
+        for t, eff in res.calendar_effects.items():
+            if np.isfinite(eff["att"]):
+                assert np.isfinite(eff["se"]) and eff["se"] > 0
+                finite_count += 1
+        assert finite_count >= 1
+
+    def test_plot_event_study_propagates_weights_kwarg(self) -> None:
+        """CI R1 P1 fix: ``plot_event_study(weights=...)`` propagates through aggregate().
+
+        Before the fix, ``plot_event_study()`` hardcoded
+        ``aggregate("event")`` (cell weights) so the new opt-in
+        ``weights="cohort_share"`` surface was unreachable from the
+        plot wrapper. Verifies the kwarg is plumbed through and that
+        the resulting ``event_study_effects`` reflects the requested
+        scheme (specifically, the k>=0 restriction Stage 4 added on
+        the cohort_share event path).
+        """
+        from unittest.mock import patch
+
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 15)
+        # Use never_treated + OLS to expose k<0 placebo cells in the
+        # default cell-weighted event aggregation; the cohort_share
+        # re-aggregation must restrict to k>=0.
+        panel = _make_three_cohort_four_period_panel(rng, n_per_cohort=80, sigma=0.05)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            res = WooldridgeDiD(method="ols", control_group="never_treated").fit(
+                panel, outcome="y", unit="unit", time="time", cohort="cohort"
+            )
+        # Default plot — uses weights="cell"
+        with patch("diff_diff.visualization.plot_event_study") as mock_plot:
+            res.plot_event_study()
+        assert mock_plot.call_count == 1
+        assert res.event_study_effects is not None
+        cell_event_keys = sorted(res.event_study_effects.keys())
+        assert any(k < 0 for k in cell_event_keys), (
+            "DGP precondition: never_treated + OLS should expose k<0 "
+            "placebo cells under default cell weighting"
+        )
+        # Plot under weights="cohort_share" — should re-aggregate +
+        # restrict to k>=0 (paper Eq. 7.6 scope)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            with patch("diff_diff.visualization.plot_event_study") as mock_plot:
+                res.plot_event_study(weights="cohort_share")
+        assert mock_plot.call_count == 1
+        assert res.event_study_effects is not None
+        cohort_share_keys = sorted(res.event_study_effects.keys())
+        assert all(k >= 0 for k in cohort_share_keys), (
+            f"plot_event_study(weights='cohort_share') must restrict to "
+            f"k>=0 per paper Eq. 7.6 scope; got {cohort_share_keys}"
+        )
+        # The cell-weighted and cohort_share-weighted event_study_effects
+        # have different key sets (cell includes k<0 placebos; cohort_share
+        # restricts to k>=0). This proves the kwarg is propagated.
+        assert set(cohort_share_keys) != set(cell_event_keys), (
+            "plot_event_study(weights='cohort_share') should produce a "
+            "different event_study_effects key set than the default "
+            "(cell weights) — keys should differ on the k<0 placebo "
+            "leads."
+        )
+
     def test_cohort_trends_true_plus_bootstrap_preserves_bootstrap_se(self) -> None:
         """R5 P1 fix: ``cohort_trends=True`` + ``n_bootstrap > 0`` runs cleanly.
 
