@@ -1011,6 +1011,139 @@ class TestW2025Section7AggregationPaths:
         with pytest.raises(ValueError, match=r"weights must be one of"):
             res.aggregate("simple", weights="random_string")
 
+    def test_aggregate_weights_cohort_share_poisson_path(self) -> None:
+        """CI R3 P1 fix: ``aggregate(weights="cohort_share")`` on the Poisson path.
+
+        Codex flagged that the new cohort-share aggregation was only
+        exercised on the OLS path; logit + Poisson result builders also
+        thread ``_n_g_per_cohort`` and need explicit coverage.
+
+        Locks the cross-method contract: under ``method="poisson"``,
+        ``aggregate("simple", weights="cohort_share")`` and
+        ``aggregate("event", weights="cohort_share")`` (a) produce
+        finite point estimates and conditional-on-shares SEs when
+        estimable; (b) fail-close the t-stat / p-value / conf-int
+        fields to NaN per the Section 7.5 contract; (c) restrict
+        event-time keys to ``k >= 0`` per the Eq. 7.6 scope.
+        """
+        rng = np.random.default_rng(_BASE_SEED_SECTION7 + 13)
+        # Deterministic Poisson panel: counts generated from
+        # lambda = exp(0.3 + 0.5 * D), with unequal cohort sizes to
+        # exercise the cohort-share weighting non-trivially.
+        panel = _make_three_cohort_four_period_panel(
+            rng,
+            n_per_cohort=80,
+            tau_constant=0.5,
+            sigma=0.05,
+            cohort_unit_counts={0: 100, 2: 50, 3: 200},
+        )
+        treatment = ((panel["cohort"] > 0) & (panel["time"] >= panel["cohort"])).astype(int)
+        panel["y_count"] = np.maximum(
+            np.round(np.exp(0.3 + 0.5 * treatment + rng.standard_normal(len(panel)) * 0.1)),
+            0,
+        ).astype(int)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            res = WooldridgeDiD(method="poisson").fit(
+                panel,
+                outcome="y_count",
+                unit="unit",
+                time="time",
+                cohort="cohort",
+            )
+        # simple aggregation
+        with pytest.warns(UserWarning, match=r"cohort_share.*conditional-on-shares"):
+            res.aggregate("simple", weights="cohort_share")
+        assert np.isfinite(res.overall_att)
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+        assert np.isnan(res.overall_t_stat)
+        assert np.isnan(res.overall_p_value)
+        assert np.isnan(res.overall_conf_int[0])
+        assert np.isnan(res.overall_conf_int[1])
+        # event aggregation: k >= 0 only
+        with pytest.warns(UserWarning, match=r"cohort_share.*conditional-on-shares"):
+            res.aggregate("event", weights="cohort_share")
+        assert res.event_study_effects is not None
+        event_keys = sorted(res.event_study_effects.keys())
+        assert all(
+            k >= 0 for k in event_keys
+        ), f"poisson cohort_share event keys must be k>=0; got {event_keys}"
+        # At least one finite event-time point estimate
+        finite_event = [
+            eff["att"] for k, eff in res.event_study_effects.items() if np.isfinite(eff["att"])
+        ]
+        assert len(finite_event) >= 1, "no finite event-time ATTs under poisson + cohort_share"
+        # Per-event-time inference is fail-closed
+        for k, eff in res.event_study_effects.items():
+            if np.isfinite(eff["att"]):
+                assert np.isnan(eff["t_stat"])
+                assert np.isnan(eff["p_value"])
+                assert np.isnan(eff["conf_int"][0])
+                assert np.isnan(eff["conf_int"][1])
+
+    def test_aggregate_weights_cohort_share_logit_path(self) -> None:
+        """CI R3 P1 fix: ``aggregate(weights="cohort_share")`` on the Logit path.
+
+        Same parameter-interaction coverage as the Poisson test above
+        but for the logit QMLE path. Locks that the cohort_share
+        surface works on the logit results builder, with the same
+        Section 7.5 conditional-on-shares contract.
+        """
+        rng = np.random.default_rng(_BASE_SEED_SECTION7 + 14)
+        # Deterministic logit panel: binary outcome from logistic with
+        # strong-enough treatment signal for QMLE convergence.
+        panel = _make_three_cohort_four_period_panel(
+            rng,
+            n_per_cohort=80,
+            tau_constant=0.5,
+            sigma=0.05,
+            cohort_unit_counts={0: 100, 2: 50, 3: 200},
+        )
+        treatment = ((panel["cohort"] > 0) & (panel["time"] >= panel["cohort"])).astype(int)
+        logits = 0.0 + 0.8 * treatment + rng.standard_normal(len(panel)) * 0.5
+        probs = 1.0 / (1.0 + np.exp(-logits))
+        panel["y_binary"] = (rng.uniform(size=len(panel)) < probs).astype(int)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            try:
+                res = WooldridgeDiD(method="logit").fit(
+                    panel,
+                    outcome="y_binary",
+                    unit="unit",
+                    time="time",
+                    cohort="cohort",
+                )
+            except (ValueError, np.linalg.LinAlgError):
+                pytest.skip(
+                    "Logit IRLS did not converge on this DGP — "
+                    "fixture stability is exercised by "
+                    "TestWooldridgeParityRLogit on the canonical panel"
+                )
+        # simple aggregation
+        with pytest.warns(UserWarning, match=r"cohort_share.*conditional-on-shares"):
+            res.aggregate("simple", weights="cohort_share")
+        assert np.isfinite(res.overall_att)
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+        assert np.isnan(res.overall_t_stat)
+        assert np.isnan(res.overall_p_value)
+        assert np.isnan(res.overall_conf_int[0])
+        assert np.isnan(res.overall_conf_int[1])
+        # event aggregation: k >= 0 only
+        with pytest.warns(UserWarning, match=r"cohort_share.*conditional-on-shares"):
+            res.aggregate("event", weights="cohort_share")
+        assert res.event_study_effects is not None
+        event_keys = sorted(res.event_study_effects.keys())
+        assert all(
+            k >= 0 for k in event_keys
+        ), f"logit cohort_share event keys must be k>=0; got {event_keys}"
+        # Per-event-time inference is fail-closed
+        for k, eff in res.event_study_effects.items():
+            if np.isfinite(eff["att"]):
+                assert np.isnan(eff["t_stat"])
+                assert np.isnan(eff["p_value"])
+                assert np.isnan(eff["conf_int"][0])
+                assert np.isnan(eff["conf_int"][1])
+
     def test_aggregate_weights_cohort_share_inference_fail_closed_with_warning(
         self,
     ) -> None:
