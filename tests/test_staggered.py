@@ -4704,11 +4704,15 @@ class TestCallawaySantAnnaClusterSafetyGates:
         )
 
     def test_explicit_survey_design_does_populate_survey_metadata(self):
-        """Counterpart to the test above: when user provides a real
-        SurveyDesign, survey_metadata IS populated (regardless of bare
-        cluster= status). Verifies the 'inject' branch path:
-        SurveyDesign(weights=...) + cluster=X → survey_metadata populated
-        + df_inference also populated."""
+        """Counterpart to test_bare_cluster_does_not_set_survey_metadata:
+        when user provides a real SurveyDesign, survey_metadata IS
+        populated (regardless of bare cluster= status). Verifies the
+        'inject' branch path: SurveyDesign(weights=...) + cluster=X →
+        survey_metadata populated; df_inference stays None per the
+        narrowed contract (canonical df carrier when survey_metadata is
+        present is survey_metadata.df_survey, which holds CS-internal
+        post-resolve-tightened df). HonestDiD reads survey_metadata
+        first, df_inference only as fallback."""
         from diff_diff import SurveyDesign
 
         data = _generate_clustered_staggered_data(seed=75)

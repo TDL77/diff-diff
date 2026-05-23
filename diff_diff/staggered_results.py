@@ -111,14 +111,19 @@ class CallawaySantAnnaResults:
         ``None`` when no clustering is active.
     df_inference : int, optional
         Cluster-level degrees of freedom for downstream inference (e.g.,
-        ``HonestDiD`` t-critical-value selection). Carried separately from
-        ``survey_metadata`` so consumers can distinguish "cluster df is
-        available" from "user provided a survey design": bare
-        ``CallawaySantAnna(cluster=X).fit(...)`` populates ``df_inference``
-        but leaves ``survey_metadata`` as ``None`` (preserving the
-        survey/non-survey contract for ``DiagnosticReport`` / ``summary()``).
-        Legitimate ``survey_design=`` fits populate both, and the two
-        surfaces agree (``df_inference == survey_metadata.df_survey``).
+        ``HonestDiD`` t-critical-value selection) on the bare-``cluster=``
+        synthesize path ONLY (the case where ``survey_metadata`` is
+        intentionally ``None`` to preserve the survey/non-survey contract
+        for ``DiagnosticReport`` / ``summary()``). When the user provides
+        an explicit ``survey_design=`` (inject or conflict branches),
+        ``df_inference`` stays ``None`` and the canonical df carrier is
+        ``survey_metadata.df_survey`` — which holds the actual CS-internal
+        df, including any post-resolve tightening (e.g., the
+        ``overall_effective_df`` recompute for replicate aggregations).
+        ``HonestDiD`` reads ``survey_metadata.df_survey`` first and falls
+        back to ``df_inference`` only when ``survey_metadata`` is absent.
+        Narrow contract prevents HonestDiD from silently overriding a
+        tightened survey df with the original ``resolved_survey.df_survey``.
     """
 
     group_time_effects: Dict[Tuple[Any, Any], Dict[str, Any]]
@@ -170,13 +175,16 @@ class CallawaySantAnnaResults:
     cluster_name: Optional[str] = None
     n_clusters: Optional[int] = None
     # df_inference: cluster-level degrees of freedom for downstream
-    # inference (e.g., HonestDiD's t-critical-value selection). Carried
-    # SEPARATELY from survey_metadata so consumers can distinguish
-    # "cluster df is available" from "user provided a survey design"
-    # — bare CS(cluster="state").fit(...) populates df_inference but
-    # leaves survey_metadata as None (DiagnosticReport / summary() must
-    # not treat a bare-cluster fit as survey-backed). Legitimate survey
-    # designs populate both (df_inference == survey_metadata.df_survey).
+    # inference, populated on the bare-cluster-synthesize path ONLY.
+    # When the user provides an explicit survey_design= (inject or
+    # conflict branches), df_inference stays None and the canonical df
+    # carrier is survey_metadata.df_survey (which holds the actual
+    # CS-internal df, including any post-resolve tightening via the
+    # overall_effective_df recompute at staggered.py:~1995-1999).
+    # HonestDiD reads survey_metadata.df_survey first and falls back to
+    # df_inference only when survey_metadata is absent. Narrow contract
+    # prevents HonestDiD from silently overriding a tightened survey df
+    # with the original resolved_survey.df_survey.
     df_inference: Optional[int] = None
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
