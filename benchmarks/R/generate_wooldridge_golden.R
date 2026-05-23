@@ -25,10 +25,12 @@ suppressPackageStartupMessages({
   library(clubSandwich)
   library(sandwich)
   library(jsonlite)
+  library(etwfe)
 })
 
 stopifnot(packageVersion("clubSandwich") >= "0.7.0")
 stopifnot(packageVersion("sandwich") >= "3.0.0")
+stopifnot(packageVersion("etwfe") >= "0.5.0")
 
 panel_path <- file.path("benchmarks", "data", "wooldridge_test_panel.csv")
 out_path <- file.path("benchmarks", "data", "wooldridge_golden.json")
@@ -263,6 +265,98 @@ golden <- list(
   )
 )
 
+# =============================================================================
+# Stage D (PR-B): Poisson + logit R parity via R `etwfe` package.
+#
+# Generates Poisson + logit outcomes from the existing panel structure with
+# a fixed seed, fits `etwfe(family="poisson")` and `etwfe(family="logit")`,
+# extracts per-cohort×time ATT coefficients + HC1 SEs, and saves the augmented
+# panel back to the same CSV so Python can load the same Y vectors.
+#
+# Tolerance (Python tests): point ATOL 1e-4, SE ATOL 5e-3. Loose because
+# QMLE optimizer paths differ (diff-diff uses direct IRLS via solve_logit /
+# solve_poisson; etwfe uses fixest's GLM backend). The HC1 sandwich differs
+# by an `(n-1)/(n-k_dm)` vs `(n-1)/(n-k_total)` factor (REGISTRY-documented).
+# =============================================================================
+
+set.seed(20260522)
+# Treatment indicator: (cohort > 0) & (time >= cohort)
+D <- as.integer((df$cohort > 0) & (df$time >= df$cohort))
+
+# Poisson outcome: lambda = exp(0.5 + 0.3 * D)
+df$y_pois <- rpois(nrow(df), lambda = exp(0.5 + 0.3 * D))
+# Logit outcome: p = plogis(0.0 + 0.8 * D)
+df$y_logit <- rbinom(nrow(df), size = 1L, prob = plogis(0.0 + 0.8 * D))
+
+# Save augmented panel back so Python loads the same outcomes. Subset to
+# the canonical fixture columns + new nonlinear outcomes to avoid
+# polluting the panel CSV with the OLS-stage `D_g_t` working columns
+# (codex CI R5 P3 fix — keeps the benchmark input contract narrow).
+panel_columns <- c("unit", "time", "cohort", "y", "y_pois", "y_logit")
+write.csv(df[, panel_columns], panel_path, row.names = FALSE)
+cat(sprintf("Wrote augmented panel with y_pois + y_logit to %s\n", panel_path))
+
+# Fit etwfe(family="poisson")
+fit_pois <- etwfe(
+  fml = y_pois ~ 1,
+  tvar = "time",
+  gvar = "cohort",
+  data = df,
+  family = "poisson",
+  vcov = "HC1"
+)
+
+# Extract per-cohort-time ATT coefs by name pattern ".Dtreat:cohort::{g}:time::{t}"
+extract_etwfe_coefs <- function(fit, gt_pairs) {
+  coef_names_fit <- names(coef(fit))
+  vcov_fit <- vcov(fit)
+  se_diag <- sqrt(diag(vcov_fit))
+  out <- list(att = numeric(length(gt_pairs)), se = numeric(length(gt_pairs)),
+              gt_keys = list())
+  for (i in seq_along(gt_pairs)) {
+    g <- gt_pairs[[i]][1]
+    t <- gt_pairs[[i]][2]
+    nm <- sprintf(".Dtreat:cohort::%d:time::%d", g, t)
+    pos <- match(nm, coef_names_fit)
+    if (is.na(pos)) {
+      # Cell may not be identified (etwfe drops collinear cells)
+      out$att[i] <- NA_real_
+      out$se[i] <- NA_real_
+    } else {
+      out$att[i] <- coef(fit)[pos]
+      out$se[i] <- se_diag[pos]
+    }
+    out$gt_keys[[i]] <- list(g = g, t = t)
+  }
+  out
+}
+
+pois_extracted <- extract_etwfe_coefs(fit_pois, gt_pairs)
+
+# Fit etwfe(family="logit")
+fit_logit <- etwfe(
+  fml = y_logit ~ 1,
+  tvar = "time",
+  gvar = "cohort",
+  data = df,
+  family = "logit",
+  vcov = "HC1"
+)
+logit_extracted <- extract_etwfe_coefs(fit_logit, gt_pairs)
+
+golden$poisson <- list(
+  per_coef_att = unname(pois_extracted$att),
+  per_coef_se = unname(pois_extracted$se),
+  gt_keys = pois_extracted$gt_keys,
+  etwfe_version = as.character(packageVersion("etwfe"))
+)
+golden$logit <- list(
+  per_coef_att = unname(logit_extracted$att),
+  per_coef_se = unname(logit_extracted$se),
+  gt_keys = logit_extracted$gt_keys,
+  etwfe_version = as.character(packageVersion("etwfe"))
+)
+
 write_json(golden, out_path, auto_unbox = TRUE, pretty = TRUE, digits = 18)
 cat(sprintf("Wrote %s\n", out_path))
 cat(sprintf("  n_obs=%d, n_int=%d, n_units=%d\n",
@@ -272,3 +366,7 @@ cat(sprintf("  hc2_bm overall_se=%.10f, overall_dof=%.4f\n",
             overall_se_hc2_bm, overall_att_contrast_dof))
 cat(sprintf("  classical overall_se=%.10f\n", overall_se_classical))
 cat(sprintf("  hc2 overall_se=%.10f\n", overall_se_hc2))
+cat(sprintf("  poisson ATTs: %s\n",
+            paste(round(pois_extracted$att, 4), collapse = ", ")))
+cat(sprintf("  logit ATTs: %s\n",
+            paste(round(logit_extracted$att, 4), collapse = ", ")))

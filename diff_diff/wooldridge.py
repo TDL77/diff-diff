@@ -76,9 +76,9 @@ def _resolve_survey_for_wooldridge(survey_design, sample, cluster_ids, cluster_n
     resolution chain in DifferenceInDifferences.fit() (estimators.py:344-359).
     """
     from diff_diff.survey import (
-        _resolve_survey_for_fit,
-        _resolve_effective_cluster,
         _inject_cluster_as_psu,
+        _resolve_effective_cluster,
+        _resolve_survey_for_fit,
         compute_survey_metadata,
     )
 
@@ -262,9 +262,15 @@ def _prepare_covariates(
 class WooldridgeDiD:
     """Extended Two-Way Fixed Effects (ETWFE) DiD estimator.
 
-    Implements the Wooldridge (2021) saturated cohort×time regression and
-    Wooldridge (2023) nonlinear extensions (logit, Poisson).  Produces all
-    four ``jwdid_estat`` aggregation types: simple, group, calendar, event.
+    Implements the Wooldridge (2025) saturated cohort×time regression
+    (*Empirical Economics* 69(5), 2545-2587; DOI
+    10.1007/s00181-025-02807-z) and Wooldridge (2023) nonlinear
+    extensions (logit, Poisson). Produces all four ``jwdid_estat``
+    aggregation types: simple, group, calendar, event. Opt-in surfaces
+    include paper W2025 Section 7 cohort-share aggregation
+    (``aggregate(weights="cohort_share")``, Eqs. 7.4 + 7.6) and paper
+    W2025 Section 8 heterogeneous cohort-specific linear trends
+    (``cohort_trends=True``, Eq. 8.1; OLS path only).
 
     Parameters
     ----------
@@ -318,6 +324,30 @@ class WooldridgeDiD:
         designs combined with ``vcov_type != "hc1"`` raise
         ``NotImplementedError`` at ``fit()`` because the survey TSL / replicate-
         refit variance overrides the analytical sandwich.
+    cohort_trends : bool, default False
+        When True, adds linear ``dg_i · t`` cohort-specific trend
+        interactions to the design matrix per paper W2025 Section 8 /
+        Eq. 8.1. Under a heterogeneous-trends DGP this recovers ``τ``
+        even when parallel trends fails (paper Section 8.3). OLS-path
+        only: ``cohort_trends=True`` + ``method ∈ {"logit","poisson"}``
+        raises ``NotImplementedError`` at ``__init__``. Auto-routes to
+        the full-dummy design regardless of ``vcov_type`` (matching the
+        absorb→fixed_effects auto-route). Each treated cohort must have
+        ≥ 2 observed pre-periods in the analysis sample for ``dg_i · t``
+        to be separately identified from cohort + time FE; ``fit()``
+        raises ``ValueError`` otherwise. On all-eventually-treated
+        panels the last cohort's trend column is dropped per paper
+        Section 5.4. ``cohort_trends=True`` + ``survey_design`` raises
+        ``NotImplementedError`` at ``fit()`` (deferred follow-up).
+        ``cohort_trends=True`` + ``control_group="never_treated"``
+        also raises ``NotImplementedError`` at ``fit()`` because the
+        OLS + never_treated branch emits ALL ``(g, t)`` placebo cell
+        dummies (paper Section 4.4 placebo coverage); the appended
+        ``dg_i · t`` trend columns are linearly spanned by the
+        per-cohort sum of those cell dummies, so the Section 8 trend
+        specification is unidentified on this branch. Use
+        ``control_group="not_yet_treated"`` (the default) for the
+        cohort_trends surface.
     """
 
     def __init__(
@@ -333,6 +363,7 @@ class WooldridgeDiD:
         seed: Optional[int] = None,
         rank_deficient_action: str = "warn",
         vcov_type: str = "hc1",
+        cohort_trends: bool = False,
     ) -> None:
         self._validate_constructor_args(
             method=method,
@@ -340,6 +371,7 @@ class WooldridgeDiD:
             anticipation=anticipation,
             bootstrap_weights=bootstrap_weights,
             vcov_type=vcov_type,
+            cohort_trends=cohort_trends,
         )
 
         self.method = method
@@ -353,6 +385,7 @@ class WooldridgeDiD:
         self.seed = seed
         self.rank_deficient_action = rank_deficient_action
         self.vcov_type = vcov_type
+        self.cohort_trends = cohort_trends
         # Track whether the user explicitly opted out of the "hc1" default.
         # The auto-cluster-at-unit default in `_fit_ols` is suppressed only
         # when the user explicitly opts into a one-way family (``hc2``,
@@ -372,6 +405,7 @@ class WooldridgeDiD:
         anticipation: int,
         bootstrap_weights: str,
         vcov_type: str,
+        cohort_trends: bool = False,
     ) -> None:
         """Shared validation for both ``__init__`` and ``set_params``.
 
@@ -417,6 +451,15 @@ class WooldridgeDiD:
                 "(WooldridgeDiD logit/poisson vcov_type follow-up row). "
                 "Use vcov_type='hc1' (default) for non-OLS methods."
             )
+        if cohort_trends and method != "ols":
+            raise NotImplementedError(
+                f"WooldridgeDiD(method={method!r}, cohort_trends=True) is "
+                f"not supported. Paper W2025 Section 8 / Eq. 8.1 specifies "
+                f"heterogeneous cohort-specific linear trends `dg_i · t` "
+                f"only for the OLS path (Eq. 5.3 POLS); the paper does not "
+                f"extend Section 8 to logit / Poisson. Set "
+                f"cohort_trends=False or use method='ols'."
+            )
 
     @property
     def results_(self) -> WooldridgeDiDResults:
@@ -438,6 +481,7 @@ class WooldridgeDiD:
             "seed": self.seed,
             "rank_deficient_action": self.rank_deficient_action,
             "vcov_type": self.vcov_type,
+            "cohort_trends": self.cohort_trends,
         }
 
     def set_params(self, **params: Any) -> "WooldridgeDiD":
@@ -464,10 +508,9 @@ class WooldridgeDiD:
             "method": params.get("method", self.method),
             "control_group": params.get("control_group", self.control_group),
             "anticipation": params.get("anticipation", self.anticipation),
-            "bootstrap_weights": params.get(
-                "bootstrap_weights", self.bootstrap_weights
-            ),
+            "bootstrap_weights": params.get("bootstrap_weights", self.bootstrap_weights),
             "vcov_type": params.get("vcov_type", self.vcov_type),
+            "cohort_trends": params.get("cohort_trends", self.cohort_trends),
         }
         self._validate_constructor_args(**pending)
 
@@ -538,6 +581,51 @@ class WooldridgeDiD:
                 "Set n_bootstrap=0 for analytic survey SEs."
             )
 
+        # 0d.i Reject cohort_trends=True + survey_design. The cohort_trends
+        # path auto-routes to the full-dummy design (regardless of
+        # vcov_type) to keep the math closure verified against PR #483's
+        # R-parity goldens; the survey TSL machinery hasn't yet been
+        # validated under the full-dummy + dg_i · t composition. Use
+        # cohort_trends=False on survey designs (the default) or wait
+        # for the deferred follow-up.
+        if survey_design is not None and self.cohort_trends:
+            raise NotImplementedError(
+                "WooldridgeDiD(cohort_trends=True) with survey_design is "
+                "not yet supported: the cohort_trends path auto-routes to "
+                "a full-dummy design with `dg_i · t` interactions whose "
+                "composition with the survey TSL variance has not been "
+                "validated against R-parity goldens. Use "
+                "cohort_trends=False (default) for survey designs, or "
+                "wait for the deferred follow-up tracked in TODO."
+            )
+
+        # 0d.ii Reject cohort_trends=True + control_group="never_treated".
+        # The OLS + never_treated branch (paper W2025 Section 4.4 / library
+        # ``_build_interaction_matrix`` ``include_pre=True``) emits ALL
+        # ``(g, t)`` cells for each treated cohort as treatment-cell
+        # indicator dummies — including pre-treatment placebo cells. For
+        # any treated cohort, ``dg_i · t = Σ_t t · 1{cohort=g, time=t}``
+        # is fully spanned by the existing per-cohort sum of cell dummies,
+        # so the appended trend columns are unidentified. The per-cohort
+        # pre-period guard above counts observed periods but doesn't
+        # catch this collinearity. Fail-close pending a redesigned
+        # design-matrix path that drops the placebo dummies (or restricts
+        # to post-treatment cells) under the trend specification — codex
+        # R9 P1 fix.
+        if self.cohort_trends and self.control_group == "never_treated":
+            raise NotImplementedError(
+                "WooldridgeDiD(cohort_trends=True, "
+                "control_group='never_treated') is not yet supported: "
+                "the OLS never_treated path emits ALL (g, t) cells (paper "
+                "W2025 Section 4.4 placebo coverage), and the appended "
+                "dg_i · t trend columns are linearly spanned by the "
+                "per-cohort sum of those cell dummies, so the Section 8 "
+                "trend specification is unidentified on this branch. Use "
+                "control_group='not_yet_treated' (the default) for "
+                "cohort_trends=True, or wait for the deferred follow-up "
+                "tracked in TODO."
+            )
+
         # 0d. Reject survey_design + non-hc1 analytical family. The survey-
         # design TSL (or replicate-weight refit) variance overrides the
         # analytical sandwich, so the requested HC2/HC2-BM/classical family
@@ -604,6 +692,39 @@ class WooldridgeDiD:
                     "observations exist. All units are treated at all observed "
                     "time periods. Use 'never_treated' with a never-treated group."
                 )
+
+        # 1c. Identification check for cohort_trends=True (paper W2025 Section 8 /
+        # Eq. 8.1). Each treated cohort needs at least 2 distinct pre-treatment
+        # periods (``t < g - anticipation``) for the cohort-specific linear trend
+        # ``dg_i · t`` to be separately identified from cohort + time FE. With
+        # only 1 pre-period the linear trend is observationally equivalent to
+        # cohort FE on that single point.
+        #
+        # Counts pre-treatment periods OBSERVED FOR THIS COHORT (per-cohort
+        # sample subset) rather than the global panel time set — on
+        # unbalanced panels a cohort can have only one observed pre-period
+        # even when the global panel has many, and the linear trend is
+        # still underidentified (per codex R2 P1 fix).
+        if self.cohort_trends:
+            for g in groups:
+                cohort_pre_times = sample.loc[
+                    (sample[cohort] == g) & (sample[time] < g - self.anticipation),
+                    time,
+                ].unique()
+                n_pre_periods = len(cohort_pre_times)
+                if n_pre_periods < 2:
+                    raise ValueError(
+                        f"cohort_trends=True requires at least 2 pre-treatment "
+                        f"periods OBSERVED FOR EACH TREATED COHORT (paper W2025 "
+                        f"Section 8 / Eq. 8.1 identification). Cohort g={g} has "
+                        f"only {n_pre_periods} pre-treatment period(s) observed "
+                        f"in the analysis sample (t < g - anticipation = "
+                        f"{g - self.anticipation}); the cohort-specific linear "
+                        f"trend dg_i · t is not separately identified from "
+                        f"cohort + time fixed effects on a single point. Drop "
+                        f"cohort_trends=True or use a panel where each treated "
+                        f"cohort has at least 2 observed pre-periods."
+                    )
 
         # 2. Build interaction matrix
         X_int, int_col_names, gt_keys = _build_interaction_matrix(
@@ -826,27 +947,43 @@ class WooldridgeDiD:
         # classical, which need the hat matrix on the full FE projection
         # (FWL does not preserve it). ``coef_offset`` shifts gt_effects
         # indexing to account for the intercept under full-dummy.
-        use_full_dummy = self.vcov_type in ("hc2", "hc2_bm", "classical")
+        #
+        # ``cohort_trends=True`` (paper W2025 Section 8 / Eq. 8.1) forces
+        # the full-dummy path regardless of ``vcov_type``: composing
+        # ``dg_i · t`` interactions with the within-transformation yields
+        # ``(dg_i − mean(dg_i)) · (t − mean(t))`` which is correct but
+        # non-trivial to verify across all panel shapes; the full-dummy
+        # auto-route (matching the absorb→fixed_effects pattern at
+        # ``feedback_absorb_to_fixed_effects_auto_route``) keeps the math
+        # closure verified on the same path already locked by PR #483's
+        # HC2 / HC2-BM / classical R-parity goldens.
+        use_full_dummy = self.vcov_type in ("hc2", "hc2_bm", "classical") or self.cohort_trends
 
         if use_full_dummy:
             # Full-dummy build: [intercept, X_design, unit_dummies,
-            # time_dummies]. Survey + non-hc1 was rejected at fit(), so
-            # survey_weights / resolved are None here. ``coef_offset = 1``
-            # shifts the gt_effects loop to skip the intercept.
+            # time_dummies, cohort_trend_cols (if cohort_trends=True)].
+            # Survey + non-hc1 was rejected at fit(), so survey_weights /
+            # resolved are None here. ``coef_offset = 1`` shifts the
+            # gt_effects loop to skip the intercept.
             n_obs = len(sample)
             n_units_fe = int(sample[unit].nunique())
             n_times_fe = int(sample[time].nunique())
-            dense_cells = n_obs * (1 + X_design.shape[1] + (n_units_fe - 1) + (n_times_fe - 1))
+            n_trend_cols = len(groups) if self.cohort_trends else 0
+            dense_cells = n_obs * (
+                1 + X_design.shape[1] + (n_units_fe - 1) + (n_times_fe - 1) + n_trend_cols
+            )
             if dense_cells > 50_000_000:
                 warnings.warn(
-                    f"WooldridgeDiD(vcov_type={self.vcov_type!r}) builds a "
+                    f"WooldridgeDiD(vcov_type={self.vcov_type!r}, "
+                    f"cohort_trends={self.cohort_trends!r}) builds a "
                     f"dense full-dummy saturated design (~{dense_cells:,} "
                     "float64 cells, >50M). FWL preserves coefficients but not "
                     "the hat matrix, so HC2/HC2-BM/classical requires the full-"
                     "dummy projection (within-transform would produce a "
                     "methodologically different statistic). For very high-"
                     "cardinality panels, consider vcov_type='hc1' (within-"
-                    "transform) or reducing the panel size.",
+                    "transform) + cohort_trends=False or reducing the panel "
+                    "size.",
                     UserWarning,
                     stacklevel=3,
                 )
@@ -857,7 +994,34 @@ class WooldridgeDiD:
             time_dummies = pd.get_dummies(
                 sample[time], prefix=f"_fe_{time}", drop_first=True
             ).values.astype(float)
-            X = np.hstack([intercept_col, X_design, unit_dummies, time_dummies])
+            design_parts: List[np.ndarray] = [intercept_col, X_design, unit_dummies, time_dummies]
+            cohort_trend_col_names: List[str] = []
+            if self.cohort_trends:
+                # Paper W2025 Eq. 8.1: ``dg_i · t`` for each treated cohort.
+                # Never-treated cohort uses no trend (acts as control trend).
+                cohort_vals = sample[cohort].values
+                time_vals = sample[time].values.astype(float)
+                # All-eventually-treated normalization: when there is no
+                # never-treated baseline cohort (g=0 not in sample), the
+                # full set of G trend columns ``dg_i · t`` is collinear
+                # with the time fixed effects (paper W2025 Section 5.4:
+                # "all variables in regression (5.3) involving dT_i get
+                # dropped" when the last cohort serves as control). Drop
+                # the LAST cohort's trend column deterministically — that
+                # cohort then acts as the trend baseline, mirroring the
+                # paper's all-treated normalization rule and matching the
+                # ``_build_interaction_matrix`` last-cohort handling for
+                # cohort × time interactions.
+                has_never_treated = (sample[cohort] == 0).any()
+                trend_groups = groups if has_never_treated else groups[:-1]
+                trend_cols: List[np.ndarray] = []
+                for g in trend_groups:
+                    trend_col = (cohort_vals == g).astype(float) * time_vals
+                    trend_cols.append(trend_col.reshape(-1, 1))
+                    cohort_trend_col_names.append(f"trend_g{g}")
+                if trend_cols:
+                    design_parts.append(np.hstack(trend_cols))
+            X = np.hstack(design_parts)
             y = sample[outcome].values.astype(float)
             coef_offset = 1
         else:
@@ -920,6 +1084,34 @@ class WooldridgeDiD:
             weight_type=survey_weight_type,
             vcov_type=self.vcov_type,
         )
+
+        # Extract cohort-trend coefficients (paper W2025 Eq. 8.1 ``δ_g``).
+        # Trend columns live at the tail of the full-dummy design after
+        # the unit + time dummies. Empty dict when cohort_trends=False
+        # (matches the no-op contract under default).
+        #
+        # ``trend_groups`` mirrors the design-build branch above: when
+        # there is no never-treated baseline cohort the last cohort's
+        # trend column is dropped per paper W2025 Section 5.4's
+        # all-treated normalization rule. ``cohort_trend_coefs`` only
+        # surfaces the identified cohorts; the dropped cohort's slope
+        # is the baseline (zero in deviation form) and is intentionally
+        # absent from the dict.
+        cohort_trend_coefs: Dict[Any, float] = {}
+        if self.cohort_trends and use_full_dummy:
+            n_units_for_trend = int(sample[unit].nunique())
+            n_times_for_trend = int(sample[time].nunique())
+            trend_start_idx = (
+                1 + X_design.shape[1] + (n_units_for_trend - 1) + (n_times_for_trend - 1)
+            )
+            has_never_treated_trend = (sample[cohort] == 0).any()
+            trend_groups_extract = groups if has_never_treated_trend else groups[:-1]
+            for i, g in enumerate(trend_groups_extract):
+                idx = trend_start_idx + i
+                if idx < len(coefs):
+                    cohort_trend_coefs[g] = float(coefs[idx])
+                else:
+                    cohort_trend_coefs[g] = float("nan")
 
         # Survey TSL vcov replaces cluster-robust vcov
         if resolved is not None:
@@ -1000,9 +1192,7 @@ class WooldridgeDiD:
         # ``safe_inference(df=None)`` (silent normal-theory).
         overall_att_bm_dof: Optional[float] = None
         per_cell_bm_dof: Dict[Tuple, float] = {}
-        bm_artifacts: Optional[
-            Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[Tuple, int]]
-        ] = None
+        bm_artifacts: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, Dict[Tuple, int]]] = None
         # Residual DOF for one-way ``vcov_type in {"classical","hc2"}`` paths
         # (full-dummy, no survey). Matches R's ``lm()`` / ``coef_test()`` use
         # of ``n - rank(X)`` for the t-distribution under both classical OLS
@@ -1052,17 +1242,13 @@ class WooldridgeDiD:
             # kept; cells with dropped coefficients are absent here and will
             # be fail-closed at gt_effects inference + aggregate() time.
             reduced_coef_idx_map: Dict[Tuple, int] = {
-                k: full_to_reduced[v]
-                for k, v in gt_coef_index_map.items()
-                if int(v) in kept_set
+                k: full_to_reduced[v] for k, v in gt_coef_index_map.items() if int(v) in kept_set
             }
             n_red = X_red.shape[1]
             # Per-cell one-hot contrasts (kept cells only). Dropped cells get
             # NaN per_cell_bm_dof (caller fail-closes inference fields).
             per_cell_keys_kept = [k for k in gt_keys_ordered if k in reduced_coef_idx_map]
-            per_cell_keys_dropped = [
-                k for k in gt_keys_ordered if k not in reduced_coef_idx_map
-            ]
+            per_cell_keys_dropped = [k for k in gt_keys_ordered if k not in reduced_coef_idx_map]
             # Overall ATT contrast across post-period kept cells.
             post_keys = [(g, t) for (g, t) in gt_keys_ordered if t >= g]
             post_keys_kept = [k for k in post_keys if k in reduced_coef_idx_map]
@@ -1070,9 +1256,7 @@ class WooldridgeDiD:
             overall_contrast = np.zeros(n_red)
             if w_total_post > 0:
                 for k in post_keys_kept:
-                    overall_contrast[reduced_coef_idx_map[k]] = (
-                        gt_weights[k] / w_total_post
-                    )
+                    overall_contrast[reduced_coef_idx_map[k]] = gt_weights[k] / w_total_post
             include_overall = w_total_post > 0 and bool(np.any(overall_contrast != 0))
             cols: List[np.ndarray] = []
             for k in per_cell_keys_kept:
@@ -1089,14 +1273,10 @@ class WooldridgeDiD:
                     )
                     for i, k in enumerate(per_cell_keys_kept):
                         candidate = float(dof_vec[i])
-                        per_cell_bm_dof[k] = (
-                            candidate if np.isfinite(candidate) else float("nan")
-                        )
+                        per_cell_bm_dof[k] = candidate if np.isfinite(candidate) else float("nan")
                     if include_overall:
                         candidate = float(dof_vec[-1])
-                        overall_att_bm_dof = (
-                            candidate if np.isfinite(candidate) else float("nan")
-                        )
+                        overall_att_bm_dof = candidate if np.isfinite(candidate) else float("nan")
                 except (ValueError, np.linalg.LinAlgError) as exc:
                     warnings.warn(
                         f"WooldridgeDiD(vcov_type='hc2_bm') analytical "
@@ -1210,6 +1390,9 @@ class WooldridgeDiD:
         n_treated = int(sample[sample[cohort] > 0][unit].nunique())
         n_control = self._count_control_units(sample, unit, cohort, time)
         all_times = sorted(sample[time].unique().tolist())
+        # Per-cohort unit counts ``N_g`` (paper Eqs. 7.4, 7.6) — needed by
+        # ``aggregate(weights="cohort_share")``.
+        n_g_per_cohort = {g: int(sample[sample[cohort] == g][unit].nunique()) for g in groups}
 
         results = WooldridgeDiDResults(
             group_time_effects=gt_effects,
@@ -1241,12 +1424,15 @@ class WooldridgeDiD:
                 else (int(np.unique(cluster_ids).size) if cluster_ids is not None else None)
             ),
             _gt_weights=gt_weights,
+            _n_g_per_cohort=n_g_per_cohort,
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
             _df_survey=df_inf,
             _bm_per_cell_dof=per_cell_bm_dof,
             _bm_artifacts=bm_artifacts,
             _df_one_way=df_one_way,
+            cohort_trend_coefs=cohort_trend_coefs,
+            cohort_trends=self.cohort_trends,
         )
 
         # 9. Optional multiplier bootstrap (overrides analytic SE for overall ATT).
@@ -1315,6 +1501,7 @@ class WooldridgeDiD:
                 results.overall_t_stat = t_stat_b
                 results.overall_p_value = p_b
                 results.overall_conf_int = ci_b
+                results._bootstrap_used = True
 
         return results
 
@@ -1560,6 +1747,7 @@ class WooldridgeDiD:
             cluster_name=(None if _has_survey else cluster_col),
             n_clusters=(None if _has_survey else int(np.unique(cluster_ids).size)),
             _gt_weights=gt_weights,
+            _n_g_per_cohort={g: int(sample[sample[cohort] == g][unit].nunique()) for g in groups},
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
             _df_survey=df_inf,
@@ -1810,6 +1998,7 @@ class WooldridgeDiD:
             cluster_name=(None if _has_survey else cluster_col),
             n_clusters=(None if _has_survey else int(np.unique(cluster_ids).size)),
             _gt_weights=gt_weights,
+            _n_g_per_cohort={g: int(sample[sample[cohort] == g][unit].nunique()) for g in groups},
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
             _df_survey=df_inf,

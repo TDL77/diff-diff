@@ -24,7 +24,7 @@ A **Complete** entry has a documented review pass against the primary academic s
 
 The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
 
-**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures (e.g., WooldridgeDiD has a companion-paper review for Wooldridge (2023) plus unit tests but no primary-source review for Wooldridge (2025) and no dedicated methodology test file yet); others have only the REGISTRY entry and unit tests (e.g., PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
+**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures (e.g., TROP has a recent paper review but no methodology test file or cross-language anchor yet); others have only the REGISTRY entry and unit tests (e.g., PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
 
 **Not Started** entries have neither a tracker walk-through nor an REGISTRY.md section. This tracker no longer carries any Not Started rows; new estimators are expected to enter as In Progress when their REGISTRY entry lands.
 
@@ -49,7 +49,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | StackedDiD | `stacked_did.py` | `stacked-did-weights` (Wing-Freedman-Hollingsworth code) | **Complete** | 2026-02-19 |
 | ImputationDiD | `imputation.py` | `didimputation` | **In Progress** | — |
 | TwoStageDiD | `two_stage.py` | `did2s` | **In Progress** | — |
-| WooldridgeDiD (ETWFE) | `wooldridge.py` | `etwfe` (R) / `jwdid` (Stata) | **In Progress** | — |
+| WooldridgeDiD (ETWFE) | `wooldridge.py` | `etwfe` (R) / `jwdid` (Stata) | **Complete** | 2026-05-22 |
 | EfficientDiD | `efficient_did.py` | (no canonical R package) | **In Progress** | — |
 
 ### Continuous & Universal-Treatment Estimators
@@ -587,21 +587,40 @@ and covariate-adjusted specifications.)
 |-------|-------|
 | Module | `wooldridge.py`, `wooldridge_results.py` |
 | Primary Reference | Wooldridge (2025), *Two-way fixed effects, the two-way Mundlak regression, and difference-in-differences estimators*, Empirical Economics 69(5), 2545–2587 |
+| Companion Reference | Wooldridge (2023), *Simple approaches to nonlinear difference-in-differences with panel data*, Econometrics Journal 26(3) (nonlinear extensions for logit/Poisson paths) |
 | R Reference | `etwfe` (McDermott 2023); Stata `jwdid` (Rios-Avila 2021) |
-| Status | **In Progress** |
-| Last Review | — |
+| Status | **Complete** |
+| Last Review | 2026-05-22 |
 
-**Documentation in place:**
-- REGISTRY.md section: `## WooldridgeDiD (ETWFE)` (saturated cohort×time interactions, OLS/logit/Poisson via IRLS, ASF-based ATT for nonlinear methods with delta-method SEs, four aggregations, survey support)
-- **Companion-paper review on file**: `docs/methodology/papers/wooldridge-2023-review.md` covers Wooldridge (2023) *Simple approaches to nonlinear difference-in-differences with panel data*, Econometrics Journal 26(3) — the nonlinear extension that the logit/Poisson paths implement (retrospective, merged PR #443 on 2026-05-13). A dedicated review for the primary ETWFE source (Wooldridge 2025, *Empirical Economics* 69(5)) is **not** yet on file.
-- Implementation: `tests/test_wooldridge.py` (covers OLS, logit, and Poisson paths plus the four aggregation types)
+**Verified Components:**
+- **Theorem 3.1 (Mundlak ≡ TWFE):** equivalence under non-singularity Eq. 3.3 — `tests/test_methodology_wooldridge.py::TestW2025Theorem31MundlakTWFEEquivalence`
+- **Proposition 5.1 / 5.2 (Imputation ≡ POLS five-way chain):** `TestW2025Proposition51ImputationPOLSEquivalence`
+- **Section 6 / Eqs. 6.1-6.5 event-study:** `TestW2025Section6EventStudy`
+- **Section 7 aggregation paths (Eqs. 7.2-7.4 + 7.6):** opt-in `weights="cohort_share"` on `aggregate()` recovers paper Eq. 7.4 simple-overall and Eq. 7.6 event-time hand-calc forms — `TestW2025Section7AggregationPaths`
+- **Section 8 / Eq. 8.1 heterogeneous cohort-specific trends:** `cohort_trends=True` adds `dg_i · t` interactions; recovers `tau` under heterogeneous-trends DGP — `TestW2025Section8HeterogeneousTrends`
+- **Section 10 unbalanced panels + time-varying covariates (Eq. 10.1-10.6):** `TestW2025Section10UnbalancedPanels`
 
-**Outstanding for promotion:**
-- Dedicated paper review for the primary ETWFE source: write `docs/methodology/papers/wooldridge-2025-review.md` covering Wooldridge (2025) *Empirical Economics* 69(5), 2545–2587 (published version of the 2021 SSRN working paper / NBER WP 29154)
-- Dedicated `tests/test_methodology_wooldridge.py` with paper-equation-numbered Verified Components walk-through
-- R parity fixture against `etwfe` (and ideally Stata `jwdid`) covering OLS, logit, and Poisson paths
-- Verified Components for nonlinear-method ASF / delta-method SE invariants
-- "Corrections Made" listing
+**Test Coverage:**
+- `tests/test_methodology_wooldridge.py` — 10 test classes (6 paper-equation-numbered Theorem/Proposition/Section walk-throughs + `TestW2025LibraryDeviations` consolidating 5 surviving deviations + `TestWooldridgeParityR` vcov_type R-parity from PR #483 + `TestWooldridgeParityRPoisson` / `TestWooldridgeParityRLogit` surface tests with log-link goldens; numerical R-parity for nonlinear paths deferred per TODO row)
+- `tests/test_wooldridge.py` — unit-level test suite covering OLS / logit / Poisson + four aggregations + survey support + vcov_type variants + cluster/bootstrap interactions
+- `benchmarks/R/generate_wooldridge_golden.R` — clubSandwich + sandwich + etwfe goldens at `benchmarks/data/wooldridge_golden.json`
+
+**Corrections Made:**
+- **PR #484 (PR-A):** Added primary-source review for Wooldridge (2025) at `docs/methodology/papers/wooldridge-2025-review.md` (771 lines). Documented the cohort-share aggregation deviation (Eqs. 7.2-7.4 simple-overall AND Eq. 7.6 event-time) and the Section 8 heterogeneous-trends gap. REGISTRY § Aggregations Note + TODO row 95 extended to cover both paths.
+- **PR-B (this PR):** Closed two paper gaps documented in PR-A:
+  - **Opt-in cohort-share aggregation weighting** via `aggregate(weights="cohort_share")` on `WooldridgeDiDResults` (paper Eq. 7.4 simple-overall + Eq. 7.6 event-time). Default stays `weights="cell"` for `jwdid_estat` back-compat.
+  - **Heterogeneous cohort trends** via `WooldridgeDiD(cohort_trends=True)` (paper Eq. 8.1; OLS path only; auto-routes to full-dummy mode regardless of `vcov_type` to keep math closure verified against existing R-parity goldens).
+  - Extended R goldens to include `etwfe(family="poisson")` and `etwfe(family="logit")` log-link coefficients (surface tests in Python; numerical response-scale parity deferred to follow-up).
+
+**Deviations from the paper / from R / library extensions:** See REGISTRY.md `## WooldridgeDiD (ETWFE)` → `### Deviations from the paper / from R / library extensions` block for the consolidated list (HC1 finite-sample factor, QMLE sandwich `(n-1)/(n-k)` term, nonlinear-vs-fixest direct QMLE, logit cohort+time additive dummies, anticipation + aggregation, cell-count default with opt-in cohort-share).
+
+**Outstanding Concerns:**
+- **Stata `jwdid` golden values** (TODO "Stata `jwdid` golden value tests" row): Stata-side parity infrastructure deferred until Stata install is available; R `etwfe` side covered in PR-B Stage D.
+- **Response-scale APE / log-link bridge for Poisson + logit R parity** (new TODO row added in PR-B): direct cell-level numerical parity between diff-diff's response-scale ATT and R `etwfe` log-link coefficients requires either `emfx()`-based APE extraction on the R side or link-function inversion with baseline-mean adjustment.
+- **QMLE sandwich Stata-parity `qmle` weight type** (TODO row 94): diff-diff's `(G/(G-1)) × ((n-1)/(n-k))` is conservative vs Stata's `G/(G-1)` only; awaiting Stata golden values to confirm material difference.
+- **Repeated cross-sections** (paper p. 2581 → Deb et al. 2024): not in 2025 paper's main body; future PR.
+- **Treatment exit / non-absorbing treatment** (2023 paper Section 7.2 sketch): not in 2025 paper; future PR.
+- **`cohort_trends` polynomial extension** (`"quadratic"`, `"cubic"`): PR-B ships binary `True/False` for linear `dg_i · t`; forward-extensibility deferred.
 
 ---
 
@@ -1319,11 +1338,10 @@ Promotion priority for the **In Progress** entries, ordered by what's blocked on
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
-6. **WooldridgeDiD (ETWFE)** — companion-paper review (Wooldridge 2023 nonlinear extension) merged in PR #443; primary-source review for Wooldridge (2025) ETWFE not yet on file, and no dedicated methodology test file.
-7. **TROP** — paper review recently merged (PR #443); needs methodology file and cross-language anchor (when paper-author reference becomes available).
-8. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
-9. **ConleySpatialHAC** — paper review + committed R `conleyreg` goldens; needs dedicated methodology test file + summary R-parity table in this tracker.
-10. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
+6. **TROP** — paper review recently merged (PR #443); needs methodology file and cross-language anchor (when paper-author reference becomes available).
+7. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
+8. **ConleySpatialHAC** — paper review + committed R `conleyreg` goldens; needs dedicated methodology test file + summary R-parity table in this tracker.
+9. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
 
 ---
 

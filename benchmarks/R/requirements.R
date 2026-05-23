@@ -11,6 +11,7 @@ required_packages <- c(
   "HonestDiD",     # Rambachan & Roth (2023) sensitivity analysis
   "fixest",        # Fast TWFE and basic DiD
   "triplediff",    # Ortiz-Villavicencio & Sant'Anna (2025) triple difference
+  "etwfe",         # McDermott (2023) Wooldridge ETWFE estimator (R-parity for Poisson + logit paths)
   "survey",        # Lumley (2004) complex survey analysis
   "estimatr",      # Blair et al. (2019) weighted robust / IV SE (HAD mass-point parity)
   "DIDHAD",        # de Chaisemartin et al. (2025) HAD estimator (HAD Phase 4 R-parity)
