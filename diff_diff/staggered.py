@@ -94,26 +94,35 @@ def _linear_regression(
 
 def _cluster_robust_se_from_per_gt_if(
     inf_info: Dict[str, Any],
-    psu_array: np.ndarray,
+    resolved_survey: "Any",
 ) -> Optional[float]:
     """CR1 Liang-Zeger cluster-robust SE for a single (g,t) ATT.
 
-    Computes the cluster-aggregated IF variance for one per-(g,t) cell:
+    Builds the per-(g,t) per-index IF vector from ``inf_info`` and routes
+    through ``compute_survey_if_variance`` so that the per-cell variance
+    inherits the SAME design-based machinery as the aggregate path:
 
-        psi_per_index[i] = sum of IFs at this index for this (g, t)
-        psi_per_cluster[c] = sum_{i in c} psi_per_index[i]
-        se = sqrt(sum(psi_per_cluster ** 2))
+        V = sum_h (1 - f_h) * (n_h / (n_h - 1)) * sum_j (psi_hj - psi_h_bar)^2
 
-    For the panel path, ``psu_array`` is ``resolved_survey_unit.psu``
+    where ``psi_hj = sum_{i in PSU j, stratum h} psi_i``. This matches
+    the documented CR1 contract in REGISTRY.md (synthesized
+    ``SurveyDesign(psu=cluster)`` → ``_compute_stratified_psu_meat``)
+    and applies the G/(G-1) finite-sample correction, PSU centering,
+    FPC, and lonely-PSU handling uniformly with overall / event-study
+    inference.
+
+    For the panel path, ``resolved_survey`` is ``resolved_survey_unit``
     (length n_units) and the IF index space is per-unit. For the RCS
-    path, ``psu_array`` is ``resolved_survey.psu`` (length n_obs) and
-    the IF index space is per-obs. The helper is index-space agnostic
-    — it just requires ``treated_idx`` / ``control_idx`` in ``inf_info``
-    to be valid offsets into ``psu_array``.
+    path, ``resolved_survey`` is the per-obs ``resolved_survey`` (length
+    n_obs). The helper is index-space agnostic — it just requires
+    ``treated_idx`` / ``control_idx`` in ``inf_info`` to be valid
+    offsets into ``resolved_survey.psu``.
 
-    Returns ``None`` when ``inf_info`` lacks the required IF fields or
-    when index alignment cannot be verified (caller falls back to the
-    unit-level SE returned by the underlying estimation method).
+    Returns ``None`` when ``inf_info`` lacks required IF fields, when
+    ``resolved_survey.psu`` is None, when index alignment cannot be
+    verified, or when ``compute_survey_if_variance`` returns NaN (caller
+    falls back to the unit-level SE returned by the underlying estimation
+    method).
     """
     if (
         inf_info is None
@@ -127,6 +136,9 @@ def _cluster_robust_se_from_per_gt_if(
     control_idx = np.asarray(inf_info["control_idx"])
     treated_inf = np.asarray(inf_info["treated_inf"])
     control_inf = np.asarray(inf_info["control_inf"])
+    psu_array = getattr(resolved_survey, "psu", None)
+    if psu_array is None:
+        return None
     n = len(psu_array)
     if (
         treated_idx.size > 0
@@ -141,14 +153,16 @@ def _cluster_robust_se_from_per_gt_if(
         np.add.at(psi_per_index, treated_idx, treated_inf)
     if control_idx.size:
         np.add.at(psi_per_index, control_idx, control_inf)
-    # Factorize PSU labels for index-friendly aggregation
-    _, psu_codes = np.unique(psu_array, return_inverse=True)
-    n_clusters = int(psu_codes.max() + 1) if psu_codes.size else 0
-    if n_clusters == 0:
+    # Route through the shared survey helper so the per-cell variance
+    # gets the same G/(G-1) finite-sample correction, PSU centering,
+    # FPC handling, and lonely-PSU/G<2→NaN behavior as overall +
+    # event-study inference (per the documented CR1 contract).
+    from diff_diff.survey import compute_survey_if_variance
+
+    var = compute_survey_if_variance(psi_per_index, resolved_survey)
+    if not np.isfinite(var) or var < 0:
         return None
-    psi_per_cluster = np.zeros(n_clusters)
-    np.add.at(psi_per_cluster, psu_codes, psi_per_index)
-    return float(np.sqrt(np.sum(psi_per_cluster**2)))
+    return float(np.sqrt(var))
 
 
 def _safe_inv(
@@ -1109,7 +1123,7 @@ class CallawaySantAnna(
             # cluster=) provides one. Bit-equal to pre-PR when psu is None.
             rsu_for_gt = precomputed.get("resolved_survey_unit")
             if rsu_for_gt is not None and getattr(rsu_for_gt, "psu", None) is not None:
-                se_cluster = _cluster_robust_se_from_per_gt_if(inf_info_gt, rsu_for_gt.psu)
+                se_cluster = _cluster_robust_se_from_per_gt_if(inf_info_gt, rsu_for_gt)
                 if se_cluster is not None and np.isfinite(se_cluster):
                     se = se_cluster
                     # gte_entry["se"] was set with the unit-level value
@@ -1468,7 +1482,7 @@ class CallawaySantAnna(
                 # _compute_all_att_gt_vectorized.
                 rsu_for_gt = precomputed.get("resolved_survey_unit")
                 if rsu_for_gt is not None and getattr(rsu_for_gt, "psu", None) is not None:
-                    se_cluster = _cluster_robust_se_from_per_gt_if(inf_info_gt, rsu_for_gt.psu)
+                    se_cluster = _cluster_robust_se_from_per_gt_if(inf_info_gt, rsu_for_gt)
                     if se_cluster is not None and np.isfinite(se_cluster):
                         se = se_cluster
                         group_time_effects[(g, t)]["se"] = se
@@ -1917,7 +1931,7 @@ class CallawaySantAnna(
                             and getattr(rs_for_gt, "psu", None) is not None
                             and inf_info is not None
                         ):
-                            se_cluster = _cluster_robust_se_from_per_gt_if(inf_info, rs_for_gt.psu)
+                            se_cluster = _cluster_robust_se_from_per_gt_if(inf_info, rs_for_gt)
                             if se_cluster is not None and np.isfinite(se_cluster):
                                 se_gt = se_cluster
 
@@ -2025,7 +2039,7 @@ class CallawaySantAnna(
                             and getattr(rsu_for_gt, "psu", None) is not None
                             and inf_info is not None
                         ):
-                            se_cluster = _cluster_robust_se_from_per_gt_if(inf_info, rsu_for_gt.psu)
+                            se_cluster = _cluster_robust_se_from_per_gt_if(inf_info, rsu_for_gt)
                             if se_cluster is not None and np.isfinite(se_cluster):
                                 se_gt = se_cluster
 

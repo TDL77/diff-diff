@@ -4921,6 +4921,68 @@ class TestCallawaySantAnnaClusterSafetyGates:
                     "aggregation."
                 )
 
+    def test_per_gt_se_matches_compute_survey_if_variance_helper(self):
+        """The per-(g,t) cluster-aware SE must use the SAME design-based
+        variance machinery as the aggregate path
+        (compute_survey_if_variance / _compute_stratified_psu_meat) —
+        applying G/(G-1) finite-sample correction, PSU centering, and
+        lonely-PSU handling uniformly. Compares per-cell SE against the
+        shared helper on a small-G design (so the finite-sample
+        correction is non-trivial). Per CI codex R4 P1/P2 findings."""
+        from diff_diff.staggered import _cluster_robust_se_from_per_gt_if
+        from diff_diff.survey import (
+            SurveyDesign,
+            _resolve_survey_for_fit,
+            compute_survey_if_variance,
+        )
+
+        # 10 PSUs (states), 4 units each = 40 units total (small-G)
+        n_clusters = 10
+        units_per_cluster = 4
+        n_units = n_clusters * units_per_cluster
+        state_ids = np.repeat(np.arange(n_clusters), units_per_cluster)
+        unit_data = pd.DataFrame(
+            {"unit": np.arange(n_units), "state": state_ids}
+        )
+
+        synthetic = SurveyDesign(psu="state", weight_type="pweight")
+        rsu, _, _, _ = _resolve_survey_for_fit(synthetic, unit_data, "analytical")
+        assert rsu.psu is not None and len(rsu.psu) == n_units
+
+        # Hand-crafted per-(g,t) IF: 5 treated + 10 control units in this cell
+        rng = np.random.default_rng(7)
+        treated_idx = np.arange(0, 5)
+        control_idx = np.arange(5, 15)
+        treated_inf = rng.normal(0.0, 0.1, 5)
+        control_inf = rng.normal(0.0, 0.1, 10)
+        inf_info = {
+            "treated_idx": treated_idx,
+            "control_idx": control_idx,
+            "treated_inf": treated_inf,
+            "control_inf": control_inf,
+        }
+
+        # Helper output (function under test)
+        se_helper = _cluster_robust_se_from_per_gt_if(inf_info, rsu)
+        assert se_helper is not None
+        assert np.isfinite(se_helper) and se_helper > 0
+
+        # Direct reconstruction via compute_survey_if_variance must agree
+        # exactly — verifies the helper routes through the shared
+        # G/(G-1) + PSU centering + FPC machinery, not a bespoke formula.
+        psi_per_unit = np.zeros(n_units)
+        np.add.at(psi_per_unit, treated_idx, treated_inf)
+        np.add.at(psi_per_unit, control_idx, control_inf)
+        var_reference = compute_survey_if_variance(psi_per_unit, rsu)
+        se_reference = float(np.sqrt(var_reference))
+
+        assert se_helper == pytest.approx(se_reference, rel=0, abs=0), (
+            f"Per-(g,t) SE helper ({se_helper}) must equal "
+            f"compute_survey_if_variance reconstruction ({se_reference}) "
+            "— any divergence means the helper bypasses the shared "
+            "G/(G-1) finite-sample correction + PSU centering machinery."
+        )
+
     def test_survey_design_psu_wins_under_bootstrap(self):
         """Bootstrap path: when survey_design=SurveyDesign(psu=Y) is
         explicit AND cluster=X is also set with a different partition,
