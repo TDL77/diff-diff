@@ -4829,6 +4829,98 @@ class TestCallawaySantAnnaClusterSafetyGates:
             "not be reaching the bootstrap multiplier-weights routing."
         )
 
+    def test_per_gt_analytical_se_changes_with_cluster(self):
+        """Per-(g,t) analytical SE at results.group_time_effects[(g,t)]
+        ["se"] must change when cluster= is set (mirrors the overall_se
+        contract). Pre-fix, per-(g,t) SEs were unit-level even with
+        cluster=, only the aggregate path + bootstrap honored cluster=.
+        Per CI codex R3 P0 finding."""
+        data = _generate_clustered_staggered_data(seed=97)
+
+        cs_unit = CallawaySantAnna()
+        res_unit = cs_unit.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        cs_cluster = CallawaySantAnna(cluster="state")
+        res_cluster = cs_cluster.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+
+        # Pick a representative (g, t) cell that exists in both fits
+        gt_keys = sorted(
+            set(res_unit.group_time_effects.keys()) & set(res_cluster.group_time_effects.keys())
+        )
+        assert len(gt_keys) > 0, "expected overlapping (g, t) keys"
+
+        # At least one (g, t) cell must show measurable SE divergence —
+        # cluster-aware aggregation should differ from unit-level for at
+        # least one cell on a panel with intra-cluster correlation.
+        diffs = []
+        for gt in gt_keys:
+            se_unit = res_unit.group_time_effects[gt]["se"]
+            se_cluster = res_cluster.group_time_effects[gt]["se"]
+            if np.isfinite(se_unit) and np.isfinite(se_cluster):
+                diffs.append(abs(se_unit - se_cluster))
+        max_diff = max(diffs) if diffs else 0.0
+        assert max_diff > 1e-6, (
+            f"Per-(g,t) SEs did not change with cluster= (max diff "
+            f"across {len(diffs)} cells: {max_diff:.6g}). The cluster= "
+            "parameter may not be reaching the per-(g,t) analytical SE "
+            "computation."
+        )
+
+    def test_per_gt_se_matches_explicit_survey_design(self):
+        """When bare cluster=X and explicit SurveyDesign(psu=X) produce
+        equivalent variance contracts, the per-(g,t) SE surface must
+        also agree (modulo the deterministic synthesis path). Per CI
+        codex R3 P0 finding."""
+        from diff_diff import SurveyDesign
+
+        data = _generate_clustered_staggered_data(seed=101)
+
+        cs_bare = CallawaySantAnna(cluster="state")
+        res_bare = cs_bare.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+
+        cs_explicit = CallawaySantAnna()
+        res_explicit = cs_explicit.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=SurveyDesign(psu="state"),
+        )
+
+        gt_keys = sorted(
+            set(res_bare.group_time_effects.keys()) & set(res_explicit.group_time_effects.keys())
+        )
+        assert len(gt_keys) > 0
+
+        for gt in gt_keys:
+            se_bare = res_bare.group_time_effects[gt]["se"]
+            se_explicit = res_explicit.group_time_effects[gt]["se"]
+            if np.isfinite(se_bare) and np.isfinite(se_explicit):
+                assert se_bare == pytest.approx(se_explicit, rel=1e-10, abs=1e-12), (
+                    f"Per-(g,t) SE divergence at {gt}: bare cluster=state "
+                    f"({se_bare}) vs explicit SurveyDesign(psu=state) "
+                    f"({se_explicit}). Both should activate the same CR1 "
+                    "aggregation."
+                )
+
     def test_survey_design_psu_wins_under_bootstrap(self):
         """Bootstrap path: when survey_design=SurveyDesign(psu=Y) is
         explicit AND cluster=X is also set with a different partition,

@@ -92,6 +92,65 @@ def _linear_regression(
     return beta, residuals
 
 
+def _cluster_robust_se_from_per_gt_if(
+    inf_info: Dict[str, Any],
+    psu_array: np.ndarray,
+) -> Optional[float]:
+    """CR1 Liang-Zeger cluster-robust SE for a single (g,t) ATT.
+
+    Computes the cluster-aggregated IF variance for one per-(g,t) cell:
+
+        psi_per_index[i] = sum of IFs at this index for this (g, t)
+        psi_per_cluster[c] = sum_{i in c} psi_per_index[i]
+        se = sqrt(sum(psi_per_cluster ** 2))
+
+    For the panel path, ``psu_array`` is ``resolved_survey_unit.psu``
+    (length n_units) and the IF index space is per-unit. For the RCS
+    path, ``psu_array`` is ``resolved_survey.psu`` (length n_obs) and
+    the IF index space is per-obs. The helper is index-space agnostic
+    — it just requires ``treated_idx`` / ``control_idx`` in ``inf_info``
+    to be valid offsets into ``psu_array``.
+
+    Returns ``None`` when ``inf_info`` lacks the required IF fields or
+    when index alignment cannot be verified (caller falls back to the
+    unit-level SE returned by the underlying estimation method).
+    """
+    if (
+        inf_info is None
+        or "treated_inf" not in inf_info
+        or "control_inf" not in inf_info
+        or "treated_idx" not in inf_info
+        or "control_idx" not in inf_info
+    ):
+        return None
+    treated_idx = np.asarray(inf_info["treated_idx"])
+    control_idx = np.asarray(inf_info["control_idx"])
+    treated_inf = np.asarray(inf_info["treated_inf"])
+    control_inf = np.asarray(inf_info["control_inf"])
+    n = len(psu_array)
+    if (
+        treated_idx.size > 0
+        and (treated_idx.max(initial=-1) >= n or treated_idx.min(initial=0) < 0)
+    ) or (
+        control_idx.size > 0
+        and (control_idx.max(initial=-1) >= n or control_idx.min(initial=0) < 0)
+    ):
+        return None
+    psi_per_index = np.zeros(n)
+    if treated_idx.size:
+        np.add.at(psi_per_index, treated_idx, treated_inf)
+    if control_idx.size:
+        np.add.at(psi_per_index, control_idx, control_inf)
+    # Factorize PSU labels for index-friendly aggregation
+    _, psu_codes = np.unique(psu_array, return_inverse=True)
+    n_clusters = int(psu_codes.max() + 1) if psu_codes.size else 0
+    if n_clusters == 0:
+        return None
+    psi_per_cluster = np.zeros(n_clusters)
+    np.add.at(psi_per_cluster, psu_codes, psi_per_index)
+    return float(np.sqrt(np.sum(psi_per_cluster**2)))
+
+
 def _safe_inv(
     A: np.ndarray,
     tracker: Optional[list] = None,
@@ -1035,7 +1094,7 @@ class CallawaySantAnna(
             all_units = precomputed["all_units"]
             treated_positions = np.where(treated_valid)[0]
             control_positions = np.where(control_valid)[0]
-            influence_func_info[(g, t)] = {
+            inf_info_gt = {
                 "treated_idx": treated_positions,
                 "control_idx": control_positions,
                 "treated_units": all_units[treated_positions],
@@ -1043,6 +1102,22 @@ class CallawaySantAnna(
                 "treated_inf": inf_treated,
                 "control_inf": inf_control,
             }
+            influence_func_info[(g, t)] = inf_info_gt
+
+            # Cluster-aware per-(g,t) SE: aggregate the per-(g,t) IF by
+            # PSU when a survey design (explicit OR synthesized from bare
+            # cluster=) provides one. Bit-equal to pre-PR when psu is None.
+            rsu_for_gt = precomputed.get("resolved_survey_unit")
+            if rsu_for_gt is not None and getattr(rsu_for_gt, "psu", None) is not None:
+                se_cluster = _cluster_robust_se_from_per_gt_if(inf_info_gt, rsu_for_gt.psu)
+                if se_cluster is not None and np.isfinite(se_cluster):
+                    se = se_cluster
+                    # gte_entry["se"] was set with the unit-level value
+                    # at the gte_entry construction above; overwrite with
+                    # the cluster-aware value so the public surface
+                    # group_time_effects[(g,t)]["se"] reflects the
+                    # documented CR1 contract.
+                    group_time_effects[(g, t)]["se"] = se
 
             atts.append(att)
             ses.append(se)
@@ -1379,7 +1454,7 @@ class CallawaySantAnna(
                 all_units = precomputed["all_units"]
                 treated_positions = np.where(treated_valid)[0]
                 control_positions = np.where(control_valid)[0]
-                influence_func_info[(g, t)] = {
+                inf_info_gt = {
                     "treated_idx": treated_positions,
                     "control_idx": control_positions,
                     "treated_units": all_units[treated_positions],
@@ -1387,6 +1462,16 @@ class CallawaySantAnna(
                     "treated_inf": inf_treated,
                     "control_inf": inf_control,
                 }
+                influence_func_info[(g, t)] = inf_info_gt
+
+                # Cluster-aware per-(g,t) SE — see same pattern in
+                # _compute_all_att_gt_vectorized.
+                rsu_for_gt = precomputed.get("resolved_survey_unit")
+                if rsu_for_gt is not None and getattr(rsu_for_gt, "psu", None) is not None:
+                    se_cluster = _cluster_robust_se_from_per_gt_if(inf_info_gt, rsu_for_gt.psu)
+                    if se_cluster is not None and np.isfinite(se_cluster):
+                        se = se_cluster
+                        group_time_effects[(g, t)]["se"] = se
 
                 atts.append(att)
                 ses.append(se)
@@ -1820,6 +1905,22 @@ class CallawaySantAnna(
                     agg_w = rc_result[6] if len(rc_result) > 6 else n_treat
 
                     if att_gt is not None:
+                        # Cluster-aware per-(g,t) SE on the RCS path. RC
+                        # IF indices are per-obs (vs per-unit on the panel
+                        # path); the corresponding PSU array is
+                        # ``resolved_survey.psu`` (length n_obs), not
+                        # ``resolved_survey_unit.psu``. Bit-equal to pre-PR
+                        # when psu is None.
+                        rs_for_gt = precomputed.get("resolved_survey") if precomputed else None
+                        if (
+                            rs_for_gt is not None
+                            and getattr(rs_for_gt, "psu", None) is not None
+                            and inf_info is not None
+                        ):
+                            se_cluster = _cluster_robust_se_from_per_gt_if(inf_info, rs_for_gt.psu)
+                            if se_cluster is not None and np.isfinite(se_cluster):
+                                se_gt = se_cluster
+
                         t_stat, p_val, ci = safe_inference(
                             att_gt,
                             se_gt,
@@ -1912,6 +2013,22 @@ class CallawaySantAnna(
                     )
 
                     if att_gt is not None:
+                        # Cluster-aware per-(g,t) SE: when a survey PSU is
+                        # in play (explicit OR synthesized from bare
+                        # cluster=), aggregate the per-(g,t) IF by PSU
+                        # and use CR1 Liang-Zeger SE instead of the
+                        # unit-level diff-of-means SE returned by OR/IPW/DR.
+                        # Preserves bit-equality when psu is None.
+                        rsu_for_gt = precomputed.get("resolved_survey_unit")
+                        if (
+                            rsu_for_gt is not None
+                            and getattr(rsu_for_gt, "psu", None) is not None
+                            and inf_info is not None
+                        ):
+                            se_cluster = _cluster_robust_se_from_per_gt_if(inf_info, rsu_for_gt.psu)
+                            if se_cluster is not None and np.isfinite(se_cluster):
+                                se_gt = se_cluster
+
                         t_stat, p_val, ci = safe_inference(
                             att_gt,
                             se_gt,
