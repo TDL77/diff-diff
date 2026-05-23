@@ -590,6 +590,33 @@ class WooldridgeDiD:
                 "wait for the deferred follow-up tracked in TODO."
             )
 
+        # 0d.ii Reject cohort_trends=True + control_group="never_treated".
+        # The OLS + never_treated branch (paper W2025 Section 4.4 / library
+        # ``_build_interaction_matrix`` ``include_pre=True``) emits ALL
+        # ``(g, t)`` cells for each treated cohort as treatment-cell
+        # indicator dummies — including pre-treatment placebo cells. For
+        # any treated cohort, ``dg_i · t = Σ_t t · 1{cohort=g, time=t}``
+        # is fully spanned by the existing per-cohort sum of cell dummies,
+        # so the appended trend columns are unidentified. The per-cohort
+        # pre-period guard above counts observed periods but doesn't
+        # catch this collinearity. Fail-close pending a redesigned
+        # design-matrix path that drops the placebo dummies (or restricts
+        # to post-treatment cells) under the trend specification — codex
+        # R9 P1 fix.
+        if self.cohort_trends and self.control_group == "never_treated":
+            raise NotImplementedError(
+                "WooldridgeDiD(cohort_trends=True, "
+                "control_group='never_treated') is not yet supported: "
+                "the OLS never_treated path emits ALL (g, t) cells (paper "
+                "W2025 Section 4.4 placebo coverage), and the appended "
+                "dg_i · t trend columns are linearly spanned by the "
+                "per-cohort sum of those cell dummies, so the Section 8 "
+                "trend specification is unidentified on this branch. Use "
+                "control_group='not_yet_treated' (the default) for "
+                "cohort_trends=True, or wait for the deferred follow-up "
+                "tracked in TODO."
+            )
+
         # 0d. Reject survey_design + non-hc1 analytical family. The survey-
         # design TSL (or replicate-weight refit) variance overrides the
         # analytical sandwich, so the requested HC2/HC2-BM/classical family

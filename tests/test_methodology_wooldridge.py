@@ -1482,6 +1482,34 @@ class TestW2025Section8HeterogeneousTrends:
         assert np.isfinite(res.overall_att)
         assert np.isfinite(res.overall_se) and res.overall_se > 0
 
+    def test_cohort_trends_true_rejects_never_treated_control_group(self) -> None:
+        """CI R9 P1 fix: ``cohort_trends=True`` + ``control_group="never_treated"`` raises.
+
+        The OLS + never_treated branch emits ALL (g, t) cells as
+        treatment-cell dummies (paper W2025 Section 4.4 placebo
+        coverage). For each treated cohort g, the trend column
+        ``dg_i · t`` is fully spanned by the per-cohort sum of those
+        cell dummies, so ``dg_i · t`` is unidentified. The library
+        fail-closes the combination with ``NotImplementedError``.
+        """
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 23)
+        panel = _make_heterogeneous_trends_panel(rng, n_per_cohort=80, sigma=0.05)
+        with pytest.raises(
+            NotImplementedError,
+            match=r"cohort_trends=True.*control_group='never_treated'.*not yet supported",
+        ):
+            WooldridgeDiD(
+                method="ols",
+                cohort_trends=True,
+                control_group="never_treated",
+            ).fit(
+                panel,
+                outcome="y",
+                unit="unit",
+                time="time",
+                cohort="cohort",
+            )
+
     def test_cohort_trends_true_rejects_survey_design(self) -> None:
         """R5 P1 fix: ``cohort_trends=True`` + ``survey_design`` raises NotImplementedError.
 
