@@ -95,6 +95,35 @@ class CallawaySantAnnaResults:
         Effects aggregated by treatment cohort.
     pscore_trim : float
         Propensity score trimming bound used during estimation.
+    vcov_type : str
+        Variance type used during estimation. CallawaySantAnna is
+        permanently narrow to ``"hc1"`` — see REGISTRY.md
+        "IF-based variance estimators vs analytical-sandwich estimators"
+        for why analytical-sandwich families don't compose with the
+        per-(g,t) doubly-robust / IPW / outcome-regression structure.
+    cluster_name : str, optional
+        Canonical cluster column. Set to ``survey_design.psu`` when an
+        explicit survey PSU was provided (regardless of bare ``cluster=``),
+        otherwise to ``self.cluster`` when bare cluster synthesizes or
+        injects a PSU. ``None`` when no clustering is active.
+    n_clusters : int, optional
+        Number of unique clusters (PSUs) used for variance estimation.
+        ``None`` when no clustering is active.
+    df_inference : int, optional
+        Cluster-level degrees of freedom for downstream inference (e.g.,
+        ``HonestDiD`` t-critical-value selection) on the bare-``cluster=``
+        synthesize path ONLY (the case where ``survey_metadata`` is
+        intentionally ``None`` to preserve the survey/non-survey contract
+        for ``DiagnosticReport`` / ``summary()``). When the user provides
+        an explicit ``survey_design=`` (inject or conflict branches),
+        ``df_inference`` stays ``None`` and the canonical df carrier is
+        ``survey_metadata.df_survey`` — which holds the actual CS-internal
+        df, including any post-resolve tightening (e.g., the
+        ``overall_effective_df`` recompute for replicate aggregations).
+        ``HonestDiD`` reads ``survey_metadata.df_survey`` first and falls
+        back to ``df_inference`` only when ``survey_metadata`` is absent.
+        Narrow contract prevents HonestDiD from silently overriding a
+        tightened survey df with the original ``resolved_survey.df_survey``.
     """
 
     group_time_effects: Dict[Tuple[Any, Any], Dict[str, Any]]
@@ -137,6 +166,26 @@ class CallawaySantAnnaResults:
     )
     epv_threshold: float = 10
     pscore_fallback: str = "error"
+    # Variance / clustering metadata (PR #XXX — narrow vcov_type contract
+    # + cluster= wiring fix). vcov_type is permanently narrow to "hc1" for
+    # CS per IF-based variance structure (REGISTRY.md). cluster_name +
+    # n_clusters surface the effective clustering level for downstream
+    # introspection and label rendering.
+    vcov_type: str = "hc1"
+    cluster_name: Optional[str] = None
+    n_clusters: Optional[int] = None
+    # df_inference: cluster-level degrees of freedom for downstream
+    # inference, populated on the bare-cluster-synthesize path ONLY.
+    # When the user provides an explicit survey_design= (inject or
+    # conflict branches), df_inference stays None and the canonical df
+    # carrier is survey_metadata.df_survey (which holds the actual
+    # CS-internal df, including any post-resolve tightening via the
+    # overall_effective_df recompute at staggered.py:~1995-1999).
+    # HonestDiD reads survey_metadata.df_survey first and falls back to
+    # df_inference only when survey_metadata is absent. Narrow contract
+    # prevents HonestDiD from silently overriding a tightened survey df
+    # with the original resolved_survey.df_survey.
+    df_inference: Optional[int] = None
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property

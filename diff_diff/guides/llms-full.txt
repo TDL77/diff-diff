@@ -188,7 +188,7 @@ CallawaySantAnna(
     anticipation: int = 0,                       # Anticipation periods
     estimation_method: str = "dr",               # "dr", "ipw", or "reg"
     alpha: float = 0.05,
-    cluster: str | None = None,                  # Defaults to unit-level clustering
+    cluster: str | None = None,                  # Cluster col; activates CR1 on the IF via synthesized SurveyDesign(psu=col). None → per-unit IF.
     n_bootstrap: int = 0,                        # 0 = analytical SEs, 999+ recommended
     bootstrap_weights: str | None = None,        # "rademacher", "mammen", or "webb"
     seed: int | None = None,
@@ -196,6 +196,7 @@ CallawaySantAnna(
     base_period: str = "varying",                # "varying" or "universal"
     cband: bool = True,                          # Simultaneous confidence bands
     pscore_trim: float = 0.01,                   # Propensity score trimming bound
+    vcov_type: str = "hc1",                      # {"hc1"} only — IF-based variance per Callaway & Sant'Anna (2021). Analytical-sandwich {classical, hc2, hc2_bm} and conley REJECTED at __init__ (see REGISTRY.md IF-vs-sandwich subsection).
 )
 ```
 

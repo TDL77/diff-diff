@@ -92,6 +92,104 @@ def _linear_regression(
     return beta, residuals
 
 
+def _cluster_robust_se_from_per_gt_if(
+    inf_info: Dict[str, Any],
+    resolved_survey: "Any",
+) -> Optional[float]:
+    """CR1 Liang-Zeger cluster-robust SE for a single (g,t) ATT.
+
+    Builds the per-(g,t) per-index IF vector from ``inf_info`` and routes
+    through ``compute_survey_if_variance`` so that the per-cell variance
+    inherits the SAME design-based machinery as the aggregate path:
+
+        V = sum_h (1 - f_h) * (n_h / (n_h - 1)) * sum_j (psi_hj - psi_h_bar)^2
+
+    where ``psi_hj = sum_{i in PSU j, stratum h} psi_i``. This matches
+    the documented CR1 contract in REGISTRY.md (synthesized
+    ``SurveyDesign(psu=cluster)`` → ``_compute_stratified_psu_meat``)
+    and applies the G/(G-1) finite-sample correction, PSU centering,
+    FPC, and lonely-PSU handling uniformly with overall / event-study
+    inference.
+
+    For the panel path, ``resolved_survey`` is ``resolved_survey_unit``
+    (length n_units) and the IF index space is per-unit. For the RCS
+    path, ``resolved_survey`` is the per-obs ``resolved_survey`` (length
+    n_obs). The helper is index-space agnostic — it just requires
+    ``treated_idx`` / ``control_idx`` in ``inf_info`` to be valid
+    offsets into ``resolved_survey.psu``.
+
+    Return contract (callers depend on this distinction):
+
+    * **float SE** — finite cluster-robust variance; caller uses it.
+    * **NaN** — ``compute_survey_if_variance`` returned NaN (clustered
+      variance unidentified, e.g., G<2 or lonely-PSU removed all strata).
+      Caller MUST propagate this NaN through to ``safe_inference`` so
+      the per-cell inference surface (se / t_stat / p_value / conf_int)
+      is NaN-consistent — NEVER fall back to the unit-level SE. Falling
+      back would silently report a different estimator's variance under
+      a clustered request (``feedback_no_silent_failures``).
+    * **None** — malformed inputs or invariant violations:
+      ``inf_info`` lacks required IF fields, ``resolved_survey.psu`` is
+      None, index alignment cannot be verified, or
+      ``compute_survey_if_variance`` returned a negative variance. In
+      these cases the helper cannot evaluate the contract; caller falls
+      back to the unit-level SE returned by the underlying estimation
+      method (no PSU is in play, so unit-level is the documented default).
+    """
+    if (
+        inf_info is None
+        or "treated_inf" not in inf_info
+        or "control_inf" not in inf_info
+        or "treated_idx" not in inf_info
+        or "control_idx" not in inf_info
+    ):
+        return None
+    treated_idx = np.asarray(inf_info["treated_idx"])
+    control_idx = np.asarray(inf_info["control_idx"])
+    treated_inf = np.asarray(inf_info["treated_inf"])
+    control_inf = np.asarray(inf_info["control_inf"])
+    psu_array = getattr(resolved_survey, "psu", None)
+    if psu_array is None:
+        return None
+    n = len(psu_array)
+    if (
+        treated_idx.size > 0
+        and (treated_idx.max(initial=-1) >= n or treated_idx.min(initial=0) < 0)
+    ) or (
+        control_idx.size > 0
+        and (control_idx.max(initial=-1) >= n or control_idx.min(initial=0) < 0)
+    ):
+        return None
+    psi_per_index = np.zeros(n)
+    if treated_idx.size:
+        np.add.at(psi_per_index, treated_idx, treated_inf)
+    if control_idx.size:
+        np.add.at(psi_per_index, control_idx, control_inf)
+    # Route through the shared survey helper so the per-cell variance
+    # gets the same G/(G-1) finite-sample correction, PSU centering,
+    # FPC handling, and lonely-PSU/G<2→NaN behavior as overall +
+    # event-study inference (per the documented CR1 contract).
+    from diff_diff.survey import compute_survey_if_variance
+
+    var = compute_survey_if_variance(psi_per_index, resolved_survey)
+    # Return contract:
+    #   float SE → use it (finite cluster-robust variance)
+    #   NaN     → propagate NaN so the caller can NaN-out the inference
+    #             surface rather than silently falling back to the
+    #             unit-level SE (per feedback_no_silent_failures: when
+    #             clustered variance is undefined — e.g., G<2, lonely-PSU
+    #             removed all strata — the user-facing per-cell SE must
+    #             reflect that, not silently revert to a different
+    #             estimator).
+    #   None    → malformed (negative variance or other invariant
+    #             violation); caller falls back to the unit-level SE.
+    if np.isnan(var):
+        return float("nan")
+    if var < 0:
+        return None
+    return float(np.sqrt(var))
+
+
 def _safe_inv(
     A: np.ndarray,
     tracker: Optional[list] = None,
@@ -152,8 +250,26 @@ class CallawaySantAnna(
     alpha : float, default=0.05
         Significance level for confidence intervals.
     cluster : str, optional
-        Column name for cluster-robust standard errors.
-        Defaults to unit-level clustering.
+        Column name for cluster-robust standard errors. When set, the
+        influence-function aggregator clusters at the named level via a
+        synthesized ``SurveyDesign(psu=cluster_col)`` threaded through the
+        existing PSU-meat machinery (``_compute_stratified_psu_meat``) and
+        PSU-level multiplier bootstrap. When ``None`` (default), the
+        aggregator uses per-unit IF variance (Williams 2000 form). When
+        ``survey_design=SurveyDesign(psu=...)`` is also provided, the
+        explicit PSU takes precedence; a ``UserWarning`` fires if the bare
+        ``cluster=`` partition differs from the explicit PSU partition.
+    vcov_type : str, default="hc1"
+        Variance family. CallawaySantAnna accepts ``{"hc1"}`` only —
+        ``hc1`` means per-unit IF variance when ``cluster=None`` and CR1
+        Liang-Zeger on the IF when ``cluster=X`` is set. The
+        analytical-sandwich families (``classical``, ``hc2``, ``hc2_bm``)
+        and spatial-HAC (``conley``) are rejected at ``__init__`` because
+        CS's per-(g,t) doubly-robust / IPW / outcome-regression structure
+        has no single design matrix to compute hat-matrix leverage or
+        Bell-McCaffrey Satterthwaite DOF on. See REGISTRY.md "IF-based
+        variance estimators vs analytical-sandwich estimators" for the
+        structural taxonomy.
     n_bootstrap : int, default=0
         Number of bootstrap iterations for inference.
         If 0, uses analytical standard errors.
@@ -321,6 +437,7 @@ class CallawaySantAnna(
         panel: bool = True,
         epv_threshold: float = 10,
         pscore_fallback: str = "error",
+        vcov_type: str = "hc1",
     ):
         import warnings
 
@@ -363,11 +480,27 @@ class CallawaySantAnna(
                 f"base_period must be 'varying' or 'universal', " f"got '{base_period}'"
             )
 
+        # vcov_type input contract: CallawaySantAnna is permanently narrow
+        # to {"hc1"} because the analytical-sandwich families (classical,
+        # hc2, hc2_bm) require a single regression's hat matrix that CS's
+        # per-(g,t) doubly-robust / IPW / outcome-regression structure
+        # doesn't have. See REGISTRY.md "IF-based variance estimators vs
+        # analytical-sandwich estimators" for the structural taxonomy.
+        # Factored out so fit() can re-run it after sklearn-style
+        # set_params bypasses __init__ validation.
+        self._validate_vcov_type(vcov_type)
+
         self.control_group = control_group
         self.anticipation = anticipation
         self.estimation_method = estimation_method
         self.alpha = alpha
         self.cluster = cluster
+        self.vcov_type = vcov_type
+        # Track whether vcov_type was explicitly set (for future symmetry
+        # with SA / StackedDiD / WooldridgeDiD set_params patterns; the
+        # narrow contract makes the flag a no-op today but consistency
+        # avoids surprises if the contract ever broadens).
+        self._vcov_type_explicit = vcov_type != "hc1"
         self.n_bootstrap = n_bootstrap
         self.bootstrap_weights = bootstrap_weights
         self.seed = seed
@@ -1000,7 +1133,7 @@ class CallawaySantAnna(
             all_units = precomputed["all_units"]
             treated_positions = np.where(treated_valid)[0]
             control_positions = np.where(control_valid)[0]
-            influence_func_info[(g, t)] = {
+            inf_info_gt = {
                 "treated_idx": treated_positions,
                 "control_idx": control_positions,
                 "treated_units": all_units[treated_positions],
@@ -1008,6 +1141,24 @@ class CallawaySantAnna(
                 "treated_inf": inf_treated,
                 "control_inf": inf_control,
             }
+            influence_func_info[(g, t)] = inf_info_gt
+
+            # Cluster-aware per-(g,t) SE: aggregate the per-(g,t) IF by
+            # PSU when a survey design (explicit OR synthesized from bare
+            # cluster=) provides one. Bit-equal to pre-PR when psu is None.
+            rsu_for_gt = precomputed.get("resolved_survey_unit")
+            if rsu_for_gt is not None and getattr(rsu_for_gt, "psu", None) is not None:
+                se_cluster = _cluster_robust_se_from_per_gt_if(inf_info_gt, rsu_for_gt)
+                # se_cluster is float (use), NaN (cluster-undefined, propagate),
+                # or None (malformed, keep unit-level). Per the helper's
+                # contract, NaN is a deliberate signal that the survey/PSU
+                # variance is unidentified (e.g., G<2, lonely-PSU removed
+                # all strata) — propagating NaN here causes safe_inference
+                # to NaN-out the full per-cell inference surface, which is
+                # the documented CS contract (feedback_no_silent_failures).
+                if se_cluster is not None:
+                    se = se_cluster
+                    group_time_effects[(g, t)]["se"] = se
 
             atts.append(att)
             ses.append(se)
@@ -1344,7 +1495,7 @@ class CallawaySantAnna(
                 all_units = precomputed["all_units"]
                 treated_positions = np.where(treated_valid)[0]
                 control_positions = np.where(control_valid)[0]
-                influence_func_info[(g, t)] = {
+                inf_info_gt = {
                     "treated_idx": treated_positions,
                     "control_idx": control_positions,
                     "treated_units": all_units[treated_positions],
@@ -1352,6 +1503,19 @@ class CallawaySantAnna(
                     "treated_inf": inf_treated,
                     "control_inf": inf_control,
                 }
+                influence_func_info[(g, t)] = inf_info_gt
+
+                # Cluster-aware per-(g,t) SE — see same pattern in
+                # _compute_all_att_gt_vectorized.
+                rsu_for_gt = precomputed.get("resolved_survey_unit")
+                if rsu_for_gt is not None and getattr(rsu_for_gt, "psu", None) is not None:
+                    se_cluster = _cluster_robust_se_from_per_gt_if(inf_info_gt, rsu_for_gt)
+                    # Propagate NaN (cluster-undefined) per the helper's
+                    # contract — see _compute_all_att_gt_vectorized site
+                    # for the same pattern.
+                    if se_cluster is not None:
+                        se = se_cluster
+                        group_time_effects[(g, t)]["se"] = se
 
                 atts.append(att)
                 ses.append(se)
@@ -1465,6 +1629,12 @@ class CallawaySantAnna(
         # cell. Sibling of PR #9 finding #17.
         self._safe_inv_tracker: List[float] = []
 
+        # Re-validate vcov_type at fit-time so sklearn-style set_params
+        # mutations are caught before they propagate to Results metadata.
+        # __init__ already validated the constructor argument; this is the
+        # second layer for the post-construction mutation path.
+        self._validate_vcov_type(self.vcov_type)
+
         if not self.panel:
             warnings.warn(
                 "panel=False uses repeated cross-section DRDID estimators "
@@ -1490,6 +1660,7 @@ class CallawaySantAnna(
 
         # Resolve survey design if provided
         from diff_diff.survey import (
+            SurveyDesign,
             _resolve_survey_for_fit,
             _validate_unit_constant_survey,
         )
@@ -1498,10 +1669,119 @@ class CallawaySantAnna(
             _resolve_survey_for_fit(survey_design, data, "analytical")
         )
 
-        # Validate within-unit constancy for panel survey designs
+        # Wire bare cluster= into the survey-PSU machinery BEFORE the
+        # unit-constant + pweight validators below, so the synthesized
+        # survey design also passes through validation (otherwise movers
+        # on panel data — units crossing cluster boundaries — would
+        # silently get a first-value-wins collapse via
+        # _collapse_survey_to_unit_level). Mirrors estimators.py:497-516,
+        # adapted for CS's IF-based variance: no solve_ols(cluster_ids=...)
+        # fallback exists, so we synthesize a minimal SurveyDesign(psu=...)
+        # to reach the existing PSU-meat aggregator + PSU multiplier
+        # bootstrap. Both consume resolved_survey.psu, so synthesis
+        # transparently activates the same code paths used when the user
+        # passes SurveyDesign(psu=X) explicitly.
+        effective_survey_design = survey_design  # refreshed below if synthesized
+        if self.cluster is not None:
+            if self.cluster not in data.columns:
+                raise ValueError(f"cluster column '{self.cluster}' not found in data")
+            # Pre-validate cluster NaN with a cluster-domain error message.
+            # Without this, SurveyDesign.resolve() raises "PSU column ...
+            # contains missing values" — wrong domain for the user-facing
+            # cluster= API.
+            if data[self.cluster].isna().any():
+                raise ValueError(
+                    f"cluster column '{self.cluster}' contains missing "
+                    "values. All observations must have valid cluster "
+                    "identifiers."
+                )
+            # Reject replicate-weight + cluster=: replicate IF variance is
+            # computed by replicate reweighting (BRR / Fay / JK1 / JKn / SDR)
+            # and ignores PSU/cluster entirely (survey.py:104-109 enforces
+            # replicate_weights are mutually exclusive with strata/psu/fpc).
+            # Honoring bare cluster= here would silently have no effect on
+            # variance while populating cluster_name/n_clusters on Results
+            # dishonestly. Fail-closed per feedback_no_silent_failures.
+            if (
+                survey_design is not None
+                and getattr(survey_design, "replicate_weights", None) is not None
+            ):
+                raise NotImplementedError(
+                    f"CallawaySantAnna(cluster={self.cluster!r}) is not "
+                    "supported with replicate-weight survey designs. "
+                    "Replicate-weight variance is computed by replicate "
+                    "reweighting (BRR / Fay / JK1 / JKn / SDR) and ignores "
+                    "PSU/cluster entirely — setting cluster= would silently "
+                    "have no effect on the variance estimate. Either omit "
+                    "cluster= (the replicate weights encode the design "
+                    "structure implicitly) or use a non-replicate survey "
+                    "design (with explicit strata/psu/fpc)."
+                )
+            cluster_ids = data[self.cluster].values
+
+            if resolved_survey is None:
+                # Bare cluster=, no survey: synthesize minimal
+                # SurveyDesign(psu=...). Activates the same survey-PSU
+                # aggregator + bootstrap machinery already used when the
+                # user passes SurveyDesign(psu=X) explicitly.
+                synthetic_design = SurveyDesign(psu=self.cluster, weight_type="pweight")
+                (
+                    resolved_survey,
+                    survey_weights,
+                    survey_weight_type,
+                    _,
+                ) = _resolve_survey_for_fit(synthetic_design, data, "analytical")
+                effective_survey_design = synthetic_design
+                # survey_metadata stays None — user did NOT provide a
+                # survey design, so downstream consumers that check
+                # `survey_metadata is not None` for "original fit used a
+                # survey design" (DiagnosticReport at diagnostic_report.py:
+                # 848-856 + 1150-1158, summary at staggered_results.py:
+                # 235-238) must continue to see a non-survey fit. The
+                # cluster-level df is carried via the dedicated
+                # `df_inference` field on Results (set below after the
+                # cluster-handling block).
+            elif resolved_survey.psu is None:
+                # User provided survey_design (weights/strata/etc.) without
+                # PSU AND cluster=X. Inject cluster as PSU into the resolved
+                # survey. Construct effective_survey_design with
+                # psu=self.cluster (via dataclasses.replace) so the
+                # downstream _validate_unit_constant_survey catches movers
+                # on panel data (otherwise the validator runs on the user-
+                # provided design which has no PSU column).
+                from dataclasses import replace
+
+                from diff_diff.survey import (
+                    _inject_cluster_as_psu,
+                    compute_survey_metadata,
+                )
+
+                effective_survey_design = replace(survey_design, psu=self.cluster)
+                resolved_survey = _inject_cluster_as_psu(resolved_survey, cluster_ids)
+                # Recompute survey_metadata to reflect the new effective PSU
+                # (so n_psu / df_survey on Results reflect the injected
+                # cluster, not the no-PSU pre-injection state).
+                raw_w = (
+                    data[survey_design.weights].values.astype(np.float64)
+                    if survey_design.weights
+                    else np.ones(len(data), dtype=np.float64)
+                )
+                survey_metadata = compute_survey_metadata(resolved_survey, raw_w)
+            else:
+                # User provided survey_design with psu= AND cluster=X. PSU
+                # wins; _resolve_effective_cluster emits a UserWarning if
+                # partitions differ. Return value intentionally discarded
+                # — helper's purpose is the warning, and the effective PSU
+                # is already resolved_survey.psu (no rewrite needed).
+                from diff_diff.survey import _resolve_effective_cluster
+
+                _resolve_effective_cluster(resolved_survey, cluster_ids, self.cluster)
+
+        # Validate within-unit constancy for panel survey designs (uses
+        # effective_survey_design so synthesized designs are validated too).
         if resolved_survey is not None:
             if self.panel:
-                _validate_unit_constant_survey(data, unit, survey_design)
+                _validate_unit_constant_survey(data, unit, effective_survey_design)
             if resolved_survey.weight_type != "pweight":
                 raise ValueError(
                     f"CallawaySantAnna survey support requires weight_type='pweight', "
@@ -1669,6 +1949,26 @@ class CallawaySantAnna(
                     agg_w = rc_result[6] if len(rc_result) > 6 else n_treat
 
                     if att_gt is not None:
+                        # Cluster-aware per-(g,t) SE on the RCS path. RC
+                        # IF indices are per-obs (vs per-unit on the panel
+                        # path); the corresponding PSU array is
+                        # ``resolved_survey.psu`` (length n_obs), not
+                        # ``resolved_survey_unit.psu``. Bit-equal to pre-PR
+                        # when psu is None.
+                        rs_for_gt = precomputed.get("resolved_survey") if precomputed else None
+                        if (
+                            rs_for_gt is not None
+                            and getattr(rs_for_gt, "psu", None) is not None
+                            and inf_info is not None
+                        ):
+                            se_cluster = _cluster_robust_se_from_per_gt_if(inf_info, rs_for_gt)
+                            # Propagate NaN (cluster-undefined) per the
+                            # helper's contract — see
+                            # _compute_all_att_gt_vectorized for the
+                            # pattern.
+                            if se_cluster is not None:
+                                se_gt = se_cluster
+
                         t_stat, p_val, ci = safe_inference(
                             att_gt,
                             se_gt,
@@ -1761,6 +2061,26 @@ class CallawaySantAnna(
                     )
 
                     if att_gt is not None:
+                        # Cluster-aware per-(g,t) SE: when a survey PSU is
+                        # in play (explicit OR synthesized from bare
+                        # cluster=), aggregate the per-(g,t) IF by PSU
+                        # and use CR1 Liang-Zeger SE instead of the
+                        # unit-level diff-of-means SE returned by OR/IPW/DR.
+                        # Preserves bit-equality when psu is None.
+                        rsu_for_gt = precomputed.get("resolved_survey_unit")
+                        if (
+                            rsu_for_gt is not None
+                            and getattr(rsu_for_gt, "psu", None) is not None
+                            and inf_info is not None
+                        ):
+                            se_cluster = _cluster_robust_se_from_per_gt_if(inf_info, rsu_for_gt)
+                            # Propagate NaN (cluster-undefined) per the
+                            # helper's contract — see
+                            # _compute_all_att_gt_vectorized for the
+                            # pattern.
+                            if se_cluster is not None:
+                                se_gt = se_cluster
+
                         t_stat, p_val, ci = safe_inference(
                             att_gt,
                             se_gt,
@@ -2035,6 +2355,42 @@ class CallawaySantAnna(
             event_study_vcov = None
             event_study_vcov_index = None
 
+        # Resolve canonical cluster_name + n_clusters for Results metadata.
+        # Canonical PSU column wins when explicit: if survey_design has
+        # psu=, that's the canonical column even if bare cluster= was also
+        # set (a UserWarning would have fired above if partitions differed).
+        if survey_design is not None and getattr(survey_design, "psu", None) is not None:
+            cluster_name_for_results: Optional[str] = survey_design.psu
+        elif self.cluster is not None:
+            cluster_name_for_results = self.cluster
+        else:
+            cluster_name_for_results = None
+        n_clusters_for_results: Optional[int] = (
+            int(np.unique(resolved_survey.psu).size)
+            if (resolved_survey is not None and resolved_survey.psu is not None)
+            else None
+        )
+        # df_inference: cluster-level degrees of freedom for downstream
+        # inference (HonestDiD t-critical selection). Populated ONLY for
+        # the bare-cluster-synthesize path (where survey_metadata is None
+        # because the user did not provide a survey design). For
+        # inject/conflict branches, survey_metadata is populated and
+        # survey_metadata.df_survey carries the actual CS-internal df
+        # (which may have been tightened by overall_effective_df recompute
+        # at the aggregation step around L1995-1999). Narrowing here
+        # prevents HonestDiD from reading a stale/wrong df_inference for
+        # survey fits whose df was tightened post-resolve — fix for
+        # CI codex P1 (PR #487 round 1).
+        df_inference_for_results: Optional[int] = (
+            int(resolved_survey.df_survey)
+            if (
+                resolved_survey is not None
+                and survey_metadata is None
+                and getattr(resolved_survey, "df_survey", None) is not None
+            )
+            else None
+        )
+
         self.results_ = CallawaySantAnnaResults(
             group_time_effects=group_time_effects,
             overall_att=overall_att,
@@ -2063,6 +2419,10 @@ class CallawaySantAnna(
             epv_diagnostics=epv_diagnostics if epv_diagnostics else None,
             epv_threshold=self.epv_threshold,
             pscore_fallback=self.pscore_fallback,
+            vcov_type=self.vcov_type,
+            cluster_name=cluster_name_for_results,
+            n_clusters=n_clusters_for_results,
+            df_inference=df_inference_for_results,
         )
 
         self.is_fitted_ = True
@@ -3922,6 +4282,51 @@ class CallawaySantAnna(
         idx_all = None
         return att, se, inf_all, idx_all
 
+    @staticmethod
+    def _validate_vcov_type(vcov_type: str) -> None:
+        """Validate ``vcov_type`` membership against CS's narrow contract.
+
+        Called from ``__init__`` and from ``fit()`` (so sklearn-style
+        ``set_params(vcov_type=...)`` mutations are re-checked at use
+        time rather than silently passing a bad value through to Results).
+        """
+        _accepted_vcov = {"hc1"}
+        _deferred_vcov = {"conley"}
+        _if_incompatible_vcov = {"classical", "hc2", "hc2_bm"}
+        if vcov_type in _if_incompatible_vcov:
+            raise ValueError(
+                f"CallawaySantAnna(vcov_type={vcov_type!r}) is rejected: "
+                "CS uses influence-function-based variance per Callaway & "
+                "Sant'Anna (2021); the analytical-sandwich families "
+                "{'classical', 'hc2', 'hc2_bm'} are defined on a single "
+                "regression's hat matrix, and CS's per-(g,t) doubly-robust "
+                "/ IPW / outcome-regression structure has no equivalent "
+                "single design matrix to compute hat-matrix leverage or "
+                "Bell-McCaffrey Satterthwaite DOF on. The rejection is "
+                "library-architectural, not paper-prescribed. Use "
+                "vcov_type='hc1' (the default) with cluster=<col> for "
+                "cluster-robust inference. See docs/methodology/REGISTRY.md "
+                "'IF-based variance estimators vs analytical-sandwich "
+                "estimators' for the structural taxonomy."
+            )
+        if vcov_type in _deferred_vcov:
+            raise ValueError(
+                f"CallawaySantAnna(vcov_type={vcov_type!r}) is not yet "
+                "supported: spatial-HAC (Conley) on per-unit influence "
+                "functions could conceptually apply (spatial aggregation "
+                "of per-unit IFs) but requires separate methodology work. "
+                "Tracked as a follow-up TODO row. Use vcov_type='hc1' "
+                "(the default) with cluster=<col> for cluster-robust "
+                "inference today."
+            )
+        if vcov_type not in _accepted_vcov:
+            raise ValueError(
+                f"CallawaySantAnna(vcov_type={vcov_type!r}) is invalid. "
+                f"Accepted values: {sorted(_accepted_vcov)}. CS is "
+                "permanently narrow to 'hc1' per IF-based variance "
+                "structure; see REGISTRY.md."
+            )
+
     def get_params(self) -> Dict[str, Any]:
         """Get estimator parameters (sklearn-compatible)."""
         return {
@@ -3930,6 +4335,7 @@ class CallawaySantAnna(
             "estimation_method": self.estimation_method,
             "alpha": self.alpha,
             "cluster": self.cluster,
+            "vcov_type": self.vcov_type,
             "n_bootstrap": self.n_bootstrap,
             "bootstrap_weights": self.bootstrap_weights,
             "seed": self.seed,
@@ -3943,12 +4349,23 @@ class CallawaySantAnna(
         }
 
     def set_params(self, **params) -> "CallawaySantAnna":
-        """Set estimator parameters (sklearn-compatible)."""
+        """Set estimator parameters (sklearn-compatible).
+
+        Mirrors SA pattern at ``sun_abraham.py:2150-2161``: setattr first,
+        then refresh ``_vcov_type_explicit`` if ``vcov_type`` changed.
+        Membership validation of ``vcov_type`` is deferred to next
+        ``fit()`` call (sklearn-style ``set_params`` is documented as
+        mutate-then-validate-at-use). Bad values like
+        ``set_params(vcov_type="hc4")`` surface at the next ``__init__``-
+        style validation call.
+        """
         for key, value in params.items():
             if hasattr(self, key):
                 setattr(self, key, value)
             else:
                 raise ValueError(f"Unknown parameter: {key}")
+        if "vcov_type" in params:
+            self._vcov_type_explicit = self.vcov_type != "hc1"
         return self
 
     def summary(self) -> str:

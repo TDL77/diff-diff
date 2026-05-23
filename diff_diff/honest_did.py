@@ -478,7 +478,9 @@ class SensitivityResults:
                     "ub": ub,
                     "ci_lb": ci_lb,
                     "ci_ub": ci_ub,
-                    "is_significant": (np.isfinite(ci_lb) and np.isfinite(ci_ub) and not (ci_lb <= 0 <= ci_ub)),
+                    "is_significant": (
+                        np.isfinite(ci_lb) and np.isfinite(ci_ub) and not (ci_lb <= 0 <= ci_ub)
+                    ),
                 }
             )
         return pd.DataFrame(rows)
@@ -649,13 +651,26 @@ def _extract_event_study_params(
             # Fallback: diagonal from SEs
             sigma = np.diag(np.array(ses) ** 2)
 
-        # Extract survey df. Replicate designs with undefined df → sentinel 0.
+        # Extract inference df. Prefer ``survey_metadata.df_survey`` (the
+        # actual CS-internal df, which may have been tightened post-resolve
+        # for replicate designs) over the dedicated ``df_inference`` field.
+        # ``df_inference`` is the FALLBACK carrier for bare-``cluster=`` CS
+        # fits where ``survey_metadata`` is intentionally None (preserving
+        # the survey/non-survey contract for ``DiagnosticReport`` /
+        # ``summary()``). Reading ``df_inference`` first would silently
+        # overstate the denominator df on panel survey fits whose df was
+        # tightened during aggregation. Replicate designs with undefined
+        # df → sentinel 0.
         df_survey = None
         if hasattr(results, "survey_metadata") and results.survey_metadata is not None:
             sm = results.survey_metadata
             df_survey = getattr(sm, "df_survey", None)
             if df_survey is None and getattr(sm, "replicate_method", None) is not None:
-                df_survey = 0
+                df_survey = 0  # undefined replicate df → NaN inference
+        if df_survey is None:
+            df_inference = getattr(results, "df_inference", None)
+            if df_inference is not None:
+                df_survey = int(df_inference)
 
         return (
             beta_hat,
@@ -817,15 +832,26 @@ def _extract_event_study_params(
                         "or use balance_e to restrict to a balanced subset."
                     )
 
-                # Extract survey df. For replicate designs with undefined df
-                # (rank <= 1), use sentinel df=0 so _get_critical_value returns
-                # NaN, matching the safe_inference contract.
+                # Extract inference df. Prefer ``survey_metadata.df_survey``
+                # (the actual CS-internal df, which may have been tightened
+                # post-resolve for replicate designs) over the dedicated
+                # ``df_inference`` field. ``df_inference`` is the FALLBACK
+                # carrier for bare-``cluster=`` CS fits where
+                # ``survey_metadata`` is intentionally None (preserving the
+                # survey/non-survey contract for ``DiagnosticReport`` /
+                # ``summary()``). Mirrors the MPD branch preference order
+                # at ``_extract_event_study_params`` so all branches agree.
+                # Replicate designs with undefined df → sentinel 0.
                 df_survey = None
                 if hasattr(results, "survey_metadata") and results.survey_metadata is not None:
                     sm = results.survey_metadata
                     df_survey = getattr(sm, "df_survey", None)
                     if df_survey is None and getattr(sm, "replicate_method", None) is not None:
                         df_survey = 0  # undefined replicate df → NaN inference
+                if df_survey is None:
+                    df_inference = getattr(results, "df_inference", None)
+                    if df_inference is not None:
+                        df_survey = int(df_inference)
 
                 return (
                     beta_hat,
@@ -884,8 +910,8 @@ def _extract_event_study_params(
                     if np.isfinite(data.get("se", np.nan))
                 }
 
-                pre_times = sorted(placebo_finite.keys())   # -P, ..., -1
-                post_times = sorted(effects_finite.keys())   # 1, ..., L_max
+                pre_times = sorted(placebo_finite.keys())  # -P, ..., -1
+                post_times = sorted(effects_finite.keys())  # 1, ..., L_max
 
                 if len(pre_times) == 0:
                     raise ValueError(
@@ -975,15 +1001,26 @@ def _extract_event_study_params(
                 beta_hat = np.array(effects)
                 sigma = np.diag(np.array(ses) ** 2)
 
-                # Extract survey df. For replicate designs with undefined df
-                # (rank <= 1), use sentinel df=0 so _get_critical_value returns
-                # NaN, matching the safe_inference contract.
+                # Extract inference df. Prefer ``survey_metadata.df_survey``
+                # (the actual CS-internal df, which may have been tightened
+                # post-resolve for replicate designs) over the dedicated
+                # ``df_inference`` field. ``df_inference`` is the FALLBACK
+                # carrier for bare-``cluster=`` CS fits where
+                # ``survey_metadata`` is intentionally None (preserving the
+                # survey/non-survey contract for ``DiagnosticReport`` /
+                # ``summary()``). Mirrors the MPD branch preference order
+                # at ``_extract_event_study_params`` so all branches agree.
+                # Replicate designs with undefined df → sentinel 0.
                 df_survey = None
                 if hasattr(results, "survey_metadata") and results.survey_metadata is not None:
                     sm = results.survey_metadata
                     df_survey = getattr(sm, "df_survey", None)
                     if df_survey is None and getattr(sm, "replicate_method", None) is not None:
                         df_survey = 0  # undefined replicate df → NaN inference
+                if df_survey is None:
+                    df_inference = getattr(results, "df_inference", None)
+                    if df_inference is not None:
+                        df_survey = int(df_inference)
 
                 return (
                     beta_hat,
@@ -1045,17 +1082,17 @@ def _construct_A_sd(num_pre_periods: int, num_post_periods: int) -> np.ndarray:
     # Row i corresponds to: delta_{-(T-i)} - 2*delta_{-(T-i-1)} + delta_{-(T-i-2)}
     for i in range(T - 2):
         row = np.zeros(total)
-        row[i] = 1        # delta_{t-1}
-        row[i + 1] = -2   # delta_t
-        row[i + 2] = 1    # delta_{t+1}
+        row[i] = 1  # delta_{t-1}
+        row[i + 1] = -2  # delta_t
+        row[i + 2] = 1  # delta_{t+1}
         rows.append(row)
 
     # Boundary constraint at t = -1: delta_{-2} - 2*delta_{-1} + delta_0
     # With delta_0 = 0: delta_{-2} - 2*delta_{-1}
     if T >= 2:
         row = np.zeros(total)
-        row[T - 2] = 1    # delta_{-2}
-        row[T - 1] = -2   # delta_{-1}
+        row[T - 2] = 1  # delta_{-2}
+        row[T - 1] = -2  # delta_{-1}
         # delta_0 = 0, no entry needed
         rows.append(row)
 
@@ -1063,25 +1100,25 @@ def _construct_A_sd(num_pre_periods: int, num_post_periods: int) -> np.ndarray:
     # With delta_0 = 0: delta_{-1} + delta_1
     if T >= 1 and Tbar >= 1:
         row = np.zeros(total)
-        row[T - 1] = 1    # delta_{-1}
-        row[T] = 1         # delta_1
+        row[T - 1] = 1  # delta_{-1}
+        row[T] = 1  # delta_1
         rows.append(row)
 
     # Boundary constraint at t = 1: delta_0 - 2*delta_1 + delta_2
     # With delta_0 = 0: -2*delta_1 + delta_2
     if Tbar >= 2:
         row = np.zeros(total)
-        row[T] = -2        # delta_1
-        row[T + 1] = 1     # delta_2
+        row[T] = -2  # delta_1
+        row[T + 1] = 1  # delta_2
         rows.append(row)
 
     # Pure post-period second differences: event times t = 2, ..., Tbar-1
     # delta_{t+1} - 2*delta_t + delta_{t-1}, all within the post-period block
     for t in range(2, Tbar):
         row = np.zeros(total)
-        row[T + t - 2] = 1    # delta_{t-1}
-        row[T + t - 1] = -2   # delta_t
-        row[T + t] = 1        # delta_{t+1}
+        row[T + t - 2] = 1  # delta_{t-1}
+        row[T + t - 1] = -2  # delta_t
+        row[T + t] = 1  # delta_{t+1}
         rows.append(row)
 
     if not rows:
@@ -1182,12 +1219,12 @@ def _construct_constraints_rm_component(
     # t=1, ..., Tbar-1: |delta_{t+1} - delta_t| <= bound
     for t in range(1, Tbar):
         row_pos = np.zeros(total)
-        row_pos[T + t] = 1       # delta_{t+1}
+        row_pos[T + t] = 1  # delta_{t+1}
         row_pos[T + t - 1] = -1  # -delta_t
         rows.append(row_pos)
         row_neg = np.zeros(total)
-        row_neg[T + t] = -1      # -delta_{t+1}
-        row_neg[T + t - 1] = 1   # delta_t
+        row_neg[T + t] = -1  # -delta_{t+1}
+        row_neg[T + t - 1] = 1  # delta_t
         rows.append(row_neg)
 
     if not rows:
@@ -1290,9 +1327,7 @@ def _solve_rm_bounds_union(
     A_ineq, b_ineq = _construct_constraints_rm_component(
         num_pre_periods, num_post, Mbar, max_pre_fd
     )
-    return _solve_bounds_lp(
-        beta_pre, beta_post, l_vec, A_ineq, b_ineq, num_pre_periods, lp_method
-    )
+    return _solve_bounds_lp(beta_pre, beta_post, l_vec, A_ineq, b_ineq, num_pre_periods, lp_method)
 
 
 def _solve_bounds_lp(
@@ -1550,9 +1585,7 @@ def _build_fd_transform(num_pre: int, num_post: int) -> np.ndarray:
     return C
 
 
-def _build_fd_smoothness_constraints(
-    num_fd: int, M: float
-) -> Tuple[np.ndarray, np.ndarray]:
+def _build_fd_smoothness_constraints(num_fd: int, M: float) -> Tuple[np.ndarray, np.ndarray]:
     """
     Build smoothness constraints in first-difference space.
 
@@ -1839,7 +1872,7 @@ def _setup_moment_inequalities(
     # Change of basis: first column = l direction, rest = complement
     # Use QR on l to get orthogonal complement
     l_full = l.reshape(-1, 1)
-    Q, _ = np.linalg.qr(np.hstack([l_full, np.eye(num_post)[:, :num_post - 1]]))
+    Q, _ = np.linalg.qr(np.hstack([l_full, np.eye(num_post)[:, : num_post - 1]]))
 
     A_tilde_rotated = A_tilde @ Q  # Rotate into (l, complement) basis
 
@@ -1905,10 +1938,12 @@ def _enumerate_vertices(
         # gamma[basis_idx]' @ X_tilde[basis_idx, :] = 0
         # gamma[basis_idx]' @ sigma_tilde_diag[basis_idx] = 1
         if n_nuisance > 0:
-            A_sys = np.vstack([
-                X_tilde[basis_idx, :].T,
-                sigma_tilde_diag[basis_idx].reshape(1, -1),
-            ])
+            A_sys = np.vstack(
+                [
+                    X_tilde[basis_idx, :].T,
+                    sigma_tilde_diag[basis_idx].reshape(1, -1),
+                ]
+            )
         else:
             A_sys = sigma_tilde_diag[basis_idx].reshape(1, -1)
 
@@ -2282,7 +2317,7 @@ class HonestDiD:
         M = M if M is not None else self.M
 
         # Extract event study parameters
-        (beta_hat, sigma, num_pre, num_post, pre_periods, post_periods, df_survey) = (
+        beta_hat, sigma, num_pre, num_post, pre_periods, post_periods, df_survey = (
             _extract_event_study_params(results)
         )
 
@@ -2343,8 +2378,15 @@ class HonestDiD:
         # Compute bounds based on method
         if self.method == "smoothness":
             lb, ub, ci_lb, ci_ub = self._compute_smoothness_bounds(
-                beta_pre, beta_post, sigma, sigma_post, l_vec,
-                num_pre, num_post, M, df=df_survey,
+                beta_pre,
+                beta_post,
+                sigma,
+                sigma_post,
+                l_vec,
+                num_pre,
+                num_post,
+                M,
+                df=df_survey,
             )
             ci_method = "FLCI"
 
@@ -2425,9 +2467,7 @@ class HonestDiD:
         A_ineq, b_ineq = _construct_constraints_sd(num_pre, num_post, M)
 
         # Solve for identified set bounds with delta_pre = beta_pre pinned
-        lb, ub = _solve_bounds_lp(
-            beta_pre, beta_post, l_vec, A_ineq, b_ineq, num_pre
-        )
+        lb, ub = _solve_bounds_lp(beta_pre, beta_post, l_vec, A_ineq, b_ineq, num_pre)
 
         # Propagate infeasibility: if bounds are NaN, CI is NaN too
         if np.isnan(lb) or np.isnan(ub):
@@ -2436,8 +2476,15 @@ class HonestDiD:
         # Compute optimal FLCI (Rambachan & Roth Section 4.1)
         if sigma_full.shape[0] == num_pre + num_post:
             ci_lb, ci_ub = _compute_optimal_flci(
-                beta_pre, beta_post, sigma_full, l_vec,
-                num_pre, num_post, M, self.alpha, df=df,
+                beta_pre,
+                beta_post,
+                sigma_full,
+                l_vec,
+                num_pre,
+                num_post,
+                M,
+                self.alpha,
+                df=df,
             )
         else:
             # Fallback to naive FLCI when full sigma unavailable
@@ -2472,9 +2519,7 @@ class HonestDiD:
         inequality transformation.
         """
         # Solve identified set via union of polyhedra
-        lb, ub = _solve_rm_bounds_union(
-            beta_pre, beta_post, l_vec, num_pre, Mbar
-        )
+        lb, ub = _solve_rm_bounds_union(beta_pre, beta_post, l_vec, num_pre, Mbar)
 
         # CI construction for Delta^RM.
         # The paper recommends ARP conditional/hybrid confidence sets
@@ -2520,14 +2565,30 @@ class HonestDiD:
         )
         # Get smoothness bounds
         lb_sd, ub_sd, _, _ = self._compute_smoothness_bounds(
-            beta_pre, beta_post, sigma_full, sigma_post, l_vec,
-            num_pre, num_post, M, df=df,
+            beta_pre,
+            beta_post,
+            sigma_full,
+            sigma_post,
+            l_vec,
+            num_pre,
+            num_post,
+            M,
+            df=df,
         )
 
         # Get RM bounds (use M as Mbar for combined)
         lb_rm, ub_rm, _, _ = self._compute_rm_bounds(
-            beta_pre, beta_post, sigma_full, sigma_post, l_vec,
-            num_pre, num_post, M, pre_periods, results, df=df,
+            beta_pre,
+            beta_post,
+            sigma_full,
+            sigma_post,
+            l_vec,
+            num_pre,
+            num_post,
+            M,
+            pre_periods,
+            results,
+            df=df,
         )
 
         # Combined bounds are intersection
@@ -2651,6 +2712,7 @@ class HonestDiD:
 
         Uses binary search for precision.
         """
+
         # Check if any CI includes zero (NaN CIs are treated as undefined, not significant)
         def _ci_includes_zero(ci_lb, ci_ub):
             if not (np.isfinite(ci_lb) and np.isfinite(ci_ub)):
@@ -2709,6 +2771,7 @@ class HonestDiD:
         float or None
             Breakdown value, or None if effect is always significant.
         """
+
         def _ci_covers_zero(r):
             if not (np.isfinite(r.ci_lb) and np.isfinite(r.ci_ub)):
                 return True  # Undefined CIs are not "significant"

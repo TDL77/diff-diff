@@ -73,15 +73,17 @@ def generate_ddd_data(
                     # Add noise
                     y += rng.normal(0, noise_sd)
 
-                    rows.append({
-                        "outcome": y,
-                        "group": g,
-                        "partition": p,
-                        "time": t,
-                        "x1": x1,
-                        "x2": x2,
-                        "unit_id": len(rows),
-                    })
+                    rows.append(
+                        {
+                            "outcome": y,
+                            "group": g,
+                            "partition": p,
+                            "time": t,
+                            "x1": x1,
+                            "x2": x2,
+                            "unit_id": len(rows),
+                        }
+                    )
 
     return pd.DataFrame(rows)
 
@@ -463,9 +465,11 @@ class TestInputValidation:
         """Test error when a cell has no observations."""
         # Remove all observations from one cell
         data = simple_ddd_data[
-            ~((simple_ddd_data["group"] == 1) &
-              (simple_ddd_data["partition"] == 1) &
-              (simple_ddd_data["time"] == 0))
+            ~(
+                (simple_ddd_data["group"] == 1)
+                & (simple_ddd_data["partition"] == 1)
+                & (simple_ddd_data["time"] == 0)
+            )
         ]
 
         ddd = TripleDifference()
@@ -880,12 +884,14 @@ class TestRankDeficientAction:
         """Create DDD data with covariates for testing."""
         np.random.seed(42)
         n = 400
-        data = pd.DataFrame({
-            "group": np.repeat([0, 1], n // 2),
-            "partition": np.tile(np.repeat([0, 1], n // 4), 2),
-            "time": np.tile([0, 1], n // 2),
-            "x1": np.random.randn(n),
-        })
+        data = pd.DataFrame(
+            {
+                "group": np.repeat([0, 1], n // 2),
+                "partition": np.tile(np.repeat([0, 1], n // 4), 2),
+                "time": np.tile([0, 1], n // 2),
+                "x1": np.random.randn(n),
+            }
+        )
 
         # Generate outcome with effect
         data["outcome"] = (
@@ -907,7 +913,7 @@ class TestRankDeficientAction:
 
         ddd = TripleDifference(
             estimation_method="reg",  # Use regression method to test OLS path
-            rank_deficient_action="error"
+            rank_deficient_action="error",
         )
         with pytest.raises(ValueError, match="[Rr]ank-deficient"):
             ddd.fit(
@@ -916,7 +922,7 @@ class TestRankDeficientAction:
                 group="group",
                 partition="partition",
                 time="time",
-                covariates=["x1", "x1_dup"]
+                covariates=["x1", "x1_dup"],
             )
 
     def test_rank_deficient_action_silent_no_warning(self, ddd_data_with_covariates):
@@ -928,7 +934,7 @@ class TestRankDeficientAction:
 
         ddd = TripleDifference(
             estimation_method="reg",  # Use regression method to test OLS path
-            rank_deficient_action="silent"
+            rank_deficient_action="silent",
         )
 
         with warnings.catch_warnings(record=True) as w:
@@ -939,12 +945,15 @@ class TestRankDeficientAction:
                 group="group",
                 partition="partition",
                 time="time",
-                covariates=["x1", "x1_dup"]
+                covariates=["x1", "x1_dup"],
             )
 
             # No warnings about rank deficiency should be emitted
-            rank_warnings = [x for x in w if "Rank-deficient" in str(x.message)
-                           or "rank-deficient" in str(x.message).lower()]
+            rank_warnings = [
+                x
+                for x in w
+                if "Rank-deficient" in str(x.message) or "rank-deficient" in str(x.message).lower()
+            ]
             assert len(rank_warnings) == 0, f"Expected no rank warnings, got {rank_warnings}"
 
         # Should still get valid results
@@ -968,7 +977,7 @@ class TestRankDeficientAction:
                 time="time",
                 estimation_method="reg",
                 covariates=["x1", "x1_dup"],
-                rank_deficient_action="error"
+                rank_deficient_action="error",
             )
 
 
@@ -993,18 +1002,16 @@ class TestTripleDifferenceTStatNaN:
         t_stat = results.t_stat
 
         if not np.isfinite(se) or se == 0:
-            assert np.isnan(t_stat), (
-                f"t_stat should be NaN when SE={se}, got {t_stat}"
-            )
+            assert np.isnan(t_stat), f"t_stat should be NaN when SE={se}, got {t_stat}"
             ci = results.conf_int
-            assert np.isnan(ci[0]) and np.isnan(ci[1]), (
-                f"conf_int should be (NaN, NaN) when SE={se}, got {ci}"
-            )
+            assert np.isnan(ci[0]) and np.isnan(
+                ci[1]
+            ), f"conf_int should be (NaN, NaN) when SE={se}, got {ci}"
         else:
             expected = results.att / se
-            assert np.isclose(t_stat, expected), (
-                f"t_stat should be ATT/SE, expected {expected}, got {t_stat}"
-            )
+            assert np.isclose(
+                t_stat, expected
+            ), f"t_stat should be ATT/SE, expected {expected}, got {t_stat}"
 
     def test_tstat_consistency_all_methods(self):
         """t_stat follows NaN pattern across all estimation methods."""
@@ -1031,12 +1038,104 @@ class TestTripleDifferenceTStatNaN:
             t_stat = results.t_stat
 
             if not np.isfinite(se) or se == 0:
-                assert np.isnan(t_stat), (
-                    f"[{method}] t_stat should be NaN when SE={se}, got {t_stat}"
-                )
+                assert np.isnan(
+                    t_stat
+                ), f"[{method}] t_stat should be NaN when SE={se}, got {t_stat}"
             else:
                 expected = results.att / se
                 assert np.isclose(t_stat, expected), (
-                    f"[{method}] t_stat should be ATT/SE, "
-                    f"expected {expected}, got {t_stat}"
+                    f"[{method}] t_stat should be ATT/SE, " f"expected {expected}, got {t_stat}"
                 )
+
+
+def _generate_ddd_data_with_state_clusters(
+    n_states: int = 25,
+    units_per_state: int = 8,
+    state_effect_sd: float = 3.0,
+    true_att: float = 2.0,
+    seed: int = 53,
+) -> pd.DataFrame:
+    """Generate DDD data with state-level random effects.
+
+    Used by the defensive cluster-changes-SE test below. Per
+    ``feedback_homogeneous_dgp_no_twfe_bias``, assertive cluster-vs-no-cluster
+    SE tests need a panel with intra-cluster correlation; without state
+    random effects, cluster-robust SE collapses to per-unit SE.
+    """
+    rng = np.random.default_rng(seed)
+    state_effects = rng.normal(0.0, state_effect_sd, n_states)
+    rows = []
+    next_unit = 0
+    for s in range(n_states):
+        for _ in range(units_per_state):
+            for g in [0, 1]:
+                for p in [0, 1]:
+                    for t in [0, 1]:
+                        y = (
+                            state_effects[s]
+                            + 10.0
+                            + 2 * g
+                            + 1 * p
+                            + 0.5 * t
+                            + 0.3 * g * p
+                            + 0.2 * g * t
+                            + 0.1 * p * t
+                            + (true_att if (g == 1 and p == 1 and t == 1) else 0.0)
+                            + rng.normal(0.0, 0.5)
+                        )
+                        rows.append(
+                            {
+                                "outcome": y,
+                                "group": g,
+                                "partition": p,
+                                "time": t,
+                                "state": s,
+                                "unit_id": next_unit,
+                            }
+                        )
+                        next_unit += 1
+    return pd.DataFrame(rows)
+
+
+class TestTripleDifferenceClusterDefensive:
+    """Defensive: TripleDifference cluster= produces SE differing from
+    cluster=None on a panel with intra-cluster correlation.
+
+    Added because the audit found that TripleDifference's bare-cluster
+    code path (``triple_diff.py:1245-1259``) is correct but had no
+    positive regression test (only an error-handling test for missing
+    cluster columns). Without this assertive test, a future refactor
+    could silently regress the cluster wiring to a no-op (matching the
+    CS class of bug just fixed). Mirrors
+    ``tests/test_two_stage.py::test_cluster_changes_ses``.
+    """
+
+    def test_cluster_changes_ses(self):
+        data = _generate_ddd_data_with_state_clusters(seed=53)
+
+        td_unit = TripleDifference()  # cluster=None default
+        res_unit = td_unit.fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+        )
+
+        td_cluster = TripleDifference(cluster="state")
+        res_cluster = td_cluster.fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+        )
+
+        assert np.isfinite(res_unit.se) and res_unit.se > 0
+        assert np.isfinite(res_cluster.se) and res_cluster.se > 0
+        assert abs(res_unit.se - res_cluster.se) > 1e-6, (
+            f"TripleDifference cluster='state' SE ({res_cluster.se:.6f}) "
+            f"is effectively identical to cluster=None SE "
+            f"({res_unit.se:.6f}) — the cluster= parameter may "
+            "have regressed to a silent no-op."
+        )
