@@ -1546,6 +1546,86 @@ class TestW2025Section8HeterogeneousTrends:
                 finite_count += 1
         assert finite_count >= 1
 
+    def test_plot_event_study_cohort_share_suppresses_error_bars(self) -> None:
+        """CI R6 P1 fix: ``plot_event_study(weights="cohort_share")`` passes NaN SEs.
+
+        Honors the Section 7.5 fail-closed inference contract: the
+        conditional-on-shares SE that ``aggregate()`` returns is NOT a
+        valid input for a normal-theory CI band, so the plot helper
+        receives NaN SEs and therefore suppresses error bars. Locked
+        by inspecting the ``se`` kwarg the helper was called with.
+        """
+        from unittest.mock import patch
+
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 19)
+        panel = _make_three_cohort_four_period_panel(rng, n_per_cohort=80, sigma=0.05)
+        res = WooldridgeDiD(method="ols").fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        # cohort_share path: plot helper must receive NaN SEs
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            with patch("diff_diff.visualization.plot_event_study") as mock_plot:
+                res.plot_event_study(weights="cohort_share")
+        assert mock_plot.call_count == 1
+        se_arg = mock_plot.call_args.kwargs["se"]
+        assert se_arg, "plot_event_study should be called with a non-empty se dict"
+        assert all(np.isnan(v) for v in se_arg.values()), (
+            f"weights='cohort_share' must pass NaN SEs to the plot helper "
+            f"to suppress error bars; got {se_arg}"
+        )
+        # cell path: plot helper must receive FINITE SEs (control)
+        with patch("diff_diff.visualization.plot_event_study") as mock_plot:
+            res.plot_event_study(weights="cell")
+        assert mock_plot.call_count == 1
+        se_arg_cell = mock_plot.call_args.kwargs["se"]
+        assert se_arg_cell, "cell path should also pass a non-empty se dict"
+        assert any(np.isfinite(v) and v > 0 for v in se_arg_cell.values()), (
+            f"weights='cell' must pass finite SEs to the plot helper for "
+            f"normal-theory CI bands; got {se_arg_cell}"
+        )
+
+    def test_results_metadata_records_cohort_trends_and_active_aggregation_weights(
+        self,
+    ) -> None:
+        """CI R6 P1 fix: Results object surfaces cohort_trends + active_aggregation_weights.
+
+        Downstream consumers need to know which model produced
+        ``overall_*`` / ``event_study_effects`` / ``group_effects`` /
+        ``calendar_effects`` (cohort_trends on/off) and which weighting
+        scheme is currently cached (``"cell"`` vs ``"cohort_share"``).
+        ``cohort_trend_coefs`` is NOT a reliable proxy for cohort_trends
+        because the all-treated drop rule legitimately empties the dict
+        on G=1-after-drop panels.
+        """
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 20)
+        panel = _make_heterogeneous_trends_panel(rng, n_per_cohort=80, sigma=0.05)
+        # Default fit: cohort_trends=False, default aggregation weights "cell"
+        res_default = WooldridgeDiD(method="ols").fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        assert res_default.cohort_trends is False
+        assert res_default.active_aggregation_weights == "cell"
+        # cohort_trends=True fit: metadata reflects it
+        res_trends = WooldridgeDiD(method="ols", cohort_trends=True).fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        assert res_trends.cohort_trends is True
+        assert res_trends.active_aggregation_weights == "cell"
+        # Opt-in cohort_share aggregation flips active_aggregation_weights
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            res_trends.aggregate("simple", weights="cohort_share")
+        assert res_trends.active_aggregation_weights == "cohort_share"
+        # Surface in summary()
+        summary_text = res_trends.summary("simple")
+        assert (
+            "Cohort trends:   True" in summary_text
+        ), f"summary() should surface cohort_trends; got:\n{summary_text}"
+        assert "Aggregation w:   cohort_share" in summary_text, (
+            f"summary() should surface active_aggregation_weights; got:\n" f"{summary_text}"
+        )
+
     def test_plot_event_study_propagates_weights_kwarg(self) -> None:
         """CI R1 P1 fix: ``plot_event_study(weights=...)`` propagates through aggregate().
 

@@ -1375,6 +1375,7 @@ class WooldridgeDiD:
             _bm_artifacts=bm_artifacts,
             _df_one_way=df_one_way,
             cohort_trend_coefs=cohort_trend_coefs,
+            cohort_trends=self.cohort_trends,
         )
 
         # 9. Optional multiplier bootstrap (overrides analytic SE for overall ATT).

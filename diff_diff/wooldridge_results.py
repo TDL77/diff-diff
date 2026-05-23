@@ -100,6 +100,23 @@ class WooldridgeDiDResults:
     # or wait for the deferred bootstrap-cohort-share follow-up.
     _bootstrap_used: bool = field(default=False, repr=False)
 
+    # Model-surface metadata for self-describing reporting.
+    # ``cohort_trends`` records whether the fit was produced under the
+    # Section 8 / Eq. 8.1 heterogeneous-cohort-trends design (paper
+    # W2025 ``dg_i · t`` interactions on the OLS path). False on the
+    # default ``cohort_trends=False`` fit and on logit/Poisson paths
+    # (which reject ``cohort_trends=True`` at the constructor).
+    # ``active_aggregation_weights`` records the most recent
+    # ``aggregate(weights=...)`` scheme that wrote to the ``overall_*``
+    # / ``event_study_effects`` / ``group_effects`` / ``calendar_effects``
+    # fields ("cell" by default; flips to "cohort_share" after an opt-in
+    # cohort-share aggregation). Surfaced in ``summary()`` so downstream
+    # consumers can tell which estimand the printed rows represent
+    # without inspecting ``cohort_trend_coefs`` (which is legitimately
+    # empty on all-treated panels per the last-cohort drop rule).
+    cohort_trends: bool = field(default=False, repr=False)
+    active_aggregation_weights: str = field(default="cell", repr=False)
+
     # ------------------------------------------------------------------ #
     # Internal — used by aggregate() for delta-method SEs                 #
     # ------------------------------------------------------------------ #
@@ -194,6 +211,14 @@ class WooldridgeDiDResults:
                 f"weighting; use weights='cell' (default) for "
                 f"jwdid_estat-style cell-count weighting."
             )
+
+        # Record the active aggregation weighting scheme on the Results
+        # object so downstream reporting (``summary()`` / ``to_dataframe()``
+        # / ``__repr__``) can label the persisted ``overall_*`` /
+        # ``event_study_effects`` / ``group_effects`` / ``calendar_effects``
+        # fields with the right estimand. Stamped AFTER the raise-paths
+        # above so invalid combinations don't pollute the metadata.
+        self.active_aggregation_weights = weights
 
         gt = self.group_time_effects
         cell_weights = self._gt_weights
@@ -556,6 +581,8 @@ class WooldridgeDiDResults:
             f"Observations:    {self.n_obs}",
             f"Treated units:   {self.n_treated_units}",
             f"Control units:   {self.n_control_units}",
+            f"Cohort trends:   {self.cohort_trends}",
+            f"Aggregation w:   {self.active_aggregation_weights}",
             "-" * 70,
         ]
 
@@ -714,7 +741,10 @@ class WooldridgeDiDResults:
             paper W2025 Eq. 7.6 cohort-share-by-exposure weights
             (post-treatment ``k >= 0`` only); inference fields are
             fail-closed to NaN per the Section 7.5 conditional-on-shares
-            contract documented in REGISTRY.
+            contract documented in REGISTRY, and the plot **suppresses
+            error bars / CI bands** to honor the fail-closed contract
+            (the conditional-on-shares SE would build a misleading
+            normal-theory CI in the plotter).
         **kwargs
             Forwarded to ``diff_diff.visualization.plot_event_study``.
 
@@ -738,7 +768,17 @@ class WooldridgeDiDResults:
         from diff_diff.visualization import plot_event_study  # type: ignore
 
         effects = {k: v["att"] for k, v in (self.event_study_effects or {}).items()}
-        se = {k: v["se"] for k, v in (self.event_study_effects or {}).items()}
+        if weights == "cohort_share":
+            # Honor the fail-closed inference contract per paper Section
+            # 7.5: the conditional-on-shares SE understates unconditional
+            # uncertainty, so passing the finite SE into the plotter
+            # would let it render a normal-theory CI that contradicts
+            # the NaN inference fields the aggregate() helper produces.
+            # Pass NaN SEs so the plotter suppresses error bars / CI
+            # bands. Locked by ``test_plot_event_study_cohort_share_suppresses_error_bars``.
+            se = {k: float("nan") for k in (self.event_study_effects or {})}
+        else:
+            se = {k: v["se"] for k, v in (self.event_study_effects or {}).items()}
         plot_event_study(effects=effects, se=se, alpha=self.alpha, **kwargs)
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
