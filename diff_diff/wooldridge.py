@@ -262,9 +262,15 @@ def _prepare_covariates(
 class WooldridgeDiD:
     """Extended Two-Way Fixed Effects (ETWFE) DiD estimator.
 
-    Implements the Wooldridge (2021) saturated cohort×time regression and
-    Wooldridge (2023) nonlinear extensions (logit, Poisson).  Produces all
-    four ``jwdid_estat`` aggregation types: simple, group, calendar, event.
+    Implements the Wooldridge (2025) saturated cohort×time regression
+    (*Empirical Economics* 69(5), 2545-2587; DOI
+    10.1007/s00181-025-02807-z) and Wooldridge (2023) nonlinear
+    extensions (logit, Poisson). Produces all four ``jwdid_estat``
+    aggregation types: simple, group, calendar, event. Opt-in surfaces
+    include paper W2025 Section 7 cohort-share aggregation
+    (``aggregate(weights="cohort_share")``, Eqs. 7.4 + 7.6) and paper
+    W2025 Section 8 heterogeneous cohort-specific linear trends
+    (``cohort_trends=True``, Eq. 8.1; OLS path only).
 
     Parameters
     ----------
@@ -318,6 +324,21 @@ class WooldridgeDiD:
         designs combined with ``vcov_type != "hc1"`` raise
         ``NotImplementedError`` at ``fit()`` because the survey TSL / replicate-
         refit variance overrides the analytical sandwich.
+    cohort_trends : bool, default False
+        When True, adds linear ``dg_i · t`` cohort-specific trend
+        interactions to the design matrix per paper W2025 Section 8 /
+        Eq. 8.1. Under a heterogeneous-trends DGP this recovers ``τ``
+        even when parallel trends fails (paper Section 8.3). OLS-path
+        only: ``cohort_trends=True`` + ``method ∈ {"logit","poisson"}``
+        raises ``NotImplementedError`` at ``__init__``. Auto-routes to
+        the full-dummy design regardless of ``vcov_type`` (matching the
+        absorb→fixed_effects auto-route). Each treated cohort must have
+        ≥ 2 observed pre-periods in the analysis sample for ``dg_i · t``
+        to be separately identified from cohort + time FE; ``fit()``
+        raises ``ValueError`` otherwise. On all-eventually-treated
+        panels the last cohort's trend column is dropped per paper
+        Section 5.4. ``cohort_trends=True`` + ``survey_design`` raises
+        ``NotImplementedError`` at ``fit()`` (deferred follow-up).
     """
 
     def __init__(

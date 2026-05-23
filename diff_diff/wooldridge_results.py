@@ -17,8 +17,18 @@ class WooldridgeDiDResults:
     """Results from WooldridgeDiD.fit().
 
     Core output is ``group_time_effects``: a dict keyed by (cohort_g, time_t)
-    with per-cell ATT estimates and inference.  Call ``.aggregate(type)`` to
-    compute any of the four jwdid_estat aggregation types.
+    with per-cell ATT estimates and inference. Call
+    ``.aggregate(type, weights=...)`` to compute any of the four
+    ``jwdid_estat`` aggregation types under either the default
+    cell-count weighting (``weights="cell"``, matches Stata
+    ``jwdid_estat``) or the paper W2025 opt-in cohort-share weighting
+    (``weights="cohort_share"``, Eqs. 7.4 / 7.6; restricted to
+    ``type ∈ {"simple", "event"}``). ``cohort_trend_coefs`` carries
+    Section 8 / Eq. 8.1 estimated ``δ_g`` slopes when the fit was
+    produced under ``WooldridgeDiD(cohort_trends=True)``.
+    ``aggregation_weights`` is keyed by aggregation type and records
+    the active weighting scheme that wrote to each cached surface
+    (surfaced in ``summary()`` / ``to_dataframe()`` / ``__repr__``).
     """
 
     # ------------------------------------------------------------------ #
@@ -692,6 +702,13 @@ class WooldridgeDiDResults:
                 rows.append(row)
             return pd.DataFrame(rows)
 
+        # Active weighting scheme for the requested aggregation surface
+        # (default "cell"; flips to "cohort_share" after an opt-in
+        # cohort-share aggregation on that surface). Stamped on every
+        # exported row so downstream consumers can tell which estimand
+        # the row represents without having to inspect the originating
+        # Results object.
+        active_weights = self.aggregation_weights.get(aggregation, "cell")
         mapping = {
             "simple": [
                 {
@@ -702,6 +719,8 @@ class WooldridgeDiDResults:
                     "p_value": self.overall_p_value,
                     "conf_int_lo": self.overall_conf_int[0],
                     "conf_int_hi": self.overall_conf_int[1],
+                    "cohort_trends": self.cohort_trends,
+                    "aggregation_weights": active_weights,
                 }
             ],
             "group": [
@@ -710,6 +729,8 @@ class WooldridgeDiDResults:
                     **{k: v for k, v in eff.items() if k != "conf_int"},
                     "conf_int_lo": eff["conf_int"][0],
                     "conf_int_hi": eff["conf_int"][1],
+                    "cohort_trends": self.cohort_trends,
+                    "aggregation_weights": active_weights,
                 }
                 for g, eff in sorted((self.group_effects or {}).items())
             ],
@@ -719,6 +740,8 @@ class WooldridgeDiDResults:
                     **{k: v for k, v in eff.items() if k != "conf_int"},
                     "conf_int_lo": eff["conf_int"][0],
                     "conf_int_hi": eff["conf_int"][1],
+                    "cohort_trends": self.cohort_trends,
+                    "aggregation_weights": active_weights,
                 }
                 for t, eff in sorted((self.calendar_effects or {}).items())
             ],
@@ -728,6 +751,8 @@ class WooldridgeDiDResults:
                     **{kk: vv for kk, vv in eff.items() if kk != "conf_int"},
                     "conf_int_lo": eff["conf_int"][0],
                     "conf_int_hi": eff["conf_int"][1],
+                    "cohort_trends": self.cohort_trends,
+                    "aggregation_weights": active_weights,
                 }
                 for k, eff in sorted((self.event_study_effects or {}).items())
             ],
@@ -812,8 +837,14 @@ class WooldridgeDiDResults:
         att_str = f"{self.overall_att:.4f}" if not np.isnan(self.overall_att) else "NaN"
         se_str = f"{self.overall_se:.4f}" if not np.isnan(self.overall_se) else "NaN"
         p_str = f"{self.overall_p_value:.4f}" if not np.isnan(self.overall_p_value) else "NaN"
+        # Surface the active simple aggregation scheme (the one that
+        # produced the printed ``overall_*`` values) + cohort_trends
+        # flag so repr is self-describing for downstream consumers.
+        simple_weights = self.aggregation_weights.get("simple", "cell")
         return (
             f"WooldridgeDiDResults("
             f"ATT={att_str}, SE={se_str}, p={p_str}, "
-            f"n_gt={n_gt}, method={self.method!r})"
+            f"n_gt={n_gt}, method={self.method!r}, "
+            f"cohort_trends={self.cohort_trends}, "
+            f"aggregation_weights={simple_weights!r})"
         )
