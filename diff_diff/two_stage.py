@@ -22,7 +22,6 @@ Butts, K. & Gardner, J. (2022). did2s: Two-Stage
 """
 
 import warnings
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
@@ -1462,12 +1461,30 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         always_treated_mask = (~df["_never_treated"]) & (df[first_treat] <= min_time)
         always_treated_units = df.loc[always_treated_mask, unit].unique()
         n_always_treated = len(always_treated_units)
+        # `keep_mask` is always defined (defaults to all-True over `data`) so
+        # downstream survey-path code can subset full-domain arrays uniformly
+        # whether or not the always-treated branch fires (Wave E.3 parity).
+        keep_mask = pd.Series(np.ones(len(data), dtype=bool), index=data.index)
         if n_always_treated > 0:
             unit_list = ", ".join(str(u) for u in always_treated_units[:10])
             suffix = f" (and {n_always_treated - 10} more)" if n_always_treated > 10 else ""
             survey_note = ""
             if survey_weights is not None or resolved_survey is not None:
-                survey_note = " Associated survey weights and design arrays " "adjusted to match."
+                # Wave E.3 parity (PR #482 SpilloverDiD precedent): under the
+                # always-treated drop we subset `survey_weights` for stage-1 /
+                # stage-2 OLS arithmetic but retain the full-domain
+                # `resolved_survey` for variance estimation. The Binder TSL
+                # meat consumes zero-padded per-cluster scores keyed against
+                # the full-domain PSU/strata layout, matching R
+                # `survey::svyrecvar(subset())` (Lumley 2010 §2.5) and the
+                # in-library convention used at `imputation.py:2175-2183`
+                # (PreTrendsImputation) and `prep.py:1401-1432` (DCDH cell
+                # variance).
+                survey_note = (
+                    " Associated survey weights subsetted for stage-1 / "
+                    "stage-2 OLS; full-domain survey design retained for "
+                    "variance estimation (Wave E.3 parity)."
+                )
             warnings.warn(
                 f"{n_always_treated} unit(s) are treated in all observed periods "
                 f"(first_treat <= {min_time}): [{unit_list}{suffix}]. "
@@ -1478,55 +1495,21 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             )
             df = df[~df[unit].isin(always_treated_units)].copy()
 
-            # Subset survey arrays to match filtered df
+            # Stage-1 / stage-2 OLS sample = post-drop `df`; survey_weights
+            # must be aligned for OLS arithmetic. The active-sample mask
+            # `keep_mask` is FULL-DOMAIN length and identifies kept rows.
+            keep_mask = ~data[unit].isin(always_treated_units)
             if survey_weights is not None:
-                keep_mask = ~data[unit].isin(always_treated_units)
                 survey_weights = survey_weights[keep_mask.values]
-            if resolved_survey is not None:
-                keep_mask = ~data[unit].isin(always_treated_units)
-                resolved_survey = replace(
-                    resolved_survey,
-                    weights=resolved_survey.weights[keep_mask.values],
-                    strata=(
-                        resolved_survey.strata[keep_mask.values]
-                        if resolved_survey.strata is not None
-                        else None
-                    ),
-                    psu=(
-                        resolved_survey.psu[keep_mask.values]
-                        if resolved_survey.psu is not None
-                        else None
-                    ),
-                    fpc=(
-                        resolved_survey.fpc[keep_mask.values]
-                        if resolved_survey.fpc is not None
-                        else None
-                    ),
-                    replicate_weights=(
-                        resolved_survey.replicate_weights[keep_mask.values]
-                        if resolved_survey.replicate_weights is not None
-                        else None
-                    ),
-                )
-                # Recompute n_psu/n_strata after subsetting
-                new_n_psu = (
-                    len(np.unique(resolved_survey.psu)) if resolved_survey.psu is not None else 0
-                )
-                new_n_strata = (
-                    len(np.unique(resolved_survey.strata))
-                    if resolved_survey.strata is not None
-                    else 0
-                )
-                resolved_survey = replace(resolved_survey, n_psu=new_n_psu, n_strata=new_n_strata)
-                # Recompute survey_metadata since it depends on these counts
-                from diff_diff.survey import compute_survey_metadata
-
-                raw_w = (
-                    df[survey_design.weights].values.astype(np.float64)
-                    if survey_design.weights
-                    else np.ones(len(df), dtype=np.float64)
-                )
-                survey_metadata = compute_survey_metadata(resolved_survey, raw_w)
+            # NOTE (Wave E.3 parity): `resolved_survey` is intentionally NOT
+            # subsetted here. Full-domain `n_psu` / `n_strata` / `df_survey` /
+            # `strata` / `fpc` / `psu` arrays propagate downstream; the
+            # always-treated rows contribute zero score to the Binder TSL
+            # meat (see `_compute_gmm_variance` for the zero-pad mechanics).
+            # `survey_metadata` is computed once on the full-domain design by
+            # `_resolve_survey_for_fit` upstream and (when cluster injection
+            # fires) recomputed once post-injection in the block below; no
+            # post-always-treated recompute is needed.
 
         # Treatment indicator with anticipation
         effective_treat = df[first_treat] - self.anticipation
@@ -1569,9 +1552,20 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                 f"Available columns: {list(df.columns)}"
             )
 
-        # Resolve effective cluster and inject cluster-as-PSU for survey variance
+        # Resolve effective cluster and inject cluster-as-PSU for survey variance.
+        # Wave E.3 parity: under always-treated drop, `resolved_survey` retains
+        # full-domain arrays — so the cluster_ids fed into
+        # `_resolve_effective_cluster` / `_inject_cluster_as_psu` MUST be the
+        # FULL-DOMAIN cluster column (sourced from `data`, not `df` which is
+        # post-drop). Otherwise the zip in `_inject_cluster_as_psu` between
+        # `resolved.strata` (full-domain) and `cluster_ids` (post-drop) would
+        # truncate silently. Mirrors `spillover.py:2879` (PR #482 Wave E.3
+        # `cluster_ids_full` invariant).
+        cluster_ids_full: Optional[np.ndarray] = None
         if resolved_survey is not None:
-            cluster_ids_raw = df[cluster_var].values if cluster_var in df.columns else None
+            cluster_ids_raw = (
+                np.asarray(data[cluster_var].values) if cluster_var in data.columns else None
+            )
             effective_cluster_ids = _resolve_effective_cluster(
                 resolved_survey,
                 cluster_ids_raw,
@@ -1579,18 +1573,31 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             )
             resolved_survey = _inject_cluster_as_psu(resolved_survey, effective_cluster_ids)
             # When survey PSU is present, use it as the effective cluster for
-            # GMM variance (PSU overrides unit-level clustering)
+            # GMM variance (PSU overrides unit-level clustering). Both
+            # `df["_survey_cluster"]` (post-drop) and `cluster_ids_full`
+            # (full-domain) reference the post-injection PSU labels: the OLS
+            # aggregation downstream uses `df["_survey_cluster"]` (df-aligned);
+            # `_compute_gmm_variance` receives `cluster_ids_full` (full-domain)
+            # so the zero-padded per-PSU meat sees the full-domain PSU list.
             if resolved_survey.psu is not None:
-                df["_survey_cluster"] = resolved_survey.psu
+                df["_survey_cluster"] = resolved_survey.psu[keep_mask.values]
                 cluster_var = "_survey_cluster"
-            # Recompute metadata after PSU injection
+                cluster_ids_full = np.asarray(resolved_survey.psu)
+            elif effective_cluster_ids is not None:
+                # No PSU injected (e.g., user-only cluster=, no survey.psu);
+                # full-domain cluster_ids match effective_cluster_ids.
+                cluster_ids_full = np.asarray(effective_cluster_ids)
+            # Recompute metadata after PSU injection. `raw_w` is taken from the
+            # FULL-DOMAIN `data` so the design-effect / Kish-effective-n
+            # diagnostics reflect the full domain (matches the retained
+            # full-domain `resolved_survey` arrays per Wave E.3 R6 lesson).
             if resolved_survey.psu is not None and survey_metadata is not None:
                 from diff_diff.survey import compute_survey_metadata
 
                 raw_w = (
-                    df[survey_design.weights].values.astype(np.float64)
+                    np.asarray(data[survey_design.weights].values, dtype=np.float64)
                     if survey_design.weights
-                    else np.ones(len(df), dtype=np.float64)
+                    else np.ones(len(data), dtype=np.float64)
                 )
                 survey_metadata = compute_survey_metadata(resolved_survey, raw_w)
 
@@ -1657,6 +1664,28 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         if _uses_replicate_ts and _survey_df is None:
             _survey_df = 0
 
+        # Wave E.3 parity (PR #482 SpilloverDiD precedent): under the survey
+        # path, `score_pad_mask_arg` is the FULL-DOMAIN keep_mask identifying
+        # rows present in the stage-1 / stage-2 OLS sample after the
+        # always-treated drop. `cluster_ids_full` is the FULL-DOMAIN
+        # post-injection PSU labels. Both are passed through to
+        # `_compute_gmm_variance`, which zero-pads per-cluster scores onto
+        # the full-domain PSU list before stratified-meat dispatch so
+        # `n_psu` / `n_strata` / `df_survey` reflect the full design.
+        # Replicate-variance fits do NOT pad — Replicate refits per-replicate
+        # already handle the resampling at the survey-design level.
+        # We gate the padding kwargs on `n_always_treated > 0` so the
+        # zero-pad branch in `_compute_gmm_variance` (np.unique +
+        # np.searchsorted + full-size c_by_cluster / s2_by_cluster copies)
+        # only fires when always-treated rows were actually dropped —
+        # baseline survey fits with no drop pass `None / None` and take
+        # the bit-identical pre-PR path.
+        _wave_e3_pad_active = (
+            resolved_survey is not None and not _uses_replicate_ts and n_always_treated > 0
+        )
+        score_pad_mask_arg = keep_mask.values if _wave_e3_pad_active else None
+        cluster_ids_full_arg = cluster_ids_full if _wave_e3_pad_active else None
+
         # Always compute overall ATT (static specification)
         overall_att, overall_se = self._stage2_static(
             df=df,
@@ -1675,6 +1704,8 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             survey_weights=survey_weights,
             survey_weight_type=survey_weight_type,
             resolved_survey=(resolved_survey if not _uses_replicate_ts else None),
+            score_pad_mask=score_pad_mask_arg,
+            cluster_ids_full=cluster_ids_full_arg,
         )
 
         # Compute overall ATT inference (may be overridden by replicate below)
@@ -1708,6 +1739,8 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                 survey_weight_type=survey_weight_type,
                 survey_df=_survey_df,
                 resolved_survey=(resolved_survey if not _uses_replicate_ts else None),
+                score_pad_mask=score_pad_mask_arg,
+                cluster_ids_full=cluster_ids_full_arg,
             )
 
         if aggregate in ("group", "all"):
@@ -1730,6 +1763,8 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                 survey_weight_type=survey_weight_type,
                 survey_df=_survey_df,
                 resolved_survey=(resolved_survey if not _uses_replicate_ts else None),
+                score_pad_mask=score_pad_mask_arg,
+                cluster_ids_full=cluster_ids_full_arg,
             )
 
         # Replicate variance override: derive keys from actual outputs, then refit
@@ -1756,6 +1791,19 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             _full_est_ts.extend([group_effects[g]["effect"] for g in _sorted_groups_ts])
 
             def _refit_ts(w_r):
+                # Wave E.3 parity (PR #482 SpilloverDiD precedent): the main fit
+                # path keeps `resolved_survey` at full-domain length but subsets
+                # `survey_weights` for stage-1 / stage-2 OLS arithmetic via
+                # `keep_mask` (always-treated drop). The replicate refit
+                # callback receives a FULL-DOMAIN replicate weight `w_r`
+                # (sourced from `resolved_survey.replicate_weights` which is
+                # also full-domain) and must apply the SAME `keep_mask`
+                # subsetting before threading through stage-1 / stage-2,
+                # otherwise `solve_ols` rejects the length mismatch
+                # (full-domain w_r vs post-drop df) and the ValueError is
+                # swallowed by `compute_replicate_refit_variance` →
+                # NaN replicate inference.
+                w_r_fit = np.asarray(w_r)[keep_mask.values]
                 ufe_r, tfe_r, gm_r, delta_r, kcm_r = self._fit_untreated_model(
                     df,
                     outcome,
@@ -1763,7 +1811,7 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                     time,
                     covariates,
                     omega_0_mask,
-                    weights=w_r,
+                    weights=w_r_fit,
                 )
                 y_tilde_r = self._residualize(
                     df,
@@ -1794,7 +1842,7 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                     delta_hat=delta_r,
                     cluster_var=cluster_var,
                     kept_cov_mask=kcm_r,
-                    survey_weights=w_r,
+                    survey_weights=w_r_fit,
                     survey_weight_type="pweight",
                 )
                 results.append(att_r)
@@ -1817,7 +1865,7 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                         ref_period=ref_period,
                         balance_e=balance_e,
                         kept_cov_mask=kcm_r,
-                        survey_weights=w_r,
+                        survey_weights=w_r_fit,
                         survey_weight_type="pweight",
                         survey_df=None,
                     )
@@ -1840,7 +1888,7 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                         cluster_var=cluster_var,
                         treatment_groups=treatment_groups,
                         kept_cov_mask=kcm_r,
-                        survey_weights=w_r,
+                        survey_weights=w_r_fit,
                         survey_weight_type="pweight",
                         survey_df=None,
                     )
@@ -2296,6 +2344,8 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         survey_weights: Optional[np.ndarray] = None,
         survey_weight_type: str = "pweight",
         resolved_survey=None,
+        score_pad_mask: Optional[np.ndarray] = None,
+        cluster_ids_full: Optional[np.ndarray] = None,
     ) -> Tuple[float, float]:
         """
         Static (simple ATT) Stage 2: OLS of y_tilde on D_it.
@@ -2344,6 +2394,8 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             cluster_ids=df[cluster_var].values,
             survey_weights=survey_weights,
             resolved_survey=resolved_survey,
+            score_pad_mask=score_pad_mask,
+            cluster_ids_full=cluster_ids_full,
         )
 
         se = float(np.sqrt(max(V[0, 0], 0.0)))
@@ -2371,6 +2423,8 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         survey_weight_type: str = "pweight",
         survey_df: Optional[int] = None,
         resolved_survey=None,
+        score_pad_mask: Optional[np.ndarray] = None,
+        cluster_ids_full: Optional[np.ndarray] = None,
     ) -> Dict[int, Dict[str, Any]]:
         """Event study Stage 2: OLS of y_tilde on relative-time dummies."""
         y_tilde = df["_y_tilde"].values.copy()
@@ -2512,6 +2566,8 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             cluster_ids=df[cluster_var].values,
             survey_weights=survey_weights,
             resolved_survey=resolved_survey,
+            score_pad_mask=score_pad_mask,
+            cluster_ids_full=cluster_ids_full,
         )
 
         # Build results dict
@@ -2589,6 +2645,8 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         survey_weight_type: str = "pweight",
         survey_df: Optional[int] = None,
         resolved_survey=None,
+        score_pad_mask: Optional[np.ndarray] = None,
+        cluster_ids_full: Optional[np.ndarray] = None,
     ) -> Dict[Any, Dict[str, Any]]:
         """Group (cohort) Stage 2: OLS of y_tilde on cohort dummies."""
         y_tilde = df["_y_tilde"].values.copy()
@@ -2634,6 +2692,8 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             cluster_ids=df[cluster_var].values,
             survey_weights=survey_weights,
             resolved_survey=resolved_survey,
+            score_pad_mask=score_pad_mask,
+            cluster_ids_full=cluster_ids_full,
         )
 
         group_effects: Dict[Any, Dict[str, Any]] = {}
@@ -2723,6 +2783,8 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         cluster_ids: np.ndarray,
         survey_weights: Optional[np.ndarray] = None,
         resolved_survey=None,
+        score_pad_mask: Optional[np.ndarray] = None,
+        cluster_ids_full: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Compute GMM sandwich variance (Butts & Gardner 2022).
@@ -2754,10 +2816,37 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         eps_2 : np.ndarray, shape (n,)
             Stage 2 residuals.
         cluster_ids : np.ndarray, shape (n,)
-            Cluster identifiers.
+            Cluster identifiers, fit-sample length. Used for the per-cluster
+            stage-1 / stage-2 score aggregation (OLS path).
         survey_weights : np.ndarray, optional
             Survey weights of shape (n,). When None, unweighted (identical
             to current code).
+        resolved_survey : ResolvedSurveyDesign, optional
+            Resolved survey design. Under Wave E.3 parity (PR #482 SpilloverDiD
+            precedent) the design retains full-domain `n_psu` / `n_strata` /
+            `df_survey` / `strata` / `fpc` / `psu` arrays even when the
+            always-treated drop removes rows from the OLS sample. The
+            zero-padded per-cluster scores expand onto the full-domain PSU
+            list before stratified-meat dispatch. R `survey::svyrecvar(subset())`
+            convention (Lumley 2010 §2.5); mirrors `imputation.py:2175-2183`
+            (PreTrendsImputation) and `prep.py:1401-1432` (DCDH cell variance).
+        score_pad_mask : np.ndarray of shape (n_full,), bool, optional
+            Wave E.3 parity zero-pad mask. When supplied, indicates which
+            FULL-DOMAIN rows are present in the fit sample (True = kept
+            for OLS). Requires `n == int(np.sum(score_pad_mask))`. Co-supplied
+            with `cluster_ids_full`. Per-cluster stage-1 / stage-2 score
+            aggregates computed at fit-length are expanded onto the
+            full-domain unique-PSU list; PSUs absent from the fit sample
+            (e.g. PSUs containing only always-treated rows) get zero score
+            rows but still count toward `G_full` for `n_psu` / `df_survey`.
+            None (default) → no padding, exact pre-PR behavior.
+        cluster_ids_full : np.ndarray of shape (n_full,), optional
+            Full-domain PSU labels. Co-supplied with `score_pad_mask`. Must
+            share the same length. Provides the full-domain unique-PSU list
+            used both for score zero-pad expansion and for downstream
+            strata/FPC `obs_idx` lookups against the full-domain
+            `resolved_survey.strata` / `.fpc` arrays. None (default) → no
+            padding, exact pre-PR behavior.
 
         Returns
         -------
@@ -2871,6 +2960,78 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         for j_col in range(k):
             np.add.at(s2_by_cluster[:, j_col], cluster_indices, weighted_X2[:, j_col])
 
+        # Wave E.3 parity (PR #482 SpilloverDiD precedent): when the caller
+        # supplies `score_pad_mask` + `cluster_ids_full`, expand per-cluster
+        # stage-1 / stage-2 score aggregates onto the FULL-DOMAIN unique-PSU
+        # list. PSUs absent from the fit sample (those containing only
+        # always-treated rows) get zero score rows but still count toward
+        # `G_full` for `n_psu` / `df_survey` accounting. Mirrors R
+        # `survey::svyrecvar(subset())` (Lumley 2010 §2.5) and the in-library
+        # convention at `imputation.py:2175-2183` (PreTrendsImputation) and
+        # `prep.py:1401-1432` (DCDH cell variance). Downstream strata / FPC
+        # lookups use `cluster_ids_for_lookup` so the obs_idx applies to the
+        # full-domain `resolved_survey.strata` / `.fpc` arrays.
+        if score_pad_mask is not None:
+            if cluster_ids_full is None:
+                raise ValueError(
+                    "_compute_gmm_variance: score_pad_mask requires "
+                    "cluster_ids_full to be co-supplied (Wave E.3 parity "
+                    "contract — score zero-pad expansion needs the "
+                    "full-domain PSU labels to align with resolved_survey)."
+                )
+            if resolved_survey is None:
+                raise ValueError(
+                    "_compute_gmm_variance: score_pad_mask requires "
+                    "resolved_survey to be co-supplied (Wave E.3 parity "
+                    "contract — zero-pad only meaningful under a survey "
+                    "design that retains full-domain dimensions)."
+                )
+            n_full = int(len(score_pad_mask))
+            if int(len(cluster_ids_full)) != n_full:
+                raise ValueError(
+                    "_compute_gmm_variance: score_pad_mask and "
+                    "cluster_ids_full must share the FULL-DOMAIN length; "
+                    f"got len(score_pad_mask)={n_full}, "
+                    f"len(cluster_ids_full)={int(len(cluster_ids_full))}."
+                )
+            if int(np.sum(score_pad_mask)) != n:
+                raise ValueError(
+                    "_compute_gmm_variance: int(np.sum(score_pad_mask)) "
+                    f"({int(np.sum(score_pad_mask))}) must equal the "
+                    f"fit-sample length n ({n}) so the score expansion "
+                    "is well-defined."
+                )
+            unique_clusters_full = np.unique(cluster_ids_full)
+            G_full = int(len(unique_clusters_full))
+            # Map fit-sample unique_clusters into positions in
+            # unique_clusters_full via searchsorted (both arrays sorted by
+            # np.unique). Verify the mapping is exact — otherwise the fit
+            # sample contains PSU labels absent from the full domain (a
+            # contract violation that should never occur under the upstream
+            # `_inject_cluster_as_psu` invariant).
+            fit_to_full_idx = np.searchsorted(unique_clusters_full, unique_clusters)
+            if not np.array_equal(
+                unique_clusters_full[fit_to_full_idx], np.asarray(unique_clusters)
+            ):
+                raise ValueError(
+                    "_compute_gmm_variance: fit-sample unique cluster "
+                    "labels are not a subset of full-domain cluster labels "
+                    "(Wave E.3 parity invariant violated). This should be "
+                    "impossible under `_inject_cluster_as_psu` — please "
+                    "file an issue with a minimal reproducer."
+                )
+            c_by_cluster_full = np.zeros((G_full, p))
+            s2_by_cluster_full = np.zeros((G_full, k))
+            c_by_cluster_full[fit_to_full_idx] = c_by_cluster
+            s2_by_cluster_full[fit_to_full_idx] = s2_by_cluster
+            c_by_cluster = c_by_cluster_full
+            s2_by_cluster = s2_by_cluster_full
+            unique_clusters = unique_clusters_full
+            G = G_full
+            cluster_ids_for_lookup = np.asarray(cluster_ids_full)
+        else:
+            cluster_ids_for_lookup = cluster_ids
+
         # 4. S_g = gamma_hat' c_g - X'_{2g} eps_{2g}
         S = self._compute_gmm_scores(c_by_cluster, gamma_hat, s2_by_cluster)
 
@@ -2882,15 +3043,17 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             from diff_diff.survey import _compute_stratified_meat_from_psu_scores
 
             # Build PSU→stratum and PSU→FPC mappings from observation-level arrays.
-            # cluster_ids used here match resolved_survey.psu (via _inject_cluster_as_psu).
-            # unique_clusters is already computed at line above (np.unique(cluster_ids)).
+            # cluster_ids_for_lookup is full-domain length under Wave E.3 parity
+            # (score_pad_mask path) and fit-sample length otherwise; either way it
+            # aligns with `resolved_survey.strata` / `resolved_survey.fpc` so the
+            # obs_idx lookup resolves to the correct stratum / FPC value.
             G_meat = len(unique_clusters)
 
             # Strata: synthesize single stratum when strata is None (unstratified FPC)
             if resolved_survey.strata is not None:
                 psu_strata = np.empty(G_meat, dtype=resolved_survey.strata.dtype)
                 for idx, c in enumerate(unique_clusters):
-                    obs_idx = np.where(cluster_ids == c)[0][0]
+                    obs_idx = np.where(cluster_ids_for_lookup == c)[0][0]
                     psu_strata[idx] = resolved_survey.strata[obs_idx]
             else:
                 psu_strata = np.zeros(G_meat, dtype=int)
@@ -2900,12 +3063,14 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             if resolved_survey.fpc is not None:
                 psu_fpc = np.empty(G_meat, dtype=np.float64)
                 for idx, c in enumerate(unique_clusters):
-                    obs_idx = np.where(cluster_ids == c)[0][0]
+                    obs_idx = np.where(cluster_ids_for_lookup == c)[0][0]
                     psu_fpc[idx] = resolved_survey.fpc[obs_idx]
 
             # Unstratified single-PSU: variance is unidentified (matches
             # _compute_stratified_psu_meat at survey.py:1225 which returns
             # zero meat with no variance_computed flag for n_psu < 2).
+            # Under Wave E.3 parity, G_meat = G_full (post zero-pad), so the
+            # gate fires on the full-domain PSU count, not the fit-sample.
             if resolved_survey.strata is None and G_meat < 2:
                 return np.full((k, k), np.nan)
 
