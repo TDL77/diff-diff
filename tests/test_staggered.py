@@ -4725,11 +4725,24 @@ class TestCallawaySantAnnaClusterSafetyGates:
         assert (
             res.survey_metadata is not None
         ), "User-provided SurveyDesign must populate survey_metadata."
-        assert res.df_inference is not None and res.df_inference > 0
-        # Both surfaces agree on the cluster df (no divergence)
+        # df_inference is NARROWED to bare-cluster-synthesize path only:
+        # when survey_metadata is populated, df_inference stays None and
+        # HonestDiD reads df_survey directly from survey_metadata (which
+        # carries the actual CS-internal df, post-recompute). Prevents
+        # HonestDiD from reading a stale/wrong df_inference when CS's
+        # internal df was tightened post-resolve. See honest_did.py:
+        # _extract_event_study_params preference order: survey_metadata
+        # first, df_inference fallback.
+        assert res.df_inference is None, (
+            "Inject/conflict branches must leave df_inference=None — "
+            "survey_metadata.df_survey is the canonical df carrier when "
+            "a survey design is present."
+        )
         sm_df = getattr(res.survey_metadata, "df_survey", None)
-        if sm_df is not None:
-            assert int(sm_df) == int(res.df_inference)
+        assert sm_df is not None and sm_df > 0, (
+            "survey_metadata.df_survey must be populated when an explicit "
+            "SurveyDesign is provided."
+        )
 
     def test_bare_cluster_honest_did_uses_df_inference(self):
         """End-to-end integration: HonestDiD.fit() on a bare-cluster CS
@@ -4774,4 +4787,98 @@ class TestCallawaySantAnnaClusterSafetyGates:
             f"equal CS Results.df_inference ({cs_res.df_inference}). "
             "A divergence here means df_inference is not being threaded "
             "through honest_did.py's _extract_event_study_params."
+        )
+
+    def test_bare_cluster_bootstrap_se_differs_from_unit_level(self):
+        """Bootstrap path coverage: bare cluster= must route bootstrap
+        through the PSU-level multiplier-weights branch at
+        staggered_bootstrap.py:323-347 (synthesized SurveyDesign(psu=
+        cluster) sets resolved_survey.psu, triggering the survey-PSU
+        bootstrap path). Without the fix, bootstrap drew per-unit weights
+        regardless of self.cluster — same class of silent no-op as the
+        analytical path. Per CI codex R1 P3 finding."""
+        data = _generate_clustered_staggered_data(seed=83)
+
+        # Low n_bootstrap for speed; assertion bands wide enough for stochasticity
+        cs_unit = CallawaySantAnna(n_bootstrap=99, seed=83)
+        res_unit = cs_unit.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        cs_cluster = CallawaySantAnna(cluster="state", n_bootstrap=99, seed=83)
+        res_cluster = cs_cluster.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        assert np.isfinite(res_unit.overall_se) and res_unit.overall_se > 0
+        assert np.isfinite(res_cluster.overall_se) and res_cluster.overall_se > 0
+        assert abs(res_unit.overall_se - res_cluster.overall_se) > 1e-6, (
+            f"Bootstrap path: cluster=state SE ({res_cluster.overall_se:.6f}) "
+            f"is effectively identical to cluster=None SE "
+            f"({res_unit.overall_se:.6f}) — the cluster= parameter may "
+            "not be reaching the bootstrap multiplier-weights routing."
+        )
+
+    def test_survey_design_psu_wins_under_bootstrap(self):
+        """Bootstrap path: when survey_design=SurveyDesign(psu=Y) is
+        explicit AND cluster=X is also set with a different partition,
+        the explicit PSU partition wins for the bootstrap draws (just
+        like for the analytical sandwich). UserWarning fires for the
+        partition mismatch; bootstrap SE matches the explicit-PSU-only
+        fit, not the bare-cluster fit. Per CI codex R1 P3 finding."""
+        from diff_diff import SurveyDesign
+
+        data = _generate_clustered_staggered_data(n_clusters=20, units_per_cluster=5, seed=89)
+        data["region"] = data["state"] // 10  # 2 regions of 10 states
+
+        # Reference: explicit region PSU only (no cluster= confound)
+        cs_ref = CallawaySantAnna(n_bootstrap=99, seed=89)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res_ref = cs_ref.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=SurveyDesign(psu="region"),
+            )
+
+        # Conflict: explicit region PSU + bare cluster=state (different partition)
+        cs_conflict = CallawaySantAnna(cluster="state", n_bootstrap=99, seed=89)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res_conflict = cs_conflict.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=SurveyDesign(psu="region"),
+            )
+
+        partition_warnings = [
+            w
+            for w in caught
+            if "psu" in str(w.message).lower()
+            or "partition" in str(w.message).lower()
+            or "different groupings" in str(w.message).lower()
+        ]
+        assert len(partition_warnings) > 0, (
+            "Conflict case (explicit PSU + bare cluster with different "
+            "partition) must emit UserWarning."
+        )
+        # PSU wins under bootstrap too — SE must match the reference
+        # (explicit-PSU-only) fit at the same seed
+        assert res_conflict.overall_se == pytest.approx(res_ref.overall_se, rel=0, abs=0), (
+            f"Bootstrap precedence: with seed={cs_conflict.seed}, conflict "
+            f"fit SE ({res_conflict.overall_se}) must match explicit-PSU-only "
+            f"reference SE ({res_ref.overall_se}) — both bootstraps must "
+            "draw at the same effective PSU level."
         )

@@ -329,7 +329,6 @@ class CallawaySantAnna(
         estimation_method: str = "dr",
         alpha: float = 0.05,
         cluster: Optional[str] = None,
-        vcov_type: str = "hc1",
         n_bootstrap: int = 0,
         bootstrap_weights: Optional[str] = None,
         seed: Optional[int] = None,
@@ -340,6 +339,7 @@ class CallawaySantAnna(
         panel: bool = True,
         epv_threshold: float = 10,
         pscore_fallback: str = "error",
+        vcov_type: str = "hc1",
     ):
         import warnings
 
@@ -2202,17 +2202,21 @@ class CallawaySantAnna(
             else None
         )
         # df_inference: cluster-level degrees of freedom for downstream
-        # inference (HonestDiD t-critical selection). Carried separately
-        # from survey_metadata so consumers can distinguish "cluster df
-        # is available" from "user provided a survey design" — bare
-        # cluster= populates df_inference but leaves survey_metadata=None
-        # (so DiagnosticReport / summary don't treat a bare-cluster fit
-        # as survey-backed). Populated whenever a resolved_survey is in
-        # play (covers all 3 cluster branches: synthesize, inject, conflict).
+        # inference (HonestDiD t-critical selection). Populated ONLY for
+        # the bare-cluster-synthesize path (where survey_metadata is None
+        # because the user did not provide a survey design). For
+        # inject/conflict branches, survey_metadata is populated and
+        # survey_metadata.df_survey carries the actual CS-internal df
+        # (which may have been tightened by overall_effective_df recompute
+        # at the aggregation step around L1995-1999). Narrowing here
+        # prevents HonestDiD from reading a stale/wrong df_inference for
+        # survey fits whose df was tightened post-resolve — fix for
+        # CI codex P1 (PR #487 round 1).
         df_inference_for_results: Optional[int] = (
             int(resolved_survey.df_survey)
             if (
                 resolved_survey is not None
+                and survey_metadata is None
                 and getattr(resolved_survey, "df_survey", None) is not None
             )
             else None
