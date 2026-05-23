@@ -615,7 +615,7 @@ and covariate-adjusted specifications.)
 **Deviations from the paper / from R / library extensions:** See REGISTRY.md `## WooldridgeDiD (ETWFE)` → `### Deviations from the paper / from R / library extensions` block for the consolidated list (HC1 finite-sample factor, QMLE sandwich `(n-1)/(n-k)` term, nonlinear-vs-fixest direct QMLE, logit cohort+time additive dummies, anticipation + aggregation, cell-count default with opt-in cohort-share).
 
 **Outstanding Concerns:**
-- **Stata `jwdid` golden values** (TODO row 97): Stata-side parity infrastructure deferred until Stata install is available; R `etwfe` side covered in PR-B Stage D.
+- **Stata `jwdid` golden values** (TODO "Stata `jwdid` golden value tests" row): Stata-side parity infrastructure deferred until Stata install is available; R `etwfe` side covered in PR-B Stage D.
 - **Response-scale APE / log-link bridge for Poisson + logit R parity** (new TODO row added in PR-B): direct cell-level numerical parity between diff-diff's response-scale ATT and R `etwfe` log-link coefficients requires either `emfx()`-based APE extraction on the R side or link-function inversion with baseline-mean adjustment.
 - **QMLE sandwich Stata-parity `qmle` weight type** (TODO row 94): diff-diff's `(G/(G-1)) × ((n-1)/(n-k))` is conservative vs Stata's `G/(G-1)` only; awaiting Stata golden values to confirm material difference.
 - **Repeated cross-sections** (paper p. 2581 → Deb et al. 2024): not in 2025 paper's main body; future PR.

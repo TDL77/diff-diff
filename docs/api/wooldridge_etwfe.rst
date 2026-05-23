@@ -12,7 +12,7 @@ This module implements ETWFE via a single saturated regression that:
 3. **Uses ASF-based ATT** for nonlinear models: E[f(η₁)] − E[f(η₀)]
 4. **Computes delta-method SEs** for all aggregations (event, group, calendar, simple)
 5. **Supports paper W2025 cohort-share aggregation** via ``aggregate(weights="cohort_share")`` (Eqs. 7.4 + 7.6; default is cell-count matching Stata ``jwdid_estat``)
-6. **Supports paper W2025 Section 8 heterogeneous cohort trends** via ``cohort_trends=True`` (OLS path only; auto-routes to full-dummy mode)
+6. **Supports paper W2025 Section 8 heterogeneous cohort trends** via ``cohort_trends=True`` (OLS path only; auto-routes to full-dummy mode; requires ``control_group="not_yet_treated"`` — the default — and ``survey_design=None``; the ``never_treated`` and survey paths are fail-closed with ``NotImplementedError`` because the all-(g, t)-cells placebo basis collinearity / unvalidated survey-TSL composition would make the trend specification unidentified or unverified — see Methodology Registry for the full contract)
 7. **Follows the Stata jwdid specification** for OLS defaults and nonlinear paths (see Methodology Registry for documented SE/aggregation deviations)
 
 **When to use WooldridgeDiD:**

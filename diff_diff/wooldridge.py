@@ -339,6 +339,15 @@ class WooldridgeDiD:
         panels the last cohort's trend column is dropped per paper
         Section 5.4. ``cohort_trends=True`` + ``survey_design`` raises
         ``NotImplementedError`` at ``fit()`` (deferred follow-up).
+        ``cohort_trends=True`` + ``control_group="never_treated"``
+        also raises ``NotImplementedError`` at ``fit()`` because the
+        OLS + never_treated branch emits ALL ``(g, t)`` placebo cell
+        dummies (paper Section 4.4 placebo coverage); the appended
+        ``dg_i · t`` trend columns are linearly spanned by the
+        per-cohort sum of those cell dummies, so the Section 8 trend
+        specification is unidentified on this branch. Use
+        ``control_group="not_yet_treated"`` (the default) for the
+        cohort_trends surface.
     """
 
     def __init__(
