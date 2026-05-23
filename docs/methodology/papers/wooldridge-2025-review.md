@@ -537,14 +537,14 @@ d_i · fq̄_i, ..., d_i · fT̄_i, f2̄_i, ..., fT̄_i                 (10.6)
 - **Imputation-step inference (Section 5.5):** "Inference is complicated, and BJS (2024) only provide conservative standard errors. Inference is made easier by implementing the estimator as pooled OLS, random effects (equivalently TWFE)."
 - **Bootstrap usage (Section 9):** For the heterogeneous-cohort-trends event study plot (Figure 2): "The standard errors used to obtain the 95% confidence are obtained using 1,000 bootstrap replications (rather than working through the more complicated analytical standard errors)." No specifics on bootstrap type (pairs / wild / cluster) or weight distribution are provided.
 
-### Aggregations Comparison Table (matching shipped `jwdid_estat`)
+### Aggregations Comparison Table (default + opt-in surfaces)
 
-| Aggregation | Paper (Eqs. 7.2-7.4) | Shipped `WooldridgeDiD` |
+| Aggregation | Paper (Eqs. 7.2-7.4 / 7.6) | Shipped `WooldridgeDiD` |
 |-------------|----------------------|-------------------------|
-| `simple` / overall | Cohort-share `ω̂_g = N_g / Σ_g (T-g+1) N_g`, constant within cohort, decreasing-coefficient denominator | Cell-level `n_{g,t}` observation counts (matches Stata `jwdid_estat`) |
-| `event` / exposure-time | Eq. 7.6: `ω̂_{ge} = N_g / (N_q + ··· + N_{T-e})` | Cell counts |
-| `group` | Not explicitly given in paper as a closed-form weight | Weighted average across `t` for each cohort `g` (weights = cell counts) |
-| `calendar` | Not explicitly given in paper as a closed-form weight | Weighted average across `g` for each calendar time `t` (weights = cell counts) |
+| `simple` / overall | Cohort-share `ω̂_g = N_g / Σ_g (T-g+1) N_g`, constant within cohort, decreasing-coefficient denominator | Default `weights="cell"`: cell-level `n_{g,t}` observation counts (matches Stata `jwdid_estat`). Opt-in `weights="cohort_share"`: paper Eq. 7.4 form (shipped in PR-B). |
+| `event` / exposure-time | Eq. 7.6: `ω̂_{ge} = N_g / (N_q + ··· + N_{T-e})` | Default `weights="cell"`: cell counts (placebo leads included). Opt-in `weights="cohort_share"`: paper Eq. 7.6 form, restricted to `k >= 0` (shipped in PR-B). |
+| `group` | Not explicitly given in paper as a closed-form weight | Weighted average across `t` for each cohort `g` (cell-count weights; `weights="cohort_share"` raises by design — no paper closed-form). |
+| `calendar` | Not explicitly given in paper as a closed-form weight | Weighted average across `g` for each calendar time `t` (cell-count weights; `weights="cohort_share"` raises by design — no paper closed-form). |
 
 ### Covariates
 
@@ -711,7 +711,7 @@ No cross-validation or information-criterion tuning is involved.
 
 ### Reference Implementations
 
-- **Stata `jwdid`** (Rios-Avila 2021): Implements Procedure 5.1 (POLS on the (5.3) regressor set). The `jwdid_estat` post-estimation command computes aggregations. The shipped `WooldridgeDiD` matches `jwdid_estat` (cell-count weights) for the `simple` aggregation rather than Eq. 7.4 cohort-share weights.
+- **Stata `jwdid`** (Rios-Avila 2021): Implements Procedure 5.1 (POLS on the (5.3) regressor set). The `jwdid_estat` post-estimation command computes aggregations. The shipped `WooldridgeDiD` matches `jwdid_estat` cell-count weights as the **default** `aggregate(weights="cell")` surface; the opt-in `aggregate(weights="cohort_share")` exposes the paper W2025 Eq. 7.4 / 7.6 cohort-share forms for `type ∈ {"simple", "event"}` (shipped in PR-B).
 - **R `etwfe`** (McDermott 2023): Implements ETWFE for OLS, logit, and Poisson via `fixest`. The shipped `WooldridgeDiD` uses direct QMLE via `compute_robust_vcov` to avoid a `fixest`/statsmodels dependency.
 
 ### Cross-link to 2023 Companion Review

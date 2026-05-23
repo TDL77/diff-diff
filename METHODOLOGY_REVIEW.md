@@ -601,8 +601,8 @@ and covariate-adjusted specifications.)
 - **Section 10 unbalanced panels + time-varying covariates (Eq. 10.1-10.6):** `TestW2025Section10UnbalancedPanels`
 
 **Test Coverage:**
-- `tests/test_methodology_wooldridge.py` — 60 tests across 6 paper-equation-numbered classes + `TestW2025LibraryDeviations` (5 surviving deviations locked) + `TestWooldridgeParityR` (12 vcov_type R-parity tests, OLS path) + `TestWooldridgeParityRPoisson` / `TestWooldridgeParityRLogit` (surface tests, with log-link goldens; numerical R-parity for nonlinear deferred per TODO row)
-- `tests/test_wooldridge.py` — 140 unit-level tests covering OLS / logit / Poisson + four aggregations + survey support + vcov_type variants + cluster/bootstrap interactions
+- `tests/test_methodology_wooldridge.py` — 10 test classes (6 paper-equation-numbered Theorem/Proposition/Section walk-throughs + `TestW2025LibraryDeviations` consolidating 5 surviving deviations + `TestWooldridgeParityR` vcov_type R-parity from PR #483 + `TestWooldridgeParityRPoisson` / `TestWooldridgeParityRLogit` surface tests with log-link goldens; numerical R-parity for nonlinear paths deferred per TODO row)
+- `tests/test_wooldridge.py` — unit-level test suite covering OLS / logit / Poisson + four aggregations + survey support + vcov_type variants + cluster/bootstrap interactions
 - `benchmarks/R/generate_wooldridge_golden.R` — clubSandwich + sandwich + etwfe goldens at `benchmarks/data/wooldridge_golden.json`
 
 **Corrections Made:**
