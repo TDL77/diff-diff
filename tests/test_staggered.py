@@ -5088,6 +5088,89 @@ class TestCallawaySantAnnaClusterSafetyGates:
                     assert np.isnan(ev["p_value"])
                     assert np.isnan(ev["conf_int"][0]) and np.isnan(ev["conf_int"][1])
 
+    def test_grouped_aggregate_se_changes_with_cluster(self):
+        """The ``aggregate="group"`` aggregation path
+        (``_aggregate_by_group`` at ``staggered_aggregation.py:782-860``)
+        has its own SE computation independent of overall + event-study.
+        Asserts grouped SEs differ between cluster=None and cluster="state"
+        on a panel with intra-cluster correlation, AND that bare cluster=
+        "state" matches explicit SurveyDesign(psu="state") on the grouped
+        surface. Per CI codex R8 P3 finding."""
+        from diff_diff import SurveyDesign
+
+        data = _generate_clustered_staggered_data(seed=117)
+
+        cs_unit = CallawaySantAnna()
+        res_unit = cs_unit.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="group",
+        )
+
+        cs_cluster = CallawaySantAnna(cluster="state")
+        res_cluster = cs_cluster.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="group",
+        )
+
+        cs_explicit = CallawaySantAnna()
+        res_explicit = cs_explicit.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="group",
+            survey_design=SurveyDesign(psu="state"),
+        )
+
+        assert res_unit.group_effects is not None
+        assert res_cluster.group_effects is not None
+        assert res_explicit.group_effects is not None
+
+        # Grouped SEs must differ under cluster vs unit-level (at least
+        # one group)
+        common_groups = set(res_unit.group_effects.keys()) & set(
+            res_cluster.group_effects.keys()
+        )
+        assert common_groups, "expected overlapping groups"
+
+        diffs = []
+        for g in common_groups:
+            se_unit = res_unit.group_effects[g]["se"]
+            se_cluster = res_cluster.group_effects[g]["se"]
+            if np.isfinite(se_unit) and np.isfinite(se_cluster):
+                diffs.append(abs(se_unit - se_cluster))
+        max_diff = max(diffs) if diffs else 0.0
+        assert max_diff > 1e-6, (
+            f"Grouped SEs did not change with cluster= (max diff: "
+            f"{max_diff:.6g}). aggregate='group' may not be routing "
+            "through the cluster-aware IF aggregation."
+        )
+
+        # Bare cluster vs explicit SurveyDesign must agree on grouped surface
+        common = set(res_cluster.group_effects.keys()) & set(
+            res_explicit.group_effects.keys()
+        )
+        for g in common:
+            se_bare = res_cluster.group_effects[g]["se"]
+            se_explicit = res_explicit.group_effects[g]["se"]
+            if np.isfinite(se_bare) and np.isfinite(se_explicit):
+                assert se_bare == pytest.approx(
+                    se_explicit, rel=1e-10, abs=1e-12
+                ), (
+                    f"Grouped SE divergence at g={g}: bare cluster=state "
+                    f"({se_bare}) vs explicit SurveyDesign(psu=state) "
+                    f"({se_explicit})."
+                )
+
     def test_survey_design_psu_wins_under_bootstrap(self):
         """Bootstrap path: when survey_design=SurveyDesign(psu=Y) is
         explicit AND cluster=X is also set with a different partition,
