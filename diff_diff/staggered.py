@@ -160,7 +160,20 @@ def _cluster_robust_se_from_per_gt_if(
     from diff_diff.survey import compute_survey_if_variance
 
     var = compute_survey_if_variance(psi_per_index, resolved_survey)
-    if not np.isfinite(var) or var < 0:
+    # Return contract:
+    #   float SE → use it (finite cluster-robust variance)
+    #   NaN     → propagate NaN so the caller can NaN-out the inference
+    #             surface rather than silently falling back to the
+    #             unit-level SE (per feedback_no_silent_failures: when
+    #             clustered variance is undefined — e.g., G<2, lonely-PSU
+    #             removed all strata — the user-facing per-cell SE must
+    #             reflect that, not silently revert to a different
+    #             estimator).
+    #   None    → malformed (negative variance or other invariant
+    #             violation); caller falls back to the unit-level SE.
+    if np.isnan(var):
+        return float("nan")
+    if var < 0:
         return None
     return float(np.sqrt(var))
 
@@ -1124,13 +1137,15 @@ class CallawaySantAnna(
             rsu_for_gt = precomputed.get("resolved_survey_unit")
             if rsu_for_gt is not None and getattr(rsu_for_gt, "psu", None) is not None:
                 se_cluster = _cluster_robust_se_from_per_gt_if(inf_info_gt, rsu_for_gt)
-                if se_cluster is not None and np.isfinite(se_cluster):
+                # se_cluster is float (use), NaN (cluster-undefined, propagate),
+                # or None (malformed, keep unit-level). Per the helper's
+                # contract, NaN is a deliberate signal that the survey/PSU
+                # variance is unidentified (e.g., G<2, lonely-PSU removed
+                # all strata) — propagating NaN here causes safe_inference
+                # to NaN-out the full per-cell inference surface, which is
+                # the documented CS contract (feedback_no_silent_failures).
+                if se_cluster is not None:
                     se = se_cluster
-                    # gte_entry["se"] was set with the unit-level value
-                    # at the gte_entry construction above; overwrite with
-                    # the cluster-aware value so the public surface
-                    # group_time_effects[(g,t)]["se"] reflects the
-                    # documented CR1 contract.
                     group_time_effects[(g, t)]["se"] = se
 
             atts.append(att)
@@ -1483,7 +1498,10 @@ class CallawaySantAnna(
                 rsu_for_gt = precomputed.get("resolved_survey_unit")
                 if rsu_for_gt is not None and getattr(rsu_for_gt, "psu", None) is not None:
                     se_cluster = _cluster_robust_se_from_per_gt_if(inf_info_gt, rsu_for_gt)
-                    if se_cluster is not None and np.isfinite(se_cluster):
+                    # Propagate NaN (cluster-undefined) per the helper's
+                    # contract — see _compute_all_att_gt_vectorized site
+                    # for the same pattern.
+                    if se_cluster is not None:
                         se = se_cluster
                         group_time_effects[(g, t)]["se"] = se
 
@@ -1932,7 +1950,11 @@ class CallawaySantAnna(
                             and inf_info is not None
                         ):
                             se_cluster = _cluster_robust_se_from_per_gt_if(inf_info, rs_for_gt)
-                            if se_cluster is not None and np.isfinite(se_cluster):
+                            # Propagate NaN (cluster-undefined) per the
+                            # helper's contract — see
+                            # _compute_all_att_gt_vectorized for the
+                            # pattern.
+                            if se_cluster is not None:
                                 se_gt = se_cluster
 
                         t_stat, p_val, ci = safe_inference(
@@ -2040,7 +2062,11 @@ class CallawaySantAnna(
                             and inf_info is not None
                         ):
                             se_cluster = _cluster_robust_se_from_per_gt_if(inf_info, rsu_for_gt)
-                            if se_cluster is not None and np.isfinite(se_cluster):
+                            # Propagate NaN (cluster-undefined) per the
+                            # helper's contract — see
+                            # _compute_all_att_gt_vectorized for the
+                            # pattern.
+                            if se_cluster is not None:
                                 se_gt = se_cluster
 
                         t_stat, p_val, ci = safe_inference(

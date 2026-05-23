@@ -832,25 +832,26 @@ def _extract_event_study_params(
                         "or use balance_e to restrict to a balanced subset."
                     )
 
-                # Extract inference df. Prefer the dedicated ``df_inference``
-                # field over ``survey_metadata.df_survey`` so that bare-
-                # ``cluster=`` CS fits (which populate ``df_inference`` but
-                # leave ``survey_metadata`` = None to preserve the survey/
-                # non-survey contract for ``DiagnosticReport`` /
-                # ``summary()``) still get cluster-level critical values
-                # rather than silently reverting to normal-theory.
-                # Replicate designs with undefined df (rank <= 1) use
-                # sentinel df=0 so _get_critical_value returns NaN,
-                # matching the safe_inference contract.
+                # Extract inference df. Prefer ``survey_metadata.df_survey``
+                # (the actual CS-internal df, which may have been tightened
+                # post-resolve for replicate designs) over the dedicated
+                # ``df_inference`` field. ``df_inference`` is the FALLBACK
+                # carrier for bare-``cluster=`` CS fits where
+                # ``survey_metadata`` is intentionally None (preserving the
+                # survey/non-survey contract for ``DiagnosticReport`` /
+                # ``summary()``). Mirrors the MPD branch preference order
+                # at ``_extract_event_study_params`` so all branches agree.
+                # Replicate designs with undefined df → sentinel 0.
                 df_survey = None
-                df_inference = getattr(results, "df_inference", None)
-                if df_inference is not None:
-                    df_survey = int(df_inference)
-                elif hasattr(results, "survey_metadata") and results.survey_metadata is not None:
+                if hasattr(results, "survey_metadata") and results.survey_metadata is not None:
                     sm = results.survey_metadata
                     df_survey = getattr(sm, "df_survey", None)
                     if df_survey is None and getattr(sm, "replicate_method", None) is not None:
                         df_survey = 0  # undefined replicate df → NaN inference
+                if df_survey is None:
+                    df_inference = getattr(results, "df_inference", None)
+                    if df_inference is not None:
+                        df_survey = int(df_inference)
 
                 return (
                     beta_hat,
@@ -1000,25 +1001,26 @@ def _extract_event_study_params(
                 beta_hat = np.array(effects)
                 sigma = np.diag(np.array(ses) ** 2)
 
-                # Extract inference df. Prefer the dedicated ``df_inference``
-                # field over ``survey_metadata.df_survey`` so that bare-
-                # ``cluster=`` CS fits (which populate ``df_inference`` but
-                # leave ``survey_metadata`` = None to preserve the survey/
-                # non-survey contract for ``DiagnosticReport`` /
-                # ``summary()``) still get cluster-level critical values
-                # rather than silently reverting to normal-theory.
-                # Replicate designs with undefined df (rank <= 1) use
-                # sentinel df=0 so _get_critical_value returns NaN,
-                # matching the safe_inference contract.
+                # Extract inference df. Prefer ``survey_metadata.df_survey``
+                # (the actual CS-internal df, which may have been tightened
+                # post-resolve for replicate designs) over the dedicated
+                # ``df_inference`` field. ``df_inference`` is the FALLBACK
+                # carrier for bare-``cluster=`` CS fits where
+                # ``survey_metadata`` is intentionally None (preserving the
+                # survey/non-survey contract for ``DiagnosticReport`` /
+                # ``summary()``). Mirrors the MPD branch preference order
+                # at ``_extract_event_study_params`` so all branches agree.
+                # Replicate designs with undefined df → sentinel 0.
                 df_survey = None
-                df_inference = getattr(results, "df_inference", None)
-                if df_inference is not None:
-                    df_survey = int(df_inference)
-                elif hasattr(results, "survey_metadata") and results.survey_metadata is not None:
+                if hasattr(results, "survey_metadata") and results.survey_metadata is not None:
                     sm = results.survey_metadata
                     df_survey = getattr(sm, "df_survey", None)
                     if df_survey is None and getattr(sm, "replicate_method", None) is not None:
                         df_survey = 0  # undefined replicate df → NaN inference
+                if df_survey is None:
+                    df_inference = getattr(results, "df_inference", None)
+                    if df_inference is not None:
+                        df_survey = int(df_inference)
 
                 return (
                     beta_hat,

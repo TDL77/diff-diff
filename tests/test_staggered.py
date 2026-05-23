@@ -4941,12 +4941,11 @@ class TestCallawaySantAnnaClusterSafetyGates:
         units_per_cluster = 4
         n_units = n_clusters * units_per_cluster
         state_ids = np.repeat(np.arange(n_clusters), units_per_cluster)
-        unit_data = pd.DataFrame(
-            {"unit": np.arange(n_units), "state": state_ids}
-        )
+        unit_data = pd.DataFrame({"unit": np.arange(n_units), "state": state_ids})
 
         synthetic = SurveyDesign(psu="state", weight_type="pweight")
         rsu, _, _, _ = _resolve_survey_for_fit(synthetic, unit_data, "analytical")
+        assert rsu is not None
         assert rsu.psu is not None and len(rsu.psu) == n_units
 
         # Hand-crafted per-(g,t) IF: 5 treated + 10 control units in this cell
@@ -4982,6 +4981,55 @@ class TestCallawaySantAnnaClusterSafetyGates:
             "— any divergence means the helper bypasses the shared "
             "G/(G-1) finite-sample correction + PSU centering machinery."
         )
+
+    def test_per_gt_se_propagates_nan_when_cluster_variance_undefined(self):
+        """When clustered design-based variance is undefined (e.g., G=1
+        — single cluster, no within-PSU variability), the per-(g,t) SE
+        must propagate NaN through the full inference surface (se,
+        t_stat, p_value, conf_int) instead of silently falling back to
+        the unit-level SE. Verifies the helper's NaN-propagation
+        contract end-to-end on a fit. Per CI codex R5 P1/P2 findings."""
+        # Build a panel where all units belong to a single cluster.
+        # compute_survey_if_variance returns NaN for G<2 designs (lonely
+        # PSU removed or single-cluster) — the per-cell helper must
+        # propagate this NaN rather than retain the unit-level SE.
+        data = _generate_clustered_staggered_data(n_clusters=2, units_per_cluster=10, seed=109)
+        # Force ALL units into a single cluster (G=1)
+        data["single_cluster"] = 0
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # lonely-PSU warnings are expected
+            cs = CallawaySantAnna(cluster="single_cluster")
+            res = cs.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+            )
+
+        # At least one (g, t) cell should have NaN inference under the
+        # undefined-variance contract. If ALL cells retain finite SE, the
+        # helper is silently falling back to unit-level on the NaN branch.
+        nan_cells = [gt for gt, eff in res.group_time_effects.items() if not np.isfinite(eff["se"])]
+        assert len(nan_cells) > 0, (
+            "Expected at least one (g, t) cell with NaN SE under G=1 "
+            "(undefined clustered variance), but all cells retained "
+            "finite unit-level SE — the helper's NaN-propagation "
+            "contract is broken (cells silently fall back to unit-level)."
+        )
+
+        # For each NaN-SE cell, the full inference surface must be NaN
+        # (matches the safe_inference contract for non-finite SE).
+        for gt in nan_cells:
+            eff = res.group_time_effects[gt]
+            assert np.isnan(eff["se"]), f"{gt}: se should be NaN"
+            assert np.isnan(eff["t_stat"]), f"{gt}: t_stat should be NaN"
+            assert np.isnan(eff["p_value"]), f"{gt}: p_value should be NaN"
+            ci_lo, ci_hi = eff["conf_int"]
+            assert np.isnan(ci_lo) and np.isnan(
+                ci_hi
+            ), f"{gt}: CI bounds should both be NaN, got ({ci_lo}, {ci_hi})"
 
     def test_survey_design_psu_wins_under_bootstrap(self):
         """Bootstrap path: when survey_design=SurveyDesign(psu=Y) is
