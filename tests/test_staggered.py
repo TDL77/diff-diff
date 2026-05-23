@@ -5031,6 +5031,63 @@ class TestCallawaySantAnnaClusterSafetyGates:
                 ci_hi
             ), f"{gt}: CI bounds should both be NaN, got ({ci_lo}, {ci_hi})"
 
+    def test_bare_cluster_bootstrap_propagates_nan_when_g_less_than_2(self):
+        """Bootstrap path NaN propagation: when bare cluster= produces
+        G=1 (single cluster), the PSU-multiplier-weights bootstrap path
+        at bootstrap_utils.py:557-562 returns zero PSU multipliers and
+        the downstream zero-SE guards at :365-377/:472-485 must NaN-out
+        the full bootstrap inference surface (overall_se, per-(g,t),
+        aggregate). Per CI codex R7 P3 finding."""
+        data = _generate_clustered_staggered_data(n_clusters=2, units_per_cluster=10, seed=113)
+        data["single_cluster"] = 0  # Force G=1
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # lonely-PSU + low-n_bootstrap warnings expected
+            cs = CallawaySantAnna(cluster="single_cluster", n_bootstrap=99, seed=113)
+            res = cs.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                aggregate="event_study",
+            )
+
+        # Overall bootstrap inference must be NaN-consistent
+        assert not np.isfinite(res.overall_se), (
+            f"Bootstrap overall_se should be NaN under G=1 cluster, " f"got {res.overall_se}."
+        )
+        assert np.isnan(res.overall_t_stat)
+        assert np.isnan(res.overall_p_value)
+        assert np.isnan(res.overall_conf_int[0]) and np.isnan(res.overall_conf_int[1])
+
+        # At least one (g, t) cell must have NaN inference (undefined
+        # clustered variance propagating through either the bootstrap or
+        # analytical layer)
+        nan_gt_cells = [
+            gt for gt, eff in res.group_time_effects.items() if not np.isfinite(eff["se"])
+        ]
+        assert len(nan_gt_cells) > 0, (
+            "Expected at least one (g, t) cell with NaN SE under "
+            "G=1 cluster + bootstrap — undefined clustered variance "
+            "must propagate through the bootstrap inference surface."
+        )
+        for gt in nan_gt_cells:
+            eff = res.group_time_effects[gt]
+            assert np.isnan(eff["se"])
+            assert np.isnan(eff["t_stat"])
+            assert np.isnan(eff["p_value"])
+            assert np.isnan(eff["conf_int"][0]) and np.isnan(eff["conf_int"][1])
+
+        # Requested aggregate (event-study) must also be NaN-consistent
+        # for any aggregated horizon whose underlying cells are NaN
+        if res.event_study_effects:
+            for h, ev in res.event_study_effects.items():
+                if not np.isfinite(ev["se"]):
+                    assert np.isnan(ev["t_stat"])
+                    assert np.isnan(ev["p_value"])
+                    assert np.isnan(ev["conf_int"][0]) and np.isnan(ev["conf_int"][1])
+
     def test_survey_design_psu_wins_under_bootstrap(self):
         """Bootstrap path: when survey_design=SurveyDesign(psu=Y) is
         explicit AND cluster=X is also set with a different partition,

@@ -326,11 +326,36 @@ class CallawaySantAnnaBootstrapMixin:
             or resolved_survey_unit.fpc is not None
         )
 
+        # When the bootstrap routes through PSU-multiplier weights, the
+        # bootstrap variance is unidentified if there are fewer than 2
+        # PSUs (single-cluster designs collapse all multiplier draws to
+        # constants → ≈0 variance from BLAS roundoff, NOT NaN). Without
+        # this guard, downstream safe_inference would silently produce
+        # tight CIs and near-zero p-values for a variance that's actually
+        # undefined. Capture the flag here and NaN-out all bootstrap
+        # inference surfaces before return (per feedback_no_silent_failures).
+        _bootstrap_cluster_variance_unidentified = False
+
         if _use_survey_bootstrap:
             # PSU-level multiplier weights
             psu_weights, psu_ids = _generate_survey_multiplier_weights_batch(
                 self.n_bootstrap, resolved_survey_unit, self.bootstrap_weights, rng
             )
+            if len(psu_ids) < 2:
+                import warnings as _warnings
+
+                _warnings.warn(
+                    f"CallawaySantAnna bootstrap with survey/cluster design "
+                    f"has only {len(psu_ids)} PSU(s); bootstrap variance is "
+                    "unidentified. All bootstrap inference fields "
+                    "(overall_se, group_time_ses, event_study_ses, "
+                    "group_effect_ses, and their CIs / p-values) will be "
+                    "NaN. Use n_bootstrap=0 (analytical IF variance) or "
+                    "a design with at least 2 PSUs.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                _bootstrap_cluster_variance_unidentified = True
             # Build unit → PSU column map
             if resolved_survey_unit.psu is not None:
                 unit_psu = resolved_survey_unit.psu
@@ -531,6 +556,28 @@ class CallawaySantAnnaBootstrapMixin:
                     )
                 elif n_valid > 0:
                     cband_crit_value = float(np.quantile(sup_t_dist[finite_mask], 1 - self.alpha))
+
+        # NaN-out all bootstrap inference surfaces when clustered
+        # bootstrap variance is unidentified (G<2 PSUs). See guard
+        # added at the top of the bootstrap weight generation.
+        if _bootstrap_cluster_variance_unidentified:
+            overall_se = np.nan
+            overall_ci = (np.nan, np.nan)
+            overall_p_value = np.nan
+            gt_ses = {gt: np.nan for gt in gt_ses} if gt_ses else gt_ses
+            gt_cis = (
+                {gt: (np.nan, np.nan) for gt in gt_cis} if gt_cis else gt_cis
+            )
+            gt_p_values = {gt: np.nan for gt in gt_p_values} if gt_p_values else gt_p_values
+            if event_study_ses:
+                event_study_ses = {k: np.nan for k in event_study_ses}
+                event_study_cis = {k: (np.nan, np.nan) for k in event_study_cis}
+                event_study_p_values = {k: np.nan for k in event_study_p_values}
+            if group_effect_ses:
+                group_effect_ses = {k: np.nan for k in group_effect_ses}
+                group_effect_cis = {k: (np.nan, np.nan) for k in group_effect_cis}
+                group_effect_p_values = {k: np.nan for k in group_effect_p_values}
+            cband_crit_value = None
 
         return CSBootstrapResults(
             n_bootstrap=self.n_bootstrap,
