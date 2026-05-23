@@ -944,8 +944,21 @@ class WooldridgeDiD:
                 # Never-treated cohort uses no trend (acts as control trend).
                 cohort_vals = sample[cohort].values
                 time_vals = sample[time].values.astype(float)
+                # All-eventually-treated normalization: when there is no
+                # never-treated baseline cohort (g=0 not in sample), the
+                # full set of G trend columns ``dg_i · t`` is collinear
+                # with the time fixed effects (paper W2025 Section 5.4:
+                # "all variables in regression (5.3) involving dT_i get
+                # dropped" when the last cohort serves as control). Drop
+                # the LAST cohort's trend column deterministically — that
+                # cohort then acts as the trend baseline, mirroring the
+                # paper's all-treated normalization rule and matching the
+                # ``_build_interaction_matrix`` last-cohort handling for
+                # cohort × time interactions.
+                has_never_treated = (sample[cohort] == 0).any()
+                trend_groups = groups if has_never_treated else groups[:-1]
                 trend_cols: List[np.ndarray] = []
-                for g in groups:
+                for g in trend_groups:
                     trend_col = (cohort_vals == g).astype(float) * time_vals
                     trend_cols.append(trend_col.reshape(-1, 1))
                     cohort_trend_col_names.append(f"trend_g{g}")
@@ -1019,6 +1032,14 @@ class WooldridgeDiD:
         # Trend columns live at the tail of the full-dummy design after
         # the unit + time dummies. Empty dict when cohort_trends=False
         # (matches the no-op contract under default).
+        #
+        # ``trend_groups`` mirrors the design-build branch above: when
+        # there is no never-treated baseline cohort the last cohort's
+        # trend column is dropped per paper W2025 Section 5.4's
+        # all-treated normalization rule. ``cohort_trend_coefs`` only
+        # surfaces the identified cohorts; the dropped cohort's slope
+        # is the baseline (zero in deviation form) and is intentionally
+        # absent from the dict.
         cohort_trend_coefs: Dict[Any, float] = {}
         if self.cohort_trends and use_full_dummy:
             n_units_for_trend = int(sample[unit].nunique())
@@ -1026,7 +1047,9 @@ class WooldridgeDiD:
             trend_start_idx = (
                 1 + X_design.shape[1] + (n_units_for_trend - 1) + (n_times_for_trend - 1)
             )
-            for i, g in enumerate(groups):
+            has_never_treated_trend = (sample[cohort] == 0).any()
+            trend_groups_extract = groups if has_never_treated_trend else groups[:-1]
+            for i, g in enumerate(trend_groups_extract):
                 idx = trend_start_idx + i
                 if idx < len(coefs):
                     cohort_trend_coefs[g] = float(coefs[idx])

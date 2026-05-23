@@ -1602,6 +1602,85 @@ class TestW2025Section8HeterogeneousTrends:
             "leads."
         )
 
+    def test_cohort_trends_true_all_treated_drops_last_cohort_trend(self) -> None:
+        """CI R4 P1 fix: ``cohort_trends=True`` on all-eventually-treated panel drops last-cohort trend.
+
+        Paper W2025 Section 5.4: when all units are eventually treated
+        and the last cohort serves as control, "all variables in
+        regression (5.3) involving ``dT_i`` get dropped." The library
+        mirrors this by deterministically dropping the last cohort's
+        ``dg_i · t`` interaction column when no never-treated baseline
+        exists; ``cohort_trend_coefs`` surfaces ``G - 1`` entries
+        instead of the rank-deficient ``G``.
+
+        Uses the 5-period heterogeneous-trends DGP with cohort 0
+        dropped — gives treated cohorts {3, 4}, each with ≥ 2
+        pre-periods so the R2 per-cohort identification guard passes.
+        """
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 17)
+        full_panel = _make_heterogeneous_trends_panel(rng, n_per_cohort=80, sigma=0.05)
+        # Drop never-treated rows to construct an all-eventually-treated panel
+        full_panel = full_panel.loc[full_panel["cohort"] > 0].reset_index(drop=True)
+        assert (
+            0 not in full_panel["cohort"].unique()
+        ), "DGP precondition: all-treated panel must have no cohort=0"
+        treated_cohorts = sorted(c for c in full_panel["cohort"].unique())
+        assert treated_cohorts == [
+            3,
+            4,
+        ], f"DGP precondition: treated cohorts should be [3, 4], got {treated_cohorts}"
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            res = WooldridgeDiD(method="ols", cohort_trends=True).fit(
+                full_panel,
+                outcome="y",
+                unit="unit",
+                time="time",
+                cohort="cohort",
+            )
+        # Last cohort (g=4) dropped per paper Section 5.4 — only g=3 in dict
+        assert set(res.cohort_trend_coefs.keys()) == {3}, (
+            f"cohort_trend_coefs should drop the last cohort (g=4) on "
+            f"all-treated panels; got keys={set(res.cohort_trend_coefs.keys())}"
+        )
+        assert np.isfinite(
+            res.cohort_trend_coefs[3]
+        ), f"cohort_trend_coefs[3]={res.cohort_trend_coefs[3]} should be finite"
+        # Stable ATT output: at least one treated cell estimated cleanly
+        treated_cells_finite = [
+            res.group_time_effects[k]["att"]
+            for k in res.group_time_effects
+            if k[0] > 0 and k[1] >= k[0] and np.isfinite(res.group_time_effects[k]["att"])
+        ]
+        assert len(treated_cells_finite) >= 1, (
+            "all-treated panel + cohort_trends=True should produce at "
+            "least one finite treated-cell ATT"
+        )
+
+    def test_cohort_trends_true_with_never_treated_keeps_all_cohort_trends(self) -> None:
+        """CI R4 P1 fix companion: with never-treated baseline, all G cohorts surface.
+
+        When a never-treated cohort (g=0) is present, the all-treated
+        normalization rule doesn't fire — all G treated cohorts get
+        their own trend column relative to the never-treated baseline.
+        """
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 18)
+        panel = _make_heterogeneous_trends_panel(rng, n_per_cohort=80, sigma=0.05)
+        assert (
+            0 in panel["cohort"].unique()
+        ), "DGP precondition: panel must include cohort=0 (never-treated)"
+        res = WooldridgeDiD(method="ols", cohort_trends=True).fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        # All treated cohorts (g=3 and g=4) keep their trend columns
+        assert set(res.cohort_trend_coefs.keys()) == {3, 4}, (
+            f"cohort_trend_coefs should include both treated cohorts "
+            f"when never-treated baseline exists; got keys="
+            f"{set(res.cohort_trend_coefs.keys())}"
+        )
+        for g, slope in res.cohort_trend_coefs.items():
+            assert np.isfinite(slope), f"cohort {g}: slope={slope}"
+
     def test_plot_event_study_cohort_share_to_cell_round_trip_restores_placebo_leads(
         self,
     ) -> None:

@@ -1573,6 +1573,7 @@ where `g(·)` is the link inverse (logistic or exp), `η_i` is the individual li
 - **Result attribute:** `WooldridgeDiDResults.cohort_trend_coefs: Dict[g → δ_g]` populated under `cohort_trends=True`; empty dict otherwise.
 - **Note:** Polynomial-trend extensions (`"quadratic"`, `"cubic"` per paper p. 2572 footnote) are NOT yet exposed — `cohort_trends` is a binary `True/False` flag for linear `dg_i · t` only.
 - **Note:** `cohort_trends=True` + `survey_design` is **NOT yet supported** (raises `NotImplementedError` at `fit()`). The full-dummy auto-route composed with the survey TSL variance has not been validated against R-parity goldens. Tracked in TODO follow-up.
+- **Note:** Identification + baseline normalization for `cohort_trend_coefs` on all-eventually-treated panels: when a never-treated cohort (`g = 0`) is present, **all** `G` treated cohorts get a `dg_i · t` interaction column and `cohort_trend_coefs[g]` reports each cohort's linear slope relative to the never-treated baseline (absorbed by time FE). When **no** never-treated cohort exists, the **last cohort's** trend column is dropped deterministically per paper W2025 Section 5.4 ("all variables in regression (5.3) involving `dT_i` get dropped"); that cohort serves as the trend baseline, and `cohort_trend_coefs` surfaces `G - 1` entries (the last cohort is absent — its slope is the baseline in deviation form). Mirrors the all-treated normalization the library applies to cohort × time interactions.
 
 ### Deviations from the paper / from R / library extensions
 
