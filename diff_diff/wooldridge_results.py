@@ -106,16 +106,24 @@ class WooldridgeDiDResults:
     # W2025 ``dg_i · t`` interactions on the OLS path). False on the
     # default ``cohort_trends=False`` fit and on logit/Poisson paths
     # (which reject ``cohort_trends=True`` at the constructor).
-    # ``active_aggregation_weights`` records the most recent
-    # ``aggregate(weights=...)`` scheme that wrote to the ``overall_*``
-    # / ``event_study_effects`` / ``group_effects`` / ``calendar_effects``
-    # fields ("cell" by default; flips to "cohort_share" after an opt-in
-    # cohort-share aggregation). Surfaced in ``summary()`` so downstream
-    # consumers can tell which estimand the printed rows represent
-    # without inspecting ``cohort_trend_coefs`` (which is legitimately
-    # empty on all-treated panels per the last-cohort drop rule).
+    #
+    # ``aggregation_weights`` records the weighting scheme PER cached
+    # aggregation surface so ``summary()`` / ``to_dataframe()`` /
+    # ``__repr__()`` can label each surface correctly under mixed-order
+    # ``aggregate(weights=...)`` calls. Keys: ``"simple"`` (matches the
+    # ``overall_*`` fields), ``"group"``, ``"calendar"``, ``"event"``.
+    # The fit-time ``overall_*`` is cell-weighted, so ``"simple"`` is
+    # initialized to ``"cell"`` and only flips after a successful
+    # ``aggregate(type="simple", weights="cohort_share")`` call. The
+    # other keys are populated lazily by ``aggregate()``. Mutation is
+    # atomic — only set after the aggregation passes all validation
+    # AND completes successfully, so failed cohort_share calls on
+    # survey-weighted or bootstrap fits leave metadata unchanged
+    # (codex CI R7 P1 fix).
     cohort_trends: bool = field(default=False, repr=False)
-    active_aggregation_weights: str = field(default="cell", repr=False)
+    aggregation_weights: Dict[str, str] = field(
+        default_factory=lambda: {"simple": "cell"}, repr=False
+    )
 
     # ------------------------------------------------------------------ #
     # Internal — used by aggregate() for delta-method SEs                 #
@@ -211,14 +219,6 @@ class WooldridgeDiDResults:
                 f"weighting; use weights='cell' (default) for "
                 f"jwdid_estat-style cell-count weighting."
             )
-
-        # Record the active aggregation weighting scheme on the Results
-        # object so downstream reporting (``summary()`` / ``to_dataframe()``
-        # / ``__repr__``) can label the persisted ``overall_*`` /
-        # ``event_study_effects`` / ``group_effects`` / ``calendar_effects``
-        # fields with the right estimand. Stamped AFTER the raise-paths
-        # above so invalid combinations don't pollute the metadata.
-        self.active_aggregation_weights = weights
 
         gt = self.group_time_effects
         cell_weights = self._gt_weights
@@ -487,6 +487,8 @@ class WooldridgeDiDResults:
                     self.overall_t_stat = eff["t_stat"]
                     self.overall_p_value = eff["p_value"]
                     self.overall_conf_int = eff["conf_int"]
+                    # Atomic metadata mutation — only after successful write.
+                    self.aggregation_weights["simple"] = weights
 
         elif type == "group":
             cells_by_g: Dict[Any, List[Tuple[Any, Any]]] = {}
@@ -507,6 +509,7 @@ class WooldridgeDiDResults:
                 se = _agg_se(w_vec)
                 result[g] = _build_effect(att, se, dofs.get(g))
             self.group_effects = result
+            self.aggregation_weights["group"] = weights
 
         elif type == "calendar":
             cells_by_t: Dict[Any, List[Tuple[Any, Any]]] = {}
@@ -527,6 +530,7 @@ class WooldridgeDiDResults:
                 se = _agg_se(w_vec)
                 result[t] = _build_effect(att, se, dofs.get(t))
             self.calendar_effects = result
+            self.aggregation_weights["calendar"] = weights
 
         elif type == "event":
             # Paper W2025 Eq. 7.6 cohort-share-by-exposure weighting is
@@ -562,6 +566,7 @@ class WooldridgeDiDResults:
                 se = _agg_se(w_vec)
                 result[k] = _build_effect(att, se, dofs.get(k))
             self.event_study_effects = result
+            self.aggregation_weights["event"] = weights
 
         return self
 
@@ -582,7 +587,7 @@ class WooldridgeDiDResults:
             f"Treated units:   {self.n_treated_units}",
             f"Control units:   {self.n_control_units}",
             f"Cohort trends:   {self.cohort_trends}",
-            f"Aggregation w:   {self.active_aggregation_weights}",
+            f"Aggregation w:   {self.aggregation_weights.get(aggregation, 'cell')}",
             "-" * 70,
         ]
 

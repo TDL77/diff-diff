@@ -1585,46 +1585,83 @@ class TestW2025Section8HeterogeneousTrends:
             f"normal-theory CI bands; got {se_arg_cell}"
         )
 
-    def test_results_metadata_records_cohort_trends_and_active_aggregation_weights(
+    def test_results_metadata_records_cohort_trends_and_per_surface_weights(
         self,
     ) -> None:
-        """CI R6 P1 fix: Results object surfaces cohort_trends + active_aggregation_weights.
+        """CI R6/R7 P1 fix: Results surfaces cohort_trends + per-surface aggregation_weights.
 
-        Downstream consumers need to know which model produced
-        ``overall_*`` / ``event_study_effects`` / ``group_effects`` /
-        ``calendar_effects`` (cohort_trends on/off) and which weighting
-        scheme is currently cached (``"cell"`` vs ``"cohort_share"``).
-        ``cohort_trend_coefs`` is NOT a reliable proxy for cohort_trends
-        because the all-treated drop rule legitimately empties the dict
-        on G=1-after-drop panels.
+        ``aggregation_weights`` is keyed by aggregation type so
+        ``summary()`` can label each cached surface correctly under
+        mixed-order ``aggregate(weights=...)`` calls.
         """
         rng = np.random.default_rng(_BASE_SEED_SECTION8 + 20)
         panel = _make_heterogeneous_trends_panel(rng, n_per_cohort=80, sigma=0.05)
-        # Default fit: cohort_trends=False, default aggregation weights "cell"
         res_default = WooldridgeDiD(method="ols").fit(
             panel, outcome="y", unit="unit", time="time", cohort="cohort"
         )
         assert res_default.cohort_trends is False
-        assert res_default.active_aggregation_weights == "cell"
-        # cohort_trends=True fit: metadata reflects it
+        assert res_default.aggregation_weights == {"simple": "cell"}
         res_trends = WooldridgeDiD(method="ols", cohort_trends=True).fit(
             panel, outcome="y", unit="unit", time="time", cohort="cohort"
         )
         assert res_trends.cohort_trends is True
-        assert res_trends.active_aggregation_weights == "cell"
-        # Opt-in cohort_share aggregation flips active_aggregation_weights
+        assert res_trends.aggregation_weights == {"simple": "cell"}
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning)
             res_trends.aggregate("simple", weights="cohort_share")
-        assert res_trends.active_aggregation_weights == "cohort_share"
-        # Surface in summary()
+        assert res_trends.aggregation_weights["simple"] == "cohort_share"
         summary_text = res_trends.summary("simple")
-        assert (
-            "Cohort trends:   True" in summary_text
-        ), f"summary() should surface cohort_trends; got:\n{summary_text}"
-        assert "Aggregation w:   cohort_share" in summary_text, (
-            f"summary() should surface active_aggregation_weights; got:\n" f"{summary_text}"
+        assert "Cohort trends:   True" in summary_text
+        assert "Aggregation w:   cohort_share" in summary_text
+
+    def test_aggregation_weights_per_surface_mixed_order(self) -> None:
+        """CI R7 P1 regression: per-surface metadata under mixed-order aggregate() calls.
+
+        Sequence:
+        1. fit() → simple weights default "cell"
+        2. aggregate("event", weights="cohort_share") → event flips but
+           simple stays "cell"
+        3. summary("simple") shows "cell"; summary("event") shows
+           "cohort_share"
+        """
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 21)
+        panel = _make_three_cohort_four_period_panel(rng, n_per_cohort=80, sigma=0.05)
+        res = WooldridgeDiD(method="ols").fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
         )
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            res.aggregate("event", weights="cohort_share")
+        assert res.aggregation_weights["event"] == "cohort_share"
+        assert res.aggregation_weights["simple"] == "cell", (
+            "simple weight must remain 'cell' after event aggregation — "
+            "overall_* is still fit-time cell-weighted"
+        )
+        assert "Aggregation w:   cell" in res.summary("simple")
+        assert "Aggregation w:   cohort_share" in res.summary("event")
+
+    def test_aggregation_weights_failed_cohort_share_leaves_metadata_unchanged(
+        self,
+    ) -> None:
+        """CI R7 P1 regression: failed cohort_share call is atomic — metadata unchanged.
+
+        Validation failures (``aggregate("group", weights="cohort_share")``
+        — paper has no group cohort-share formula) raise ``ValueError``
+        BEFORE the per-surface metadata is updated.
+        """
+        rng = np.random.default_rng(_BASE_SEED_SECTION8 + 22)
+        panel = _make_three_cohort_four_period_panel(rng, n_per_cohort=80, sigma=0.05)
+        res = WooldridgeDiD(method="ols").fit(
+            panel, outcome="y", unit="unit", time="time", cohort="cohort"
+        )
+        snap = dict(res.aggregation_weights)
+        with pytest.raises(ValueError, match=r"cohort_share.*simple.*event"):
+            res.aggregate("group", weights="cohort_share")
+        assert dict(res.aggregation_weights) == snap, (
+            f"failed cohort_share call must not change aggregation_weights; "
+            f"before={snap} after={dict(res.aggregation_weights)}"
+        )
+        assert "group" not in res.aggregation_weights
 
     def test_plot_event_study_propagates_weights_kwarg(self) -> None:
         """CI R1 P1 fix: ``plot_event_study(weights=...)`` propagates through aggregate().
