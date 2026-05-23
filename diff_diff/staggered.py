@@ -118,11 +118,23 @@ def _cluster_robust_se_from_per_gt_if(
     ``treated_idx`` / ``control_idx`` in ``inf_info`` to be valid
     offsets into ``resolved_survey.psu``.
 
-    Returns ``None`` when ``inf_info`` lacks required IF fields, when
-    ``resolved_survey.psu`` is None, when index alignment cannot be
-    verified, or when ``compute_survey_if_variance`` returns NaN (caller
-    falls back to the unit-level SE returned by the underlying estimation
-    method).
+    Return contract (callers depend on this distinction):
+
+    * **float SE** — finite cluster-robust variance; caller uses it.
+    * **NaN** — ``compute_survey_if_variance`` returned NaN (clustered
+      variance unidentified, e.g., G<2 or lonely-PSU removed all strata).
+      Caller MUST propagate this NaN through to ``safe_inference`` so
+      the per-cell inference surface (se / t_stat / p_value / conf_int)
+      is NaN-consistent — NEVER fall back to the unit-level SE. Falling
+      back would silently report a different estimator's variance under
+      a clustered request (``feedback_no_silent_failures``).
+    * **None** — malformed inputs or invariant violations:
+      ``inf_info`` lacks required IF fields, ``resolved_survey.psu`` is
+      None, index alignment cannot be verified, or
+      ``compute_survey_if_variance`` returned a negative variance. In
+      these cases the helper cannot evaluate the contract; caller falls
+      back to the unit-level SE returned by the underlying estimation
+      method (no PSU is in play, so unit-level is the documented default).
     """
     if (
         inf_info is None
