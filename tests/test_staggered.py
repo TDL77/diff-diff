@@ -4172,9 +4172,7 @@ class TestCallawaySantAnnaSafeInvFallback:
     def test_collinear_covariates_emit_safe_inv_warning(self):
         """Perfectly collinear covariates should trigger the aggregate
         `_safe_inv` lstsq-fallback warning across analytical SE paths."""
-        data = generate_staggered_data(
-            n_units=150, n_periods=6, n_cohorts=3, seed=55
-        )
+        data = generate_staggered_data(n_units=150, n_periods=6, n_cohorts=3, seed=55)
         rng = np.random.default_rng(0)
         # Add a covariate and a redundant (collinear) copy — forces rank-
         # deficient X'WX in the OR bread and the PS Hessian within at
@@ -4196,7 +4194,8 @@ class TestCallawaySantAnnaSafeInvFallback:
                 covariates=["x1", "x2"],
             )
         fallback_warnings = [
-            w for w in caught
+            w
+            for w in caught
             if "Rank-deficient matrix encountered" in str(w.message)
             and "analytical SE paths" in str(w.message)
         ]
@@ -4209,9 +4208,7 @@ class TestCallawaySantAnnaSafeInvFallback:
     def test_well_conditioned_no_safe_inv_warning(self):
         """Clean data should NOT trigger the aggregate warning —
         regression-safety for the happy path."""
-        data = generate_staggered_data(
-            n_units=200, n_periods=6, n_cohorts=3, seed=42
-        )
+        data = generate_staggered_data(n_units=200, n_periods=6, n_cohorts=3, seed=42)
         cs = CallawaySantAnna(estimation_method="dr")
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
@@ -4223,11 +4220,558 @@ class TestCallawaySantAnnaSafeInvFallback:
                 first_treat="first_treat",
             )
         fallback_warnings = [
-            w for w in caught
+            w
+            for w in caught
             if "Rank-deficient matrix encountered" in str(w.message)
             and "analytical SE paths" in str(w.message)
         ]
         assert fallback_warnings == [], (
             f"Unexpected _safe_inv fallback warning on clean data: "
             f"{[str(w.message) for w in fallback_warnings]}"
+        )
+
+
+def _generate_clustered_staggered_data(
+    n_clusters: int = 20,
+    units_per_cluster: int = 5,
+    n_periods: int = 8,
+    cluster_effect_sd: float = 3.0,
+    seed: int = 7,
+) -> pd.DataFrame:
+    """
+    Generate a staggered panel with strong intra-cluster correlation.
+
+    Each "state" cluster contributes a shared random effect to every
+    unit within it, so cluster-robust SE should differ measurably from
+    per-unit IF SE. Required for the assertive cluster-wiring tests
+    (per ``feedback_homogeneous_dgp_no_twfe_bias`` — homogeneous DGPs
+    produce zero divergence and can't distinguish wired from no-op).
+    """
+    rng = np.random.default_rng(seed)
+    n_units = n_clusters * units_per_cluster
+    state_ids = np.repeat(np.arange(n_clusters), units_per_cluster)
+    cluster_effects = rng.normal(0.0, cluster_effect_sd, n_clusters)
+
+    cohort_choices = [0, 3, 5, 7]  # 0 = never-treated
+    first_treat = rng.choice(cohort_choices, size=n_units, p=[0.4, 0.2, 0.2, 0.2])
+
+    rows = []
+    for u in range(n_units):
+        s = state_ids[u]
+        ft = first_treat[u]
+        for t in range(1, n_periods + 1):
+            y = (
+                cluster_effects[s]
+                + 0.5 * (t - 1)
+                + (2.0 if (ft > 0 and t >= ft) else 0.0)
+                + rng.normal(0.0, 0.5)
+            )
+            rows.append(
+                {
+                    "unit": u,
+                    "state": int(s),
+                    "time": t,
+                    "first_treat": int(ft),
+                    "outcome": y,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+class TestCallawaySantAnnaClusterWiring:
+    """Cluster wiring fix: bare ``cluster=`` activates cluster-robust IF.
+
+    Prior to PR fix, ``CS(cluster="state").fit(...)`` accepted the
+    parameter but never consumed it — silent unit-level inference. These
+    tests pin the fix: bare cluster= synthesizes ``SurveyDesign(psu=X)``
+    and routes through the existing PSU-meat machinery.
+    """
+
+    def test_cluster_robust_ses_differ_from_unit_level(self):
+        """Assertive: cluster=state SE differs from cluster=None SE
+        on a panel with intra-cluster correlation. This is the
+        regression test that pins the silent no-op fix."""
+        data = _generate_clustered_staggered_data(seed=7)
+
+        cs_unit = CallawaySantAnna()
+        res_unit = cs_unit.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+
+        cs_cluster = CallawaySantAnna(cluster="state")
+        res_cluster = cs_cluster.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+
+        assert np.isfinite(res_unit.overall_se) and res_unit.overall_se > 0
+        assert np.isfinite(res_cluster.overall_se) and res_cluster.overall_se > 0
+        assert abs(res_unit.overall_se - res_cluster.overall_se) > 1e-6, (
+            f"cluster=state SE ({res_cluster.overall_se:.6f}) is "
+            f"effectively identical to cluster=None SE "
+            f"({res_unit.overall_se:.6f}) — the cluster= parameter "
+            "may not be wired through to the variance machinery."
+        )
+
+    def test_bare_cluster_synthesizes_survey_design(self):
+        """bare cluster= populates Results.cluster_name and n_clusters."""
+        data = _generate_clustered_staggered_data(seed=11)
+        cs = CallawaySantAnna(cluster="state")
+        res = cs.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        assert res.cluster_name == "state"
+        assert res.n_clusters is not None and res.n_clusters > 0
+        assert res.vcov_type == "hc1"
+
+    def test_survey_design_psu_overrides_cluster_warns(self):
+        """survey_design.psu wins over bare cluster=; UserWarning fires
+        if partitions differ; cluster_name reflects the canonical PSU."""
+        from diff_diff import SurveyDesign
+
+        data = _generate_clustered_staggered_data(n_clusters=20, units_per_cluster=5, seed=13)
+        # Add a coarser "region" partition: 2 regions, each with 10 states.
+        data["region"] = data["state"] // 10
+
+        cs = CallawaySantAnna(cluster="state")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = cs.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=SurveyDesign(psu="region"),
+            )
+        partition_warnings = [
+            w
+            for w in caught
+            if "psu" in str(w.message).lower()
+            or "partition" in str(w.message).lower()
+            or "different groupings" in str(w.message).lower()
+        ]
+        assert len(partition_warnings) > 0, (
+            f"Expected UserWarning about psu/partition mismatch; "
+            f"caught: {[str(w.message) for w in caught]}"
+        )
+        # Canonical PSU column wins
+        assert res.cluster_name == "region"
+
+    def test_survey_design_without_psu_plus_cluster_injects(self):
+        """survey_design without psu + cluster=X injects cluster as PSU.
+        cluster_name reflects the bare cluster (no explicit PSU to win)."""
+        from diff_diff import SurveyDesign
+
+        data = _generate_clustered_staggered_data(seed=17)
+        data["wt"] = 1.0  # uniform weights
+
+        cs = CallawaySantAnna(cluster="state")
+        res = cs.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=SurveyDesign(weights="wt"),
+        )
+        assert res.cluster_name == "state"
+        assert res.n_clusters is not None and res.n_clusters > 0
+
+    def test_cluster_none_path_unchanged(self):
+        """cluster=None path: no wiring, no cluster metadata in Results.
+        Verifies the wiring guard ``if self.cluster is not None:`` prevents
+        the wiring block from firing when cluster is not set."""
+        data = _generate_clustered_staggered_data(seed=19)
+        cs = CallawaySantAnna()  # cluster=None default
+        res = cs.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        assert res.cluster_name is None
+        assert res.n_clusters is None
+        assert res.vcov_type == "hc1"
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+
+    def test_invalid_cluster_column_raises(self):
+        """cluster=<nonexistent_col> raises ValueError with column name."""
+        data = _generate_clustered_staggered_data(seed=23)
+        cs = CallawaySantAnna(cluster="nonexistent_col")
+        with pytest.raises(ValueError, match="cluster column"):
+            cs.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+            )
+
+    def test_cluster_nan_raises_with_cluster_domain_message(self):
+        """cluster column with NaN raises ValueError citing 'cluster'
+        (not 'PSU') — verifies the cluster-domain pre-validator fires
+        BEFORE synthesis, so the error message refers to the right API."""
+        data = _generate_clustered_staggered_data(seed=29)
+        data.loc[0, "state"] = np.nan
+        cs = CallawaySantAnna(cluster="state")
+        with pytest.raises(ValueError, match="cluster column"):
+            cs.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+            )
+
+    def test_bare_cluster_works_with_panel_false_rcs(self):
+        """RCS coverage: panel=False + cluster=state produces clustered SE
+        that differs from cluster=None SE. Closes RCS coverage gap from
+        plan review."""
+        # Build a repeated cross-section: each obs is a distinct unit,
+        # but obs share state-level clusters.
+        rng = np.random.default_rng(31)
+        n_states = 15
+        obs_per_period = 60
+        n_periods = 6
+        state_effects = rng.normal(0.0, 3.0, n_states)
+        rows = []
+        next_unit = 0
+        for t in range(1, n_periods + 1):
+            for _ in range(obs_per_period):
+                s = int(rng.integers(0, n_states))
+                ft = int(rng.choice([0, 3, 5], p=[0.4, 0.3, 0.3]))
+                y = (
+                    state_effects[s]
+                    + 0.3 * (t - 1)
+                    + (1.5 if (ft > 0 and t >= ft) else 0.0)
+                    + rng.normal(0.0, 0.5)
+                )
+                rows.append(
+                    {
+                        "unit": next_unit,
+                        "state": s,
+                        "time": t,
+                        "first_treat": ft,
+                        "outcome": y,
+                    }
+                )
+                next_unit += 1
+        data = pd.DataFrame(rows)
+
+        cs_unit = CallawaySantAnna(panel=False)
+        res_unit = cs_unit.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        cs_cluster = CallawaySantAnna(panel=False, cluster="state")
+        res_cluster = cs_cluster.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        assert np.isfinite(res_unit.overall_se) and res_unit.overall_se > 0
+        assert np.isfinite(res_cluster.overall_se) and res_cluster.overall_se > 0
+        assert abs(res_unit.overall_se - res_cluster.overall_se) > 1e-6, (
+            "RCS path: cluster=state SE not measurably different from "
+            "cluster=None SE — cluster wiring may not reach the RCS code path."
+        )
+
+
+class TestCallawaySantAnnaVcovTypeNarrowContract:
+    """Narrow vcov_type contract: CS accepts {hc1} only; rejects
+    analytical-sandwich families and conley with methodology-rooted
+    messages."""
+
+    def test_default_vcov_type_is_hc1(self):
+        cs = CallawaySantAnna()
+        assert cs.vcov_type == "hc1"
+
+    def test_classical_rejected_at_init(self):
+        with pytest.raises(ValueError, match="influence-function"):
+            CallawaySantAnna(vcov_type="classical")
+
+    def test_hc2_rejected_at_init(self):
+        with pytest.raises(ValueError, match="hat matrix"):
+            CallawaySantAnna(vcov_type="hc2")
+
+    def test_hc2_bm_rejected_at_init(self):
+        with pytest.raises(ValueError, match="Bell-McCaffrey"):
+            CallawaySantAnna(vcov_type="hc2_bm")
+
+    def test_conley_rejected_at_init(self):
+        with pytest.raises(ValueError, match="(conley|spatial-HAC)"):
+            CallawaySantAnna(vcov_type="conley")
+
+    def test_unknown_vcov_type_rejected(self):
+        with pytest.raises(ValueError, match="hc4"):
+            CallawaySantAnna(vcov_type="hc4")
+
+    def test_get_params_includes_vcov_type(self):
+        cs = CallawaySantAnna()
+        params = cs.get_params()
+        assert "vcov_type" in params
+        assert params["vcov_type"] == "hc1"
+
+    def test_set_params_bad_vcov_caught_at_fit_time(self):
+        """set_params is strict-mirror SA (no atomic validation), but
+        fit() re-validates so a bad set_params(vcov_type='hc4')
+        surfaces a clear error at fit-time rather than silently
+        propagating a bad value to Results metadata."""
+        cs = CallawaySantAnna()
+        # set_params succeeds (sklearn-style mutate-then-validate-at-use)
+        cs.set_params(vcov_type="hc4")
+        assert cs.vcov_type == "hc4"
+        # fit() re-validates and raises
+        data = _generate_clustered_staggered_data(seed=37)
+        with pytest.raises(ValueError, match="hc4"):
+            cs.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+            )
+
+    def test_results_carries_vcov_type(self):
+        data = _generate_clustered_staggered_data(seed=41)
+        cs = CallawaySantAnna()
+        res = cs.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        assert res.vcov_type == "hc1"
+
+    def test_fit_clone_idempotent_on_vcov_type(self):
+        """get_params + reconstruct + refit produces same SE."""
+        data = _generate_clustered_staggered_data(seed=43)
+        cs1 = CallawaySantAnna(cluster="state")
+        res1 = cs1.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        cs2 = CallawaySantAnna(**cs1.get_params())
+        res2 = cs2.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        assert res1.overall_se == pytest.approx(res2.overall_se, rel=0, abs=0)
+        assert res1.vcov_type == res2.vcov_type == "hc1"
+        assert res1.cluster_name == res2.cluster_name == "state"
+
+
+class TestCallawaySantAnnaClusterSafetyGates:
+    """Safety gates for the cluster= wiring fix added in response to local
+    AI review findings (panel-mover validation, replicate-weight rejection,
+    df_survey propagation to HonestDiD via survey_metadata)."""
+
+    def test_inject_branch_panel_mover_raises(self):
+        """survey_design without PSU + cluster=X where a unit changes
+        cluster across periods (a 'mover') must raise via the unit-
+        constancy validator. The validator must see the injected cluster
+        column — earlier versions ran the validator on the user-provided
+        survey_design (no PSU), missing the mover entirely."""
+        from diff_diff import SurveyDesign
+
+        data = _generate_clustered_staggered_data(seed=61)
+        data["wt"] = 1.0
+        # Force unit 0 to be a mover: assign it to a different state in the
+        # later half of the panel.
+        unit_0_late_mask = (data["unit"] == 0) & (data["time"] >= 5)
+        original_state_for_unit_0 = data.loc[data["unit"] == 0, "state"].iloc[0]
+        mover_target_state = (int(original_state_for_unit_0) + 1) % 20
+        data.loc[unit_0_late_mask, "state"] = mover_target_state
+
+        cs = CallawaySantAnna(cluster="state")
+        with pytest.raises((ValueError, RuntimeError), match="(unit|constant|invariant)"):
+            cs.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=SurveyDesign(weights="wt"),
+            )
+
+    def test_replicate_weight_plus_cluster_rejected(self):
+        """SurveyDesign(replicate_weights=[...]) + cluster=X must raise
+        NotImplementedError. Replicate-weight variance ignores PSU entirely,
+        so honoring bare cluster= would silently have no effect on the
+        variance estimate while populating cluster_name/n_clusters
+        dishonestly. Fail-closed per feedback_no_silent_failures."""
+        from diff_diff import SurveyDesign
+
+        data = _generate_clustered_staggered_data(seed=67)
+        data["wt"] = 1.0
+        # Add 4 BRR replicate weights (R survey package convention).
+        for r in range(1, 5):
+            data[f"repwt_{r}"] = 1.0
+
+        cs = CallawaySantAnna(cluster="state")
+        with pytest.raises(NotImplementedError, match="replicate"):
+            cs.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=SurveyDesign(
+                    weights="wt",
+                    replicate_weights=["repwt_1", "repwt_2", "repwt_3", "repwt_4"],
+                    replicate_method="BRR",
+                ),
+            )
+
+    def test_bare_cluster_populates_df_inference(self):
+        """Bare cluster= must populate Results.df_inference so downstream
+        consumers (e.g., HonestDiD at honest_did.py:~652) see the cluster-
+        level df rather than silently reverting to normal-theory critical
+        values. df_inference is the canonical carrier — survey_metadata is
+        for user-provided SurveyDesign only (see
+        test_bare_cluster_does_not_set_survey_metadata for the other half
+        of the contract)."""
+        data = _generate_clustered_staggered_data(seed=71)
+        cs = CallawaySantAnna(cluster="state")
+        res = cs.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        assert res.df_inference is not None and res.df_inference > 0, (
+            f"Bare cluster= must populate Results.df_inference with a "
+            f"positive integer; got {res.df_inference!r}."
+        )
+        # df_inference must equal n_clusters - 1 for the PSU-only design
+        assert res.n_clusters is not None
+        assert res.df_inference == res.n_clusters - 1, (
+            f"df_inference ({res.df_inference}) must equal n_clusters - 1 "
+            f"({res.n_clusters - 1}) for PSU-only synthesized designs."
+        )
+
+    def test_bare_cluster_does_not_set_survey_metadata(self):
+        """Bare cluster= must NOT populate Results.survey_metadata. The
+        user did not provide a SurveyDesign, so downstream consumers that
+        check ``survey_metadata is not None`` for 'original fit used a
+        survey design' must continue to see a non-survey fit. Affected
+        consumers: DiagnosticReport at diagnostic_report.py:848-856 +
+        1150-1158 (Bacon decomp + 2x2 PT skip); CallawaySantAnnaResults.
+        summary() at staggered_results.py:235-238 (survey block render).
+        df_inference carries cluster df separately (see
+        test_bare_cluster_populates_df_inference)."""
+        data = _generate_clustered_staggered_data(seed=73)
+        cs = CallawaySantAnna(cluster="state")
+        res = cs.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        assert res.survey_metadata is None, (
+            "Bare cluster= must NOT populate survey_metadata — that field "
+            "is reserved for user-provided SurveyDesign. Setting it on a "
+            "non-survey fit would cause DiagnosticReport to skip checks "
+            "with 'Original fit used a survey design' and summary() to "
+            "print a misleading survey block."
+        )
+
+    def test_explicit_survey_design_does_populate_survey_metadata(self):
+        """Counterpart to the test above: when user provides a real
+        SurveyDesign, survey_metadata IS populated (regardless of bare
+        cluster= status). Verifies the 'inject' branch path:
+        SurveyDesign(weights=...) + cluster=X → survey_metadata populated
+        + df_inference also populated."""
+        from diff_diff import SurveyDesign
+
+        data = _generate_clustered_staggered_data(seed=75)
+        data["wt"] = 1.0
+        cs = CallawaySantAnna(cluster="state")
+        res = cs.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=SurveyDesign(weights="wt"),
+        )
+        assert (
+            res.survey_metadata is not None
+        ), "User-provided SurveyDesign must populate survey_metadata."
+        assert res.df_inference is not None and res.df_inference > 0
+        # Both surfaces agree on the cluster df (no divergence)
+        sm_df = getattr(res.survey_metadata, "df_survey", None)
+        if sm_df is not None:
+            assert int(sm_df) == int(res.df_inference)
+
+    def test_bare_cluster_honest_did_uses_df_inference(self):
+        """End-to-end integration: HonestDiD.fit() on a bare-cluster CS
+        result must pick up the cluster-level df via df_inference (not
+        revert to normal-theory critical values). A future refactor that
+        stops honoring df_inference in honest_did.py would silently fall
+        back to z-critical values for clustered CS fits without failing
+        the simpler results-object-contract tests. This test pins the
+        end-to-end behavior. Per the R3 codex finding."""
+        from diff_diff.honest_did import HonestDiD
+
+        data = _generate_clustered_staggered_data(seed=79)
+        cs = CallawaySantAnna(cluster="state", base_period="universal")
+        cs_res = cs.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="event_study",
+        )
+
+        # Sanity: the CS fit populated df_inference but not survey_metadata
+        assert cs_res.df_inference is not None and cs_res.df_inference > 0
+        assert cs_res.survey_metadata is None, (
+            "Pre-condition for this test: bare cluster= must NOT populate "
+            "survey_metadata. If this fails, the survey/non-survey "
+            "contract regressed (see test_bare_cluster_does_not_set_survey_metadata)."
+        )
+
+        # Run HonestDiD; assert it threads df_inference into the returned df_survey
+        honest = HonestDiD(method="relative_magnitude", M=1.0)
+        honest_res = honest.fit(cs_res)
+
+        assert honest_res.df_survey is not None, (
+            "HonestDiD must preserve the cluster df from CS's df_inference. "
+            "Reading None means it silently reverted to normal-theory "
+            "critical values — the contract this test exists to guard."
+        )
+        assert int(honest_res.df_survey) == int(cs_res.df_inference), (
+            f"HonestDiDResults.df_survey ({honest_res.df_survey}) must "
+            f"equal CS Results.df_inference ({cs_res.df_inference}). "
+            "A divergence here means df_inference is not being threaded "
+            "through honest_did.py's _extract_event_study_params."
         )

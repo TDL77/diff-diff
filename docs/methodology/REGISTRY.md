@@ -303,6 +303,56 @@ This matches the behavior of R's `fixest::feols()` with absorbed FE.
 
 # Modern Staggered Estimators
 
+## IF-based variance estimators vs analytical-sandwich estimators
+
+diff-diff houses two structural families for variance computation, and the
+distinction governs which `vcov_type` values an estimator can accept:
+
+**Analytical-sandwich estimators** fit a single (or per-cohort) linear
+regression and derive variance via `solve_ols(..., vcov_type=...)`, returning
+a sandwich `(X'X)^{-1} M (X'X)^{-1}` whose meat `M` is parameterized by
+`vcov_type ∈ {classical, hc1, hc2, hc2_bm}` (plus `conley` for spatial-HAC).
+Examples: `DifferenceInDifferences`, `MultiPeriodDiD`, `TwoWayFixedEffects`,
+`SunAbraham`, `StackedDiD`, `WooldridgeDiD`, `LinearRegression`. The full
+`vcov_type` contract is methodologically applicable because every family has
+a defined interpretation on the hat-matrix-bearing design (HC2 leverage
+`1/(1-h_ii)`, Bell-McCaffrey Satterthwaite DOF, etc.).
+
+**IF-based estimators** derive variance from an asymptotic influence function
+`Var(θ̂) = (1/n) Σ_i ψ_i²` per estimator-specific derivations (Callaway &
+Sant'Anna 2021 for `CallawaySantAnna`; Borusyak-Jaravel-Spiess 2024 for
+`ImputationDiD`; Sant'Anna & Zhao 2020 for `EfficientDiD`). For these:
+
+- `hc1` with `cluster=None` ≡ per-unit IF variance — the default
+  (Williams 2000 form).
+- `hc1` with `cluster=X` ≡ CR1 Liang-Zeger on the IF:
+  `Var = (G/(G-1)) Σ_c (Σ_{i∈c} ψ_i)² / n²`. Activated by synthesizing
+  `SurveyDesign(psu=X)` internally and routing through the existing PSU-meat
+  machinery (`_compute_stratified_psu_meat`).
+- `classical`, `hc2`, `hc2_bm` are **N/A** for IF-based estimators —
+  hat-matrix leverage and Bell-McCaffrey Satterthwaite DOF are defined on a
+  single regression's design matrix, and IF-based estimators have no
+  equivalent global hat matrix (they compose per-(g,t) or per-cohort fits
+  with custom IF derivations). Rejected at `__init__` with
+  methodology-rooted messages.
+- `conley` (spatial-HAC) — could conceptually apply to the IF (spatial
+  aggregation of per-unit IFs) but requires separate methodology work;
+  deferred.
+
+This split is a structural property of the estimator's variance derivation,
+not a missing feature. The `vcov_type` input contract for IF-based estimators
+is **permanently narrow** at `{"hc1"}`. Enforced today on
+`CallawaySantAnna`; the same narrow contract is expected when
+`ImputationDiD` and `EfficientDiD` reach `vcov_type` threading.
+
+**Note:** This routing is a documented synthesis: the
+`SurveyDesign(psu=...)` synthesis is the new wiring; the downstream
+PSU-meat machinery (`_compute_stratified_psu_meat`) is the established
+survey-side path; the CR1 Liang-Zeger algebra on IF is Williams (2000) /
+Hansen (2007). No new methodology is introduced.
+
+---
+
 ## CallawaySantAnna
 
 **Primary source:** [Callaway, B., & Sant'Anna, P.H.C. (2021). Difference-in-Differences with multiple time periods. *Journal of Econometrics*, 225(2), 200-230.](https://doi.org/10.1016/j.jeconom.2020.12.001)
@@ -314,6 +364,18 @@ This matches the behavior of R's `fixest::feols()` with absorbed FE.
 - Warns if no never-treated units exist (suggests alternative comparison strategies)
 - Limited pre-treatment periods reduce ability to test parallel trends
 - **Note:** The analytical SE paths call `_safe_inv()` on the propensity-score Hessian (`H_psi`) and outcome-regression bread (`X'WX`) across every `(g, t)` cell. When these matrices are rank deficient, `np.linalg.solve` raises `LinAlgError` and `_safe_inv()` falls back to `np.linalg.lstsq`. Previously silent; now `fit()` emits ONE aggregate `UserWarning` at the end of the fit reporting the number of fallbacks and the max condition number, so a rank-deficient analytical SE path can't quietly ship degraded standard errors. Sibling of axis-A finding #17 in the Phase 2 silent-failures audit.
+
+*Variance families (`vcov_type`, IF-based):*
+- `hc1` (default, only accepted value) — per-unit IF variance per Callaway & Sant'Anna (2021) when `cluster=None`; cluster-robust CR1 Liang-Zeger on the IF when `cluster=X` is set (synthesizes `SurveyDesign(psu=X)` internally, threading through the same PSU machinery as explicit survey designs). When `survey_design=SurveyDesign(psu=Y)` is provided, the explicit PSU takes precedence; if `cluster=X` is also set with a different partition, emits a `UserWarning` (PSU wins).
+- `classical`, `hc2`, `hc2_bm`, `conley` — REJECTED at `__init__`. The rejection is **library-architectural, not paper-prescribed**: analytical-sandwich variance families (`classical`, `hc2`, `hc2_bm`) are defined on a single regression's hat matrix, and CS's per-(g,t) doubly-robust / IPW / outcome-regression structure has no equivalent single design matrix to compute hat-matrix leverage or Bell-McCaffrey Satterthwaite DOF on. Spatial-HAC (`conley`) likewise has no defined composition with per-unit IF aggregation today. See ["IF-based variance estimators vs analytical-sandwich estimators"](#if-based-variance-estimators-vs-analytical-sandwich-estimators) above for the structural taxonomy.
+
+*Cluster wiring:*
+Prior to the bare-`cluster=` wiring fix, `CallawaySantAnna(cluster="X")` was a silent no-op — the parameter was stored at `__init__` but never consumed in the fit / aggregator / bootstrap pipeline (users got per-unit IF variance silently, even when they explicitly set `cluster="state"`). The fix synthesizes a minimal `SurveyDesign(psu=X, weight_type="pweight")` when bare `cluster=` is set without an explicit survey design, threading the synthesized PSU through the existing `_compute_stratified_psu_meat` aggregator (`staggered_aggregation.py:735-749`) and PSU-level multiplier bootstrap (`staggered_bootstrap.py:323-347`). Three-branch wiring at `staggered.py:~1500`:
+  1. Bare `cluster=X` + no `survey_design` → synthesize `SurveyDesign(psu=X)`; refit `_resolve_survey_for_fit` on synthetic; `effective_survey_design = synthetic` so `_validate_unit_constant_survey` runs on it (preventing first-value-wins collapse for movers on panel data).
+  2. `survey_design` without PSU + `cluster=X` → call `_inject_cluster_as_psu(resolved_survey, cluster_ids)`.
+  3. `survey_design` with PSU + `cluster=X` → PSU wins; `_resolve_effective_cluster` emits `UserWarning` if partitions differ.
+
+The `cluster_name` and `n_clusters` fields on `CallawaySantAnnaResults` report the effective clustering level: `survey_design.psu` (canonical column) when explicit PSU is provided, `self.cluster` when bare cluster synthesizes or injects.
 
 *Estimator equation (as implemented):*
 

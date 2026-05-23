@@ -95,6 +95,30 @@ class CallawaySantAnnaResults:
         Effects aggregated by treatment cohort.
     pscore_trim : float
         Propensity score trimming bound used during estimation.
+    vcov_type : str
+        Variance type used during estimation. CallawaySantAnna is
+        permanently narrow to ``"hc1"`` — see REGISTRY.md
+        "IF-based variance estimators vs analytical-sandwich estimators"
+        for why analytical-sandwich families don't compose with the
+        per-(g,t) doubly-robust / IPW / outcome-regression structure.
+    cluster_name : str, optional
+        Canonical cluster column. Set to ``survey_design.psu`` when an
+        explicit survey PSU was provided (regardless of bare ``cluster=``),
+        otherwise to ``self.cluster`` when bare cluster synthesizes or
+        injects a PSU. ``None`` when no clustering is active.
+    n_clusters : int, optional
+        Number of unique clusters (PSUs) used for variance estimation.
+        ``None`` when no clustering is active.
+    df_inference : int, optional
+        Cluster-level degrees of freedom for downstream inference (e.g.,
+        ``HonestDiD`` t-critical-value selection). Carried separately from
+        ``survey_metadata`` so consumers can distinguish "cluster df is
+        available" from "user provided a survey design": bare
+        ``CallawaySantAnna(cluster=X).fit(...)`` populates ``df_inference``
+        but leaves ``survey_metadata`` as ``None`` (preserving the
+        survey/non-survey contract for ``DiagnosticReport`` / ``summary()``).
+        Legitimate ``survey_design=`` fits populate both, and the two
+        surfaces agree (``df_inference == survey_metadata.df_survey``).
     """
 
     group_time_effects: Dict[Tuple[Any, Any], Dict[str, Any]]
@@ -137,6 +161,23 @@ class CallawaySantAnnaResults:
     )
     epv_threshold: float = 10
     pscore_fallback: str = "error"
+    # Variance / clustering metadata (PR #XXX — narrow vcov_type contract
+    # + cluster= wiring fix). vcov_type is permanently narrow to "hc1" for
+    # CS per IF-based variance structure (REGISTRY.md). cluster_name +
+    # n_clusters surface the effective clustering level for downstream
+    # introspection and label rendering.
+    vcov_type: str = "hc1"
+    cluster_name: Optional[str] = None
+    n_clusters: Optional[int] = None
+    # df_inference: cluster-level degrees of freedom for downstream
+    # inference (e.g., HonestDiD's t-critical-value selection). Carried
+    # SEPARATELY from survey_metadata so consumers can distinguish
+    # "cluster df is available" from "user provided a survey design"
+    # — bare CS(cluster="state").fit(...) populates df_inference but
+    # leaves survey_metadata as None (DiagnosticReport / summary() must
+    # not treat a bare-cluster fit as survey-backed). Legitimate survey
+    # designs populate both (df_inference == survey_metadata.df_survey).
+    df_inference: Optional[int] = None
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property
