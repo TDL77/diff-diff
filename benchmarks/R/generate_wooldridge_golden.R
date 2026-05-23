@@ -288,8 +288,12 @@ df$y_pois <- rpois(nrow(df), lambda = exp(0.5 + 0.3 * D))
 # Logit outcome: p = plogis(0.0 + 0.8 * D)
 df$y_logit <- rbinom(nrow(df), size = 1L, prob = plogis(0.0 + 0.8 * D))
 
-# Save augmented panel back so Python loads the same outcomes.
-write.csv(df, panel_path, row.names = FALSE)
+# Save augmented panel back so Python loads the same outcomes. Subset to
+# the canonical fixture columns + new nonlinear outcomes to avoid
+# polluting the panel CSV with the OLS-stage `D_g_t` working columns
+# (codex CI R5 P3 fix — keeps the benchmark input contract narrow).
+panel_columns <- c("unit", "time", "cohort", "y", "y_pois", "y_logit")
+write.csv(df[, panel_columns], panel_path, row.names = FALSE)
 cat(sprintf("Wrote augmented panel with y_pois + y_logit to %s\n", panel_path))
 
 # Fit etwfe(family="poisson")

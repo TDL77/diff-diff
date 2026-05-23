@@ -78,6 +78,16 @@ class WooldridgeDiDResults:
     # (the default). Populated only via the OLS path; logit / poisson
     # reject ``cohort_trends=True`` at the constructor per paper Section 8
     # OLS-only scope.
+    #
+    # Identification + baseline normalization (paper W2025 Section 5.4):
+    # the reported ``δ_g`` slopes are RELATIVE TO THE BASELINE TREND
+    # absorbed by the design — the never-treated cohort's trend (when a
+    # never-treated cohort exists) OR the last cohort's trend (when no
+    # never-treated cohort exists, per the all-eventually-treated drop
+    # rule). On all-treated panels the last cohort is intentionally
+    # absent from the dict; its slope is the baseline (zero in deviation
+    # form). See REGISTRY ``## WooldridgeDiD (ETWFE)`` → "Heterogeneous
+    # cohort trends" Notes for the exact normalization contract.
     cohort_trend_coefs: Dict[Any, float] = field(default_factory=dict, repr=False)
 
     # Flag set by ``_fit_ols`` when ``n_bootstrap > 0`` AND the multiplier

@@ -62,6 +62,17 @@ WooldridgeDiDResults
 
 Results container returned by ``WooldridgeDiD.fit()``.
 
+``cohort_trend_coefs`` (populated under ``cohort_trends=True``, OLS path
+only): ``Dict[g → δ_g]`` keyed by treated cohort. The reported slopes
+are **relative to the baseline trend** absorbed by the design — the
+never-treated cohort's trend (when a never-treated cohort exists) OR
+the last cohort's trend (when no never-treated cohort exists, per
+paper W2025 Section 5.4's all-eventually-treated drop rule). On
+all-treated panels the last cohort is intentionally absent from the
+dict; its slope is the baseline (zero in deviation form). See
+``docs/methodology/REGISTRY.md`` → ``## WooldridgeDiD (ETWFE)`` →
+"Heterogeneous cohort trends" for the full normalization contract.
+
 .. autoclass:: diff_diff.wooldridge_results.WooldridgeDiDResults
    :no-index:
    :members:
