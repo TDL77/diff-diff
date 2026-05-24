@@ -577,6 +577,7 @@ TripleDifference(
     estimation_method: str = "dr",            # "dr", "reg", or "ipw"
     robust: bool = True,
     cluster: str | None = None,
+    vcov_type: str = "hc1",                   # {"hc1"} only — IF-based variance per Ortiz-Villavicencio & Sant'Anna (2025). Analytical-sandwich {classical, hc2, hc2_bm} and conley REJECTED at __init__ (see REGISTRY.md IF-vs-sandwich subsection).
     alpha: float = 0.05,
     pscore_trim: float = 0.01,
     rank_deficient_action: str = "warn",
