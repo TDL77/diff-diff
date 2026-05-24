@@ -728,6 +728,142 @@ class TestValidateMeatPsd:
             f"Got: {[str(m.message) for m in psd]}"
         )
 
+    def test_stacklevel_attributes_to_caller_frame(self):
+        """Stacklevel parameter must attribute the warning to the caller's
+        frame (or higher), NOT to the helper's own frame.
+
+        Locks the contract that the helper itself is invisible in warning
+        attribution. The helper extraction added one frame to the stack, so
+        call sites had to bump their stacklevel by +1 (conley.py 3→4,
+        two_stage.py 2→3). Defaulting to ``stacklevel=3`` from inside the
+        helper attributes the warning to the helper's direct caller's caller
+        (one intermediate frame between caller and outer-caller)."""
+        M = np.array([[0.5, 1.5], [1.5, 0.5]])  # eigenvalues {2, -1}
+
+        def inner_caller():
+            _validate_meat_psd(
+                M,
+                error_msg="x",
+                warning_template="attr-check ({eigval:.2e})",
+                stacklevel=3,
+            )
+
+        def outer_caller():
+            inner_caller()
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            outer_caller()
+
+        psd = [msg for msg in w if "attr-check" in str(msg.message)]
+        assert len(psd) == 1, f"Expected one PSD warning; got {[str(m.message) for m in w]}"
+        # With stacklevel=3 from inside _validate_meat_psd, the warning is
+        # attributed to the caller of inner_caller, which is outer_caller.
+        # Both inner_caller and outer_caller are defined in this test file,
+        # so the attribution must land here (NOT in conley.py inside the
+        # helper body).
+        assert psd[0].filename.endswith("test_conley_vcov.py"), (
+            f"Expected attribution to test_conley_vcov.py (outer_caller "
+            f"frame); got {psd[0].filename!r}:{psd[0].lineno}. If "
+            f"attribution landed in conley.py the helper's stacklevel "
+            f"contract has regressed."
+        )
+
+    def test_no_survey_path_attributes_warning_to_user_code(self):
+        """End-to-end warning-capture test on ``_compute_conley_vcov``: when
+        the indefinite-meat path triggers the PSD warning via the shared
+        helper, attribution must bubble all the way through the three
+        internal frames (``_validate_meat_psd`` → ``_compute_conley_meat`` →
+        ``_compute_conley_vcov``) to land at user code (this test's frame).
+
+        Locks the stacklevel=4 contract at the no-survey call site that
+        compensates for the +1 frame the helper extraction added. Pre-
+        extraction the inline warn used ``stacklevel=3`` which already
+        attributed to user code; preserving that behavior is the whole
+        point of the +1 bump."""
+        from diff_diff import conley as conley_mod
+
+        rng = np.random.default_rng(seed=11)
+        n = 6
+        coords = rng.uniform(0, 1, size=(n, 2))
+        X = np.column_stack([np.ones(n), rng.standard_normal(n)])
+        eps = np.ones(n)
+        bread = X.T @ X
+
+        # Monkey-patch the bartlett kernel to force an indefinite meat
+        # (mirrors the existing test_indefinite_meat_warning_fires_for_bartlett
+        # fixture pattern).
+        original = conley_mod._bartlett_kernel
+
+        def _indefinite(u: np.ndarray) -> np.ndarray:
+            base = np.eye(u.shape[0])
+            for i in range(u.shape[0]):
+                for j in range(u.shape[0]):
+                    if i != j:
+                        base[i, j] = -10.0
+            return base
+
+        try:
+            conley_mod._bartlett_kernel = _indefinite
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                conley_mod._compute_conley_vcov(
+                    X,
+                    eps,
+                    coords,
+                    cutoff=10.0,
+                    metric="euclidean",
+                    kernel="bartlett",
+                    bread_matrix=bread,
+                )
+            psd = [
+                msg
+                for msg in w
+                if issubclass(msg.category, UserWarning)
+                and "negative eigenvalue" in str(msg.message)
+            ]
+        finally:
+            conley_mod._bartlett_kernel = original
+
+        assert len(psd) >= 1, "Expected a PSD UserWarning from the indefinite meat path"
+        msg = psd[0]
+        # Attribution must be in this test file (user code), NOT any of the
+        # three internal production frames. If a future refactor regresses
+        # the stacklevel to 3, attribution would stick at _compute_conley_vcov
+        # in conley.py; to 2, at _compute_conley_meat; to 1, inside the helper.
+        assert msg.filename.endswith("test_conley_vcov.py"), (
+            f"Expected attribution to user code (test_conley_vcov.py); got "
+            f"{msg.filename!r}:{msg.lineno}. The stacklevel=4 contract at "
+            f"the conley.py call site has regressed."
+        )
+
+    def test_survey_call_site_passes_stacklevel_3(self):
+        """Static source check: the survey orchestrator
+        ``_compute_stratified_conley_meat`` in two_stage.py must pass
+        ``stacklevel=3`` to ``_validate_meat_psd``. The pre-extraction
+        inline warn used ``stacklevel=2``; after the helper extraction the
+        +1 frame shift means the call site must pass ``stacklevel=3`` to
+        attribute the warning to the same outer caller. If a future
+        refactor drops the explicit kwarg this test surfaces it before the
+        warning starts mis-attributing to inside the helper."""
+        import inspect
+
+        from diff_diff.two_stage import _compute_stratified_conley_meat
+
+        src = inspect.getsource(_compute_stratified_conley_meat)
+        # Find the _validate_meat_psd call and verify the kwarg block
+        # includes stacklevel=3 (not 2, not 4, not missing).
+        assert "_validate_meat_psd(" in src, (
+            "_compute_stratified_conley_meat no longer calls "
+            "_validate_meat_psd; survey-side PSD guard regressed."
+        )
+        assert "stacklevel=3" in src, (
+            "_compute_stratified_conley_meat does not pass stacklevel=3 "
+            "to _validate_meat_psd. The pre-extraction inline warn used "
+            "stacklevel=2; the +1 frame shift from extracting the helper "
+            "requires stacklevel=3 to preserve attribution."
+        )
+
 
 # ---------------------------------------------------------------------------
 # TestConleyDirectHelper — _compute_conley_vcov correctness
