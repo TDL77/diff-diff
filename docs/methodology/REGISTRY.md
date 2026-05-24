@@ -328,9 +328,13 @@ Sant'Anna 2021 for `CallawaySantAnna`; Borusyak-Jaravel-Spiess 2024 for
 - `hc1` with `cluster=None` ≡ per-unit IF variance — the default
   (Williams 2000 form).
 - `hc1` with `cluster=X` ≡ CR1 Liang-Zeger on the IF:
-  `Var = (G/(G-1)) Σ_c (Σ_{i∈c} ψ_i)² / n²`. Activated by synthesizing
-  `SurveyDesign(psu=X)` internally and routing through the existing PSU-meat
-  machinery (`_compute_stratified_psu_meat`).
+  `Var = (G/(G-1)) Σ_c (Σ_{i∈c} ψ_i)² / n²`. The activation path is
+  estimator-specific: `CallawaySantAnna` synthesizes `SurveyDesign(psu=X)`
+  internally and routes through the shared PSU-meat machinery
+  (`_compute_stratified_psu_meat`); `TripleDifference` computes the
+  algebraically equivalent CR1 directly from cluster-summed IFs inline at
+  `triple_diff.py` (no SurveyDesign synthesis — the IF is already in scope
+  at the SE call site). Both produce the same numerical result.
 - `classical`, `hc2`, `hc2_bm` are **N/A** for IF-based estimators —
   hat-matrix leverage and Bell-McCaffrey Satterthwaite DOF are defined on a
   single regression's design matrix, and IF-based estimators have no
