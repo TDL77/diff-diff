@@ -19,8 +19,10 @@ from diff_diff.conley import (
     _compute_spatial_bartlett_meat_sparse,
     _haversine_km,
     _pairwise_distance_matrix,
+    _serial_bartlett_kernel_matrix,
     _uniform_kernel,
     _validate_conley_kwargs,
+    _validate_meat_psd,
 )
 from diff_diff.linalg import (
     LinearRegression,
@@ -106,6 +108,59 @@ class TestConleyKernels:
         assert np.all(K >= 0.0)
         assert np.all(K <= 1.0)
         np.testing.assert_allclose(K, K.T, atol=1e-15)
+
+    def test_serial_bartlett_kernel_matrix_basic(self):
+        """Hand-computed Bartlett HAC kernel for t=[0,1,2,3], L=2.
+
+        K[i,j] = (1 - |i-j|/(L+1)) for 0 < |i-j| <= L, else 0. With L=2
+        and (L+1)=3: lag 1 -> 2/3, lag 2 -> 1/3, lag 3 -> 0 (out of band).
+        """
+        K = _serial_bartlett_kernel_matrix(np.array([0, 1, 2, 3]), L=2)
+        expected = np.array(
+            [
+                [0.0, 2.0 / 3.0, 1.0 / 3.0, 0.0],
+                [2.0 / 3.0, 0.0, 2.0 / 3.0, 1.0 / 3.0],
+                [1.0 / 3.0, 2.0 / 3.0, 0.0, 2.0 / 3.0],
+                [0.0, 1.0 / 3.0, 2.0 / 3.0, 0.0],
+            ]
+        )
+        np.testing.assert_allclose(K, expected, atol=1e-15)
+
+    def test_serial_bartlett_kernel_matrix_l_one(self):
+        """L=1: only adjacent lags survive, with weight (1 - 1/2) = 0.5."""
+        K = _serial_bartlett_kernel_matrix(np.array([0, 1, 2]), L=1)
+        expected = np.array(
+            [
+                [0.0, 0.5, 0.0],
+                [0.5, 0.0, 0.5],
+                [0.0, 0.5, 0.0],
+            ]
+        )
+        np.testing.assert_allclose(K, expected, atol=1e-15)
+
+    def test_serial_bartlett_kernel_matrix_l_zero_returns_zero(self):
+        """L=0 is degenerate-but-callable: every off-diagonal lag fails
+        ``lag <= 0`` (since `lag != 0`), so K is the zero matrix. Callers
+        guard externally (``conley.py`` skips the loop when L == 0)."""
+        K = _serial_bartlett_kernel_matrix(np.array([0, 1, 2]), L=0)
+        np.testing.assert_array_equal(K, np.zeros((3, 3)))
+
+    def test_serial_bartlett_kernel_matrix_single_element(self):
+        """Single-element input yields a 1x1 zero matrix (no off-diagonal
+        lags exist)."""
+        K = _serial_bartlett_kernel_matrix(np.array([7]), L=2)
+        np.testing.assert_array_equal(K, np.zeros((1, 1)))
+
+    def test_serial_bartlett_kernel_matrix_int_input_bit_equal_to_float(self):
+        """Contract test: int64 and float64 inputs must yield bit-equal
+        matrices. The helper does ``astype(np.float64, copy=False)`` and one
+        of the three current call sites (``conley.py`` panel-block branch)
+        passes the result of array slicing on int time codes."""
+        K_int = _serial_bartlett_kernel_matrix(np.array([0, 1, 2, 3], dtype=np.int64), L=2)
+        K_float = _serial_bartlett_kernel_matrix(
+            np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float64), L=2
+        )
+        np.testing.assert_array_equal(K_int, K_float)
 
 
 # ---------------------------------------------------------------------------
@@ -602,6 +657,76 @@ class TestConleyValidatorHelpers:
                 unit=unit,
                 lag_cutoff=1,
             )
+
+
+# ---------------------------------------------------------------------------
+# TestValidateMeatPsd — _validate_meat_psd guard helper
+# ---------------------------------------------------------------------------
+
+
+class TestValidateMeatPsd:
+    def test_nonfinite_raises(self):
+        """Non-finite meat must raise ValueError with the caller's exact
+        ``error_msg`` so site-specific guidance reaches the user."""
+        M = np.array([[1.0, np.nan], [np.nan, 1.0]])
+        with pytest.raises(ValueError, match="custom guidance for caller XYZ"):
+            _validate_meat_psd(
+                M,
+                error_msg="custom guidance for caller XYZ",
+                warning_template="unused-here ({eigval:.2e})",
+            )
+
+    def test_negative_eigenvalue_warns_with_template_substitution(self):
+        """An indefinite meat triggers UserWarning with ``{eigval}``
+        substituted in scientific notation."""
+        # Symmetric matrix with eigenvalues {2, -1}: aggressively indefinite.
+        M = np.array([[0.5, 1.5], [1.5, 0.5]])
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _validate_meat_psd(
+                M,
+                error_msg="not used on this path",
+                warning_template="SITEX meat: min eigenvalue = {eigval:.2e}",
+            )
+        psd = [
+            msg
+            for msg in w
+            if issubclass(msg.category, UserWarning) and "SITEX" in str(msg.message)
+        ]
+        assert len(psd) == 1, f"Expected one PSD warning; got {[str(m.message) for m in w]}"
+        # Min eigenvalue is -1.0; verify scientific-notation substitution.
+        assert "-1.00e+00" in str(psd[0].message)
+
+    def test_psd_matrix_silent(self):
+        """A PSD meat (identity) must not emit any warning."""
+        M = np.eye(3)
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _validate_meat_psd(
+                M,
+                error_msg="not used",
+                warning_template="not used ({eigval:.2e})",
+            )
+        psd = [msg for msg in w if issubclass(msg.category, UserWarning)]
+        assert psd == [], f"Expected no warnings; got {[str(m.message) for m in psd]}"
+
+    def test_threshold_boundary_above_threshold_silent(self):
+        """An eigenvalue just above the -1e-12 threshold (at -5e-13) is
+        absorbed as numerical noise and must NOT warn."""
+        # diag(-5e-13, 1.0): symmetric, eigenvalues exactly {-5e-13, 1.0}.
+        M = np.diag([-5e-13, 1.0])
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            _validate_meat_psd(
+                M,
+                error_msg="not used",
+                warning_template="not used ({eigval:.2e})",
+            )
+        psd = [msg for msg in w if issubclass(msg.category, UserWarning)]
+        assert psd == [], (
+            f"Eigenvalue -5e-13 is above -1e-12 threshold; expected no warning. "
+            f"Got: {[str(m.message) for m in psd]}"
+        )
 
 
 # ---------------------------------------------------------------------------
