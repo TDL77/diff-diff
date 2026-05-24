@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from diff_diff.survey import SurveyDesign
 from diff_diff.triple_diff import (
     TripleDifference,
     TripleDifferenceResults,
@@ -1139,3 +1140,262 @@ class TestTripleDifferenceClusterDefensive:
             f"({res_unit.se:.6f}) — the cluster= parameter may "
             "have regressed to a silent no-op."
         )
+
+
+def _ddd_survey_panel(seed: int = 71, n: int = 400) -> pd.DataFrame:
+    """Cross-sectional DDD data with survey columns for vcov_type bit-equal tests.
+
+    Mirrors ``tests/test_survey_phase3.py::ddd_survey_data`` but uses
+    ``default_rng`` for reproducibility independent of global state.
+    """
+    rng = np.random.default_rng(seed)
+    data = pd.DataFrame(
+        {
+            "outcome": rng.standard_normal(n) + 0.5,
+            "group": rng.choice([0, 1], n),
+            "partition": rng.choice([0, 1], n),
+            "time": rng.choice([0, 1], n),
+            "weight": rng.uniform(0.5, 2.0, n),
+            "stratum": rng.choice([1, 2, 3], n),
+        }
+    )
+    mask = (data["group"] == 1) & (data["partition"] == 1) & (data["time"] == 1)
+    data.loc[mask, "outcome"] += 1.5
+    return data
+
+
+class TestTripleDifferenceVcovType:
+    """Phase 1b interstitial #2: vcov_type input contract on TripleDifference.
+
+    TripleDifference uses IF-based variance per Ortiz-Villavicencio &
+    Sant'Anna (2025); vcov_type is permanently narrow to {"hc1"}.
+    Analytical-sandwich families {classical, hc2, hc2_bm} and conley are
+    rejected at __init__ with methodology-rooted messages. Mirrors CS
+    PR #487 template at tests/test_staggered.py.
+
+    5-surface matrix:
+      1. Default preserved bit-equally (3 estimation methods)
+      2. Cluster path preserved bit-equally
+      3. Survey path preserved bit-equally
+      4. Input rejection at __init__ (methodology terminology)
+      5. fit()-time revalidation (set_params can't bypass)
+
+    Plus introspection tests for Results carrier, summary render,
+    to_dict, get_params, fit-clone idempotence, and convenience function.
+    """
+
+    # -- Surface 1: default behavior preserved bit-equally ---------------
+
+    @pytest.mark.parametrize("method", ["dr", "reg", "ipw"])
+    def test_default_hc1_bit_equal_baseline(self, method):
+        """vcov_type='hc1' (explicit) is bit-equal to the default for every
+        estimation method. Guards against drift between __init__ defaults
+        and Results construction when vcov_type was threaded through."""
+        data = generate_ddd_data(n_per_cell=80, true_att=2.0, seed=11)
+
+        r_default = TripleDifference(estimation_method=method).fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        r_explicit = TripleDifference(estimation_method=method, vcov_type="hc1").fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert r_default.att == r_explicit.att, f"[{method}] ATT not bit-equal"
+        assert r_default.se == r_explicit.se, f"[{method}] SE not bit-equal"
+
+    # -- Surface 2: cluster path preserved bit-equally -------------------
+
+    def test_cluster_hc1_bit_equal_baseline(self):
+        """cluster=<col> + vcov_type='hc1' bit-equal to cluster=<col> alone."""
+        data = _generate_ddd_data_with_state_clusters(seed=23)
+
+        r_default = TripleDifference(cluster="state").fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        r_explicit = TripleDifference(cluster="state", vcov_type="hc1").fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert r_default.att == r_explicit.att
+        assert r_default.se == r_explicit.se
+
+    # -- Surface 3: survey path preserved bit-equally --------------------
+
+    @pytest.mark.parametrize("method", ["dr", "reg", "ipw"])
+    def test_survey_hc1_bit_equal_baseline(self, method):
+        """survey_design + vcov_type='hc1' bit-equal to survey_design alone.
+
+        Pre-empt: CS PR #487 R2 caught a survey_metadata overload bug;
+        same risk class here when threading vcov_type alongside survey_design.
+        """
+        data = _ddd_survey_panel(seed=29)
+        sd = SurveyDesign(weights="weight", strata="stratum")
+
+        r_default = TripleDifference(estimation_method=method).fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            survey_design=sd,
+        )
+        r_explicit = TripleDifference(estimation_method=method, vcov_type="hc1").fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            survey_design=sd,
+        )
+        assert r_default.att == r_explicit.att, f"[{method}] survey ATT not bit-equal"
+        assert r_default.se == r_explicit.se, f"[{method}] survey SE not bit-equal"
+
+    # -- Surface 4: input rejection at __init__ --------------------------
+
+    def test_reject_classical_at_init(self):
+        with pytest.raises(ValueError, match="influence-function"):
+            TripleDifference(vcov_type="classical")
+
+    def test_reject_hc2_at_init(self):
+        with pytest.raises(ValueError, match="Ortiz-Villavicencio"):
+            TripleDifference(vcov_type="hc2")
+
+    def test_reject_hc2_bm_at_init(self):
+        with pytest.raises(ValueError, match="hat matrix"):
+            TripleDifference(vcov_type="hc2_bm")
+
+    def test_reject_hc2_bm_at_init_bm_keyword(self):
+        """Distinct keyword pin: Bell-McCaffrey terminology in the message."""
+        with pytest.raises(ValueError, match="Bell-McCaffrey"):
+            TripleDifference(vcov_type="hc2_bm")
+
+    def test_reject_conley_at_init(self):
+        with pytest.raises(ValueError, match="spatial-HAC"):
+            TripleDifference(vcov_type="conley")
+
+    def test_reject_conley_at_init_todo_pointer(self):
+        """Conley rejection cites the TODO follow-up row."""
+        with pytest.raises(ValueError, match="TODO"):
+            TripleDifference(vcov_type="conley")
+
+    def test_reject_unknown_vcov_type(self):
+        """Generic membership rejection for unrecognized values."""
+        with pytest.raises(ValueError, match="invalid"):
+            TripleDifference(vcov_type="hc4")
+
+    # -- Surface 5: fit()-time revalidation (set_params can't bypass) ----
+
+    def test_set_params_bad_vcov_caught_at_fit_time(self):
+        """set_params is strict-mirror sklearn (no atomic validation), but
+        fit() re-validates so a bad set_params(vcov_type='hc4') surfaces a
+        clear error at fit-time rather than silently propagating a bad
+        value to Results metadata. Mirrors CS
+        tests/test_staggered.py::test_set_params_bad_vcov_caught_at_fit_time."""
+        td = TripleDifference()
+        # set_params succeeds (sklearn-style mutate-then-validate-at-use)
+        td.set_params(vcov_type="hc4")
+        assert td.vcov_type == "hc4"
+        # fit() re-validates and raises
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=37)
+        with pytest.raises(ValueError, match="hc4"):
+            td.fit(
+                data,
+                outcome="outcome",
+                group="group",
+                partition="partition",
+                time="time",
+            )
+
+    def test_set_params_bad_vcov_classical_caught_at_fit_time(self):
+        """Same as above but with an IF-incompatible family (classical).
+        Catches the silent-propagation path on the methodology-rooted
+        rejection branch."""
+        td = TripleDifference()
+        td.set_params(vcov_type="classical")
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=39)
+        with pytest.raises(ValueError, match="influence-function"):
+            td.fit(
+                data,
+                outcome="outcome",
+                group="group",
+                partition="partition",
+                time="time",
+            )
+
+    # -- Introspection contract -------------------------------------------
+
+    def test_default_vcov_type_is_hc1(self):
+        """Attribute default sanity (pre-fit)."""
+        assert TripleDifference().vcov_type == "hc1"
+
+    def test_get_params_includes_vcov_type(self):
+        td = TripleDifference()
+        params = td.get_params()
+        assert "vcov_type" in params
+        assert params["vcov_type"] == "hc1"
+
+    def test_results_carries_vcov_type(self):
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=43)
+        res = TripleDifference().fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert res.vcov_type == "hc1"
+
+    def test_to_dict_includes_vcov_type(self):
+        """CS R7 caught the same Results-introspection gap on the dict surface."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=47)
+        res = TripleDifference().fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        d = res.to_dict()
+        assert "vcov_type" in d
+        assert d["vcov_type"] == "hc1"
+
+    def test_summary_includes_vcov_type(self):
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=51)
+        res = TripleDifference().fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert "hc1" in res.summary()
+        assert "Variance estimator" in res.summary()
+
+    def test_fit_clone_idempotent_on_vcov_type(self):
+        """get_params -> reconstruct -> refit -> identical SE.
+        Catches drift between __init__ defaults, attribute storage, and
+        Results construction (sklearn clone() pattern)."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=57)
+        td1 = TripleDifference(vcov_type="hc1")
+        r1 = td1.fit(data, outcome="outcome", group="group", partition="partition", time="time")
+        td2 = TripleDifference(**td1.get_params())
+        r2 = td2.fit(data, outcome="outcome", group="group", partition="partition", time="time")
+        assert r1.att == r2.att
+        assert r1.se == r2.se
+        assert r2.vcov_type == "hc1"
+
+    # -- Convenience function threading ----------------------------------
+
+    def test_triple_difference_convenience_func_rejects_invalid_vcov_type(self):
+        """Invalid vcov_type rejected at the function entry point too."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=59)
+        with pytest.raises(ValueError, match="influence-function"):
+            triple_difference(
+                data,
+                outcome="outcome",
+                group="group",
+                partition="partition",
+                time="time",
+                vcov_type="classical",
+            )
+
+    def test_triple_difference_convenience_func_threads_valid_vcov_type(self):
+        """Valid vcov_type='hc1' fits successfully AND lands on Results."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=61)
+        res = triple_difference(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            vcov_type="hc1",
+        )
+        assert res.vcov_type == "hc1"
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se)

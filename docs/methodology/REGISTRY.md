@@ -321,7 +321,9 @@ a defined interpretation on the hat-matrix-bearing design (HC2 leverage
 **IF-based estimators** derive variance from an asymptotic influence function
 `Var(θ̂) = (1/n) Σ_i ψ_i²` per estimator-specific derivations (Callaway &
 Sant'Anna 2021 for `CallawaySantAnna`; Borusyak-Jaravel-Spiess 2024 for
-`ImputationDiD`; Sant'Anna & Zhao 2020 for `EfficientDiD`). For these:
+`ImputationDiD`; Sant'Anna & Zhao 2020 for `EfficientDiD`; Ortiz-Villavicencio
+& Sant'Anna 2025 for `TripleDifference`, where the variance is built on the
+3-pairwise-DiD decomposition `inf = w3·IF_3 + w2·IF_2 - w1·IF_1`). For these:
 
 - `hc1` with `cluster=None` ≡ per-unit IF variance — the default
   (Williams 2000 form).
@@ -342,8 +344,8 @@ Sant'Anna 2021 for `CallawaySantAnna`; Borusyak-Jaravel-Spiess 2024 for
 This split is a structural property of the estimator's variance derivation,
 not a missing feature. The `vcov_type` input contract for IF-based estimators
 is **permanently narrow** at `{"hc1"}`. Enforced today on
-`CallawaySantAnna`; the same narrow contract is expected when
-`ImputationDiD` and `EfficientDiD` reach `vcov_type` threading.
+`CallawaySantAnna` and `TripleDifference`; the same narrow contract is
+expected when `ImputationDiD` and `EfficientDiD` reach `vcov_type` threading.
 
 **Note:** This routing is a documented synthesis: the
 `SurveyDesign(psu=...)` synthesis is the new wiring; the downstream
@@ -2033,6 +2035,7 @@ contract changes.
 - [x] ATT and SE match R within <0.001% for all methods and DGP types
 - [x] Survey design support: all methods (reg, IPW, DR) with weighted OLS/logit + TSL on combined influence functions. Weighted solve_logit() for propensity scores in IPW/DR paths.
 - **Note:** TripleDifference survey SE: for IPW/DR, pairwise IFs incorporate survey weights via weighted Riesz representers (`riesz *= weights`), so the combined IF is divided by per-observation survey weights (`inf / sw`) before passing to `compute_survey_vcov()` to prevent double-weighting. For regression (RA), pairwise IFs are already on the unweighted residual scale (WLS fits use weights internally but the IF is not Riesz-multiplied), so the combined IF passes directly to TSL without de-weighting. The OLS nuisance IF corrections in DR mode use weighted cross-products normalized by subgroup row count `n` (not `sum(weights)`).
+- **Note (vcov_type contract):** `vcov_type` is permanently narrow to `{"hc1"}` per the IF-based variance decomposition. Analytical-sandwich families `{classical, hc2, hc2_bm}` are rejected at `__init__` with a methodology-rooted message citing Ortiz-Villavicencio & Sant'Anna (2025) — the 3-pairwise-DiD decomposition has no single design matrix on which hat-matrix leverage or Bell-McCaffrey Satterthwaite DOF can be defined. `cluster=` continues to invoke Liang-Zeger CR1 on the combined influence function (`(G/(G-1)) · Σ_c (Σ_{i∈c} ψ_i)² / n²`, plain CR1 — no Stata-style `(n-1)/(n-p)` finite-sample factor because the IF has no design-matrix `p` in the OLS sense); `survey_design=` continues to invoke TSL on the combined IF. `vcov_type='conley'` is deferred to the TripleDifference Conley follow-up row in `TODO.md`. See ["IF-based variance estimators vs analytical-sandwich estimators"](#if-based-variance-estimators-vs-analytical-sandwich-estimators) above for the structural taxonomy.
 
 ---
 
