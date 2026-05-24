@@ -351,11 +351,13 @@ is **permanently narrow** at `{"hc1"}`. Enforced today on
 `CallawaySantAnna` and `TripleDifference`; the same narrow contract is
 expected when `ImputationDiD` and `EfficientDiD` reach `vcov_type` threading.
 
-**Note:** This routing is a documented synthesis: the
-`SurveyDesign(psu=...)` synthesis is the new wiring; the downstream
-PSU-meat machinery (`_compute_stratified_psu_meat`) is the established
-survey-side path; the CR1 Liang-Zeger algebra on IF is Williams (2000) /
-Hansen (2007). No new methodology is introduced.
+**Note:** This routing is a documented synthesis. The clustered-`hc1`
+activation path is estimator-specific: `CallawaySantAnna` synthesizes
+`SurveyDesign(psu=X)` internally and routes through the existing
+PSU-meat machinery (`_compute_stratified_psu_meat`); `TripleDifference`
+computes the algebraically equivalent CR1 directly from cluster-summed
+IFs inline. The CR1 Liang-Zeger algebra on the IF is Williams (2000) /
+Hansen (2007) in both cases — no new methodology is introduced.
 
 ---
 
