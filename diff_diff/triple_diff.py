@@ -753,10 +753,21 @@ class TripleDifference:
 
         t_stat, p_value, conf_int = safe_inference(att, se, alpha=self.alpha, df=df)
 
-        # Get number of clusters if clustering
-        n_clusters = None
-        if self.cluster is not None:
+        # Resolve cluster_name / n_clusters for Results metadata.
+        # Under survey designs the survey block (PSU/strata/df) is the
+        # canonical surface for cluster reporting — suppress the bare
+        # cluster_name / n_clusters fields so they don't misreport the
+        # raw `cluster=` argument when `survey_design.psu` overrides it.
+        # Mirrors the variance-estimator line suppression in summary().
+        if resolved_survey is not None:
+            cluster_name_for_results: Optional[str] = None
+            n_clusters: Optional[int] = None
+        elif self.cluster is not None:
+            cluster_name_for_results = self.cluster
             n_clusters = data[self.cluster].nunique()
+        else:
+            cluster_name_for_results = None
+            n_clusters = None
 
         # Create results object
         self.results_ = TripleDifferenceResults(
@@ -777,7 +788,7 @@ class TripleDifference:
             r_squared=r_squared,
             inference_method="analytical",
             vcov_type=self.vcov_type,
-            cluster_name=self.cluster,
+            cluster_name=cluster_name_for_results,
             n_clusters=n_clusters,
             survey_metadata=survey_metadata,
             epv_diagnostics=epv_diag if epv_diag else None,

@@ -1413,6 +1413,53 @@ class TestTripleDifferenceVcovType:
         d = r_cluster.to_dict()
         assert d.get("cluster_name") == "state"
 
+    def test_cluster_name_suppressed_under_survey_design(self):
+        """When survey_design overrides the bare cluster= argument, the Results
+        cluster_name + n_clusters fields are suppressed so they don't misreport
+        the ignored argument. The Survey Design block on summary() is the
+        canonical surface for cluster/PSU reporting on survey-backed fits.
+
+        Addresses codex local-review R2 P2 (.claude/reviews/local-review-latest.md):
+        Under cluster='state' + survey_design(psu='psu') with conflicting
+        partitions, _resolve_effective_cluster picks survey_design.psu and
+        warns; the records on Results should reflect that, not the raw
+        `self.cluster` argument the user passed."""
+        # Build DDD survey panel with BOTH a 'state' column (user's cluster=)
+        # and a 'psu' column (survey_design.psu) at DIFFERENT partitions.
+        # The survey-design PSU wins; cluster= is overridden with a warning.
+        data = _ddd_survey_panel(seed=83).copy()
+        rng = np.random.default_rng(seed=83)
+        # 'psu' is a coarser partition than 'state' — distinct grouping
+        data["state"] = rng.choice(range(20), size=len(data))
+        data["psu"] = rng.choice(range(5), size=len(data))
+
+        sd = SurveyDesign(weights="weight", psu="psu")
+        with pytest.warns(UserWarning, match="PSU will be used"):
+            res = TripleDifference(estimation_method="reg", cluster="state").fit(
+                data,
+                outcome="outcome",
+                group="group",
+                partition="partition",
+                time="time",
+                survey_design=sd,
+            )
+        # cluster_name + n_clusters suppressed under survey-backed fit
+        assert res.cluster_name is None, (
+            f"cluster_name should be suppressed under survey-backed fit, "
+            f"got {res.cluster_name!r} (the raw cluster= argument)"
+        )
+        assert res.n_clusters is None, (
+            f"n_clusters should be suppressed under survey-backed fit, "
+            f"got {res.n_clusters} (would be raw data['state'].nunique())"
+        )
+        # And to_dict doesn't leak the misleading raw cluster
+        d = res.to_dict()
+        assert "cluster_name" not in d or d.get("cluster_name") is None
+        assert "n_clusters" not in d or d.get("n_clusters") is None
+        # Survey block remains the canonical surface for cluster/PSU reporting
+        assert "Survey Design" in res.summary()
+        assert res.survey_metadata is not None
+
     def test_fit_clone_idempotent_on_vcov_type(self):
         """get_params -> reconstruct -> refit -> identical SE.
         Catches drift between __init__ defaults, attribute storage, and
