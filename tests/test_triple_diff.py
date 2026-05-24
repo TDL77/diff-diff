@@ -1350,12 +1350,68 @@ class TestTripleDifferenceVcovType:
         assert d["vcov_type"] == "hc1"
 
     def test_summary_includes_vcov_type(self):
+        """Default (no cluster, no survey) renders the variance-family label
+        via the shared _format_vcov_label, not the raw vcov_type string."""
         data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=51)
         res = TripleDifference().fit(
             data, outcome="outcome", group="group", partition="partition", time="time"
         )
-        assert "hc1" in res.summary()
-        assert "Variance estimator" in res.summary()
+        out = res.summary()
+        assert "Variance estimator" in out
+        assert "HC1 heteroskedasticity-robust" in out
+
+    def test_summary_cluster_label_is_cr1_not_raw_hc1(self):
+        """Cluster fit renders the cluster-aware CR1 Liang-Zeger label rather
+        than 'hc1', since the actual algebra is CR1 on the combined IF.
+        Addresses codex local-review P2 — raw 'hc1' line was misleading."""
+        data = _generate_ddd_data_with_state_clusters(seed=53)
+        res = TripleDifference(cluster="state").fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        out = res.summary()
+        assert "CR1 cluster-robust at state" in out
+        # G=<n_clusters> suffix present
+        assert f"G={res.n_clusters}" in out
+
+    def test_summary_no_variance_estimator_line_under_survey(self):
+        """Survey fit suppresses the variance-estimator line; the Survey Design
+        block above already names design + n_psu + df. The analytical SE is
+        TSL on the combined IF (or replicate refit), not the raw hc1 sandwich,
+        so a 'Variance estimator: hc1' line would be misleading. Addresses
+        codex local-review P2 + P3 (summary regression coverage gap)."""
+        data = _ddd_survey_panel(seed=29)
+        sd = SurveyDesign(weights="weight", strata="stratum")
+        res = TripleDifference(estimation_method="reg").fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            survey_design=sd,
+        )
+        out = res.summary()
+        # The Survey Design block remains the canonical surface
+        assert "Survey Design" in out
+        # No misleading variance-estimator line on survey-backed fits
+        assert "Variance estimator" not in out
+
+    def test_results_cluster_name_carries_through(self):
+        """cluster_name field on Results: populated when cluster= set, None otherwise.
+        Mirrors CS PR #487 pattern; consumed by _format_vcov_label in summary()."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=63)
+        r_none = TripleDifference().fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert r_none.cluster_name is None
+
+        data2 = _generate_ddd_data_with_state_clusters(seed=67)
+        r_cluster = TripleDifference(cluster="state").fit(
+            data2, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert r_cluster.cluster_name == "state"
+        # And it flows through to_dict
+        d = r_cluster.to_dict()
+        assert d.get("cluster_name") == "state"
 
     def test_fit_clone_idempotent_on_vcov_type(self):
         """get_params -> reconstruct -> refit -> identical SE.

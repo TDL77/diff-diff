@@ -107,6 +107,7 @@ class TripleDifferenceResults:
     # Inference details
     inference_method: str = field(default="analytical")
     vcov_type: str = field(default="hc1")
+    cluster_name: Optional[str] = field(default=None)
     n_bootstrap: Optional[int] = field(default=None)
     n_clusters: Optional[int] = field(default=None)
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
@@ -168,7 +169,23 @@ class TripleDifferenceResults:
             lines.append(f"{'Inference method:':<30} {self.inference_method:>15}")
             if self.n_bootstrap is not None:
                 lines.append(f"{'Bootstrap replications:':<30} {self.n_bootstrap:>15}")
-        lines.append(f"{'Variance estimator:':<30} {self.vcov_type:>15}")
+        # Variance-estimator line. Suppressed under survey designs (the survey
+        # block above already names the design + n_psu + df; the analytical
+        # SE is TSL on the combined IF, not the raw hc1 sandwich). For bare
+        # cluster= fits the actual algebra is CR1 Liang-Zeger on the combined
+        # IF, so route through the shared _format_vcov_label to render a
+        # cluster-aware label rather than raw "hc1".
+        if self.survey_metadata is None:
+            from diff_diff.results import _format_vcov_label
+
+            vcov_label = _format_vcov_label(
+                self.vcov_type,
+                cluster_name=self.cluster_name,
+                n_clusters=self.n_clusters,
+                n_obs=self.n_obs,
+            )
+            if vcov_label:
+                lines.append(f"{'Variance estimator:':<30} {vcov_label:>15}")
         if self.n_clusters is not None:
             lines.append(f"{'Number of clusters:':<30} {self.n_clusters:>15}")
 
@@ -279,6 +296,8 @@ class TripleDifferenceResults:
             result["n_bootstrap"] = self.n_bootstrap
         if self.n_clusters is not None:
             result["n_clusters"] = self.n_clusters
+        if self.cluster_name is not None:
+            result["cluster_name"] = self.cluster_name
         if self.survey_metadata is not None:
             sm = self.survey_metadata
             result["weight_type"] = sm.weight_type
@@ -758,6 +777,7 @@ class TripleDifference:
             r_squared=r_squared,
             inference_method="analytical",
             vcov_type=self.vcov_type,
+            cluster_name=self.cluster,
             n_clusters=n_clusters,
             survey_metadata=survey_metadata,
             epv_diagnostics=epv_diag if epv_diag else None,
