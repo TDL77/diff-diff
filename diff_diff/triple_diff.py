@@ -658,6 +658,31 @@ class TripleDifference:
         if self._cluster_ids is not None and np.any(pd.isna(data[self.cluster])):
             raise ValueError(f"Cluster column '{self.cluster}' contains missing values")
 
+        # Reject replicate-weight + cluster=: replicate IF variance is
+        # computed by replicate reweighting (BRR / Fay / JK1 / JKn / SDR)
+        # and ignores PSU/cluster entirely (survey.py:104-109 enforces
+        # replicate_weights are mutually exclusive with strata/psu/fpc).
+        # Honoring bare cluster= here would silently have no effect on
+        # variance while populating cluster_name/n_clusters on Results
+        # dishonestly. Fail-closed per feedback_no_silent_failures.
+        # Mirrors CallawaySantAnna guard at staggered.py:1705-1719.
+        if (
+            self.cluster is not None
+            and survey_design is not None
+            and getattr(survey_design, "replicate_weights", None) is not None
+        ):
+            raise NotImplementedError(
+                f"TripleDifference(cluster={self.cluster!r}) is not "
+                "supported with replicate-weight survey designs. "
+                "Replicate-weight variance is computed by replicate "
+                "reweighting (BRR / Fay / JK1 / JKn / SDR) and ignores "
+                "PSU/cluster entirely — setting cluster= would silently "
+                "have no effect on the variance estimate. Either omit "
+                "cluster= (the replicate weights encode the design "
+                "structure implicitly) or use a non-replicate survey "
+                "design (with explicit strata/psu/fpc)."
+            )
+
         # Resolve effective cluster and inject cluster-as-PSU for survey variance
         if resolved_survey is not None:
             effective_cluster_ids = _resolve_effective_cluster(

@@ -1331,6 +1331,37 @@ class TestTripleDifferenceVcovType:
         assert "Survey Design" in out
         assert "Variance estimator" not in out
 
+    @pytest.mark.parametrize("method", ["dr", "reg", "ipw"])
+    def test_cluster_plus_replicate_weights_rejected(self, method):
+        """cluster= + survey_design(replicate_weights=...) raises
+        NotImplementedError because replicate-weight variance is computed
+        by replicate reweighting (BRR / Fay / JK1 / JKn / SDR) and ignores
+        PSU/cluster entirely — honoring the cluster argument would silently
+        have no effect on the variance estimate.
+
+        Addresses codex R7 P1 (.claude/reviews/local-review-latest.md):
+        the silent no-op was caught by direct interpreter inspection of
+        the new JK1 replicate fixture. Mirrors CallawaySantAnna's guard
+        at diff_diff/staggered.py:1705-1719 (CS PR #487)."""
+        data, rep_cols = _ddd_replicate_panel(seed=89)
+        # Add a 'state' column to attempt as the cluster argument
+        rng = np.random.default_rng(seed=89)
+        data["state"] = rng.choice(range(5), size=len(data))
+        sd = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+        )
+        with pytest.raises(NotImplementedError, match="replicate-weight"):
+            TripleDifference(estimation_method=method, cluster="state").fit(
+                data,
+                outcome="outcome",
+                group="group",
+                partition="partition",
+                time="time",
+                survey_design=sd,
+            )
+
     # -- Surface 4: input rejection at __init__ --------------------------
 
     def test_reject_classical_at_init(self):
