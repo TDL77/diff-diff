@@ -843,9 +843,11 @@ class TestValidateMeatPsd:
         ``stacklevel=3`` to ``_validate_meat_psd``. The pre-extraction
         inline warn used ``stacklevel=2``; after the helper extraction the
         +1 frame shift means the call site must pass ``stacklevel=3`` to
-        attribute the warning to the same outer caller. If a future
-        refactor drops the explicit kwarg this test surfaces it before the
-        warning starts mis-attributing to inside the helper."""
+        attribute the warning to the same outer caller. Pairs with the
+        runtime test ``test_survey_path_attributes_warning_to_user_code``
+        which exercises the actual frame walk; this static check pins the
+        literal kwarg to surface bare-text regressions even if the runtime
+        test's fixture changes."""
         import inspect
 
         from diff_diff.two_stage import _compute_stratified_conley_meat
@@ -862,6 +864,101 @@ class TestValidateMeatPsd:
             "to _validate_meat_psd. The pre-extraction inline warn used "
             "stacklevel=2; the +1 frame shift from extracting the helper "
             "requires stacklevel=3 to preserve attribution."
+        )
+
+    def test_survey_path_attributes_warning_to_user_code(self):
+        """Runtime warning-capture test on the SURVEY orchestrator
+        ``_compute_stratified_conley_meat``: when the panel-block path
+        produces an indefinite combined meat the PSD warning must bubble
+        through the orchestrator frame to land at user code (this test).
+        Locks the stacklevel=3 contract end-to-end (not just by source
+        substring), addressing CI codex R1 P3.
+
+        Mirrors the no-survey test's monkey-patch pattern: replaces the
+        serial-Bartlett kernel helper bound inside ``two_stage.py`` with
+        an aggressively-negative-off-diagonal stub so the serial meat is
+        indefinite and the combined meat's min eigenvalue drops below
+        the -1e-12 PSD threshold. Uses the minimal 4-PSU x 2-period x
+        3-obs survey fixture from
+        ``tests/test_spillover.py::TestSpilloverDiDWaveE2Followup``."""
+        from diff_diff import two_stage as two_stage_mod
+        from diff_diff.survey import ResolvedSurveyDesign
+        from diff_diff.two_stage import _compute_stratified_conley_meat
+
+        rng = np.random.default_rng(seed=29)
+        n_obs, T, G, p_2 = 24, 2, 4, 3
+        obs_per_psu_period = 3
+        psu_id = np.repeat(np.arange(G), obs_per_psu_period * T)
+        time_arr = np.tile(np.repeat(np.arange(T), obs_per_psu_period), G)
+        Psi = rng.standard_normal((n_obs, p_2))
+        psu_centroids = np.array([[40.0, -120.0], [40.1, -120.0], [40.2, -120.0], [40.3, -120.0]])
+        coords = psu_centroids[psu_id]
+        psu_strata = np.array([0, 0, 1, 1])
+        resolved = ResolvedSurveyDesign(
+            weights=np.ones(n_obs),
+            weight_type="pweight",
+            strata=np.repeat(psu_strata, obs_per_psu_period * T),
+            psu=psu_id,
+            fpc=np.full(n_obs, 20.0),
+            n_strata=2,
+            n_psu=4,
+            lonely_psu="remove",
+        )
+
+        # Monkey-patch the serial Bartlett kernel helper as bound inside
+        # diff_diff.two_stage (the `from diff_diff.conley import ...`
+        # rebind at module load time) so the serial meat is indefinite.
+        # The combined meat = spatial + indefinite_serial then drops
+        # below the -1e-12 PSD threshold.
+        original = two_stage_mod._serial_bartlett_kernel_matrix
+
+        def _indefinite(t_codes: np.ndarray, L: int) -> np.ndarray:
+            n = t_codes.shape[0]
+            K = np.eye(n)
+            for i in range(n):
+                for j in range(n):
+                    if i != j:
+                        K[i, j] = -10.0
+            return K
+
+        try:
+            two_stage_mod._serial_bartlett_kernel_matrix = _indefinite
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                _compute_stratified_conley_meat(
+                    Psi,
+                    conley_coords=coords,
+                    conley_cutoff_km=0.30,
+                    conley_metric="euclidean",
+                    conley_kernel="bartlett",
+                    resolved_survey=resolved,
+                    conley_time=time_arr,
+                    conley_lag_cutoff=1,
+                )
+        finally:
+            two_stage_mod._serial_bartlett_kernel_matrix = original
+
+        psd = [
+            msg
+            for msg in w
+            if issubclass(msg.category, UserWarning) and "negative eigenvalue" in str(msg.message)
+        ]
+        assert len(psd) >= 1, (
+            f"Expected a PSD UserWarning from the indefinite combined "
+            f"survey meat. Got: {[str(m.message) for m in w]}"
+        )
+        msg = psd[0]
+        # Attribution must be in this test file (user code), proving the
+        # warning bubbled through both the helper (_validate_meat_psd in
+        # conley.py) and the survey orchestrator
+        # (_compute_stratified_conley_meat in two_stage.py). A regression
+        # of the call-site stacklevel from 3 to 2 would stick the
+        # attribution inside two_stage.py; to 1 inside the helper itself.
+        assert msg.filename.endswith("test_conley_vcov.py"), (
+            f"Expected attribution to user code (test_conley_vcov.py); got "
+            f"{msg.filename!r}:{msg.lineno}. The stacklevel=3 contract at "
+            f"two_stage.py's _compute_stratified_conley_meat call site has "
+            f"regressed."
         )
 
 
