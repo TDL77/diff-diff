@@ -1164,6 +1164,44 @@ def _ddd_survey_panel(seed: int = 71, n: int = 400) -> pd.DataFrame:
     return data
 
 
+def _ddd_replicate_panel(seed: int = 89, n: int = 200, n_rep: int = 10):
+    """DDD panel with JK1 replicate-weight columns for testing the
+    replicate-variance inference branch. Mirrors the pattern in
+    ``tests/test_survey_phase6.py::test_triple_diff_replicate_all_methods``
+    but uses ``default_rng`` for reproducibility independent of global state.
+
+    Returns (DataFrame with outcome/group/partition/time/weight + rep_0..rep_{n_rep-1},
+    list of replicate column names).
+    """
+    rng = np.random.default_rng(seed)
+    d1 = np.repeat([0, 1], n // 2)
+    d2 = np.tile([0, 1], n // 2)
+    post = rng.choice([0, 1], n)
+    y = 1.0 + 0.5 * d1 + 0.3 * d2 + 2.0 * d1 * d2 * post + rng.standard_normal(n) * 0.5
+    w = 1.0 + rng.exponential(0.3, n)
+    data = pd.DataFrame(
+        {
+            "outcome": y,
+            "group": d1,
+            "partition": d2,
+            "time": post,
+            "weight": w,
+        }
+    )
+    cluster_size = n // n_rep
+    rep_cols = []
+    for r in range(n_rep):
+        w_r = w.copy()
+        start = r * cluster_size
+        end = min((r + 1) * cluster_size, n)
+        w_r[start:end] = 0.0
+        w_r[w_r > 0] *= n_rep / (n_rep - 1)
+        col = f"rep_{r}"
+        data[col] = w_r
+        rep_cols.append(col)
+    return data, rep_cols
+
+
 class TestTripleDifferenceVcovType:
     """Phase 1b interstitial #2: vcov_type input contract on TripleDifference.
 
@@ -1247,6 +1285,51 @@ class TestTripleDifferenceVcovType:
         )
         assert r_default.att == r_explicit.att, f"[{method}] survey ATT not bit-equal"
         assert r_default.se == r_explicit.se, f"[{method}] survey SE not bit-equal"
+
+    # -- Surface 3b: replicate-weight survey path preserved bit-equally --
+
+    @pytest.mark.parametrize("method", ["dr", "reg", "ipw"])
+    def test_replicate_survey_hc1_bit_equal_baseline(self, method):
+        """Replicate-weight survey design + vcov_type='hc1' bit-equal to
+        replicate-weight survey design alone. Exercises the distinct
+        replicate-df branch in fit() (separate from the TSL branch in
+        Surface 3 above).
+
+        Addresses codex R5 P1 (.claude/reviews/local-review-latest.md):
+        the prior survey bit-equal coverage only exercised the analytical
+        TSL path; the replicate-variance path was unverified."""
+        data, rep_cols = _ddd_replicate_panel(seed=89)
+        sd = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+        )
+        r_default = TripleDifference(estimation_method=method).fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            survey_design=sd,
+        )
+        r_explicit = TripleDifference(estimation_method=method, vcov_type="hc1").fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            survey_design=sd,
+        )
+        assert r_default.att == r_explicit.att, f"[{method}] replicate ATT not bit-equal"
+        assert r_default.se == r_explicit.se, f"[{method}] replicate SE not bit-equal"
+        # Results-surface assertion: vcov_type carries through on the
+        # replicate path AND summary still suppresses the raw variance
+        # line (survey block remains the canonical surface).
+        assert r_explicit.vcov_type == "hc1"
+        assert r_explicit.survey_metadata is not None
+        out = r_explicit.summary()
+        assert "Survey Design" in out
+        assert "Variance estimator" not in out
 
     # -- Surface 4: input rejection at __init__ --------------------------
 
