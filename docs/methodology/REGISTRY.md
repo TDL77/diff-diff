@@ -321,14 +321,20 @@ a defined interpretation on the hat-matrix-bearing design (HC2 leverage
 **IF-based estimators** derive variance from an asymptotic influence function
 `Var(θ̂) = (1/n) Σ_i ψ_i²` per estimator-specific derivations (Callaway &
 Sant'Anna 2021 for `CallawaySantAnna`; Borusyak-Jaravel-Spiess 2024 for
-`ImputationDiD`; Sant'Anna & Zhao 2020 for `EfficientDiD`). For these:
+`ImputationDiD`; Sant'Anna & Zhao 2020 for `EfficientDiD`; Ortiz-Villavicencio
+& Sant'Anna 2025 for `TripleDifference`, where the variance is built on the
+3-pairwise-DiD decomposition `inf = w3·IF_3 + w2·IF_2 - w1·IF_1`). For these:
 
 - `hc1` with `cluster=None` ≡ per-unit IF variance — the default
   (Williams 2000 form).
 - `hc1` with `cluster=X` ≡ CR1 Liang-Zeger on the IF:
-  `Var = (G/(G-1)) Σ_c (Σ_{i∈c} ψ_i)² / n²`. Activated by synthesizing
-  `SurveyDesign(psu=X)` internally and routing through the existing PSU-meat
-  machinery (`_compute_stratified_psu_meat`).
+  `Var = (G/(G-1)) Σ_c (Σ_{i∈c} ψ_i)² / n²`. The activation path is
+  estimator-specific: `CallawaySantAnna` synthesizes `SurveyDesign(psu=X)`
+  internally and routes through the shared PSU-meat machinery
+  (`_compute_stratified_psu_meat`); `TripleDifference` computes the
+  algebraically equivalent CR1 directly from cluster-summed IFs inline at
+  `triple_diff.py` (no SurveyDesign synthesis — the IF is already in scope
+  at the SE call site). Both produce the same numerical result.
 - `classical`, `hc2`, `hc2_bm` are **N/A** for IF-based estimators —
   hat-matrix leverage and Bell-McCaffrey Satterthwaite DOF are defined on a
   single regression's design matrix, and IF-based estimators have no
@@ -342,14 +348,16 @@ Sant'Anna 2021 for `CallawaySantAnna`; Borusyak-Jaravel-Spiess 2024 for
 This split is a structural property of the estimator's variance derivation,
 not a missing feature. The `vcov_type` input contract for IF-based estimators
 is **permanently narrow** at `{"hc1"}`. Enforced today on
-`CallawaySantAnna`; the same narrow contract is expected when
-`ImputationDiD` and `EfficientDiD` reach `vcov_type` threading.
+`CallawaySantAnna` and `TripleDifference`; the same narrow contract is
+expected when `ImputationDiD` and `EfficientDiD` reach `vcov_type` threading.
 
-**Note:** This routing is a documented synthesis: the
-`SurveyDesign(psu=...)` synthesis is the new wiring; the downstream
-PSU-meat machinery (`_compute_stratified_psu_meat`) is the established
-survey-side path; the CR1 Liang-Zeger algebra on IF is Williams (2000) /
-Hansen (2007). No new methodology is introduced.
+**Note:** This routing is a documented synthesis. The clustered-`hc1`
+activation path is estimator-specific: `CallawaySantAnna` synthesizes
+`SurveyDesign(psu=X)` internally and routes through the existing
+PSU-meat machinery (`_compute_stratified_psu_meat`); `TripleDifference`
+computes the algebraically equivalent CR1 directly from cluster-summed
+IFs inline. The CR1 Liang-Zeger algebra on the IF is Williams (2000) /
+Hansen (2007) in both cases — no new methodology is introduced.
 
 ---
 
@@ -2033,6 +2041,8 @@ contract changes.
 - [x] ATT and SE match R within <0.001% for all methods and DGP types
 - [x] Survey design support: all methods (reg, IPW, DR) with weighted OLS/logit + TSL on combined influence functions. Weighted solve_logit() for propensity scores in IPW/DR paths.
 - **Note:** TripleDifference survey SE: for IPW/DR, pairwise IFs incorporate survey weights via weighted Riesz representers (`riesz *= weights`), so the combined IF is divided by per-observation survey weights (`inf / sw`) before passing to `compute_survey_vcov()` to prevent double-weighting. For regression (RA), pairwise IFs are already on the unweighted residual scale (WLS fits use weights internally but the IF is not Riesz-multiplied), so the combined IF passes directly to TSL without de-weighting. The OLS nuisance IF corrections in DR mode use weighted cross-products normalized by subgroup row count `n` (not `sum(weights)`).
+- **Note (vcov_type contract):** `vcov_type` is permanently narrow to `{"hc1"}` per the IF-based variance decomposition. Analytical-sandwich families `{classical, hc2, hc2_bm}` are rejected at `__init__` with a methodology-rooted message citing Ortiz-Villavicencio & Sant'Anna (2025) — the 3-pairwise-DiD decomposition has no single design matrix on which hat-matrix leverage or Bell-McCaffrey Satterthwaite DOF can be defined. `cluster=` continues to invoke Liang-Zeger CR1 on the combined influence function (`(G/(G-1)) · Σ_c (Σ_{i∈c} ψ_i)² / n²`, plain CR1 — no Stata-style `(n-1)/(n-p)` finite-sample factor because the IF has no design-matrix `p` in the OLS sense); `survey_design=` continues to invoke TSL on the combined IF. `vcov_type='conley'` is deferred to the TripleDifference Conley follow-up row in `TODO.md`. See ["IF-based variance estimators vs analytical-sandwich estimators"](#if-based-variance-estimators-vs-analytical-sandwich-estimators) above for the structural taxonomy.
+- **Note (`cluster=` + replicate-weight survey rejection):** `TripleDifference(cluster=X)` + `SurveyDesign(replicate_weights=[...], replicate_method=...)` is rejected at `fit()` with `NotImplementedError`. Replicate-weight variance is computed by replicate reweighting (BRR / Fay / JK1 / JKn / SDR) and ignores PSU/cluster entirely (the survey-side gate at `survey.py:104-109` enforces `replicate_weights` are mutually exclusive with `strata`/`psu`/`fpc`); honoring `cluster=` here would silently have no effect on the variance estimate while populating `cluster_name`/`n_clusters` on Results dishonestly. Mirrors the `CallawaySantAnna` guard at `staggered.py:1705-1719`. Either omit `cluster=` (the replicate weights encode the design structure implicitly) or use a non-replicate survey design with explicit `strata`/`psu`/`fpc`.
 
 ---
 

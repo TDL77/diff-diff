@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from diff_diff.survey import SurveyDesign
 from diff_diff.triple_diff import (
     TripleDifference,
     TripleDifferenceResults,
@@ -1139,3 +1140,479 @@ class TestTripleDifferenceClusterDefensive:
             f"({res_unit.se:.6f}) — the cluster= parameter may "
             "have regressed to a silent no-op."
         )
+
+
+def _ddd_survey_panel(seed: int = 71, n: int = 400) -> pd.DataFrame:
+    """Cross-sectional DDD data with survey columns for vcov_type bit-equal tests.
+
+    Mirrors ``tests/test_survey_phase3.py::ddd_survey_data`` but uses
+    ``default_rng`` for reproducibility independent of global state.
+    """
+    rng = np.random.default_rng(seed)
+    data = pd.DataFrame(
+        {
+            "outcome": rng.standard_normal(n) + 0.5,
+            "group": rng.choice([0, 1], n),
+            "partition": rng.choice([0, 1], n),
+            "time": rng.choice([0, 1], n),
+            "weight": rng.uniform(0.5, 2.0, n),
+            "stratum": rng.choice([1, 2, 3], n),
+        }
+    )
+    mask = (data["group"] == 1) & (data["partition"] == 1) & (data["time"] == 1)
+    data.loc[mask, "outcome"] += 1.5
+    return data
+
+
+def _ddd_replicate_panel(seed: int = 89, n: int = 200, n_rep: int = 10):
+    """DDD panel with JK1 replicate-weight columns for testing the
+    replicate-variance inference branch. Mirrors the pattern in
+    ``tests/test_survey_phase6.py::test_triple_diff_replicate_all_methods``
+    but uses ``default_rng`` for reproducibility independent of global state.
+
+    Returns (DataFrame with outcome/group/partition/time/weight + rep_0..rep_{n_rep-1},
+    list of replicate column names).
+    """
+    rng = np.random.default_rng(seed)
+    d1 = np.repeat([0, 1], n // 2)
+    d2 = np.tile([0, 1], n // 2)
+    post = rng.choice([0, 1], n)
+    y = 1.0 + 0.5 * d1 + 0.3 * d2 + 2.0 * d1 * d2 * post + rng.standard_normal(n) * 0.5
+    w = 1.0 + rng.exponential(0.3, n)
+    data = pd.DataFrame(
+        {
+            "outcome": y,
+            "group": d1,
+            "partition": d2,
+            "time": post,
+            "weight": w,
+        }
+    )
+    cluster_size = n // n_rep
+    rep_cols = []
+    for r in range(n_rep):
+        w_r = w.copy()
+        start = r * cluster_size
+        end = min((r + 1) * cluster_size, n)
+        w_r[start:end] = 0.0
+        w_r[w_r > 0] *= n_rep / (n_rep - 1)
+        col = f"rep_{r}"
+        data[col] = w_r
+        rep_cols.append(col)
+    return data, rep_cols
+
+
+class TestTripleDifferenceVcovType:
+    """Phase 1b interstitial #2: vcov_type input contract on TripleDifference.
+
+    TripleDifference uses IF-based variance per Ortiz-Villavicencio &
+    Sant'Anna (2025); vcov_type is permanently narrow to {"hc1"}.
+    Analytical-sandwich families {classical, hc2, hc2_bm} and conley are
+    rejected at __init__ with methodology-rooted messages. Mirrors CS
+    PR #487 template at tests/test_staggered.py.
+
+    5-surface matrix:
+      1. Default preserved bit-equally (3 estimation methods)
+      2. Cluster path preserved bit-equally
+      3. Survey path preserved bit-equally
+      4. Input rejection at __init__ (methodology terminology)
+      5. fit()-time revalidation (set_params can't bypass)
+
+    Plus introspection tests for Results carrier, summary render,
+    to_dict, get_params, fit-clone idempotence, and convenience function.
+    """
+
+    # -- Surface 1: default behavior preserved bit-equally ---------------
+
+    @pytest.mark.parametrize("method", ["dr", "reg", "ipw"])
+    def test_default_hc1_bit_equal_baseline(self, method):
+        """vcov_type='hc1' (explicit) is bit-equal to the default for every
+        estimation method. Guards against drift between __init__ defaults
+        and Results construction when vcov_type was threaded through."""
+        data = generate_ddd_data(n_per_cell=80, true_att=2.0, seed=11)
+
+        r_default = TripleDifference(estimation_method=method).fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        r_explicit = TripleDifference(estimation_method=method, vcov_type="hc1").fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert r_default.att == r_explicit.att, f"[{method}] ATT not bit-equal"
+        assert r_default.se == r_explicit.se, f"[{method}] SE not bit-equal"
+
+    # -- Surface 2: cluster path preserved bit-equally -------------------
+
+    def test_cluster_hc1_bit_equal_baseline(self):
+        """cluster=<col> + vcov_type='hc1' bit-equal to cluster=<col> alone."""
+        data = _generate_ddd_data_with_state_clusters(seed=23)
+
+        r_default = TripleDifference(cluster="state").fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        r_explicit = TripleDifference(cluster="state", vcov_type="hc1").fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert r_default.att == r_explicit.att
+        assert r_default.se == r_explicit.se
+
+    # -- Surface 3: survey path preserved bit-equally --------------------
+
+    @pytest.mark.parametrize("method", ["dr", "reg", "ipw"])
+    def test_survey_hc1_bit_equal_baseline(self, method):
+        """survey_design + vcov_type='hc1' bit-equal to survey_design alone.
+
+        Pre-empt: CS PR #487 R2 caught a survey_metadata overload bug;
+        same risk class here when threading vcov_type alongside survey_design.
+        """
+        data = _ddd_survey_panel(seed=29)
+        sd = SurveyDesign(weights="weight", strata="stratum")
+
+        r_default = TripleDifference(estimation_method=method).fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            survey_design=sd,
+        )
+        r_explicit = TripleDifference(estimation_method=method, vcov_type="hc1").fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            survey_design=sd,
+        )
+        assert r_default.att == r_explicit.att, f"[{method}] survey ATT not bit-equal"
+        assert r_default.se == r_explicit.se, f"[{method}] survey SE not bit-equal"
+
+    # -- Surface 3b: replicate-weight survey path preserved bit-equally --
+
+    @pytest.mark.parametrize("method", ["dr", "reg", "ipw"])
+    def test_replicate_survey_hc1_bit_equal_baseline(self, method):
+        """Replicate-weight survey design + vcov_type='hc1' bit-equal to
+        replicate-weight survey design alone. Exercises the distinct
+        replicate-df branch in fit() (separate from the TSL branch in
+        Surface 3 above).
+
+        Addresses codex R5 P1 (.claude/reviews/local-review-latest.md):
+        the prior survey bit-equal coverage only exercised the analytical
+        TSL path; the replicate-variance path was unverified."""
+        data, rep_cols = _ddd_replicate_panel(seed=89)
+        sd = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+        )
+        r_default = TripleDifference(estimation_method=method).fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            survey_design=sd,
+        )
+        r_explicit = TripleDifference(estimation_method=method, vcov_type="hc1").fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            survey_design=sd,
+        )
+        assert r_default.att == r_explicit.att, f"[{method}] replicate ATT not bit-equal"
+        assert r_default.se == r_explicit.se, f"[{method}] replicate SE not bit-equal"
+        # Results-surface assertion: vcov_type carries through on the
+        # replicate path AND summary still suppresses the raw variance
+        # line (survey block remains the canonical surface).
+        assert r_explicit.vcov_type == "hc1"
+        assert r_explicit.survey_metadata is not None
+        out = r_explicit.summary()
+        assert "Survey Design" in out
+        assert "Variance estimator" not in out
+
+    @pytest.mark.parametrize("method", ["dr", "reg", "ipw"])
+    def test_cluster_plus_replicate_weights_rejected(self, method):
+        """cluster= + survey_design(replicate_weights=...) raises
+        NotImplementedError because replicate-weight variance is computed
+        by replicate reweighting (BRR / Fay / JK1 / JKn / SDR) and ignores
+        PSU/cluster entirely — honoring the cluster argument would silently
+        have no effect on the variance estimate.
+
+        Addresses codex R7 P1 (.claude/reviews/local-review-latest.md):
+        the silent no-op was caught by direct interpreter inspection of
+        the new JK1 replicate fixture. Mirrors CallawaySantAnna's guard
+        at diff_diff/staggered.py:1705-1719 (CS PR #487)."""
+        data, rep_cols = _ddd_replicate_panel(seed=89)
+        # Add a 'state' column to attempt as the cluster argument
+        rng = np.random.default_rng(seed=89)
+        data["state"] = rng.choice(range(5), size=len(data))
+        sd = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+        )
+        with pytest.raises(NotImplementedError, match="replicate-weight"):
+            TripleDifference(estimation_method=method, cluster="state").fit(
+                data,
+                outcome="outcome",
+                group="group",
+                partition="partition",
+                time="time",
+                survey_design=sd,
+            )
+
+    # -- Surface 4: input rejection at __init__ --------------------------
+
+    def test_reject_classical_at_init(self):
+        with pytest.raises(ValueError, match="influence-function"):
+            TripleDifference(vcov_type="classical")
+
+    def test_reject_hc2_at_init(self):
+        with pytest.raises(ValueError, match="Ortiz-Villavicencio"):
+            TripleDifference(vcov_type="hc2")
+
+    def test_reject_hc2_bm_at_init(self):
+        with pytest.raises(ValueError, match="hat matrix"):
+            TripleDifference(vcov_type="hc2_bm")
+
+    def test_reject_hc2_bm_at_init_bm_keyword(self):
+        """Distinct keyword pin: Bell-McCaffrey terminology in the message."""
+        with pytest.raises(ValueError, match="Bell-McCaffrey"):
+            TripleDifference(vcov_type="hc2_bm")
+
+    def test_reject_conley_at_init(self):
+        with pytest.raises(ValueError, match="spatial-HAC"):
+            TripleDifference(vcov_type="conley")
+
+    def test_reject_conley_at_init_todo_pointer(self):
+        """Conley rejection cites the TODO follow-up row."""
+        with pytest.raises(ValueError, match="TODO"):
+            TripleDifference(vcov_type="conley")
+
+    def test_reject_unknown_vcov_type(self):
+        """Generic membership rejection for unrecognized values."""
+        with pytest.raises(ValueError, match="invalid"):
+            TripleDifference(vcov_type="hc4")
+
+    # -- Surface 5: fit()-time revalidation (set_params can't bypass) ----
+
+    def test_set_params_bad_vcov_caught_at_fit_time(self):
+        """set_params is strict-mirror sklearn (no atomic validation), but
+        fit() re-validates so a bad set_params(vcov_type='hc4') surfaces a
+        clear error at fit-time rather than silently propagating a bad
+        value to Results metadata. Mirrors CS
+        tests/test_staggered.py::test_set_params_bad_vcov_caught_at_fit_time."""
+        td = TripleDifference()
+        # set_params succeeds (sklearn-style mutate-then-validate-at-use)
+        td.set_params(vcov_type="hc4")
+        assert td.vcov_type == "hc4"
+        # fit() re-validates and raises
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=37)
+        with pytest.raises(ValueError, match="hc4"):
+            td.fit(
+                data,
+                outcome="outcome",
+                group="group",
+                partition="partition",
+                time="time",
+            )
+
+    def test_set_params_bad_vcov_classical_caught_at_fit_time(self):
+        """Same as above but with an IF-incompatible family (classical).
+        Catches the silent-propagation path on the methodology-rooted
+        rejection branch."""
+        td = TripleDifference()
+        td.set_params(vcov_type="classical")
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=39)
+        with pytest.raises(ValueError, match="influence-function"):
+            td.fit(
+                data,
+                outcome="outcome",
+                group="group",
+                partition="partition",
+                time="time",
+            )
+
+    # -- Introspection contract -------------------------------------------
+
+    def test_default_vcov_type_is_hc1(self):
+        """Attribute default sanity (pre-fit)."""
+        assert TripleDifference().vcov_type == "hc1"
+
+    def test_get_params_includes_vcov_type(self):
+        td = TripleDifference()
+        params = td.get_params()
+        assert "vcov_type" in params
+        assert params["vcov_type"] == "hc1"
+
+    def test_results_carries_vcov_type(self):
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=43)
+        res = TripleDifference().fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert res.vcov_type == "hc1"
+
+    def test_to_dict_includes_vcov_type(self):
+        """CS R7 caught the same Results-introspection gap on the dict surface."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=47)
+        res = TripleDifference().fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        d = res.to_dict()
+        assert "vcov_type" in d
+        assert d["vcov_type"] == "hc1"
+
+    def test_summary_includes_vcov_type(self):
+        """Default (no cluster, no survey) renders the variance-family label
+        via the shared _format_vcov_label, not the raw vcov_type string."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=51)
+        res = TripleDifference().fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        out = res.summary()
+        assert "Variance estimator" in out
+        assert "HC1 heteroskedasticity-robust" in out
+
+    def test_summary_cluster_label_is_cr1_not_raw_hc1(self):
+        """Cluster fit renders the cluster-aware CR1 Liang-Zeger label rather
+        than 'hc1', since the actual algebra is CR1 on the combined IF.
+        Addresses codex local-review P2 — raw 'hc1' line was misleading."""
+        data = _generate_ddd_data_with_state_clusters(seed=53)
+        res = TripleDifference(cluster="state").fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        out = res.summary()
+        assert "CR1 cluster-robust at state" in out
+        # G=<n_clusters> suffix present
+        assert f"G={res.n_clusters}" in out
+
+    def test_summary_no_variance_estimator_line_under_survey(self):
+        """Survey fit suppresses the variance-estimator line; the Survey Design
+        block above already names design + n_psu + df. The analytical SE is
+        TSL on the combined IF (or replicate refit), not the raw hc1 sandwich,
+        so a 'Variance estimator: hc1' line would be misleading. Addresses
+        codex local-review P2 + P3 (summary regression coverage gap)."""
+        data = _ddd_survey_panel(seed=29)
+        sd = SurveyDesign(weights="weight", strata="stratum")
+        res = TripleDifference(estimation_method="reg").fit(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            survey_design=sd,
+        )
+        out = res.summary()
+        # The Survey Design block remains the canonical surface
+        assert "Survey Design" in out
+        # No misleading variance-estimator line on survey-backed fits
+        assert "Variance estimator" not in out
+
+    def test_results_cluster_name_carries_through(self):
+        """cluster_name field on Results: populated when cluster= set, None otherwise.
+        Mirrors CS PR #487 pattern; consumed by _format_vcov_label in summary()."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=63)
+        r_none = TripleDifference().fit(
+            data, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert r_none.cluster_name is None
+
+        data2 = _generate_ddd_data_with_state_clusters(seed=67)
+        r_cluster = TripleDifference(cluster="state").fit(
+            data2, outcome="outcome", group="group", partition="partition", time="time"
+        )
+        assert r_cluster.cluster_name == "state"
+        # And it flows through to_dict
+        d = r_cluster.to_dict()
+        assert d.get("cluster_name") == "state"
+
+    def test_cluster_name_suppressed_under_survey_design(self):
+        """When survey_design overrides the bare cluster= argument, the Results
+        cluster_name + n_clusters fields are suppressed so they don't misreport
+        the ignored argument. The Survey Design block on summary() is the
+        canonical surface for cluster/PSU reporting on survey-backed fits.
+
+        Addresses codex local-review R2 P2 (.claude/reviews/local-review-latest.md):
+        Under cluster='state' + survey_design(psu='psu') with conflicting
+        partitions, _resolve_effective_cluster picks survey_design.psu and
+        warns; the records on Results should reflect that, not the raw
+        `self.cluster` argument the user passed."""
+        # Build DDD survey panel with BOTH a 'state' column (user's cluster=)
+        # and a 'psu' column (survey_design.psu) at DIFFERENT partitions.
+        # The survey-design PSU wins; cluster= is overridden with a warning.
+        data = _ddd_survey_panel(seed=83).copy()
+        rng = np.random.default_rng(seed=83)
+        # 'psu' is a coarser partition than 'state' — distinct grouping
+        data["state"] = rng.choice(range(20), size=len(data))
+        data["psu"] = rng.choice(range(5), size=len(data))
+
+        sd = SurveyDesign(weights="weight", psu="psu")
+        with pytest.warns(UserWarning, match="PSU will be used"):
+            res = TripleDifference(estimation_method="reg", cluster="state").fit(
+                data,
+                outcome="outcome",
+                group="group",
+                partition="partition",
+                time="time",
+                survey_design=sd,
+            )
+        # cluster_name + n_clusters suppressed under survey-backed fit
+        assert res.cluster_name is None, (
+            f"cluster_name should be suppressed under survey-backed fit, "
+            f"got {res.cluster_name!r} (the raw cluster= argument)"
+        )
+        assert res.n_clusters is None, (
+            f"n_clusters should be suppressed under survey-backed fit, "
+            f"got {res.n_clusters} (would be raw data['state'].nunique())"
+        )
+        # And to_dict doesn't leak the misleading raw cluster
+        d = res.to_dict()
+        assert "cluster_name" not in d or d.get("cluster_name") is None
+        assert "n_clusters" not in d or d.get("n_clusters") is None
+        # Survey block remains the canonical surface for cluster/PSU reporting
+        assert "Survey Design" in res.summary()
+        assert res.survey_metadata is not None
+
+    def test_fit_clone_idempotent_on_vcov_type(self):
+        """get_params -> reconstruct -> refit -> identical SE.
+        Catches drift between __init__ defaults, attribute storage, and
+        Results construction (sklearn clone() pattern)."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=57)
+        td1 = TripleDifference(vcov_type="hc1")
+        r1 = td1.fit(data, outcome="outcome", group="group", partition="partition", time="time")
+        td2 = TripleDifference(**td1.get_params())
+        r2 = td2.fit(data, outcome="outcome", group="group", partition="partition", time="time")
+        assert r1.att == r2.att
+        assert r1.se == r2.se
+        assert r2.vcov_type == "hc1"
+
+    # -- Convenience function threading ----------------------------------
+
+    def test_triple_difference_convenience_func_rejects_invalid_vcov_type(self):
+        """Invalid vcov_type rejected at the function entry point too."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=59)
+        with pytest.raises(ValueError, match="influence-function"):
+            triple_difference(
+                data,
+                outcome="outcome",
+                group="group",
+                partition="partition",
+                time="time",
+                vcov_type="classical",
+            )
+
+    def test_triple_difference_convenience_func_threads_valid_vcov_type(self):
+        """Valid vcov_type='hc1' fits successfully AND lands on Results."""
+        data = generate_ddd_data(n_per_cell=40, true_att=2.0, seed=61)
+        res = triple_difference(
+            data,
+            outcome="outcome",
+            group="group",
+            partition="partition",
+            time="time",
+            vcov_type="hc1",
+        )
+        assert res.vcov_type == "hc1"
+        assert np.isfinite(res.att)
+        assert np.isfinite(res.se)

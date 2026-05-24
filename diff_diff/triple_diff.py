@@ -12,6 +12,11 @@ and doubly robust estimators that correctly handle covariate adjustment,
 unlike naive implementations. Standard errors use the efficient influence
 function: SE = std(IF) / sqrt(n), which is inherently heteroskedasticity-
 robust. Cluster-robust SEs are available via the ``cluster`` parameter.
+The ``vcov_type`` input contract is permanently narrow to ``{"hc1"}``
+because the analytical-sandwich families (classical, hc2, hc2_bm) have
+no equivalent single design matrix on the 3-pairwise-DiD decomposition;
+see REGISTRY.md "IF-based variance estimators vs analytical-sandwich
+estimators" for the structural taxonomy.
 
 The DDD is computed via three pairwise DiD comparisons matching R's
 ``triplediff::ddd()`` package (panel=FALSE mode).
@@ -101,14 +106,14 @@ class TripleDifferenceResults:
     covariate_balance: Optional[pd.DataFrame] = field(default=None, repr=False)
     # Inference details
     inference_method: str = field(default="analytical")
+    vcov_type: str = field(default="hc1")
+    cluster_name: Optional[str] = field(default=None)
     n_bootstrap: Optional[int] = field(default=None)
     n_clusters: Optional[int] = field(default=None)
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None)
     # EPV diagnostics per subgroup comparison
-    epv_diagnostics: Optional[Dict[int, Dict[str, Any]]] = field(
-        default=None, repr=False
-    )
+    epv_diagnostics: Optional[Dict[int, Dict[str, Any]]] = field(default=None, repr=False)
     epv_threshold: float = 10
     pscore_fallback: str = "error"
 
@@ -164,6 +169,23 @@ class TripleDifferenceResults:
             lines.append(f"{'Inference method:':<30} {self.inference_method:>15}")
             if self.n_bootstrap is not None:
                 lines.append(f"{'Bootstrap replications:':<30} {self.n_bootstrap:>15}")
+        # Variance-estimator line. Suppressed under survey designs (the survey
+        # block above already names the design + n_psu + df; the analytical
+        # SE is TSL on the combined IF, not the raw hc1 sandwich). For bare
+        # cluster= fits the actual algebra is CR1 Liang-Zeger on the combined
+        # IF, so route through the shared _format_vcov_label to render a
+        # cluster-aware label rather than raw "hc1".
+        if self.survey_metadata is None:
+            from diff_diff.results import _format_vcov_label
+
+            vcov_label = _format_vcov_label(
+                self.vcov_type,
+                cluster_name=self.cluster_name,
+                n_clusters=self.n_clusters,
+                n_obs=self.n_obs,
+            )
+            if vcov_label:
+                lines.append(f"{'Variance estimator:':<30} {vcov_label:>15}")
         if self.n_clusters is not None:
             lines.append(f"{'Number of clusters:':<30} {self.n_clusters:>15}")
 
@@ -266,6 +288,7 @@ class TripleDifferenceResults:
             "n_control_ineligible": self.n_control_ineligible,
             "estimation_method": self.estimation_method,
             "inference_method": self.inference_method,
+            "vcov_type": self.vcov_type,
         }
         if self.r_squared is not None:
             result["r_squared"] = self.r_squared
@@ -273,6 +296,8 @@ class TripleDifferenceResults:
             result["n_bootstrap"] = self.n_bootstrap
         if self.n_clusters is not None:
             result["n_clusters"] = self.n_clusters
+        if self.cluster_name is not None:
+            result["cluster_name"] = self.cluster_name
         if self.survey_metadata is not None:
             sm = self.survey_metadata
             result["weight_type"] = sm.weight_type
@@ -320,9 +345,7 @@ class TripleDifferenceResults:
             Columns: subgroup, epv, n_events, n_params, is_low.
         """
         if not self.epv_diagnostics:
-            return pd.DataFrame(
-                columns=["subgroup", "epv", "n_events", "n_params", "is_low"]
-            )
+            return pd.DataFrame(columns=["subgroup", "epv", "n_events", "n_params", "is_low"])
         rows = []
         for sg, diag in sorted(self.epv_diagnostics.items()):
             if show_all or diag.get("is_low", False):
@@ -381,6 +404,15 @@ class TripleDifference:
         Column name for cluster-robust standard errors. When provided,
         SEs are computed using the Liang-Zeger cluster-robust variance
         estimator on the influence function.
+    vcov_type : str, default="hc1"
+        Variance estimator. Permanently narrow to ``{"hc1"}`` per the
+        IF-based variance decomposition: TripleDifference uses an
+        efficient influence function and has no single design matrix on
+        which the analytical-sandwich families (``classical``, ``hc2``,
+        ``hc2_bm``) could compute hat-matrix leverage or Bell-McCaffrey
+        Satterthwaite DOF. ``conley`` is deferred. With ``hc1``, default
+        SE is ``std(IF)/sqrt(n)``; with ``hc1`` + ``cluster=<col>``,
+        Liang-Zeger CR1 on the combined IF.
     alpha : float, default=0.05
         Significance level for confidence intervals.
     pscore_trim : float, default=0.01
@@ -486,6 +518,7 @@ class TripleDifference:
         estimation_method: str = "dr",
         robust: bool = True,
         cluster: Optional[str] = None,
+        vcov_type: str = "hc1",
         alpha: float = 0.05,
         pscore_trim: float = 0.01,
         rank_deficient_action: str = "warn",
@@ -502,17 +535,25 @@ class TripleDifference:
                 f"got '{rank_deficient_action}'"
             )
         if epv_threshold <= 0:
-            raise ValueError(
-                f"epv_threshold must be > 0, got {epv_threshold}"
-            )
+            raise ValueError(f"epv_threshold must be > 0, got {epv_threshold}")
         if pscore_fallback not in {"error", "unconditional"}:
             raise ValueError(
-                f"pscore_fallback must be 'error' or 'unconditional', "
-                f"got '{pscore_fallback}'"
+                f"pscore_fallback must be 'error' or 'unconditional', " f"got '{pscore_fallback}'"
             )
+        # vcov_type input contract: TripleDifference is permanently narrow
+        # to {"hc1"} because the analytical-sandwich families (classical,
+        # hc2, hc2_bm) require a single regression's hat matrix that
+        # TripleDifference's 3-pairwise-DiD influence-function decomposition
+        # doesn't have. See REGISTRY.md "IF-based variance estimators vs
+        # analytical-sandwich estimators" for the structural taxonomy.
+        # Factored out so fit() can re-run it after sklearn-style
+        # set_params bypasses __init__ validation.
+        self._validate_vcov_type(vcov_type)
+
         self.estimation_method = estimation_method
         self.robust = robust
         self.cluster = cluster
+        self.vcov_type = vcov_type
         self.alpha = alpha
         self.pscore_trim = pscore_trim
         self.rank_deficient_action = rank_deficient_action
@@ -575,6 +616,12 @@ class TripleDifference:
         NotImplementedError
             If survey_design is used with wild_bootstrap inference.
         """
+        # Re-validate vcov_type at fit-time so sklearn-style set_params
+        # mutations are caught before they propagate to Results metadata.
+        # __init__ already validated the constructor argument; this is the
+        # second layer for the post-construction mutation path.
+        self._validate_vcov_type(self.vcov_type)
+
         # Reset replicate state from any previous fit
         self._replicate_n_valid = None
 
@@ -610,6 +657,31 @@ class TripleDifference:
         self._cluster_ids = data[self.cluster].values if self.cluster is not None else None
         if self._cluster_ids is not None and np.any(pd.isna(data[self.cluster])):
             raise ValueError(f"Cluster column '{self.cluster}' contains missing values")
+
+        # Reject replicate-weight + cluster=: replicate IF variance is
+        # computed by replicate reweighting (BRR / Fay / JK1 / JKn / SDR)
+        # and ignores PSU/cluster entirely (survey.py:104-109 enforces
+        # replicate_weights are mutually exclusive with strata/psu/fpc).
+        # Honoring bare cluster= here would silently have no effect on
+        # variance while populating cluster_name/n_clusters on Results
+        # dishonestly. Fail-closed per feedback_no_silent_failures.
+        # Mirrors CallawaySantAnna guard at staggered.py:1705-1719.
+        if (
+            self.cluster is not None
+            and survey_design is not None
+            and getattr(survey_design, "replicate_weights", None) is not None
+        ):
+            raise NotImplementedError(
+                f"TripleDifference(cluster={self.cluster!r}) is not "
+                "supported with replicate-weight survey designs. "
+                "Replicate-weight variance is computed by replicate "
+                "reweighting (BRR / Fay / JK1 / JKn / SDR) and ignores "
+                "PSU/cluster entirely — setting cluster= would silently "
+                "have no effect on the variance estimate. Either omit "
+                "cluster= (the replicate weights encode the design "
+                "structure implicitly) or use a non-replicate survey "
+                "design (with explicit strata/psu/fpc)."
+            )
 
         # Resolve effective cluster and inject cluster-as-PSU for survey variance
         if resolved_survey is not None:
@@ -680,17 +752,22 @@ class TripleDifference:
         if survey_metadata is not None and survey_metadata.df_survey is not None:
             df = survey_metadata.df_survey
             # Override with effective replicate df only when replicates were dropped
-            if (hasattr(self, '_replicate_n_valid') and self._replicate_n_valid is not None
-                    and resolved_survey is not None
-                    and self._replicate_n_valid < resolved_survey.n_replicates):
+            if (
+                hasattr(self, "_replicate_n_valid")
+                and self._replicate_n_valid is not None
+                and resolved_survey is not None
+                and self._replicate_n_valid < resolved_survey.n_replicates
+            ):
                 df = self._replicate_n_valid - 1
                 survey_metadata.df_survey = self._replicate_n_valid - 1
             # df <= 0 means insufficient rank for t-based inference
             if df is not None and df <= 0:
                 df = 0  # Forces NaN from t-distribution
-        elif (resolved_survey is not None
-              and hasattr(resolved_survey, 'uses_replicate_variance')
-              and resolved_survey.uses_replicate_variance):
+        elif (
+            resolved_survey is not None
+            and hasattr(resolved_survey, "uses_replicate_variance")
+            and resolved_survey.uses_replicate_variance
+        ):
             # Replicate design with undefined df (rank <= 1) — NaN inference
             df = 0  # Forces NaN from t-distribution
         else:
@@ -701,10 +778,21 @@ class TripleDifference:
 
         t_stat, p_value, conf_int = safe_inference(att, se, alpha=self.alpha, df=df)
 
-        # Get number of clusters if clustering
-        n_clusters = None
-        if self.cluster is not None:
+        # Resolve cluster_name / n_clusters for Results metadata.
+        # Under survey designs the survey block (PSU/strata/df) is the
+        # canonical surface for cluster reporting — suppress the bare
+        # cluster_name / n_clusters fields so they don't misreport the
+        # raw `cluster=` argument when `survey_design.psu` overrides it.
+        # Mirrors the variance-estimator line suppression in summary().
+        if resolved_survey is not None:
+            cluster_name_for_results: Optional[str] = None
+            n_clusters: Optional[int] = None
+        elif self.cluster is not None:
+            cluster_name_for_results = self.cluster
             n_clusters = data[self.cluster].nunique()
+        else:
+            cluster_name_for_results = None
+            n_clusters = None
 
         # Create results object
         self.results_ = TripleDifferenceResults(
@@ -724,6 +812,8 @@ class TripleDifference:
             pscore_stats=pscore_stats,
             r_squared=r_squared,
             inference_method="analytical",
+            vcov_type=self.vcov_type,
+            cluster_name=cluster_name_for_results,
             n_clusters=n_clusters,
             survey_metadata=survey_metadata,
             epv_diagnostics=epv_diag if epv_diag else None,
@@ -862,7 +952,9 @@ class TripleDifference:
         X: Optional[np.ndarray],
         survey_weights: Optional[np.ndarray] = None,
         resolved_survey=None,
-    ) -> Tuple[float, float, Optional[float], Optional[Dict[str, float]], Dict[int, Dict[str, Any]]]:
+    ) -> Tuple[
+        float, float, Optional[float], Optional[Dict[str, float]], Dict[int, Dict[str, Any]]
+    ]:
         """
         Estimate ATT using regression adjustment via three-DiD decomposition.
 
@@ -890,7 +982,9 @@ class TripleDifference:
         X: Optional[np.ndarray],
         survey_weights: Optional[np.ndarray] = None,
         resolved_survey=None,
-    ) -> Tuple[float, float, Optional[float], Optional[Dict[str, float]], Dict[int, Dict[str, Any]]]:
+    ) -> Tuple[
+        float, float, Optional[float], Optional[Dict[str, float]], Dict[int, Dict[str, Any]]
+    ]:
         """
         Estimate ATT using inverse probability weighting via three-DiD
         decomposition.
@@ -918,7 +1012,9 @@ class TripleDifference:
         X: Optional[np.ndarray],
         survey_weights: Optional[np.ndarray] = None,
         resolved_survey=None,
-    ) -> Tuple[float, float, Optional[float], Optional[Dict[str, float]], Dict[int, Dict[str, Any]]]:
+    ) -> Tuple[
+        float, float, Optional[float], Optional[Dict[str, float]], Dict[int, Dict[str, Any]]
+    ]:
         """
         Estimate ATT using doubly robust estimation via three-DiD
         decomposition.
@@ -947,7 +1043,9 @@ class TripleDifference:
         X: Optional[np.ndarray],
         survey_weights: Optional[np.ndarray] = None,
         resolved_survey=None,
-    ) -> Tuple[float, float, Optional[float], Optional[Dict[str, float]], Dict[int, Dict[str, Any]]]:
+    ) -> Tuple[
+        float, float, Optional[float], Optional[Dict[str, float]], Dict[int, Dict[str, Any]]
+    ]:
         """
         Core DDD estimation via three-DiD decomposition.
 
@@ -1032,10 +1130,7 @@ class TripleDifference:
                             diagnostics_out=diag,
                         )
                     except Exception:
-                        if (
-                            self.pscore_fallback == "error"
-                            or self.rank_deficient_action == "error"
-                        ):
+                        if self.pscore_fallback == "error" or self.rank_deficient_action == "error":
                             raise
                         if w_sub is not None:
                             pos = w_sub > 0
@@ -1888,6 +1983,56 @@ class TripleDifference:
         inf_func = inf_treat - inf_control + inf_eff + inf_or
         return att, inf_func
 
+    @staticmethod
+    def _validate_vcov_type(vcov_type: str) -> None:
+        """Validate ``vcov_type`` membership against TripleDifference's
+        narrow contract.
+
+        Called from ``__init__`` and from ``fit()`` (so sklearn-style
+        ``set_params(vcov_type=...)`` mutations are re-checked at use
+        time rather than silently passing a bad value through to Results).
+        """
+        _accepted_vcov = {"hc1"}
+        _deferred_vcov = {"conley"}
+        _if_incompatible_vcov = {"classical", "hc2", "hc2_bm"}
+        if vcov_type in _if_incompatible_vcov:
+            raise ValueError(
+                f"TripleDifference(vcov_type={vcov_type!r}) is rejected: "
+                "TripleDifference uses influence-function-based variance "
+                "per Ortiz-Villavicencio & Sant'Anna (2025) "
+                "arXiv:2505.09942; the analytical-sandwich families "
+                "{'classical', 'hc2', 'hc2_bm'} are defined on a single "
+                "regression's hat matrix, and TripleDifference's "
+                "3-pairwise-DiD decomposition (DiD_3 + DiD_2 - DiD_1) "
+                "has no equivalent single design matrix to compute "
+                "hat-matrix leverage or Bell-McCaffrey Satterthwaite DOF "
+                "on. The rejection is library-architectural, not "
+                "paper-prescribed. Use vcov_type='hc1' (the default) with "
+                "cluster=<col> for cluster-robust inference (Liang-Zeger "
+                "CR1 on the combined influence function). See "
+                "docs/methodology/REGISTRY.md 'IF-based variance "
+                "estimators vs analytical-sandwich estimators' for the "
+                "structural taxonomy."
+            )
+        if vcov_type in _deferred_vcov:
+            raise ValueError(
+                f"TripleDifference(vcov_type={vcov_type!r}) is not yet "
+                "supported: spatial-HAC (Conley) on the 3-pairwise-DiD "
+                "influence-function decomposition could conceptually "
+                "apply (spatial aggregation of per-unit IFs) but requires "
+                "separate methodology work; no reference implementation "
+                "exists today. Tracked as a follow-up TODO row. Use "
+                "vcov_type='hc1' (the default) with cluster=<col> for "
+                "cluster-robust inference today."
+            )
+        if vcov_type not in _accepted_vcov:
+            raise ValueError(
+                f"TripleDifference(vcov_type={vcov_type!r}) is invalid. "
+                f"Accepted values: {sorted(_accepted_vcov)}. "
+                "TripleDifference is permanently narrow to 'hc1' per "
+                "IF-based variance structure; see REGISTRY.md."
+            )
+
     def get_params(self) -> Dict[str, Any]:
         """
         Get estimator parameters (sklearn-compatible).
@@ -1901,6 +2046,7 @@ class TripleDifference:
             "estimation_method": self.estimation_method,
             "robust": self.robust,
             "cluster": self.cluster,
+            "vcov_type": self.vcov_type,
             "alpha": self.alpha,
             "pscore_trim": self.pscore_trim,
             "rank_deficient_action": self.rank_deficient_action,
@@ -1962,6 +2108,7 @@ def triple_difference(
     estimation_method: str = "dr",
     robust: bool = True,
     cluster: Optional[str] = None,
+    vcov_type: str = "hc1",
     alpha: float = 0.05,
     rank_deficient_action: str = "warn",
     epv_threshold: float = 10,
@@ -2001,6 +2148,11 @@ def triple_difference(
         for API compatibility.
     cluster : str, optional
         Column name for cluster-robust standard errors.
+    vcov_type : str, default="hc1"
+        Variance estimator. Permanently narrow to ``{"hc1"}`` per the
+        IF-based variance decomposition; ``classical``/``hc2``/``hc2_bm``
+        are rejected at ``__init__`` and ``conley`` is deferred. See the
+        ``TripleDifference`` class docstring for the structural taxonomy.
     alpha : float, default=0.05
         Significance level for confidence intervals.
     rank_deficient_action : str, default="warn"
@@ -2037,6 +2189,7 @@ def triple_difference(
         estimation_method=estimation_method,
         robust=robust,
         cluster=cluster,
+        vcov_type=vcov_type,
         alpha=alpha,
         rank_deficient_action=rank_deficient_action,
         epv_threshold=epv_threshold,
