@@ -20,8 +20,10 @@ Equation walk-through:
                    which are not exposed on the public TROP API. Direct
                    numerical reconstruction of the four-term identity is out of
                    scope; `TestTROPNuclearNormProx.test_factor_matrix_consistent_with_treatment_effects`
-                   is a structural pointer (shape, finiteness, non-triviality
-                   of the fitted ``factor_matrix``), not a full Eq. 10 lock.
+                   is a structural pointer (shape + finiteness of the fitted
+                   ``factor_matrix`` + ``treatment_effects`` populated with
+                   finite entries), not a full Eq. 10 lock and not a non-
+                   triviality claim on the ``L_hat`` magnitude.
 - Eq. 3:           exponential-decay unit and time weights; unit distance uses
                    only periods where both i and j are untreated and excludes
                    the target period t. Verified by `TestTROPEquation3Weights`.
@@ -353,9 +355,12 @@ class TestTROPNuclearNormProx:
     reconstruct. Those vectors are not exposed on the public TROP API,
     so this class does NOT directly verify the four-term identity. The
     method ``test_factor_matrix_consistent_with_treatment_effects`` is a
-    structural pointer only — it checks ``factor_matrix`` shape /
-    finiteness / non-triviality, and verifies ``treatment_effects`` is
-    populated with finite entries (the framework that Eq. 10 derives).
+    structural pointer only — it checks ``factor_matrix`` shape +
+    finiteness and verifies ``treatment_effects`` is populated with
+    finite entries (the framework that Eq. 10 derives). It does NOT
+    assert non-triviality of the ``L_hat`` magnitude (the test DGP has
+    no interactive factor structure, so a near-zero ``L_hat`` is
+    methodologically correct under the paper's framework).
 
     Origin: ported from the pre-migration `TestTROPNuclearNormSolver`
     class in `test_trop.py` (three of four methods migrated; the one
@@ -492,8 +497,12 @@ class TestTROPNuclearNormProx:
     def test_weighted_nuclear_norm_objective_recovers_att(self):
         """Eq. 2 weighted objective with active regularisation: TROP with
         a non-zero ``lambda_nn`` grid (on an interactive-FE DGP) recovers
-        a finite positive ATT and a non-zero effective_rank — exercising
-        the weighted prox + alternating-min code path.
+        a finite positive ATT and a non-negative effective_rank —
+        exercising the weighted prox + alternating-min code path. (The
+        ``effective_rank`` assertion is `>= 0` rather than `> 0` because
+        the test DGP's factor structure may be absorbed by the prox
+        regulariser; the active code path is verified by the positive-
+        ATT recovery, not by a non-zero rank claim.)
 
         Scope note: this test does NOT fit an unregularised baseline for
         comparison; for the DID-vs-MC ranking on a confounded factor DGP
@@ -602,8 +611,12 @@ class TestTROPNuclearNormProx:
         plus per-(i,t) unit distances and is not part of the public API
         — so we cannot reconstruct the four-component sum here. What we
         CAN verify is that the resulting ``factor_matrix`` has the same
-        shape as the (period, unit) outcome grid, is finite, and is
-        non-trivial under finite ``lambda_nn``.
+        shape as the (period, unit) outcome grid, is finite, and that
+        ``treatment_effects`` is populated with finite entries. **No
+        non-triviality / magnitude claim** is made on ``L_hat`` because
+        the test DGP has no interactive factor structure (additive unit
+        + time effects only) and a near-zero ``L_hat`` is methodologically
+        correct under the paper's framework.
 
         For a direct numerical realisation of the Eq. 10 decomposition,
         see Athey et al. (2025) Section 5.2, which derives the
