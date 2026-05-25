@@ -363,6 +363,123 @@ def test_summary_renders_without_warning(spillover_fit):
     assert len(out) > 0
 
 
+def test_notebook_dgp_ast_matches_test_fixture():
+    """P2 sync guard: enforces the "verbatim" duplication claim by
+    parsing the notebook's §2 ``build_t23_panel`` definition and
+    asserting that, modulo function name (notebook: ``build_t23_panel``;
+    test: ``_build_t23_panel``) and docstring, its AST matches the test
+    fixture's. Catches silent drift in non-constant DGP logic (coordinate
+    ranges, lambda_t, row construction) that the numerical-value pins
+    don't see — codex R4 P2 flagged this gap.
+
+    Uses ``ast.dump`` for a whitespace-/comment-agnostic comparison:
+    semantically identical code matches, cosmetic edits don't trigger
+    spurious failures."""
+    import ast
+    import inspect
+    import json
+    from pathlib import Path
+
+    nb_path = Path(__file__).resolve().parents[1] / "docs" / "tutorials" / "23_spillover_tva.ipynb"
+    with nb_path.open() as f:
+        nb = json.load(f)
+
+    matches = [
+        c
+        for c in nb["cells"]
+        if c["cell_type"] == "code" and any("def build_t23_panel" in s for s in c["source"])
+    ]
+    assert len(matches) == 1, (
+        f"Expected exactly one notebook code cell defining `build_t23_panel`; "
+        f"found {len(matches)}. If you renamed or split the §2 DGP cell, "
+        f"update this test's cell-locator."
+    )
+    nb_cell_src = "".join(matches[0]["source"])
+
+    def _extract_normalized_fn(src: str, fn_name: str) -> str:
+        """Parse `src`, find FunctionDef `fn_name`, strip its docstring,
+        rename it to the canonical `build_t23_panel`, and return the
+        normalized AST dump."""
+        tree = ast.parse(src)
+        fn = next(
+            (n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == fn_name),
+            None,
+        )
+        assert fn is not None, f"Could not find FunctionDef `{fn_name}` in source"
+        if (
+            fn.body
+            and isinstance(fn.body[0], ast.Expr)
+            and isinstance(fn.body[0].value, ast.Constant)
+            and isinstance(fn.body[0].value.value, str)
+        ):
+            fn.body = fn.body[1:]
+        fn.name = "build_t23_panel"
+        return ast.dump(fn, annotate_fields=True, include_attributes=False)
+
+    nb_norm = _extract_normalized_fn(nb_cell_src, "build_t23_panel")
+    test_norm = _extract_normalized_fn(inspect.getsource(_build_t23_panel), "_build_t23_panel")
+
+    assert nb_norm == test_norm, (
+        f"Notebook §2 DGP cell drifted from test fixture `_build_t23_panel`.\n"
+        f"--- notebook AST ---\n{nb_norm[:400]}...\n"
+        f"--- test AST ---\n{test_norm[:400]}...\n"
+        f"Update one or both so the function bodies match modulo name + docstring."
+    )
+
+
+def test_seed_specific_geometry_pins_match_quoted(panel):
+    """P3 sync guard: the §2 panel-layout table and §6 within-cutoff
+    enumeration quote seed-specific geometry numbers (max distance from
+    origin, cluster diameter, band extents, far×far / near×near
+    pair-within-100km percentages). The drift test pins all the values
+    quoted in the notebook so prose can't go stale even if the headline
+    estimates remain within tolerance — codex R4 P3 flagged this gap."""
+    treated = panel[panel["ever_treated"] == 1].drop_duplicates("unit")
+    near = panel[(panel["ever_treated"] == 0) & (panel["lat"] <= 1.0)].drop_duplicates("unit")
+    far = panel[(panel["ever_treated"] == 0) & (panel["lat"] > 1.0)].drop_duplicates("unit")
+    deg_to_km = 111.0
+
+    def _max_dist_from_origin_km(d):
+        return float(np.sqrt(d["lat"] ** 2 + d["lon"] ** 2).max() * deg_to_km)
+
+    def _min_dist_from_origin_km(d):
+        return float(np.sqrt(d["lat"] ** 2 + d["lon"] ** 2).min() * deg_to_km)
+
+    def _band_diameter_km(d):
+        lats = d["lat"].values
+        lons = d["lon"].values
+        diffs = np.sqrt((lats[:, None] - lats[None, :]) ** 2 + (lons[:, None] - lons[None, :]) ** 2)
+        return float(diffs.max() * deg_to_km)
+
+    def _pct_pairs_within_100km(d):
+        lats = d["lat"].values
+        lons = d["lon"].values
+        n = len(lats)
+        dist = (
+            np.sqrt((lats[:, None] - lats[None, :]) ** 2 + (lons[:, None] - lons[None, :]) ** 2)
+            * deg_to_km
+        )
+        triu = np.triu(np.ones((n, n), dtype=bool), k=1)
+        pair_d = dist[triu]
+        return float((pair_d <= 100.0).sum() / len(pair_d) * 100.0)
+
+    # §2 quoted: "clustered around (0,0); max ~12 km from origin, cluster diameter ~22 km at seed 23"
+    assert round(_max_dist_from_origin_km(treated)) == 12, _max_dist_from_origin_km(treated)
+    assert round(_band_diameter_km(treated)) == 22, _band_diameter_km(treated)
+    # §2 quoted: "~12-82 km north"
+    assert round(_min_dist_from_origin_km(near)) == 12, _min_dist_from_origin_km(near)
+    assert round(_max_dist_from_origin_km(near)) == 82, _max_dist_from_origin_km(near)
+    # §2 quoted: "~224-331 km north"
+    assert round(_min_dist_from_origin_km(far)) == 224, _min_dist_from_origin_km(far)
+    assert round(_max_dist_from_origin_km(far)) == 331, _max_dist_from_origin_km(far)
+    # §6 quoted: "lat extent is ~131 km" for far band
+    assert round(_band_diameter_km(far)) == 131, _band_diameter_km(far)
+    # §6 quoted: "100% of within-band pairs are within 100 km" for near band
+    assert round(_pct_pairs_within_100km(near)) == 100, _pct_pairs_within_100km(near)
+    # §6 quoted: "~95% of within-band pair distances are within 100 km" for far band
+    assert round(_pct_pairs_within_100km(far)) == 95, _pct_pairs_within_100km(far)
+
+
 def _assert_post_filter_warning_surface_is_clean(captured) -> None:
     """Shared T19-style platform-agnostic warning-policy assertion.
 
