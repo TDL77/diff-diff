@@ -2244,6 +2244,8 @@ confidence bands (sup-t) for event study.
 
 **Primary source:** [Athey, S., Imbens, G.W., Qu, Z., & Viviano, D. (2025). Triply Robust Panel Estimators. arXiv:2508.21536.](https://arxiv.org/abs/2508.21536)
 
+**Note (version pinning):** the methodology promotion (`METHODOLOGY_REVIEW.md` `#### TROP` → **Complete** as of 2026-05-24) is anchored on **arXiv:2508.21536v2**; the current arXiv version is **v3**. A formal v2→v3 source delta-check has NOT been performed for the sections covered by the promotion (Eqs. 2-3, Algorithms 1-3, Section 2.2, Section 5.2-5.3, Section 6.1-6.2, Theorem 5.1, Corollary 1, Appendix Theorem 8.1). Known v2→v3 change surfaced during PR #491 review: v3 adds a `5.1.1 Conditions for exact unbiasedness` subsection (restructuring of the existing Corollary 1 material, not a methodological change to the conditions themselves, pending v3 PDF audit). See `docs/methodology/papers/athey-2025-review.md` "Version-pinning note" for the action item.
+
 **Key implementation requirements:**
 
 *Assumption checks / warnings:*
