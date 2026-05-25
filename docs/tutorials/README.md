@@ -124,7 +124,7 @@ Practitioner workflow for `SpilloverDiD` (Butts 2021 ring-indicator estimator + 
 - When place-based interventions cause geographic spillovers, naive multi-period TWFE on the full sample understates the direct effect because near-controls absorb the spillover (here: ATT recovers as -4.29 vs true `tau_total = -7.4`, a 42% understatement)
 - `SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))` cleanly recovers both `tau_total` (-7.34) and the near-band spillover coefficient `delta_1` (-4.53)
 - Choosing the spillover bandwidth via a `rings` sensitivity grid at outer edges 50 / 100 / 150 / 200 km, with the documented "undershooting `d_bar`" failure mode at 50 km
-- Conley spatial-HAC variance under `vcov_type="conley", conley_cutoff_km=100, conley_lag_cutoff in {0, 1}` per Butts §3.1
+- Conley spatial-HAC variance under `vcov_type="conley", conley_cutoff_km=100, conley_lag_cutoff in {0, 1}` — the cutoff = `d_bar` choice follows Butts §3.1, while the `conley_lag_cutoff` serial extension is the library's documented Wave E.2 follow-up synthesis with Newey-West-style serial Bartlett HAC (per REGISTRY "Variance (Wave E.2 follow-up)")
 - Companion drift-test file (`tests/test_t23_spillover_tva_drift.py`)
 
 ## Running the Notebooks
