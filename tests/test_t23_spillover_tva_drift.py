@@ -110,6 +110,7 @@ def naive_fit(panel):
             time="time",
             post_periods=[3, 4],
             unit="unit",
+            absorb=["unit"],  # full multi-period TWFE: unit + time FE absorbed
         )
 
 
