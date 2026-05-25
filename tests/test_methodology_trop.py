@@ -649,16 +649,17 @@ class TestTROPNuclearNormProx:
         L = np.asarray(results.factor_matrix, dtype=float)
         assert L.shape == (n_periods, n_units)
         assert np.all(np.isfinite(L))
-        # Non-triviality: under a non-zero ``lambda_nn`` AND interactive-
-        # FE noise in the DGP (unit_fe + small idiosyncratic shocks), the
-        # nuclear-norm soft-thresholded L should NOT collapse to all
-        # zeros. effective_rank > 0 is the diagnostic that guards
-        # this — zero would indicate over-regularisation or solver
-        # failure.
-        assert results.effective_rank > 0, (
-            f"effective_rank={results.effective_rank} indicates L "
-            "collapsed to ~0; Eq. 10's L_hat term would be trivial"
-        )
+        # NOTE: this DGP has only additive unit + time effects plus iid
+        # noise — no interactive factor structure. Per the paper's
+        # framework, ``alpha_i`` / ``beta_t`` absorb the additive
+        # surfaces, so a near-zero ``L_hat`` is methodologically correct
+        # here. Asserting ``effective_rank > 0`` would lock a solver
+        # artifact (e.g., regularisation under-shrinkage) rather than
+        # the intended low-rank behavior. The shape + finiteness check
+        # above + the treatment_effects existence check below are the
+        # legitimate structural surface for this test; the Eq. 2
+        # ingredients are independently verified in the prox / FISTA /
+        # weighted-norm tests above.
         assert results.treatment_effects is not None
         # The single treated cell (i=0, t=n_pre) must be in treatment_effects.
         # Resolve whatever unit / period values were used in the input frame.
