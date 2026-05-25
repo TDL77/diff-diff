@@ -12,6 +12,15 @@ The estimator:
 3. Aggregates imputed treatment effects with researcher-chosen weights
 
 Inference uses the conservative clustered variance estimator (Theorem 3).
+
+The ``vcov_type`` input contract is permanently narrow to ``{"hc1"}`` per
+the influence-function-based variance decomposition: the per-unit IF
+aggregation (Theorem 3 equation 7) has no equivalent single design matrix
+on which analytical-sandwich families (``classical``, ``hc2``, ``hc2_bm``)
+or spatial-HAC composition (``conley``) can be defined. ``cluster=``
+invokes per-cluster IF summation; ``survey_design=`` invokes TSL on the
+combined IF. See ``docs/methodology/REGISTRY.md`` for the cross-estimator
+IF-vs-sandwich taxonomy.
 """
 
 import warnings
@@ -61,6 +70,14 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
     cluster : str, optional
         Column name for cluster-robust standard errors.
         If None, clusters at the unit level by default.
+    vcov_type : str, default="hc1"
+        Variance estimator family. Permanently narrow to ``{"hc1"}`` per
+        the IF-based variance contract (Theorem 3): analytical-sandwich
+        families ``{classical, hc2, hc2_bm}`` and ``conley`` are rejected
+        at ``__init__`` with methodology-rooted messages. ``cluster=``
+        invokes per-cluster IF summation; ``survey_design=`` invokes TSL
+        on the combined IF. See REGISTRY.md for the cross-estimator
+        IF-vs-sandwich taxonomy.
     n_bootstrap : int, default=0
         Number of bootstrap iterations. If 0, uses analytical inference
         (conservative variance from Theorem 3).
@@ -133,6 +150,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         anticipation: int = 0,
         alpha: float = 0.05,
         cluster: Optional[str] = None,
+        vcov_type: str = "hc1",
         n_bootstrap: int = 0,
         bootstrap_weights: str = "rademacher",
         seed: Optional[int] = None,
@@ -156,10 +174,12 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
                 f"aux_partition must be 'cohort_horizon', 'cohort', or 'horizon', "
                 f"got '{aux_partition}'"
             )
+        self._validate_vcov_type(vcov_type)
 
         self.anticipation = anticipation
         self.alpha = alpha
         self.cluster = cluster
+        self.vcov_type = vcov_type
         self.n_bootstrap = n_bootstrap
         self.bootstrap_weights = bootstrap_weights
         self.seed = seed
@@ -227,6 +247,11 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         ValueError
             If required columns are missing or data validation fails.
         """
+        # Re-validate vcov_type at fit-time so sklearn-style set_params
+        # mutations (e.g. set_params(vcov_type="classical")) are re-checked
+        # at use rather than silently accepted by the parameter setter.
+        self._validate_vcov_type(self.vcov_type)
+
         # Validate inputs
         required_cols = [outcome, unit, time, first_treat]
         if covariates:
@@ -273,6 +298,28 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
             raise ValueError(
                 "Cannot use n_bootstrap > 0 with replicate-weight survey designs. "
                 "Replicate weights provide their own variance estimation."
+            )
+        # Reject replicate-weight + cluster=: replicate IF variance is
+        # computed by replicate reweighting (BRR / Fay / JK1 / JKn / SDR)
+        # and ignores PSU/cluster entirely (survey.py enforces that
+        # replicate_weights are mutually exclusive with strata/psu/fpc).
+        # Honoring bare cluster= here would silently have no effect on
+        # variance while populating cluster_name/n_clusters on Results
+        # dishonestly. Fail-closed mirroring CallawaySantAnna.
+        if (
+            self.cluster is not None
+            and survey_design is not None
+            and getattr(survey_design, "replicate_weights", None) is not None
+        ):
+            raise NotImplementedError(
+                f"ImputationDiD(cluster={self.cluster!r}) is not supported "
+                "with replicate-weight survey designs. Replicate-weight "
+                "variance is computed by replicate reweighting (BRR / Fay / "
+                "JK1 / JKn / SDR) and ignores PSU/cluster entirely — setting "
+                "cluster= would silently have no effect on the variance "
+                "estimate. Either omit cluster= (the replicate weights encode "
+                "the design structure implicitly) or use a non-replicate "
+                "survey design (with explicit strata/psu/fpc)."
             )
         # Validate within-unit constancy for panel survey designs
         if resolved_survey is not None:
@@ -839,6 +886,28 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
                             eff_val, se_val, alpha=self.alpha
                         )[0]
 
+        # Resolve cluster_name / n_clusters for Results metadata.
+        # Suppress under ANY survey design (the survey block in summary()
+        # already renders the design's PSU/strata/replicate metadata, and
+        # replicate-weight variance ignores PSU/cluster entirely — keeping
+        # cluster_name/n_clusters populated on a replicate fit would
+        # misreport the inference source).
+        # Otherwise:
+        #   bare cluster= -> populate with the user-named cluster column
+        #   cluster=None  -> the Theorem 3 variance still clusters at the
+        #                    `unit` column by default (cluster_var = unit
+        #                    at L418), so the summary label must report
+        #                    unit-cluster CR1, not generic HC1.
+        if resolved_survey is not None:
+            _cluster_name_for_results: Optional[str] = None
+            _n_clusters_for_results: Optional[int] = None
+        elif self.cluster is not None:
+            _cluster_name_for_results = self.cluster
+            _n_clusters_for_results = int(data[self.cluster].nunique())
+        else:
+            _cluster_name_for_results = unit
+            _n_clusters_for_results = int(data[unit].nunique())
+
         # Construct results
         self.results_ = ImputationDiDResults(
             treatment_effects=treated_df,
@@ -861,6 +930,9 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
             bootstrap_results=bootstrap_results,
             _estimator_ref=self,
             survey_metadata=survey_metadata,
+            vcov_type=self.vcov_type,
+            cluster_name=_cluster_name_for_results,
+            n_clusters=_n_clusters_for_results,
         )
 
         self.is_fitted_ = True
@@ -2369,6 +2441,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
             "anticipation": self.anticipation,
             "alpha": self.alpha,
             "cluster": self.cluster,
+            "vcov_type": self.vcov_type,
             "n_bootstrap": self.n_bootstrap,
             "bootstrap_weights": self.bootstrap_weights,
             "seed": self.seed,
@@ -2386,6 +2459,50 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
             else:
                 raise ValueError(f"Unknown parameter: {key}")
         return self
+
+    @staticmethod
+    def _validate_vcov_type(vcov_type: str) -> None:
+        """Validate ``vcov_type`` membership against ImputationDiD's
+        permanently-narrow influence-function variance contract.
+
+        Called from ``__init__`` AND ``fit()`` so sklearn-style
+        ``set_params(vcov_type=...)`` mutations are re-checked at use
+        time rather than silently accepted by the parameter setter.
+        Mirrors the TripleDifference / CallawaySantAnna pattern (no
+        single design matrix on which hat-matrix leverage or Bell-
+        McCaffrey Satterthwaite DOF can be defined).
+        """
+        _accepted_vcov = {"hc1"}
+        _if_incompatible_vcov = {"classical", "hc2", "hc2_bm"}
+        _deferred_vcov = {"conley"}
+
+        if vcov_type in _if_incompatible_vcov:
+            raise ValueError(
+                f"ImputationDiD(vcov_type={vcov_type!r}) is rejected: "
+                "ImputationDiD uses influence-function-based variance per "
+                "Borusyak, Jaravel, and Spiess (2024) Theorem 3. The "
+                "per-unit influence function aggregation has no equivalent "
+                "single design matrix on which hat matrix leverage or "
+                "Bell-McCaffrey Satterthwaite DOF can be defined, so "
+                "analytical-sandwich families {classical, hc2, hc2_bm} are "
+                "not paper-prescribed. Use vcov_type='hc1' (the default) "
+                "with cluster=<col> for per-cluster influence-function "
+                "summation (Theorem 3 equation 7 conservative variance)."
+            )
+        if vcov_type in _deferred_vcov:
+            raise ValueError(
+                f"ImputationDiD(vcov_type={vcov_type!r}) is not yet "
+                "supported: spatial-HAC composition with Theorem 3 "
+                "per-unit IF aggregation has no reference implementation "
+                "today. See TODO.md for the deferred follow-up row. Use "
+                "vcov_type='hc1' (the default) with cluster=<col> for "
+                "cluster-robust inference."
+            )
+        if vcov_type not in _accepted_vcov:
+            raise ValueError(
+                f"ImputationDiD(vcov_type={vcov_type!r}) is invalid. "
+                f"Accepted: {sorted(_accepted_vcov)}."
+            )
 
     def summary(self) -> str:
         """Get summary of estimation results."""
@@ -2414,6 +2531,7 @@ def imputation_did(
     aggregate: Optional[str] = None,
     balance_e: Optional[int] = None,
     survey_design: object = None,
+    vcov_type: str = "hc1",
     **kwargs,
 ) -> ImputationDiDResults:
     """
@@ -2445,6 +2563,14 @@ def imputation_did(
         PSU, and FPC for design-based variance. Strata enters survey df
         for t-distribution inference.
         Both analytical (n_bootstrap=0) and bootstrap inference are supported.
+    vcov_type : str, default="hc1"
+        Variance estimator family. ImputationDiD permanently accepts
+        ``{"hc1"}`` only — analytical-sandwich families
+        ``{classical, hc2, hc2_bm}`` are rejected at ``__init__`` because the
+        Theorem 3 per-unit IF aggregation has no single design matrix on
+        which hat-matrix leverage or Bell-McCaffrey Satterthwaite DOF can
+        be defined. ``cluster=`` invokes per-cluster IF summation;
+        ``survey_design=`` invokes TSL on the combined IF.
     **kwargs
         Additional keyword arguments passed to ImputationDiD constructor.
 
@@ -2461,7 +2587,7 @@ def imputation_did(
     ...                          aggregate='event_study')
     >>> results.print_summary()
     """
-    est = ImputationDiD(**kwargs)
+    est = ImputationDiD(vcov_type=vcov_type, **kwargs)
     return est.fit(
         data,
         outcome=outcome,

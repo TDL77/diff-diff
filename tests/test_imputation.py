@@ -14,6 +14,7 @@ from diff_diff.imputation import (
     ImputationDiDResults,
     imputation_did,
 )
+from diff_diff.survey import SurveyDesign
 
 # =============================================================================
 # Shared test data generation
@@ -1120,7 +1121,11 @@ class TestImputationBootstrap:
         n_boot = ci_params.bootstrap(50)
         est = ImputationDiD(n_bootstrap=n_boot, bootstrap_weights="mammen", seed=42)
         results = est.fit(
-            data, outcome="outcome", unit="unit", time="time", first_treat="first_treat",
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
         )
 
         br = results.bootstrap_results
@@ -1135,7 +1140,11 @@ class TestImputationBootstrap:
         n_boot = ci_params.bootstrap(50)
         est = ImputationDiD(n_bootstrap=n_boot, bootstrap_weights="webb", seed=42)
         results = est.fit(
-            data, outcome="outcome", unit="unit", time="time", first_treat="first_treat",
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
         )
 
         br = results.bootstrap_results
@@ -1148,12 +1157,14 @@ class TestImputationBootstrap:
         """Bootstrap with non-default weights should work for event study aggregation."""
         data = generate_test_data()
         n_boot = ci_params.bootstrap(50)
-        est = ImputationDiD(
-            n_bootstrap=n_boot, bootstrap_weights="mammen", seed=42
-        )
+        est = ImputationDiD(n_bootstrap=n_boot, bootstrap_weights="mammen", seed=42)
         results = est.fit(
-            data, outcome="outcome", unit="unit", time="time",
-            first_treat="first_treat", aggregate="event_study",
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="event_study",
         )
 
         br = results.bootstrap_results
@@ -1168,12 +1179,14 @@ class TestImputationBootstrap:
         """Bootstrap with non-default weights should work for group aggregation."""
         data = generate_test_data()
         n_boot = ci_params.bootstrap(50)
-        est = ImputationDiD(
-            n_bootstrap=n_boot, bootstrap_weights="mammen", seed=42
-        )
+        est = ImputationDiD(n_bootstrap=n_boot, bootstrap_weights="mammen", seed=42)
         results = est.fit(
-            data, outcome="outcome", unit="unit", time="time",
-            first_treat="first_treat", aggregate="group",
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="group",
         )
 
         br = results.bootstrap_results
@@ -1326,15 +1339,15 @@ class TestImputationVsOtherEstimators:
 
         # Imputation CIs should be meaningfully shorter than CS
         # Carousel claims ~50% shorter; use conservative 0.85 threshold
-        assert median_vs_cs < 0.85, (
-            f"Imputation CIs not shorter than CS: median ratio={median_vs_cs:.3f}"
-        )
+        assert (
+            median_vs_cs < 0.85
+        ), f"Imputation CIs not shorter than CS: median ratio={median_vs_cs:.3f}"
 
         # Imputation CIs should be meaningfully shorter than SA
         # Carousel claims 2-3.5x shorter; use conservative 0.85 threshold
-        assert median_vs_sa < 0.85, (
-            f"Imputation CIs not shorter than SA: median ratio={median_vs_sa:.3f}"
-        )
+        assert (
+            median_vs_sa < 0.85
+        ), f"Imputation CIs not shorter than SA: median ratio={median_vs_sa:.3f}"
 
 
 # =============================================================================
@@ -2166,3 +2179,728 @@ class TestImputationEdgeCases:
             warnings.simplefilter("always")
             ImputationDiD._iterative_demean(vals, units, times, idx)
         assert not any("did not converge" in str(x.message) for x in w)
+
+
+# =============================================================================
+# TestImputationDiDVcovType  (Phase 1b interstitial #3)
+# =============================================================================
+
+
+def _imputation_clustered_panel(
+    seed: int = 53,
+    n_units: int = 60,
+    n_periods: int = 6,
+    n_states: int = 12,
+) -> pd.DataFrame:
+    """Staggered-adoption panel with a `state` cluster column drawn from a
+    finite set of states with intra-state random effects. Used for
+    ``cluster=state`` bit-equality tests on the vcov_type contract.
+    """
+    rng = np.random.default_rng(seed)
+    units = np.repeat(np.arange(n_units), n_periods)
+    times = np.tile(np.arange(n_periods), n_units)
+
+    # Assign units to states; states carry random effects so cluster=state
+    # actually shifts SE relative to cluster=None (cluster=unit default).
+    unit_to_state = rng.integers(0, n_states, size=n_units)
+    state = np.repeat(unit_to_state, n_periods)
+    state_re = rng.standard_normal(n_states) * 1.5
+
+    # Half never-treated, rest assigned to one of three treatment cohorts.
+    cohorts = np.array([2, 3, 4])
+    n_never = n_units // 2
+    n_treated = n_units - n_never
+    first_treat = np.zeros(n_units, dtype=int)
+    first_treat[n_never:] = cohorts[rng.integers(0, len(cohorts), size=n_treated)]
+    first_treat_expanded = np.repeat(first_treat, n_periods)
+
+    unit_fe = rng.standard_normal(n_units) * 1.5
+    time_fe = np.linspace(0, 0.5, n_periods)
+    unit_fe_expanded = np.repeat(unit_fe, n_periods)
+    time_fe_expanded = np.tile(time_fe, n_units)
+    state_fe_expanded = state_re[state]
+
+    post = (times >= first_treat_expanded) & (first_treat_expanded > 0)
+    outcome = (
+        unit_fe_expanded
+        + time_fe_expanded
+        + state_fe_expanded
+        + 2.0 * post
+        + rng.standard_normal(len(units)) * 0.5
+    )
+
+    return pd.DataFrame(
+        {
+            "unit": units,
+            "time": times,
+            "outcome": outcome,
+            "first_treat": first_treat_expanded,
+            "state": state,
+        }
+    )
+
+
+def _imputation_survey_panel(
+    seed: int = 71,
+    n_units: int = 60,
+    n_periods: int = 4,
+    n_psu: int = 12,
+    n_strata: int = 3,
+) -> pd.DataFrame:
+    """Staggered-adoption panel with analytical survey columns (pweight +
+    panel-constant PSU + stratum). Used for TSL-survey bit-equality tests
+    on the vcov_type contract."""
+    rng = np.random.default_rng(seed)
+    units = np.repeat(np.arange(n_units), n_periods)
+    times = np.tile(np.arange(n_periods), n_units)
+
+    unit_psu = rng.integers(0, n_psu, size=n_units)
+    psu = np.repeat(unit_psu, n_periods)
+    psu_to_stratum = rng.integers(0, n_strata, size=n_psu)
+    stratum = psu_to_stratum[psu]
+
+    cohorts = np.array([2, 3])
+    n_never = n_units // 2
+    n_treated = n_units - n_never
+    first_treat = np.zeros(n_units, dtype=int)
+    first_treat[n_never:] = cohorts[rng.integers(0, len(cohorts), size=n_treated)]
+    first_treat_expanded = np.repeat(first_treat, n_periods)
+
+    unit_fe = rng.standard_normal(n_units) * 1.2
+    time_fe = np.linspace(0, 0.5, n_periods)
+    unit_fe_expanded = np.repeat(unit_fe, n_periods)
+    time_fe_expanded = np.tile(time_fe, n_units)
+
+    post = (times >= first_treat_expanded) & (first_treat_expanded > 0)
+    outcome = (
+        unit_fe_expanded + time_fe_expanded + 1.5 * post + rng.standard_normal(len(units)) * 0.4
+    )
+
+    # Panel-constant weights (per-unit).
+    unit_weight = 1.0 + rng.exponential(0.3, n_units)
+    weight = np.repeat(unit_weight, n_periods)
+
+    return pd.DataFrame(
+        {
+            "unit": units,
+            "time": times,
+            "outcome": outcome,
+            "first_treat": first_treat_expanded,
+            "psu": psu,
+            "stratum": stratum,
+            "weight": weight,
+        }
+    )
+
+
+def _imputation_replicate_panel(
+    seed: int = 89, n_units: int = 40, n_periods: int = 4, n_rep: int = 8
+):
+    """Staggered-adoption panel with JK1 replicate-weight columns. Mirrors
+    the pattern from ``test_triple_diff._ddd_replicate_panel`` but uses a
+    panel layout suitable for ImputationDiD's fit signature."""
+    rng = np.random.default_rng(seed)
+    units = np.repeat(np.arange(n_units), n_periods)
+    times = np.tile(np.arange(n_periods), n_units)
+
+    cohorts = np.array([2, 3])
+    n_never = n_units // 2
+    n_treated = n_units - n_never
+    first_treat = np.zeros(n_units, dtype=int)
+    first_treat[n_never:] = cohorts[rng.integers(0, len(cohorts), size=n_treated)]
+    first_treat_expanded = np.repeat(first_treat, n_periods)
+
+    unit_fe = rng.standard_normal(n_units) * 1.0
+    time_fe = np.linspace(0, 0.4, n_periods)
+    unit_fe_expanded = np.repeat(unit_fe, n_periods)
+    time_fe_expanded = np.tile(time_fe, n_units)
+
+    post = (times >= first_treat_expanded) & (first_treat_expanded > 0)
+    outcome = (
+        unit_fe_expanded + time_fe_expanded + 1.2 * post + rng.standard_normal(len(units)) * 0.4
+    )
+
+    unit_weight = 1.0 + rng.exponential(0.2, n_units)
+    weight = np.repeat(unit_weight, n_periods)
+
+    data = pd.DataFrame(
+        {
+            "unit": units,
+            "time": times,
+            "outcome": outcome,
+            "first_treat": first_treat_expanded,
+            "weight": weight,
+        }
+    )
+
+    # JK1 jackknife replicates: zero out one PSU (block of units) per replicate
+    # and rescale survivors. Panel-constant per unit.
+    units_per_rep = max(n_units // n_rep, 1)
+    rep_cols = []
+    for r in range(n_rep):
+        w_r = unit_weight.copy()
+        start = r * units_per_rep
+        end = min((r + 1) * units_per_rep, n_units)
+        w_r[start:end] = 0.0
+        nonzero = w_r > 0
+        # JK1 scaling (n_rep / (n_rep - 1)) applied to survivors.
+        w_r[nonzero] = w_r[nonzero] * n_rep / (n_rep - 1)
+        col = f"rep_{r}"
+        data[col] = np.repeat(w_r, n_periods)
+        rep_cols.append(col)
+    return data, rep_cols
+
+
+class TestImputationDiDVcovType:
+    """Phase 1b interstitial #3: vcov_type input contract on ImputationDiD.
+
+    ImputationDiD uses IF-based variance per Borusyak-Jaravel-Spiess (2024)
+    Theorem 3; vcov_type is permanently narrow to {"hc1"}.
+    Analytical-sandwich families {classical, hc2, hc2_bm} and conley are
+    rejected at __init__ with methodology-rooted messages. Mirrors CS
+    PR #487 (`tests/test_staggered.py`) and TD PR #488
+    (`tests/test_triple_diff.py::TestTripleDifferenceVcovType`) templates.
+
+    7-surface matrix:
+      1. Default preserved bit-equally across `aggregate ∈ {None, event_study, group}`
+      2. Cluster path preserved bit-equally across the same aggregate grid
+      3. TSL-survey path preserved bit-equally across the same aggregate grid
+      4. Replicate-survey path preserved bit-equally (event_study only; pretrends rejection limits the grid)
+      5. Bootstrap × cluster + bootstrap × survey bit-equal
+      6. fit()-time revalidation after `set_params(vcov_type=bad)`
+      7. Bootstrap n_psu<2 / n_clusters<2 NaN propagation (defensive fix regression)
+
+    Plus 8 introspection + safety-gate tests, 5 input-rejection pins, the
+    `cluster + replicate_weights` rejection, and a `pretrends=True` ×
+    `vcov_type='hc1'` × cluster bit-equality lock.
+    """
+
+    # ---- Surface 1: default bit-equal across aggregation modes ------------
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group"])
+    def test_default_hc1_bit_equal_baseline(self, aggregate):
+        data = generate_test_data(seed=53, n_units=80, n_periods=8)
+        common = dict(
+            data=data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate=aggregate,
+        )
+        r_default = ImputationDiD().fit(**common)
+        r_explicit = ImputationDiD(vcov_type="hc1").fit(**common)
+        assert r_default.overall_att == r_explicit.overall_att
+        assert r_default.overall_se == r_explicit.overall_se
+
+    # ---- Surface 2: cluster path bit-equal --------------------------------
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group"])
+    def test_cluster_hc1_bit_equal_baseline(self, aggregate):
+        data = _imputation_clustered_panel()
+        common = dict(
+            data=data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate=aggregate,
+        )
+        r_default = ImputationDiD(cluster="state").fit(**common)
+        r_explicit = ImputationDiD(cluster="state", vcov_type="hc1").fit(**common)
+        assert r_default.overall_att == r_explicit.overall_att
+        assert r_default.overall_se == r_explicit.overall_se
+
+    # ---- Surface 3: TSL-survey path bit-equal -----------------------------
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group"])
+    def test_survey_tsl_hc1_bit_equal_baseline(self, aggregate):
+        data = _imputation_survey_panel()
+        design = SurveyDesign(
+            weights="weight",
+            psu="psu",
+            strata="stratum",
+            weight_type="pweight",
+        )
+        common = dict(
+            data=data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate=aggregate,
+            survey_design=design,
+        )
+        r_default = ImputationDiD().fit(**common)
+        r_explicit = ImputationDiD(vcov_type="hc1").fit(**common)
+        assert r_default.overall_att == r_explicit.overall_att
+        assert r_default.overall_se == r_explicit.overall_se
+
+    # ---- Surface 4: replicate-survey path bit-equal -----------------------
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group"])
+    def test_survey_replicate_hc1_bit_equal_baseline(self, aggregate):
+        data, rep_cols = _imputation_replicate_panel()
+        design = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            weight_type="pweight",
+        )
+        common = dict(
+            data=data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+            aggregate=aggregate,
+        )
+        r_default = ImputationDiD().fit(**common)
+        r_explicit = ImputationDiD(vcov_type="hc1").fit(**common)
+        assert r_default.overall_att == r_explicit.overall_att
+        assert r_default.overall_se == r_explicit.overall_se
+        # Per-horizon / per-group SE override branches must also agree under
+        # the replicate-weight variance path.
+        if aggregate == "event_study":
+            assert r_default.event_study_effects is not None
+            assert r_explicit.event_study_effects is not None
+            for h in r_default.event_study_effects:
+                assert (
+                    r_default.event_study_effects[h]["se"]
+                    == r_explicit.event_study_effects[h]["se"]
+                )
+        if aggregate == "group":
+            assert r_default.group_effects is not None
+            assert r_explicit.group_effects is not None
+            for g in r_default.group_effects:
+                assert r_default.group_effects[g]["se"] == r_explicit.group_effects[g]["se"]
+
+    # ---- Surface 5: bootstrap × cluster / × survey bit-equal --------------
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group"])
+    def test_bootstrap_cluster_hc1_bit_equal(self, ci_params, aggregate):
+        data = _imputation_clustered_panel()
+        n_boot = ci_params.bootstrap(199)
+        common = dict(
+            data=data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate=aggregate,
+        )
+        r_default = ImputationDiD(cluster="state", n_bootstrap=n_boot, seed=11).fit(**common)
+        r_explicit = ImputationDiD(
+            cluster="state", n_bootstrap=n_boot, seed=11, vcov_type="hc1"
+        ).fit(**common)
+        assert r_default.bootstrap_results is not None
+        assert r_explicit.bootstrap_results is not None
+        assert (
+            r_default.bootstrap_results.overall_att_se
+            == r_explicit.bootstrap_results.overall_att_se
+        )
+        # Per-horizon / per-group bootstrap SE override branches at
+        # diff_diff/imputation.py:854-887 must also agree.
+        if aggregate == "event_study":
+            assert r_default.bootstrap_results.event_study_ses is not None
+            assert r_explicit.bootstrap_results.event_study_ses is not None
+            for h, se in r_default.bootstrap_results.event_study_ses.items():
+                assert se == r_explicit.bootstrap_results.event_study_ses[h]
+        if aggregate == "group":
+            assert r_default.bootstrap_results.group_ses is not None
+            assert r_explicit.bootstrap_results.group_ses is not None
+            for g, se in r_default.bootstrap_results.group_ses.items():
+                assert se == r_explicit.bootstrap_results.group_ses[g]
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group"])
+    def test_bootstrap_survey_hc1_bit_equal(self, ci_params, aggregate):
+        data = _imputation_survey_panel()
+        design = SurveyDesign(
+            weights="weight",
+            psu="psu",
+            strata="stratum",
+            weight_type="pweight",
+        )
+        n_boot = ci_params.bootstrap(199)
+        common = dict(
+            data=data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+            aggregate=aggregate,
+        )
+        r_default = ImputationDiD(n_bootstrap=n_boot, seed=23).fit(**common)
+        r_explicit = ImputationDiD(n_bootstrap=n_boot, seed=23, vcov_type="hc1").fit(**common)
+        assert r_default.bootstrap_results is not None
+        assert r_explicit.bootstrap_results is not None
+        assert (
+            r_default.bootstrap_results.overall_att_se
+            == r_explicit.bootstrap_results.overall_att_se
+        )
+        if aggregate == "event_study":
+            assert r_default.bootstrap_results.event_study_ses is not None
+            assert r_explicit.bootstrap_results.event_study_ses is not None
+            for h, se in r_default.bootstrap_results.event_study_ses.items():
+                assert se == r_explicit.bootstrap_results.event_study_ses[h]
+        if aggregate == "group":
+            assert r_default.bootstrap_results.group_ses is not None
+            assert r_explicit.bootstrap_results.group_ses is not None
+            for g, se in r_default.bootstrap_results.group_ses.items():
+                assert se == r_explicit.bootstrap_results.group_ses[g]
+
+    # ---- Surface 6: fit()-time revalidation -------------------------------
+
+    def test_set_params_bad_vcov_caught_at_fit_time_classical(self):
+        data = generate_test_data(seed=11)
+        imp = ImputationDiD()
+        imp.set_params(vcov_type="classical")  # mutate-then-validate-at-use
+        with pytest.raises(ValueError, match="influence-function"):
+            imp.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+            )
+
+    def test_set_params_bad_vcov_caught_at_fit_time_unknown(self):
+        data = generate_test_data(seed=11)
+        imp = ImputationDiD()
+        imp.set_params(vcov_type="hc4")
+        with pytest.raises(ValueError, match="hc4"):
+            imp.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+            )
+
+    # ---- Surface 7: bootstrap n_psu/n_clusters<2 NaN propagation ----------
+
+    def test_bootstrap_n_clusters_less_than_2_returns_nan(self):
+        # Construct a panel where the cluster column has exactly 1 unique
+        # value so the analytical-cluster bootstrap path hits the n<2 guard.
+        data = generate_test_data(seed=7, n_units=40, n_periods=6)
+        data["single_cluster"] = 1
+        with pytest.warns(UserWarning, match="n_clusters=1"):
+            results = ImputationDiD(cluster="single_cluster", n_bootstrap=199, seed=3).fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+            )
+        assert results.bootstrap_results is not None
+        assert np.isnan(results.bootstrap_results.overall_att_se)
+        assert np.isnan(results.bootstrap_results.overall_att_p_value)
+        assert all(np.isnan(x) for x in results.bootstrap_results.overall_att_ci)
+        # Derived coef_var propagates NaN through the alias property.
+        assert np.isnan(results.coef_var)
+
+    def test_bootstrap_n_psu_less_than_2_returns_nan(self):
+        # Construct a panel with a single PSU so the survey-PSU bootstrap
+        # path hits the n_psu<2 BLAS-roundoff guard. Survey weight_type
+        # must be pweight per the ImputationDiD survey contract.
+        data = _imputation_survey_panel(seed=42)
+        data["single_psu"] = 0
+        data["single_stratum"] = 0
+        design = SurveyDesign(
+            weights="weight",
+            psu="single_psu",
+            strata="single_stratum",
+            weight_type="pweight",
+        )
+        with pytest.warns(UserWarning, match="n_psu=1"):
+            results = ImputationDiD(n_bootstrap=199, seed=5).fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+        assert results.bootstrap_results is not None
+        assert np.isnan(results.bootstrap_results.overall_att_se)
+        assert np.isnan(results.bootstrap_results.overall_att_p_value)
+        assert all(np.isnan(x) for x in results.bootstrap_results.overall_att_ci)
+        assert np.isnan(results.coef_var)
+
+    # ---- Input rejection: methodology-rooted messages ---------------------
+
+    @pytest.mark.parametrize(
+        "bad_vcov,keyword",
+        [
+            ("classical", "influence-function"),
+            ("hc2", "Borusyak"),
+            ("hc2_bm", "Bell-McCaffrey"),
+            ("hc2_bm", "hat matrix"),
+        ],
+    )
+    def test_reject_invalid_vcov_at_init(self, bad_vcov, keyword):
+        with pytest.raises(ValueError, match=keyword):
+            ImputationDiD(vcov_type=bad_vcov)
+
+    def test_reject_conley_at_init(self):
+        with pytest.raises(ValueError, match="spatial-HAC"):
+            ImputationDiD(vcov_type="conley")
+
+    def test_reject_unknown_vcov_at_init(self):
+        with pytest.raises(ValueError, match="hc4"):
+            ImputationDiD(vcov_type="hc4")
+
+    # ---- cluster + replicate_weights fail-closed --------------------------
+
+    def test_cluster_plus_replicate_weights_rejected(self):
+        data, rep_cols = _imputation_replicate_panel()
+        # Synthesize a state column for the bare cluster= argument.
+        data["state"] = (data["unit"] // 4).astype(int)
+        design = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            weight_type="pweight",
+        )
+        with pytest.raises(NotImplementedError, match="replicate-weight"):
+            ImputationDiD(cluster="state").fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    # ---- pretrends × cluster × explicit hc1 bit-equality ------------------
+
+    def test_pretrends_hc1_bit_equal_with_cluster(self):
+        data = _imputation_clustered_panel()
+        common = dict(
+            data=data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="event_study",
+        )
+        r_default = ImputationDiD(cluster="state", pretrends=True).fit(**common)
+        r_explicit = ImputationDiD(cluster="state", pretrends=True, vcov_type="hc1").fit(**common)
+        # pretrend_test() (the explicit Wald-F lead-coefficient routine) uses
+        # the same Theorem 3 variance machinery — values across default vs
+        # explicit hc1 must agree to within iterative-FE-solver convergence
+        # tolerance. Sub-ULP differences come from BLAS non-associativity in
+        # `_iterative_demean` across distinct estimator instances and are not
+        # methodological divergence under the narrow vcov_type contract.
+        pt_default = r_default.pretrend_test()
+        pt_explicit = r_explicit.pretrend_test()
+        assert np.isclose(pt_default["f_stat"], pt_explicit["f_stat"], rtol=0, atol=1e-12)
+        assert np.isclose(pt_default["p_value"], pt_explicit["p_value"], rtol=0, atol=1e-12)
+        # Event-study SE (computed during fit() via Theorem 3 machinery on
+        # iterative-demeaned residuals; pretrends=True path includes the
+        # pre-period horizons). Sub-ULP differences come from BLAS
+        # non-associativity in `_iterative_demean` across distinct estimator
+        # instances and are not methodological divergence under the narrow
+        # vcov_type contract.
+        assert r_default.event_study_effects is not None
+        assert r_explicit.event_study_effects is not None
+        for h in r_default.event_study_effects:
+            assert np.isclose(
+                r_default.event_study_effects[h]["se"],
+                r_explicit.event_study_effects[h]["se"],
+                rtol=0,
+                atol=1e-12,
+                equal_nan=True,
+            )
+
+    # ---- Introspection / safety-gate tests --------------------------------
+
+    def test_default_vcov_type_is_hc1(self):
+        assert ImputationDiD().vcov_type == "hc1"
+
+    def test_get_params_includes_vcov_type(self):
+        params = ImputationDiD().get_params()
+        assert "vcov_type" in params
+        assert params["vcov_type"] == "hc1"
+
+    def test_results_carries_vcov_type(self):
+        data = generate_test_data(seed=11)
+        r = ImputationDiD().fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        assert r.vcov_type == "hc1"
+
+    def test_to_dict_includes_vcov_type(self):
+        data = generate_test_data(seed=11)
+        r = ImputationDiD().fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        d = r.to_dict()
+        assert d["vcov_type"] == "hc1"
+        # Headline alias keys are present per the TripleDifference precedent.
+        for k in ("att", "se", "t_stat", "p_value", "conf_int_lower", "conf_int_upper"):
+            assert k in d
+
+    def test_summary_includes_vcov_type_label_default(self):
+        # cluster=None still routes the Theorem 3 variance through
+        # cluster_var=unit at imputation.py:418, so summary should render
+        # the unit-clustered CR1 label rather than generic HC1.
+        data = generate_test_data(seed=11)
+        r = ImputationDiD().fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        text = r.summary()
+        assert "Variance estimator:" in text
+        assert "CR1 cluster-robust" in text
+        assert "unit" in text
+        assert r.cluster_name == "unit"
+        assert r.n_clusters == data["unit"].nunique()
+
+    def test_summary_suppresses_variance_label_under_bootstrap(self, ci_params):
+        # Under bootstrap fits, fit() overwrites the reported SE/CI/p-value
+        # with bootstrap_results, so the analytical variance-family label
+        # would misstate the inference source. Mirror the canonical
+        # DiDResults gate at diff_diff/results.py:213-226.
+        data = generate_test_data(seed=11)
+        n_boot = ci_params.bootstrap(199)
+        r = ImputationDiD(n_bootstrap=n_boot, seed=7).fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        text = r.summary()
+        assert "Inference method:" in text
+        assert "bootstrap" in text
+        # Analytical variance-family label must be suppressed.
+        assert "Variance estimator:" not in text
+        assert "CR1 cluster-robust" not in text
+        assert "HC1 heteroskedasticity-robust" not in text
+
+    def test_summary_includes_vcov_type_label_cluster(self):
+        data = _imputation_clustered_panel()
+        r = ImputationDiD(cluster="state").fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        text = r.summary()
+        assert "Variance estimator:" in text
+        # Cluster path renders the CR1 cluster-robust label per _format_vcov_label.
+        assert "CR1 cluster-robust" in text
+        assert "state" in text
+        assert r.cluster_name == "state"
+        assert r.n_clusters is not None and r.n_clusters > 1
+
+    def test_cluster_name_suppressed_under_survey(self):
+        data = _imputation_survey_panel()
+        design = SurveyDesign(
+            weights="weight",
+            psu="psu",
+            strata="stratum",
+            weight_type="pweight",
+        )
+        r = ImputationDiD(cluster="psu").fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        # Under survey designs, Results.cluster_name and n_clusters are
+        # suppressed so they can't misreport the bare cluster argument
+        # when the resolver picks the survey PSU as the effective cluster.
+        assert r.cluster_name is None
+        assert r.n_clusters is None
+
+    def test_cluster_name_suppressed_under_replicate_survey(self):
+        # Replicate-weight survey designs have psu=None but still must
+        # suppress cluster_name/n_clusters: replicate variance is computed
+        # by replicate reweighting (BRR / Fay / JK1 / JKn / SDR) and
+        # ignores PSU/cluster entirely, so populating cluster_name="unit"
+        # and n_clusters=n_units would misreport the inference source.
+        # Summary must also omit the "Number of clusters:" line and the
+        # CR1 cluster-robust label.
+        data, rep_cols = _imputation_replicate_panel()
+        design = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            weight_type="pweight",
+        )
+        r = ImputationDiD().fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert r.cluster_name is None
+        assert r.n_clusters is None
+        text = r.summary()
+        assert "Number of clusters:" not in text
+        assert "CR1 cluster-robust" not in text
+
+    def test_fit_clone_idempotent_on_vcov_type(self):
+        data = generate_test_data(seed=11)
+        imp1 = ImputationDiD(vcov_type="hc1")
+        r1 = imp1.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        imp2 = ImputationDiD(**imp1.get_params())
+        r2 = imp2.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+        )
+        assert r1.overall_se == r2.overall_se
+        assert r1.vcov_type == r2.vcov_type
+
+    def test_imputation_did_convenience_func_rejects_bad_vcov(self):
+        data = generate_test_data(seed=11)
+        with pytest.raises(ValueError, match="influence-function"):
+            imputation_did(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                vcov_type="classical",
+            )
+
+    def test_imputation_did_convenience_func_threads_vcov_type(self):
+        data = generate_test_data(seed=11)
+        r = imputation_did(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            vcov_type="hc1",
+        )
+        assert r.vcov_type == "hc1"

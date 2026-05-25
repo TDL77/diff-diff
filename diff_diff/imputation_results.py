@@ -142,6 +142,14 @@ class ImputationDiDResults:
     _estimator_ref: Optional[Any] = field(default=None, repr=False)
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None, repr=False)
+    # Variance-estimator metadata (Phase 1b interstitial #3).
+    # vcov_type is permanently narrow to {"hc1"} per the IF-based variance
+    # contract (see REGISTRY.md). cluster_name + n_clusters are populated
+    # only under bare cluster=; suppressed under survey designs (the survey
+    # block in summary() already renders the design's PSU/strata metadata).
+    vcov_type: str = field(default="hc1")
+    cluster_name: Optional[str] = field(default=None)
+    n_clusters: Optional[int] = field(default=None)
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property
@@ -219,6 +227,41 @@ class ImputationDiDResults:
         if self.survey_metadata is not None:
             sm = self.survey_metadata
             lines.extend(_format_survey_block(sm, 85))
+
+        # Inference / variance metadata. Two suppression rules — match the
+        # canonical DiDResults pattern at diff_diff/results.py:213-226:
+        #   1. Survey designs: the survey block above already names the
+        #      design + n_psu + df; the analytical SE is TSL on the combined
+        #      IF (or replicate reweighting), not the raw HC1/CR1 sandwich.
+        #   2. Bootstrap fits: fit() overwrites the reported SE/CI/p-value
+        #      with bootstrap_results, so the analytical variance-family
+        #      label would misstate the actual inference source. Surface an
+        #      "Inference method: bootstrap" + replication count instead.
+        if self.bootstrap_results is not None:
+            lines.append(f"{'Inference method:':<30} {'bootstrap':>15}")
+            lines.append(
+                f"{'Bootstrap replications:':<30} {self.bootstrap_results.n_bootstrap:>15}"
+            )
+        elif self.survey_metadata is None:
+            # Analytical, non-survey path: render the variance-family label.
+            # For cluster=None ImputationDiD still clusters at unit by default
+            # (Theorem 3 equation 7 conservative variance on per-unit IF
+            # sums), so cluster_name is populated with the unit column name
+            # and _format_vcov_label renders the unit-cluster CR1 label.
+            from diff_diff.results import _format_vcov_label
+
+            vcov_label = _format_vcov_label(
+                self.vcov_type,
+                cluster_name=self.cluster_name,
+                n_clusters=self.n_clusters,
+                n_obs=self.n_obs,
+            )
+            if vcov_label:
+                lines.append(f"{'Variance estimator:':<30} {vcov_label:>15}")
+        if self.n_clusters is not None and self.bootstrap_results is None:
+            lines.append(f"{'Number of clusters:':<30} {self.n_clusters:>15}")
+
+        lines.append("")
 
         # Overall ATT
         lines.extend(
@@ -429,6 +472,53 @@ class ImputationDiDResults:
             raise ValueError(
                 f"Unknown level: {level}. Use 'observation', 'event_study', or 'group'."
             )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert results to a dictionary.
+
+        Provides flat headline aliases (``att``/``se``/``t_stat``/``p_value``/
+        ``conf_int_lower``/``conf_int_upper``) plus variance-estimator
+        metadata (``vcov_type``, optional ``cluster_name``/``n_clusters``,
+        optional ``n_bootstrap``, ``inference_method``).
+
+        Returns
+        -------
+        Dict[str, Any]
+            Dictionary containing the headline overall ATT and inference
+            metadata. Per-cohort / per-horizon detail is exposed via
+            :meth:`to_dataframe`.
+        """
+        result: Dict[str, Any] = {
+            "att": self.overall_att,
+            "se": self.overall_se,
+            "t_stat": self.overall_t_stat,
+            "p_value": self.overall_p_value,
+            "conf_int_lower": self.overall_conf_int[0],
+            "conf_int_upper": self.overall_conf_int[1],
+            "n_obs": self.n_obs,
+            "n_treated_obs": self.n_treated_obs,
+            "n_untreated_obs": self.n_untreated_obs,
+            "n_treated_units": self.n_treated_units,
+            "n_control_units": self.n_control_units,
+            "alpha": self.alpha,
+            "anticipation": self.anticipation,
+            "vcov_type": self.vcov_type,
+        }
+        if self.cluster_name is not None:
+            result["cluster_name"] = self.cluster_name
+        if self.n_clusters is not None:
+            result["n_clusters"] = self.n_clusters
+        if self.bootstrap_results is not None:
+            result["n_bootstrap"] = self.bootstrap_results.n_bootstrap
+            result["inference_method"] = "bootstrap"
+        elif self.survey_metadata is not None:
+            result["inference_method"] = "survey"
+        elif self.n_clusters is not None:
+            result["inference_method"] = "cluster"
+        else:
+            result["inference_method"] = "analytical"
+        return result
 
     def pretrend_test(self, n_leads: Optional[int] = None) -> Dict[str, Any]:
         """
