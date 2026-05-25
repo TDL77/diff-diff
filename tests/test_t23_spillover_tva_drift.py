@@ -122,11 +122,21 @@ def naive_fit(panel):
         )
 
 
+def _silence_spillover_matmul_warnings():
+    """Narrow filter for the three benign `*encountered in matmul`
+    RuntimeWarnings SpilloverDiD's stage-2 sandwich emits on this DGP
+    from a per-unit FE projection edge case. Values are recovered
+    correctly. Any other warning (including a 4th matmul flavor or any
+    UserWarning) is intentionally NOT silenced — `test_spillover_fit_emits_only_known_matmul_warnings`
+    pins the exact surface."""
+    warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*encountered in matmul")
+
+
 @pytest.fixture(scope="module")
 def spillover_fit(panel):
     est = SpilloverDiD(rings=[0.0, D_BAR_KM], conley_coords=("lat", "lon"))
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+        _silence_spillover_matmul_warnings()
         return est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
 
 
@@ -140,7 +150,7 @@ def spillover_conley_lag0_fit(panel):
         conley_lag_cutoff=0,
     )
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+        _silence_spillover_matmul_warnings()
         return est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
 
 
@@ -154,7 +164,7 @@ def spillover_conley_lag1_fit(panel):
         conley_lag_cutoff=1,
     )
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+        _silence_spillover_matmul_warnings()
         return est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
 
 
@@ -323,3 +333,32 @@ def test_summary_renders_without_warning(spillover_fit):
         out = spillover_fit.summary()
     assert isinstance(out, str)
     assert len(out) > 0
+
+
+def test_spillover_fit_emits_only_known_matmul_warnings(panel):
+    """Pin the EXACT warning surface of the headline SpilloverDiD fit so
+    future library changes can't silently introduce new warnings into the
+    tutorial output (T19-pattern warning-policy guard). The notebook's
+    narrow `RuntimeWarning` matmul filter masks ONLY the three known
+    `*encountered in matmul` warnings; any other warning category or
+    other RuntimeWarning message must surface."""
+    est = SpilloverDiD(rings=[0.0, D_BAR_KM], conley_coords=("lat", "lon"))
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
+
+    # Partition into expected (matmul RuntimeWarning) vs unexpected (anything else)
+    unexpected = []
+    for msg in w:
+        is_matmul_runtime = issubclass(
+            msg.category, RuntimeWarning
+        ) and "encountered in matmul" in str(msg.message)
+        if not is_matmul_runtime:
+            unexpected.append((msg.category.__name__, str(msg.message)))
+
+    assert not unexpected, (
+        f"SpilloverDiD.fit emitted unexpected warnings on the T23 DGP: "
+        f"{unexpected}. If a new warning is genuinely expected, broaden "
+        f"`_silence_spillover_matmul_warnings()` and update the §6 "
+        f"notebook narrative accordingly."
+    )
