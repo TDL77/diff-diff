@@ -427,9 +427,18 @@ class TestTROPNuclearNormProx:
             )
 
     def test_local_nonuniform_weights_objective(self):
-        """Eq. 2 weighted-prox: objective decreases under non-uniform
-        weights (W_max < 1), and the resulting L has strictly smaller
-        nuclear norm than the residual R.
+        """Eq. 2 weighted-prox: objective at the final iterate is
+        at-or-below initialisation under non-uniform weights
+        (W_max < 1), and the resulting L has strictly smaller nuclear
+        norm than the residual R.
+
+        Scope note: this is a **final-vs-initial** check on the shipped
+        `_weighted_nuclear_norm_solve` (which uses accelerated FISTA);
+        it does NOT verify per-iteration monotonicity. Per-step
+        monotonicity is a property of the plain prox-gradient ingredient
+        only (see ``test_plain_prox_gradient_objective_decreases``);
+        accelerated FISTA's Nesterov momentum is allowed to produce
+        transient per-step objective increases while still converging.
         """
         rng = np.random.default_rng(123)
         R = rng.normal(0, 1, (6, 4))
