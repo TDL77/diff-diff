@@ -512,7 +512,7 @@ class SpilloverCarouselPDF(FPDF):
         fig.patch.set_facecolor("white")
         ax.set_facecolor("white")
 
-        ring_labels = ["[0, 50)", "[50, 100)", "[100, 200)"]
+        ring_labels = ["[0, 50)", "[50, 100)", "[100, 200]"]
         delta = np.array([0.045, 0.018, 0.003])
         ci_half = np.array([0.012, 0.009, 0.005])
 
@@ -1032,7 +1032,7 @@ class SpilloverCarouselPDF(FPDF):
                 ("# [50, 100)   0.018  0.009  0.041", LIGHT_GRAY),
             ],
             [
-                ("# [100, 200)  0.003  0.005  0.561", LIGHT_GRAY),
+                ("# [100, 200]  0.003  0.005  0.561", LIGHT_GRAY),
             ],
         ]
 
@@ -1113,7 +1113,7 @@ class SpilloverCarouselPDF(FPDF):
         self.centered_text(40, "Validated.", size=42, color=SLATE_BLUE)
         self.centered_text(
             82,
-            "Paper equations + Monte Carlo coverage on synthetic DGPs.",
+            "Documented synthesis + Monte Carlo recovery on synthetic DGPs.",
             size=13,
             bold=False,
             italic=True,
@@ -1130,7 +1130,7 @@ class SpilloverCarouselPDF(FPDF):
         items = [
             (
                 "Butts Eq 5/6 + Proposition 2.1",
-                "Ring-augmented spec + bias decomposition, implemented as written.",
+                "Time-varying ring-exposure synthesis (Butts Sec 5 + Gardner + Conley).",
             ),
             (
                 "Gardner Two-Stage GMM (Section 4)",
@@ -1141,8 +1141,8 @@ class SpilloverCarouselPDF(FPDF):
                 "Matched to R conleyreg at atol=1e-6 on parity fixtures.",
             ),
             (
-                "Monte Carlo Coverage",
-                "Recovers known tau_total + delta_j; coverage near nominal level.",
+                "Monte Carlo Recovery",
+                "Recovers known tau_total + delta_j on synthetic spillover DGPs.",
             ),
         ]
 
