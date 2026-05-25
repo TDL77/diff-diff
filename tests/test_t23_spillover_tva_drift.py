@@ -363,6 +363,74 @@ def test_summary_renders_without_warning(spillover_fit):
     assert len(out) > 0
 
 
+def test_notebook_dgp_constants_match_test_module_constants():
+    """P2 sync guard: codex R6 caught that `test_notebook_dgp_ast_matches_test_fixture`
+    only compares the function body, and `test_dgp_true_parameters_match_quoted`
+    only reasserts the test module's own constants. A notebook-only edit
+    to `MAIN_SEED`, `N_TREATED`, `N_NEAR`, `N_FAR`, `T_PERIODS`,
+    `FIRST_TREAT`, `TAU_TOTAL`, `DELTA_1`, `D_BAR_KM`, or `NOISE_SD`
+    would change tutorial behavior without failing either of those
+    tests.
+
+    Parses the notebook §2 cell, walks the top-level
+    ``Assign`` nodes, and asserts the value of each expected constant
+    matches the test module's value. Any notebook-only constant edit
+    now fails this guard."""
+    import ast
+    import json
+    from pathlib import Path
+
+    nb_path = Path(__file__).resolve().parents[1] / "docs" / "tutorials" / "23_spillover_tva.ipynb"
+    with nb_path.open() as f:
+        nb = json.load(f)
+
+    matches = [
+        c
+        for c in nb["cells"]
+        if c["cell_type"] == "code" and any("def build_t23_panel" in s for s in c["source"])
+    ]
+    assert len(matches) == 1, (
+        f"Expected exactly one notebook code cell defining `build_t23_panel`; "
+        f"found {len(matches)}."
+    )
+    nb_cell_src = "".join(matches[0]["source"])
+
+    # Walk top-level Assigns in the cell and collect a constant -> value dict.
+    nb_consts: dict = {}
+    tree = ast.parse(nb_cell_src)
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target = node.targets[0]
+            if isinstance(target, ast.Name):
+                try:
+                    nb_consts[target.id] = ast.literal_eval(node.value)
+                except (ValueError, SyntaxError):
+                    pass  # non-literal RHS; skip
+
+    expected = {
+        "MAIN_SEED": MAIN_SEED,
+        "N_TREATED": N_TREATED,
+        "N_NEAR": N_NEAR,
+        "N_FAR": N_FAR,
+        "T_PERIODS": T_PERIODS,
+        "FIRST_TREAT": FIRST_TREAT,
+        "TAU_TOTAL": TAU_TOTAL,
+        "DELTA_1": DELTA_1,
+        "D_BAR_KM": D_BAR_KM,
+        "NOISE_SD": NOISE_SD,
+    }
+    missing = [k for k in expected if k not in nb_consts]
+    assert not missing, (
+        f"Notebook §2 cell missing expected constant assignments: {missing}. "
+        f"If a constant was renamed or moved, update both notebook and test."
+    )
+    mismatched = {k: (nb_consts[k], expected[k]) for k in expected if nb_consts[k] != expected[k]}
+    assert not mismatched, (
+        f"Notebook §2 constants drifted from test module constants: {mismatched}. "
+        f"Each entry is (notebook_value, test_value). Update both to match."
+    )
+
+
 def test_notebook_dgp_ast_matches_test_fixture():
     """P2 sync guard: enforces the "verbatim" duplication claim by
     parsing the notebook's §2 ``build_t23_panel`` definition and
