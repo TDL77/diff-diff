@@ -27,6 +27,7 @@ silent drift on those values.
 from __future__ import annotations
 
 import warnings
+from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -349,41 +350,43 @@ def test_summary_renders_without_warning(spillover_fit):
 def _assert_exact_matmul_warning_surface(captured) -> None:
     """Shared assertion body for the §5 / §6 warning-policy guards.
 
-    Asserts BOTH directions of the warning-surface contract:
-    (a) every captured warning is one of the three known benign
-        `*encountered in matmul` RuntimeWarnings (no unexpected
-        category, no new RuntimeWarning message);
-    (b) ALL THREE known messages are present at least once (so a
-        future upstream fix that removes one — e.g. NumPy stops
-        emitting "overflow encountered in matmul" on this DGP —
-        surfaces the diff and forces the narrative to be re-checked).
+    Asserts EXACT-multiset equality of the captured warning surface
+    against the three known benign `*encountered in matmul`
+    RuntimeWarnings — each expected to fire exactly ONCE per fit.
+    This pins:
+    (a) no unexpected warning category or message slips through,
+    (b) no expected message silently disappears, AND
+    (c) no expected message starts firing multiple times (which would
+        silently invalidate the notebook's "three benign warnings"
+        claim even with both (a) and (b) holding).
 
-    Both halves are required: (a) alone would let a new flavor sneak
-    in; (b) alone would let a silent appearance of an unrelated warning
-    pass.
+    If a future upstream change legitimately shifts the multiplicity
+    (e.g. NumPy emits "overflow encountered in matmul" twice instead
+    of once after a stage-2 loop refactor), the failure message lists
+    the observed vs. expected counts so the maintainer can either
+    update `_EXPECTED_MATMUL_MESSAGES` / the multiplicity expectation
+    or investigate the underlying change before merging.
     """
-    seen = set()
-    unexpected = []
-    for msg in captured:
-        text = str(msg.message)
-        is_known = issubclass(msg.category, RuntimeWarning) and text in _EXPECTED_MATMUL_MESSAGES
-        if is_known:
-            seen.add(text)
-        else:
-            unexpected.append((msg.category.__name__, text))
-
-    assert not unexpected, (
-        f"SpilloverDiD.fit emitted unexpected warnings on the T23 DGP: "
-        f"{unexpected}. If a new warning is genuinely expected, extend "
-        f"`_EXPECTED_MATMUL_MESSAGES` and update the §5/§6 notebook "
-        f"narrative accordingly."
+    non_runtime = [
+        (msg.category.__name__, str(msg.message))
+        for msg in captured
+        if not issubclass(msg.category, RuntimeWarning)
+    ]
+    assert not non_runtime, (
+        f"Non-RuntimeWarning surfaced on the T23 DGP: {non_runtime}. "
+        f"If a new warning category is genuinely expected, broaden the "
+        f"guard and update the §5/§6 notebook narrative accordingly."
     )
-    missing = set(_EXPECTED_MATMUL_MESSAGES) - seen
-    assert not missing, (
-        f"Expected matmul warnings absent on the T23 DGP: {sorted(missing)}. "
-        f"If one of the three known warnings has disappeared (e.g. upstream "
-        f"library fix), narrow `_EXPECTED_MATMUL_MESSAGES` to the remaining "
-        f"set and update the §5/§6 notebook narrative."
+
+    observed = Counter(str(msg.message) for msg in captured)
+    expected = Counter(_EXPECTED_MATMUL_MESSAGES)  # each message x 1
+    assert observed == expected, (
+        f"SpilloverDiD.fit warning surface drifted on the T23 DGP.\n"
+        f"  expected: {dict(expected)}\n"
+        f"  observed: {dict(observed)}\n"
+        f"If the new multiplicity is genuinely expected, update "
+        f"`_EXPECTED_MATMUL_MESSAGES` (or the Counter expectation) and "
+        f"the §5/§6 notebook narrative accordingly."
     )
 
 
