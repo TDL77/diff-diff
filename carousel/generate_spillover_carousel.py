@@ -1105,7 +1105,7 @@ class SpilloverCarouselPDF(FPDF):
         self.add_footer()
 
     def slide_10_validated(self):
-        """Slide 10: paper-equation parity + Monte Carlo coverage."""
+        """Slide 10: documented synthesis + Monte Carlo recovery."""
         self.add_page()
         self.light_gradient_background()
         self._draw_vertical_sidebar(10, total=11)
