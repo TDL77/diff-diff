@@ -43,16 +43,20 @@ Equation walk-through:
                    MSE strictly below DID MSE on a factor-confounded DGP.
                    The direct fixed-weight bias-bound test is deferred.
 - Section 2.2:     special-case reductions. DID reduction (lambda_nn=inf +
-                   uniform weights) is verified as an algebraic match
-                   against the DiD benchmark on a TWFE-clean panel. The MC reduction
-                   (uniform weights + finite lambda_nn) only verifies that
-                   the nuclear-norm prox code path engages and beats a DID-
-                   style baseline; it is NOT an equivalence check against
-                   an independent MC reference implementation. SC + SDID
-                   reductions are skipped — paper claims reduction under
-                   "specific (omega, theta) weight choices" without
-                   providing the map; cross-language anchors are deferred
-                   until paper-author code lands. See `TestTROPSpecialCases`.
+                   uniform weights) is verified as a **benchmark sanity
+                   check** against the basic DiD on a no-interactive-FE
+                   panel (additive unit + time effects only) — empirical
+                   numerical agreement on a friendly DGP, NOT an algebraic-
+                   equivalence proof of the Section 2.2 reduction. The MC
+                   reduction (uniform weights + finite lambda_nn) only
+                   verifies that the nuclear-norm prox code path engages
+                   and beats a DID-style baseline; it is NOT an
+                   equivalence check against an independent MC reference
+                   implementation. SC + SDID reductions are skipped —
+                   paper claims reduction under "specific (omega, theta)
+                   weight choices" without providing the map; cross-
+                   language anchors are deferred until paper-author code
+                   lands. See `TestTROPSpecialCases`.
 - Eq. 13 / Algorithm 2: per-(i, t) estimation for multiple treated units;
                    ATT averages over all W_it=1 cells. Verified by
                    `TestTROPAlgorithm2MultipleTreated`.
@@ -1289,12 +1293,18 @@ class TestTROPSpecialCases:
 
     def test_did_reduction_lambda_nn_inf_uniform_weights(self):
         """Section 2.2 first bullet: with ``lambda_nn = infinity`` and
-        uniform weights (``lambda_time = lambda_unit = 0``), TROP reduces
-        to DID / TWFE. Both estimators recover the same ATT on a
-        TWFE-clean (no factor structure) DGP.
+        uniform weights (``lambda_time = lambda_unit = 0``), TROP and
+        basic DiD should produce close ATT estimates on a no-
+        interactive-FE panel (additive unit + time effects only).
 
-        The reduction is exact in expectation; finite-sample MC noise
-        is absorbed by a relative-tolerance assertion.
+        **This is a benchmark sanity check, not an algebraic-equivalence
+        proof.** The paper's Section 2.2 reduction is stated for the
+        2×2 block-assignment case; this test uses a multi-period panel
+        (n_pre=6, n_post=4) where the library's basic DiD is the
+        canonical comparator but not the algebraic target. The 0.5
+        tolerance absorbs finite-sample MC noise. A direct algebraic-
+        reduction test (true 2-period panel or `TwoWayFixedEffects`
+        comparator) is deferred.
         """
         df = _make_no_factor_panel(
             n_units=30,
