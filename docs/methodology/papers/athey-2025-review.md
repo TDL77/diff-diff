@@ -11,7 +11,7 @@
 
 *Working draft formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries.*
 
-*Resolution status (post-promotion, 2026-05-24):* Gap #5 (weight normalization) is resolved as a **library-side choice**, not a source-side clarification: the shipped implementation uses unnormalized exponential weights matching Eq. 2, and the methodology-promotion PR documents this choice as a deliberate deviation from the Section 5 sum-to-one statement (`docs/methodology/REGISTRY.md` `## TROP` → `**Note (paper resolution):**`; `METHODOLOGY_REVIEW.md` `#### TROP` → Deviations). The deviation is locked by `tests/test_methodology_trop.py::TestTROPDeviations::test_unnormalized_weights_match_eq2` via direct kernel-weight inspection. See Gap #5 below for the original source-side ambiguity.
+*Resolution status (post-promotion, 2026-05-24):* Gap #5 (weight normalization) is resolved as a **library-side choice**, not a source-side clarification: the shipped implementation uses unnormalized exponential weights matching Eq. 2, and the methodology-promotion PR documents this choice as a deliberate deviation from the Section 5 sum-to-one statement (see the weight-normalization note in the `## TROP` block of `docs/methodology/REGISTRY.md` and the Deviations subsection of the `#### TROP` block in `METHODOLOGY_REVIEW.md`). The deviation is locked by `tests/test_methodology_trop.py::TestTROPDeviations::test_unnormalized_weights_match_eq2` via direct kernel-weight inspection. See Gap #5 below for the original source-side ambiguity.
 
 ## TROP
 
