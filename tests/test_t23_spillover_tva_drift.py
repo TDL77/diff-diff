@@ -284,6 +284,24 @@ def test_rings_sensitivity_grid_endpoints(panel):
         )
 
 
+def test_rings_grid_d_bar_100_to_200_identical_delta_1(panel):
+    """§4 narrative claim covers BOTH coefficients: `d_bar in {100, 150,
+    200}` produces identical tau_total AND delta_1 (the test of
+    tau_total identity lives in `test_rings_grid_d_bar_100_to_200_identical`;
+    this companion test pins the delta_1 identity so a future drift
+    that affects only the spillover coefficient can't leave the
+    'identical' notebook claim stale)."""
+    deltas = []
+    for outer in (100.0, 150.0, 200.0):
+        est = SpilloverDiD(rings=[0.0, outer], conley_coords=("lat", "lon"))
+        with warnings.catch_warnings():
+            _silence_spillover_matmul_warnings()
+            res = est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
+        assert res.spillover_effects is not None
+        deltas.append(float(res.spillover_effects.iloc[0]["coef"]))
+    np.testing.assert_allclose(deltas, deltas[0] * np.ones(3), atol=1e-10)
+
+
 def test_rings_grid_d_bar_100_to_200_identical(panel):
     """§4 narrative claim: once d_bar covers the true spillover horizon
     (which here ends at ~78 km), widening past 100 km adds zero
