@@ -27,7 +27,6 @@ silent drift on those values.
 from __future__ import annotations
 
 import warnings
-from collections import Counter
 
 import numpy as np
 import pandas as pd
@@ -123,25 +122,24 @@ def naive_fit(panel):
         )
 
 
-_EXPECTED_MATMUL_MESSAGES = (
-    "divide by zero encountered in matmul",
-    "overflow encountered in matmul",
-    "invalid value encountered in matmul",
-)
-
-
 def _silence_spillover_matmul_warnings():
-    """Narrow filter for the three benign `*encountered in matmul`
-    RuntimeWarnings SpilloverDiD's stage-2 sandwich emits on this DGP
-    from a per-unit FE projection edge case. Values are recovered
-    correctly. Filters are message-exact (not just `.*encountered in
-    matmul`) so a hypothetical 4th flavor like "underflow encountered
-    in matmul" would NOT be silently masked. Any UserWarning,
-    FutureWarning, or RuntimeWarning with a different message also
-    surfaces — `test_spillover_fit_emits_only_known_matmul_warnings`
-    pins the exact surface."""
-    for expected in _EXPECTED_MATMUL_MESSAGES:
-        warnings.filterwarnings("ignore", category=RuntimeWarning, message=expected)
+    """Apply the notebook's narrow ``.*encountered in matmul``
+    ``RuntimeWarning`` filter. The three matmul warnings ("divide by
+    zero" / "overflow" / "invalid value") are an Apple Silicon M4 +
+    macOS Sequoia + numpy<2.3 Accelerate BLAS artifact documented at
+    ``TODO.md`` under "RuntimeWarnings in Linear Algebra Operations"
+    (root cause: Apple BLAS SME kernels corrupt the FP status register;
+    tracked as numpy#28687, fixed in numpy>=2.3). They DO NOT fire on
+    M3 / Intel / Linux or numpy>=2.3 — so this filter is a no-op there,
+    and any platform-specific noise it does silence does not affect
+    result correctness.
+
+    The post-filter warning surface (zero remaining warnings on the
+    T23 DGP) is pinned by ``test_spillover_fit_warning_policy_post_filter_clean``
+    and ``test_spillover_conley_fit_warning_policy_post_filter_clean``.
+    A new RuntimeWarning with a different message, or any UserWarning /
+    FutureWarning, fails those tests."""
+    warnings.filterwarnings("ignore", category=RuntimeWarning, message=r".*encountered in matmul")
 
 
 @pytest.fixture(scope="module")
@@ -347,67 +345,60 @@ def test_summary_renders_without_warning(spillover_fit):
     assert len(out) > 0
 
 
-def _assert_exact_matmul_warning_surface(captured) -> None:
-    """Shared assertion body for the §5 / §6 warning-policy guards.
+def _assert_post_filter_warning_surface_is_clean(captured) -> None:
+    """Shared T19-style platform-agnostic warning-policy assertion.
 
-    Asserts EXACT-multiset equality of the captured warning surface
-    against the three known benign `*encountered in matmul`
-    RuntimeWarnings — each expected to fire exactly ONCE per fit.
-    This pins:
-    (a) no unexpected warning category or message slips through,
-    (b) no expected message silently disappears, AND
-    (c) no expected message starts firing multiple times (which would
-        silently invalidate the notebook's "three benign warnings"
-        claim even with both (a) and (b) holding).
+    The notebook's narrow ``.*encountered in matmul`` filter (see
+    `_silence_spillover_matmul_warnings`) silences three Apple Silicon
+    M4 + numpy<2.3 Accelerate BLAS warnings that are emitted on the
+    affected platform but DO NOT fire on M3 / Intel / Linux or
+    numpy>=2.3 (per ``TODO.md`` "RuntimeWarnings in Linear Algebra
+    Operations"). The drift contract this assertion locks is
+    platform-agnostic:
 
-    If a future upstream change legitimately shifts the multiplicity
-    (e.g. NumPy emits "overflow encountered in matmul" twice instead
-    of once after a stage-2 loop refactor), the failure message lists
-    the observed vs. expected counts so the maintainer can either
-    update `_EXPECTED_MATMUL_MESSAGES` / the multiplicity expectation
-    or investigate the underlying change before merging.
-    """
-    non_runtime = [
-        (msg.category.__name__, str(msg.message))
-        for msg in captured
-        if not issubclass(msg.category, RuntimeWarning)
-    ]
-    assert not non_runtime, (
-        f"Non-RuntimeWarning surfaced on the T23 DGP: {non_runtime}. "
-        f"If a new warning category is genuinely expected, broaden the "
-        f"guard and update the §5/§6 notebook narrative accordingly."
-    )
+    - on platforms where the matmul warnings fire, they get filtered
+      and never reach the captured list;
+    - on platforms where they don't fire, the filter is a no-op;
 
-    observed = Counter(str(msg.message) for msg in captured)
-    expected = Counter(_EXPECTED_MATMUL_MESSAGES)  # each message x 1
-    assert observed == expected, (
-        f"SpilloverDiD.fit warning surface drifted on the T23 DGP.\n"
-        f"  expected: {dict(expected)}\n"
-        f"  observed: {dict(observed)}\n"
-        f"If the new multiplicity is genuinely expected, update "
-        f"`_EXPECTED_MATMUL_MESSAGES` (or the Counter expectation) and "
-        f"the §5/§6 notebook narrative accordingly."
+    EITHER WAY the post-filter captured list must be empty. Any
+    UserWarning, FutureWarning, DeprecationWarning, or RuntimeWarning
+    with a non-matmul message will fail this assertion and force the
+    maintainer to either update the notebook narrative or fix the
+    underlying cause."""
+    if not captured:
+        return
+    details = [(msg.category.__name__, str(msg.message)) for msg in captured]
+    assert False, (
+        f"Unexpected post-filter warnings on the T23 DGP: {details}. "
+        f"If a new warning is genuinely expected, broaden "
+        f"`_silence_spillover_matmul_warnings()` and update the §5/§6 "
+        f"notebook narrative accordingly."
     )
 
 
-def test_spillover_fit_emits_only_known_matmul_warnings(panel):
-    """§5 warning-policy guard (T19-pattern). The notebook's narrow
-    `RuntimeWarning` matmul filter masks ONLY the three known
-    `*encountered in matmul` warnings; any other warning category or
-    other RuntimeWarning message must surface."""
+def test_spillover_fit_warning_policy_post_filter_clean(panel):
+    """§5 warning-policy guard (T19-pattern, platform-agnostic).
+
+    Mirrors the notebook's narrow ``.*encountered in matmul`` filter
+    inside the capture block, then asserts the post-filter warning
+    surface is empty on the T23 DGP. On Apple Silicon M4 + numpy<2.3
+    the three known BLAS matmul warnings fire and are filtered; on
+    M3 / Intel / Linux or numpy>=2.3 the filter is a no-op. EITHER
+    WAY a fresh ``UserWarning`` / ``FutureWarning`` or any non-matmul
+    ``RuntimeWarning`` will fail this guard."""
     est = SpilloverDiD(rings=[0.0, D_BAR_KM], conley_coords=("lat", "lon"))
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
+        _silence_spillover_matmul_warnings()  # mirror notebook §5 filter
         est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
-    _assert_exact_matmul_warning_surface(w)
+    _assert_post_filter_warning_surface_is_clean(w)
 
 
-def test_spillover_conley_fit_emits_only_known_matmul_warnings(panel):
+def test_spillover_conley_fit_warning_policy_post_filter_clean(panel):
     """§6 warning-policy guard, parallel to §5 but on the Conley path
     (vcov_type="conley", conley_cutoff_km=d_bar, conley_lag_cutoff in {0, 1}).
-    If the Conley branch starts emitting a new warning, a maintainer must
-    either widen `_silence_spillover_matmul_warnings()` and update the §6
-    narrative or fix the underlying cause."""
+    Same T19-style platform-agnostic contract: mirror the notebook
+    filter inside the capture, assert no remaining warning escaped."""
     for lag in (0, 1):
         est = SpilloverDiD(
             rings=[0.0, D_BAR_KM],
@@ -418,5 +409,6 @@ def test_spillover_conley_fit_emits_only_known_matmul_warnings(panel):
         )
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
+            _silence_spillover_matmul_warnings()  # mirror notebook §6 filter
             est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
-        _assert_exact_matmul_warning_surface(w)
+        _assert_post_filter_warning_surface_is_clean(w)
