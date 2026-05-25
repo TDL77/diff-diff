@@ -1122,7 +1122,7 @@ class TestTROPCorollary1Unbiasedness:
             f"ATT={results.att:.4f} not within 3 SE={results.se:.4f} " f"of true=2.0 under B=0"
         )
         # Sanity: lambda_nn was preserved as inf in results metadata
-        # (REGISTRY L2280-2285: "TROPResults stores ORIGINAL lambda_nn value (inf)").
+        # (REGISTRY ## TROP "λ_nn=∞ implementation" note: "TROPResults stores ORIGINAL lambda_nn value (inf)").
         assert results.lambda_nn == np.inf
 
 
@@ -2018,10 +2018,11 @@ class TestTROPDeviations:
         )
 
     def test_lambda_nn_inf_stored_unchanged(self):
-        """REGISTRY L2280-2285: lambda_nn=infinity is converted internally
-        to 1e10 for computation, but ``TROPResults.lambda_nn`` stores the
-        original ``inf`` value. lambda_time and lambda_unit store their
-        selected grid values directly (no inf conversion — Eq. 3 uses
+        """REGISTRY ``## TROP`` "λ_nn=∞ implementation" edge-case note:
+        lambda_nn=infinity is converted internally to 1e10 for
+        computation, but ``TROPResults.lambda_nn`` stores the original
+        ``inf`` value. lambda_time and lambda_unit store their selected
+        grid values directly (no inf conversion — Eq. 3 uses
         ``lambda_time = lambda_unit = 0`` for "disabled", not infinity).
         """
         df = _make_no_factor_panel(
@@ -2055,11 +2056,12 @@ class TestTROPDeviations:
         assert results.lambda_unit in [0.0, 0.5]
 
     def test_inf_in_lambda_time_or_unit_grid_rejected(self):
-        """REGISTRY L2260-2265: only ``lambda_nn`` may be infinity in Eq. 3
-        semantics. ``lambda_time = 0`` and ``lambda_unit = 0`` mean "uniform
-        weights" (disabled), because ``exp(-0 * dist) = 1``. inf in
-        lambda_time / lambda_unit is rejected with ``ValueError`` pointing
-        users to 0.0 for uniform weights.
+        """REGISTRY ``## TROP`` "Disabled parameter semantics" note: only
+        ``lambda_nn`` may be infinity in Eq. 3 semantics.
+        ``lambda_time = 0`` and ``lambda_unit = 0`` mean "uniform weights"
+        (disabled), because ``exp(-0 * dist) = 1``. inf in lambda_time /
+        lambda_unit is rejected with ``ValueError`` pointing users to
+        0.0 for uniform weights.
         """
         df = _make_no_factor_panel(
             n_units=10,
@@ -2130,10 +2132,10 @@ class TestTROPDeviations:
         assert results.se >= 0
 
     def test_event_style_d_rejected_with_value_error(self):
-        """REGISTRY L2289-2298: event-style D (only first treatment
-        period has D=1) is rejected because monotonicity (absorbing
-        state) is violated. Error message must guide users to convert
-        to absorbing state.
+        """REGISTRY ``## TROP`` "D matrix validation" edge-case note:
+        event-style D (only first treatment period has D=1) is rejected
+        because monotonicity (absorbing state) is violated. Error message
+        must guide users to convert to absorbing state.
         """
         # Build event-style: D=1 at t=3, D=0 at t=4 (1->0 transition
         # is non-monotonic, violating absorbing state).
@@ -2236,7 +2238,8 @@ class TestTROPDeviations:
         assert np.isfinite(results.effective_rank)
 
     def test_n_bootstrap_minimum_is_2(self):
-        """REGISTRY L2298: ``n_bootstrap`` must be >= 2 (enforced via
+        """REGISTRY ``## TROP`` "Bootstrap minimum" edge-case note:
+        ``n_bootstrap`` must be >= 2 (enforced via
         ``ValueError``). TROP has no analytical SE formula — bootstrap
         is the only variance estimator, so n_bootstrap=0 or 1 cannot
         produce a defined SE.
@@ -2251,7 +2254,8 @@ class TestTROPDeviations:
             )
 
     def test_loocv_returns_user_grid_values_on_well_conditioned_panel(self):
-        """REGISTRY L2279 (happy-path side): when LOOCV produces a finite
+        """REGISTRY ``## TROP`` "LOOCV failure handling" edge-case note
+        (happy-path side): when LOOCV produces a finite
         Q(lambda) on at least one grid point, the result tuple
         ``(lambda_time, lambda_unit, lambda_nn)`` is from the user-
         supplied grid (no fallback to documented defaults
@@ -2296,10 +2300,11 @@ class TestTROPDeviations:
         assert results.lambda_nn == 0.1
 
     def test_inference_ci_uses_t_distribution(self):
-        """REGISTRY L2301: after the safe_inference migration the
-        confidence interval uses the t-distribution with df = max(1,
-        n_treated_obs - 1), consistent with p_value. (Previously CI used
-        normal-distribution while p_value used t-distribution.)
+        """REGISTRY ``## TROP`` "Inference CI distribution" edge-case
+        note: after the safe_inference migration the confidence interval
+        uses the t-distribution with df = max(1, n_treated_obs - 1),
+        consistent with p_value. (Previously CI used normal-distribution
+        while p_value used t-distribution.)
 
         Lock: with a well-defined SE, the CI half-width equals
         ``t_{alpha/2, df} * SE`` within numerical tolerance.
@@ -2338,7 +2343,7 @@ class TestTROPDeviations:
         assert np.isclose(half_width, expected_half_width, rtol=1e-6), (
             f"CI half-width={half_width:.6e} does not match "
             f"t_{{alpha/2, df={df_t}}} * SE = {expected_half_width:.6e} "
-            f"(REGISTRY L2301: post safe_inference migration uses t-dist)"
+            f"(REGISTRY ## TROP 'Inference CI distribution' note: post safe_inference migration uses t-dist)"
         )
 
     def test_safe_inference_nan_propagation_contract(self):
