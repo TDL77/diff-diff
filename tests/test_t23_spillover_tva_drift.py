@@ -122,14 +122,25 @@ def naive_fit(panel):
         )
 
 
+_EXPECTED_MATMUL_MESSAGES = (
+    "divide by zero encountered in matmul",
+    "overflow encountered in matmul",
+    "invalid value encountered in matmul",
+)
+
+
 def _silence_spillover_matmul_warnings():
     """Narrow filter for the three benign `*encountered in matmul`
     RuntimeWarnings SpilloverDiD's stage-2 sandwich emits on this DGP
     from a per-unit FE projection edge case. Values are recovered
-    correctly. Any other warning (including a 4th matmul flavor or any
-    UserWarning) is intentionally NOT silenced — `test_spillover_fit_emits_only_known_matmul_warnings`
+    correctly. Filters are message-exact (not just `.*encountered in
+    matmul`) so a hypothetical 4th flavor like "underflow encountered
+    in matmul" would NOT be silently masked. Any UserWarning,
+    FutureWarning, or RuntimeWarning with a different message also
+    surfaces — `test_spillover_fit_emits_only_known_matmul_warnings`
     pins the exact surface."""
-    warnings.filterwarnings("ignore", category=RuntimeWarning, message=".*encountered in matmul")
+    for expected in _EXPECTED_MATMUL_MESSAGES:
+        warnings.filterwarnings("ignore", category=RuntimeWarning, message=expected)
 
 
 @pytest.fixture(scope="module")
@@ -335,26 +346,44 @@ def test_summary_renders_without_warning(spillover_fit):
     assert len(out) > 0
 
 
-def _assert_only_known_matmul_warnings(captured) -> None:
+def _assert_exact_matmul_warning_surface(captured) -> None:
     """Shared assertion body for the §5 / §6 warning-policy guards.
 
-    Asserts the only emitted warnings on a recorded
-    ``warnings.catch_warnings(record=True)`` list are the three known
-    benign ``*encountered in matmul`` ``RuntimeWarning`` flavors. Any
-    other warning surfaces the diff via the assertion message.
+    Asserts BOTH directions of the warning-surface contract:
+    (a) every captured warning is one of the three known benign
+        `*encountered in matmul` RuntimeWarnings (no unexpected
+        category, no new RuntimeWarning message);
+    (b) ALL THREE known messages are present at least once (so a
+        future upstream fix that removes one — e.g. NumPy stops
+        emitting "overflow encountered in matmul" on this DGP —
+        surfaces the diff and forces the narrative to be re-checked).
+
+    Both halves are required: (a) alone would let a new flavor sneak
+    in; (b) alone would let a silent appearance of an unrelated warning
+    pass.
     """
+    seen = set()
     unexpected = []
     for msg in captured:
-        is_matmul_runtime = issubclass(
-            msg.category, RuntimeWarning
-        ) and "encountered in matmul" in str(msg.message)
-        if not is_matmul_runtime:
-            unexpected.append((msg.category.__name__, str(msg.message)))
+        text = str(msg.message)
+        is_known = issubclass(msg.category, RuntimeWarning) and text in _EXPECTED_MATMUL_MESSAGES
+        if is_known:
+            seen.add(text)
+        else:
+            unexpected.append((msg.category.__name__, text))
+
     assert not unexpected, (
         f"SpilloverDiD.fit emitted unexpected warnings on the T23 DGP: "
-        f"{unexpected}. If a new warning is genuinely expected, broaden "
-        f"`_silence_spillover_matmul_warnings()` and update the §5/§6 "
-        f"notebook narrative accordingly."
+        f"{unexpected}. If a new warning is genuinely expected, extend "
+        f"`_EXPECTED_MATMUL_MESSAGES` and update the §5/§6 notebook "
+        f"narrative accordingly."
+    )
+    missing = set(_EXPECTED_MATMUL_MESSAGES) - seen
+    assert not missing, (
+        f"Expected matmul warnings absent on the T23 DGP: {sorted(missing)}. "
+        f"If one of the three known warnings has disappeared (e.g. upstream "
+        f"library fix), narrow `_EXPECTED_MATMUL_MESSAGES` to the remaining "
+        f"set and update the §5/§6 notebook narrative."
     )
 
 
@@ -367,7 +396,7 @@ def test_spillover_fit_emits_only_known_matmul_warnings(panel):
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
-    _assert_only_known_matmul_warnings(w)
+    _assert_exact_matmul_warning_surface(w)
 
 
 def test_spillover_conley_fit_emits_only_known_matmul_warnings(panel):
@@ -387,4 +416,4 @@ def test_spillover_conley_fit_emits_only_known_matmul_warnings(panel):
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
-        _assert_only_known_matmul_warnings(w)
+        _assert_exact_matmul_warning_surface(w)
