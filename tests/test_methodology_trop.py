@@ -15,7 +15,7 @@ Equation walk-through:
                    monotonicity, so the test exercises the plain prox-gradient
                    ingredient (without momentum), not the accelerated loop.
 - Eq. 10:          balancing decomposition of the estimated counterfactual is
-                   a paper-side asymptotic identity that depends on the internal
+                   a paper-side balancing representation (paper Eq. 10 / Section 5.2) that depends on the internal
                    per-(i, t) weight vectors `theta_s^{i,t}` / `omega_j^{i,t}`,
                    which are not exposed on the public TROP API. Direct
                    numerical reconstruction of the four-term identity is out of
@@ -335,7 +335,7 @@ class TestTROPNuclearNormProx:
     The balancing decomposition of paper Eq. 10
     (``Y_NT_hat = L_NT + theta . (Y_pre_N - L_pre_N) + omega . (Y_T_co - L_T_co)
         - sum theta_t omega_i (Y_it_co - L_it_co)``)
-    is a paper-side asymptotic identity that requires the internal per-(i, t)
+    is a paper-side balancing representation (paper Eq. 10 / Section 5.2) that requires the internal per-(i, t)
     weight vectors ``theta_s^{i,t}`` / ``omega_j^{i,t}`` to numerically
     reconstruct. Those vectors are not exposed on the public TROP API,
     so this class does NOT directly verify the four-term identity. The
