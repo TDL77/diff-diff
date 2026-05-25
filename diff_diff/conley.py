@@ -365,6 +365,61 @@ def _uniform_kernel(u: np.ndarray) -> np.ndarray:
     return (np.abs(u) <= 1.0).astype(np.float64)
 
 
+def _serial_bartlett_kernel_matrix(t_codes: np.ndarray, L: int) -> np.ndarray:
+    """Within-unit Newey-West (1987) Bartlett HAC kernel matrix for serial
+    correlation in panel data, indexed by panel-wide dense time codes.
+
+    Returns the K matrix with ``K[i, j] = 1 - |t_i - t_j| / (L + 1)`` for
+    ``0 < |t_i - t_j| <= L``, else 0. The lag-0 diagonal is excluded so
+    callers can add this to a spatial within-period meat without
+    double-counting the diagonal.
+
+    Uses the 1-D radial pairwise form (matches conleyreg::time_dist), NOT
+    Conley 1999 Eq 3.14's 2-D separable product window — see the methodology
+    lock at :func:`_compute_conley_meat` for context.
+    """
+    t = t_codes.astype(np.float64, copy=False)
+    lag_mat = np.abs(t[:, None] - t[None, :])
+    return ((lag_mat <= L) & (lag_mat != 0)).astype(np.float64) * (1.0 - lag_mat / (L + 1.0))
+
+
+def _validate_meat_psd(
+    M: np.ndarray,
+    *,
+    error_msg: str,
+    warning_template: str,
+    stacklevel: int = 3,
+) -> None:
+    """Finite + PSD guard for sandwich meat matrices. Raises ``ValueError``
+    on non-finite entries; warns ``UserWarning`` when ``min(eigvalsh(M)) <
+    -1e-12``.
+
+    Parameters
+    ----------
+    error_msg
+        Message passed to ``ValueError`` on non-finite entries.
+    warning_template
+        Format string for the negative-eigenvalue warning. May contain an
+        ``{eigval}`` placeholder; the caller embeds ``{eigval:.2e}`` directly
+        in the template so the helper formats the minimum eigenvalue with
+        scientific notation.
+    stacklevel
+        Frame count from inside ``_validate_meat_psd``: ``stacklevel=N``
+        attributes the warning to the Nth caller above the helper itself.
+        Default 3 covers a single intermediate frame (the helper's direct
+        caller's caller); pass an explicit value matching call-site depth.
+    """
+    if not np.all(np.isfinite(M)):
+        raise ValueError(error_msg)
+    eigvals = np.linalg.eigvalsh(M)
+    if eigvals.size and eigvals.min() < -1e-12:
+        warnings.warn(
+            warning_template.format(eigval=eigvals.min()),
+            UserWarning,
+            stacklevel=stacklevel,
+        )
+
+
 def _compute_spatial_bartlett_meat_sparse(
     S: np.ndarray,
     coords: np.ndarray,
@@ -957,37 +1012,33 @@ def _compute_conley_meat(
                     mask_u = unit_arr == u_val
                     scores_u = scores[mask_u]
                     # Use dense panel-period codes (NOT raw labels) for lag math.
-                    t_u = time_codes[mask_u].astype(np.float64)
-                    lag_mat = np.abs(t_u[:, None] - t_u[None, :])
-                    K_u = ((lag_mat <= L) & (lag_mat != 0)).astype(np.float64) * (
-                        1.0 - lag_mat / (L + 1.0)
-                    )
+                    K_u = _serial_bartlett_kernel_matrix(time_codes[mask_u], L)
                     meat += scores_u.T @ K_u @ scores_u
-    if not np.all(np.isfinite(meat)):
-        raise ValueError(
-            "Conley meat contains non-finite values; check residuals and "
-            "score matrix for NaN/Inf."
-        )
-
     # PSD guard. Neither the uniform kernel (Conley 1999 fn 11) nor the
     # radial 1-D Bartlett specialization is formally PSD-guaranteed —
     # Conley's explicit PSD Bartlett formula (Eq 3.14) is the 2-D separable
     # product window, not the 1-D radial pairwise form that R `conleyreg`,
     # Stata `acreg`, and this implementation use. Check both kernels.
-    eigvals = np.linalg.eigvalsh(meat)
-    if eigvals.size and eigvals.min() < -1e-12:
-        warnings.warn(
+    # ``{eigval:.2e}`` is a literal placeholder for ``_validate_meat_psd``;
+    # only ``{kernel!r}`` is interpolated by the f-string here.
+    _validate_meat_psd(
+        meat,
+        error_msg=(
+            "Conley meat contains non-finite values; check residuals and "
+            "score matrix for NaN/Inf."
+        ),
+        warning_template=(
             f"Conley meat with conley_kernel={kernel!r} has a materially "
-            f"negative eigenvalue ({eigvals.min():.2e}); the variance "
+            "negative eigenvalue ({eigval:.2e}); the variance "
             "estimator is not guaranteed PSD on this design. Both "
             "supported kernels (radial bartlett and uniform) are "
             "practitioner specializations of Conley 1999 and are not "
             "formally PSD-guaranteed; consider varying conley_cutoff_km "
             "or reviewing the design for collinearity / degenerate "
-            "residual structure.",
-            UserWarning,
-            stacklevel=3,
-        )
+            "residual structure."
+        ),
+        stacklevel=4,
+    )
 
     return meat
 

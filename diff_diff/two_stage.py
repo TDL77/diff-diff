@@ -32,7 +32,9 @@ from scipy.sparse.linalg import factorized as sparse_factorized
 from diff_diff.conley import (
     ConleyMetric,
     _compute_conley_meat,
+    _serial_bartlett_kernel_matrix,
     _validate_conley_kwargs,
+    _validate_meat_psd,
 )
 from diff_diff.linalg import solve_ols
 from diff_diff.two_stage_bootstrap import TwoStageDiDBootstrapMixin
@@ -904,34 +906,35 @@ def _compute_stratified_conley_meat(
         return np.full((p_2, p_2), np.nan)
 
     # Finite + PSD guards on the COMBINED survey meat (spatial + serial).
-    # Mirrors :func:`diff_diff.conley._compute_conley_meat` L966-990 so the
-    # survey panel-block path has the same diagnostic surface as the
+    # Shares ``_validate_meat_psd`` with :func:`diff_diff.conley._compute_conley_meat`
+    # so the survey panel-block path has the same diagnostic surface as the
     # no-survey path. The radial 1-D Bartlett spatial kernel and the
     # Newey-West Bartlett serial kernel are both practitioner
     # specializations that are NOT formally PSD-guaranteed; adding two
     # non-PSD-guaranteed terms can produce a more indefinite combined
     # meat, so the check matters most on the panel-block path. CI codex
     # R1 P2 fix.
-    if not np.all(np.isfinite(meat)):
-        raise ValueError(
+    # ``{eigval:.2e}`` is a literal placeholder for ``_validate_meat_psd``;
+    # only ``{conley_kernel!r}`` is interpolated by the f-string here.
+    _validate_meat_psd(
+        meat,
+        error_msg=(
             "SpilloverDiD Wave E.2 stratified-Conley meat contains non-finite "
             "values; check Psi for NaN/Inf upstream of the sandwich."
-        )
-    eigvals = np.linalg.eigvalsh(meat)
-    if eigvals.size and eigvals.min() < -1e-12:
-        warnings.warn(
+        ),
+        warning_template=(
             f"SpilloverDiD Wave E.2 stratified-Conley meat with conley_kernel="
             f"{conley_kernel!r} has a materially negative eigenvalue "
-            f"({eigvals.min():.2e}); the variance estimator is not guaranteed "
+            "({eigval:.2e}); the variance estimator is not guaranteed "
             "PSD on this design. Both supported kernels (radial bartlett and "
             "uniform spatial) plus the hardcoded serial Bartlett term are "
             "practitioner specializations of Conley 1999 / Newey-West 1987 "
             "and are not formally PSD-guaranteed; consider varying "
             "conley_cutoff_km / conley_lag_cutoff, or reviewing the design "
-            "for collinearity / degenerate residual structure.",
-            UserWarning,
-            stacklevel=2,
-        )
+            "for collinearity / degenerate residual structure."
+        ),
+        stacklevel=3,
+    )
 
     return meat
 
@@ -1164,10 +1167,7 @@ def _compute_stratified_serial_bartlett_meat(
                     if int(present_g.sum()) < 2:
                         continue
                     t_g = t_codes_full[present_g]
-                    lag_mat = np.abs(t_g[:, None] - t_g[None, :])
-                    K_g = ((lag_mat <= L) & (lag_mat != 0)).astype(np.float64) * (
-                        1.0 - lag_mat / (L + 1.0)
-                    )
+                    K_g = _serial_bartlett_kernel_matrix(t_g, L)
                     S_g_centered = S_psu_panel[g, present_g] - _global_psu_mean
                     with np.errstate(invalid="ignore", over="ignore"):
                         meat += S_g_centered.T @ K_g @ S_g_centered
@@ -1194,9 +1194,8 @@ def _compute_stratified_serial_bartlett_meat(
             t_g = t_codes_full[present_g]
             # PANEL-WIDE dense time codes for the serial kernel (NOT per-PSU
             # positional encoding). See test (g) in TestSpilloverDiDWaveE2Followup
-            # for the methodology lock; matches conley.py:940 R-deviation.
-            lag_mat = np.abs(t_g[:, None] - t_g[None, :])
-            K_g = ((lag_mat <= L) & (lag_mat != 0)).astype(np.float64) * (1.0 - lag_mat / (L + 1.0))
+            # for the methodology lock; matches conley.py R-deviation.
+            K_g = _serial_bartlett_kernel_matrix(t_g, L)
             S_g_centered = S_centered[g, present_g]
             with np.errstate(invalid="ignore", over="ignore"):
                 M_h_serial += S_g_centered.T @ K_g @ S_g_centered
