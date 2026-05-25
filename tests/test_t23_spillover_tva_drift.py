@@ -386,12 +386,27 @@ def test_notebook_dgp_constants_match_test_module_constants():
     Parses the notebook §2 cell, walks the top-level
     ``Assign`` nodes, and asserts the value of each expected constant
     matches the test module's value. Any notebook-only constant edit
-    now fails this guard."""
+    now fails this guard.
+
+    **CI isolation note:** the project's pure-Python and Rust CI jobs
+    copy ``tests/`` to an isolated location WITHOUT the ``docs/``
+    tree (to verify the installed package doesn't depend on the
+    source tree). When the notebook source isn't reachable, this
+    test skips gracefully — the sync-guard contract is meaningful
+    in local dev (where edits happen) and the nbmake job separately
+    verifies the notebook executes end-to-end."""
     import ast
     import json
     from pathlib import Path
 
     nb_path = Path(__file__).resolve().parents[1] / "docs" / "tutorials" / "23_spillover_tva.ipynb"
+    if not nb_path.exists():
+        pytest.skip(
+            f"Notebook source not found at {nb_path}; this drift guard "
+            f"requires source-tree access and is meaningful only in local "
+            f"dev. The nbmake CI job separately verifies the notebook "
+            f"executes end-to-end."
+        )
     with nb_path.open() as f:
         nb = json.load(f)
 
@@ -453,13 +468,26 @@ def test_notebook_dgp_ast_matches_test_fixture():
 
     Uses ``ast.dump`` for a whitespace-/comment-agnostic comparison:
     semantically identical code matches, cosmetic edits don't trigger
-    spurious failures."""
+    spurious failures.
+
+    **CI isolation note:** like
+    ``test_notebook_dgp_constants_match_test_module_constants``, this
+    test skips gracefully when CI's isolated-tests-copy step strips
+    the ``docs/`` tree. The sync-guard contract is meaningful in
+    local dev where edits happen."""
     import ast
     import inspect
     import json
     from pathlib import Path
 
     nb_path = Path(__file__).resolve().parents[1] / "docs" / "tutorials" / "23_spillover_tva.ipynb"
+    if not nb_path.exists():
+        pytest.skip(
+            f"Notebook source not found at {nb_path}; this drift guard "
+            f"requires source-tree access and is meaningful only in local "
+            f"dev. The nbmake CI job separately verifies the notebook "
+            f"executes end-to-end."
+        )
     with nb_path.open() as f:
         nb = json.load(f)
 
