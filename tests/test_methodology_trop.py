@@ -44,7 +44,7 @@ Equation walk-through:
                    The direct fixed-weight bias-bound test is deferred.
 - Section 2.2:     special-case reductions. DID reduction (lambda_nn=inf +
                    uniform weights) is verified as an algebraic match
-                   against TWFE-DiD on a TWFE-clean panel. The MC reduction
+                   against the DiD benchmark on a TWFE-clean panel. The MC reduction
                    (uniform weights + finite lambda_nn) only verifies that
                    the nuclear-norm prox code path engages and beats a DID-
                    style baseline; it is NOT an equivalence check against
@@ -297,10 +297,19 @@ def _make_no_factor_panel(
 
 
 def _fit_did(df: pd.DataFrame) -> float:
-    """Fit a TWFE DiD on the panel and return the interaction coefficient.
+    """Fit a `DifferenceInDifferences` benchmark on the panel and return
+    the interaction coefficient.
 
-    Used by `TestTROPTheorem51TripleRobustness` as the comparator benchmark
-    for the MC-ranking realisation of the Theorem 5.1 bias bound.
+    This is the library's basic 2×2 DiD estimator (`[const, D, T, D×T]`
+    design, no explicit fixed effects added). On a balanced two-period
+    block-assignment panel it coincides numerically with TWFE / two-way
+    fixed effects (paper Section 2.2 uses "DID/TWFE" interchangeably for
+    this special case), but the library distinguishes the two classes —
+    `TwoWayFixedEffects` is a separate explicit-FE estimator. Used by
+    `TestTROPTheorem51TripleRobustness` as the comparator benchmark for
+    the MC-ranking realisation of the Theorem 5.1 bias bound and by
+    `TestTROPSpecialCases::test_did_reduction_lambda_nn_inf_uniform_weights`
+    as the DID-reduction target.
     """
     df2 = df.copy()
     df2["treat"] = df2.groupby("unit")["treated"].transform("max").astype(int)
@@ -1156,7 +1165,7 @@ class TestTROPTheorem51TripleRobustness:
 
     TROP RMSE < DID RMSE under a confounded factor DGP, over a MC sweep
     of independent panels. The factor DGP induces interactive fixed-effect
-    bias that TWFE-DiD cannot handle, while TROP's three robustness
+    bias that the DiD benchmark cannot handle, while TROP's three robustness
     components jointly absorb the confounding.
 
     Tests are NEW. The MC-ranking pattern also dedupes the
@@ -1172,7 +1181,7 @@ class TestTROPTheorem51TripleRobustness:
         true ``tau = 0``, TROP RMSE is strictly below DID RMSE across
         independent MC replicates.
 
-        The factor DGP induces interactive-FE bias that TWFE-DiD cannot
+        The factor DGP induces interactive-FE bias that the DiD benchmark cannot
         handle; TROP's three robustness components jointly absorb the
         confounding. Empirical magnitude (spike measurement at
         ``factor_strength=1.0``, 15 reps): TROP/DID RMSE ratio ~ 0.34
