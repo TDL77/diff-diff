@@ -9,7 +9,9 @@
 
 ## Methodology Registry Entry
 
-*Working draft formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries. One open source-ambiguity item remains (weight normalization — see Gap #5 under "Gaps and Uncertainties" below); resolve it against the source before promoting this section into REGISTRY.md.*
+*Working draft formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries.*
+
+*Resolution status (post-promotion, 2026-05-24):* Gap #5 (weight normalization) is resolved as a **library-side choice**, not a source-side clarification: the shipped implementation uses unnormalized exponential weights matching Eq. 2, and the methodology-promotion PR documents this choice as a deliberate deviation from the Section 5 sum-to-one statement (`docs/methodology/REGISTRY.md` `## TROP` → `**Note (paper resolution):**`; `METHODOLOGY_REVIEW.md` `#### TROP` → Deviations). The deviation is locked by `tests/test_methodology_trop.py::TestTROPDeviations::test_unnormalized_weights_match_eq2` via direct kernel-weight inspection. See Gap #5 below for the original source-side ambiguity.
 
 ## TROP
 
@@ -264,7 +266,7 @@ Note: Stratified bootstrap -- control and treated units resampled separately. Pr
 - [ ] Stratified bootstrap preserving unit-level structure (Algorithm 3)
 - [ ] Covariate extension supported (Equation 14)
 - [ ] Special cases recoverable: DID, MC, SC, SDID via tuning parameters
-- Weight normalization (`1^T omega = 1^T theta = 1`, Section 5, page 20) — **open source-ambiguity item**; see Gap #5 below. Section 5 states sum-to-one, Equation 3 / Equation 2 use unnormalized exponential weights, and the shipped implementation matches Equation 2. Do not promote this to a requirement until the discrepancy is resolved against the source.
+- Weight normalization (`1^T omega = 1^T theta = 1`, Section 5, page 20) — **resolved as library-side choice (2026-05-24)**. Section 5 states sum-to-one, Equation 3 / Equation 2 use unnormalized exponential weights, and the shipped implementation matches Equation 2 (unnormalized). The methodology-promotion PR documents this as a deliberate deviation from the Section 5 sum-to-one statement, locked by direct kernel inspection (see Gap #5 below for original source-side ambiguity).
 - [ ] Heterogeneous treatment effects supported via per-observation estimation (Remark 6.1)
 
 ---
@@ -349,7 +351,7 @@ The paper uses semi-synthetic simulations (Section 3.1, pages 9-11) based on 6 r
 
 4. **Computational complexity**: Not explicitly discussed. The LOOCV grid search is described as the bottleneck, but no formal complexity analysis is provided.
 
-5. **Weight normalization**: Section 5 (page 20) states weights sum to one (`1^T omega = 1^T theta = 1`), but the weight specification in Equation 3 (page 7) uses unnormalized exponential weights. It is unclear whether normalization is applied before or after the optimization, or whether the theoretical results in Section 5 assume normalized weights while the practical algorithm uses unnormalized weights. The existing diff-diff implementation uses unnormalized weights in the optimization (matching Equation 2).
+5. **Weight normalization** (*resolved 2026-05-24*): Section 5 (page 20) states weights sum to one (`1^T omega = 1^T theta = 1`), but the weight specification in Equation 3 (page 7) uses unnormalized exponential weights. It is unclear whether normalization is applied before or after the optimization, or whether the theoretical results in Section 5 assume normalized weights while the practical algorithm uses unnormalized weights. **Resolution**: the shipped implementation uses unnormalized weights matching Equation 2. The methodology-promotion PR adopts this as a deliberate **library-side choice / deviation from the Section 5 sum-to-one statement**, locked by `tests/test_methodology_trop.py::TestTROPDeviations::test_unnormalized_weights_match_eq2` which directly inspects the per-(i, t) weight matrix at `lambda_unit = lambda_time = 0` and asserts every entry equals 1.0 (sum = N*T, not 1). The source-side ambiguity remains open — clarification from the paper authors / forthcoming reference implementation would let the library either confirm the unnormalized choice or migrate to the normalized form; for now the unnormalized form is the documented library contract.
 
 6. **Nuclear norm penalty in Equation 13** (resolved): the source uses the same unsquared nuclear-norm penalty `lambda_nn ||L||_*` in Equation 13 as in Equation 2 (consistent with the rest of the draft and confirmed against the paper text). The shipped implementation matches.
 
