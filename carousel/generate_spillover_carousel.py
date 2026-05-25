@@ -241,8 +241,8 @@ class SpilloverCarouselPDF(FPDF):
         # at the bottom edge of the term; xytext is the label position.
         ax.annotate(
             "hidden bias term",
-            xy=(0.715, 0.62),
-            xytext=(0.715, 0.18),
+            xy=(0.668, 0.62),
+            xytext=(0.668, 0.18),
             fontsize=14,
             color=TERRA_HEX,
             fontweight="bold",
