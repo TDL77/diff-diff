@@ -212,6 +212,55 @@ class SpilloverCarouselPDF(FPDF):
         return display_h
 
     # -----------------------------------------------------------------
+    # Slide-6 bias equation with annotation arrow pointing at the
+    # tau_spill(0) term specifically (NOT centered ambiguously under the
+    # whole equation, which would visually land closer to tau_total).
+    # -----------------------------------------------------------------
+
+    def _render_bias_equation(self):
+        fig = plt.figure(figsize=(10, 3.2))
+        fig.patch.set_alpha(0)
+        ax = fig.add_axes((0.0, 0.0, 1.0, 1.0))
+        ax.axis("off")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+
+        # Equation centered horizontally. Hairspace-aware spacing for legibility.
+        ax.text(
+            0.5,
+            0.72,
+            r"$\beta_{\mathrm{DiD}}\;\approx\;\tau_{\mathrm{total}}\;-\;\tau_{\mathrm{spill}}(0)$",
+            fontsize=30,
+            ha="center",
+            va="center",
+            color=NAVY_HEX,
+        )
+
+        # Arrow + label pointing UP at tau_spill(0), which sits to the
+        # right of center in the rendered equation. xy is tail-of-arrow
+        # at the bottom edge of the term; xytext is the label position.
+        ax.annotate(
+            "hidden bias term",
+            xy=(0.715, 0.62),
+            xytext=(0.715, 0.18),
+            fontsize=14,
+            color=TERRA_HEX,
+            fontweight="bold",
+            ha="center",
+            va="bottom",
+            arrowprops=dict(arrowstyle="->", color=TERRA_HEX, lw=1.5, shrinkA=2, shrinkB=4),
+        )
+
+        fd, path = tempfile.mkstemp(suffix=".png")
+        os.close(fd)
+        fig.savefig(path, dpi=250, bbox_inches="tight", pad_inches=0.06, transparent=True)
+        plt.close(fig)
+        with PILImage.open(path) as img:
+            pw, ph = img.size
+        self._temp_files.append(path)
+        return path, pw, ph
+
+    # -----------------------------------------------------------------
     # Slide-2 visual — stylized map: treated zone bleeding into the
     # spillover ring, with a dashed d_bar boundary. Clean-control region
     # beyond d_bar shown as faint slate dots.
@@ -863,30 +912,14 @@ class SpilloverCarouselPDF(FPDF):
             108, "(Butts 2021, Proposition 2.1)", size=14, bold=False, italic=True, color=GRAY
         )
 
-        eq_path, epw, eph = self._render_equations(
-            [
-                r"$\beta_{\mathrm{DiD}}\;\approx\;\tau_{\mathrm{total}}"
-                r"\;-\;\tau_{\mathrm{spill}}(0)$"
-            ],
-            fontsize=26,
-            color=NAVY_HEX,
-        )
+        # Equation + annotation arrow rendered together so the arrow points
+        # specifically at tau_spill(0) (not ambiguously at the equation center).
+        eq_path, epw, eph = self._render_bias_equation()
         eq_y = 140
-        eq_h = self._place_equation_centered(eq_path, epw, eph, eq_y, max_w=210)
+        eq_h = self._place_equation_centered(eq_path, epw, eph, eq_y, max_w=230)
 
-        # TERRA annotation directly under the equation
-        anno_y = eq_y + eq_h + 4
-        self.centered_text(
-            anno_y,
-            "the hidden bias term",
-            size=12,
-            bold=False,
-            italic=True,
-            color=TERRA,
-        )
-
-        # Plain-English gloss
-        gloss_y = anno_y + 22
+        # Plain-English gloss below
+        gloss_y = eq_y + eq_h + 12
         self.centered_text(
             gloss_y,
             "Standard DiD recovers tau_total only when spillover is zero.",
