@@ -83,6 +83,7 @@ Quick Links
    tutorials/20_had_brand_campaign
    tutorials/21_had_pretest_workflow
    tutorials/22_had_survey_design
+   tutorials/23_spillover_tva
 
 .. toctree::
    :maxdepth: 1

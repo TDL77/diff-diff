@@ -188,7 +188,11 @@ Multi-Period and Staggered Adoption
 
 - **Butts, K. (2023).** "Difference-in-Differences with Spatial Spillovers." *arXiv:2105.03737v3* (originally posted 2021). https://arxiv.org/abs/2105.03737
 
-  Identifies the ring-indicator estimator implemented in our ``SpilloverDiD`` class. Section 2-3 covers non-staggered timing (Equations 5/6/8); Section 5 covers staggered timing via two-stage Gardner (Table 2). Section 3.1 (page 13) recommends Conley spatial-HAC for inference with cutoff = ``d_bar``.
+  Identifies the ring-indicator estimator implemented in our ``SpilloverDiD`` class. Section 2-3 covers non-staggered timing (Equations 5/6/8); Section 5 covers staggered timing via two-stage Gardner (Table 2). Section 3.1 (page 13) recommends Conley spatial-HAC for inference with cutoff = ``d_bar``. Section 4 Table 1 Panel A (TVA agriculture) is the empirical anchor for tutorial ``docs/tutorials/23_spillover_tva.ipynb`` (~40% understatement direction).
+
+- **Kline, P., & Moretti, E. (2014).** "Local Economic Development, Agglomeration Economies, and the Big Push: 100 Years of Evidence from the Tennessee Valley Authority." *The Quarterly Journal of Economics*, 129(1), 275-331. https://doi.org/10.1093/qje/qjt034
+
+  Original Tennessee Valley Authority application that Butts (2021) §4 revisits to illustrate spillover bias in the canonical place-based-intervention DiD. Cited as the motivating real-world example in ``docs/tutorials/23_spillover_tva.ipynb``.
 
 - **Conley, T. G. (1999).** "GMM Estimation with Cross Sectional Dependence." *Journal of Econometrics*, 92(1), 1-45. https://doi.org/10.1016/S0304-4076(98)00084-0
 
