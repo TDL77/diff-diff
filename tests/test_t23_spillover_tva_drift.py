@@ -102,7 +102,14 @@ def panel() -> pd.DataFrame:
 def naive_fit(panel):
     est = MultiPeriodDiD()
     with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
+        # absorb=['unit'] makes the unit-invariant 'ever_treated' indicator
+        # perfectly collinear with the unit FE; MultiPeriodDiD drops it
+        # (with a UserWarning) and identifies the ATT through the
+        # ever_treated x post interaction columns. This is the expected
+        # TWFE specification; the rank-deficient drop is benign.
+        warnings.filterwarnings(
+            "ignore", category=UserWarning, message="Rank-deficient design matrix"
+        )
         return est.fit(
             panel,
             outcome="y",
@@ -110,7 +117,8 @@ def naive_fit(panel):
             time="time",
             post_periods=[3, 4],
             unit="unit",
-            absorb=["unit"],  # full multi-period TWFE: unit + time FE absorbed
+            absorb=["unit"],
+            reference_period=2,  # explicit pre-period; matches the current MPD default
         )
 
 
@@ -272,9 +280,17 @@ def test_rings_grid_d_bar_100_to_200_identical(panel):
 
 def test_conley_se_differs_from_hc1(spillover_fit, spillover_conley_lag0_fit):
     """§6 sanity: Conley vcov produces a different SE than HC1 by more than
-    floating-point noise. Direction-agnostic: on this DGP the Conley SE
-    happens to be smaller than HC1, but the contract is just 'different'."""
+    floating-point noise. Pairs with `test_conley_se_less_than_hc1` which
+    pins the direction of the difference for this specific DGP."""
     assert abs(spillover_conley_lag0_fit.se - spillover_fit.se) > 1e-6
+
+
+def test_conley_se_less_than_hc1(spillover_fit, spillover_conley_lag0_fit):
+    """§6 prose claim: 'on this DGP, the Conley spatial-HAC SE comes in
+    *lower* than HC1'. Pin the direction so the narrative doesn't go
+    stale if a future library change flips the sign of the per-pair
+    score covariance and reverses the inequality."""
+    assert spillover_conley_lag0_fit.se < spillover_fit.se
 
 
 def test_conley_se_point_estimates_invariant(
