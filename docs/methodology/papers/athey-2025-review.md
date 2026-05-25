@@ -5,11 +5,17 @@
 **PDF reviewed:** https://arxiv.org/abs/2508.21536v2 (version-pinned arXiv abstract for v2)
 **Review date:** 2026-02-08
 
+**Version-pinning note (2026-05-25):** The current arXiv version of arXiv:2508.21536 is **v3** (submitted 2026-02-09). The 2026-05-24 methodology promotion ships against this v2-pinned review; a formal v2-vs-v3 delta-check against the v3 PDF for TROP-relevant methodology changes (Eqs. 2-3, Algorithms 1-3, Section 2.2, Section 5.2-5.3, Section 6.1-6.2, Theorem 5.1, Corollary 1, Appendix Theorem 8.1) has **NOT** been performed.
+
+**Action item**: before the next paper-author reference implementation or substantive v3 release, refresh this review against the most recent arXiv version, perform a real v2→v3 PDF delta audit, and re-validate that the verified-component checklist still maps cleanly. Pending that refresh, the methodology promotion is anchored on v2 as documented here.
+
 ---
 
 ## Methodology Registry Entry
 
-*Working draft formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries. One open source-ambiguity item remains (weight normalization — see Gap #5 under "Gaps and Uncertainties" below); resolve it against the source before promoting this section into REGISTRY.md.*
+*Working draft formatted to match docs/methodology/REGISTRY.md structure. Heading levels and labels align with existing entries.*
+
+*Resolution status (post-promotion, 2026-05-24):* Gap #5 (weight normalization) is resolved as a **library-side choice**, not a source-side clarification: the shipped implementation uses unnormalized exponential weights matching Eq. 2, and the methodology-promotion PR documents this choice as a deliberate deviation from the Section 5 sum-to-one statement (see the weight-normalization note in the `## TROP` block of `docs/methodology/REGISTRY.md` and the Deviations subsection of the `#### TROP` block in `METHODOLOGY_REVIEW.md`). The deviation is locked by `tests/test_methodology_trop.py::TestTROPDeviations::test_unnormalized_weights_match_eq2` via direct kernel-weight inspection. See Gap #5 below for the original source-side ambiguity.
 
 ## TROP
 
@@ -264,7 +270,7 @@ Note: Stratified bootstrap -- control and treated units resampled separately. Pr
 - [ ] Stratified bootstrap preserving unit-level structure (Algorithm 3)
 - [ ] Covariate extension supported (Equation 14)
 - [ ] Special cases recoverable: DID, MC, SC, SDID via tuning parameters
-- Weight normalization (`1^T omega = 1^T theta = 1`, Section 5, page 20) — **open source-ambiguity item**; see Gap #5 below. Section 5 states sum-to-one, Equation 3 / Equation 2 use unnormalized exponential weights, and the shipped implementation matches Equation 2. Do not promote this to a requirement until the discrepancy is resolved against the source.
+- Weight normalization (`1^T omega = 1^T theta = 1`, Section 5, page 20) — **resolved as library-side choice (2026-05-24)**. Section 5 states sum-to-one, Equation 3 / Equation 2 use unnormalized exponential weights, and the shipped implementation matches Equation 2 (unnormalized). The methodology-promotion PR documents this as a deliberate deviation from the Section 5 sum-to-one statement, locked by direct kernel inspection (see Gap #5 below for original source-side ambiguity).
 - [ ] Heterogeneous treatment effects supported via per-observation estimation (Remark 6.1)
 
 ---
@@ -349,7 +355,7 @@ The paper uses semi-synthetic simulations (Section 3.1, pages 9-11) based on 6 r
 
 4. **Computational complexity**: Not explicitly discussed. The LOOCV grid search is described as the bottleneck, but no formal complexity analysis is provided.
 
-5. **Weight normalization**: Section 5 (page 20) states weights sum to one (`1^T omega = 1^T theta = 1`), but the weight specification in Equation 3 (page 7) uses unnormalized exponential weights. It is unclear whether normalization is applied before or after the optimization, or whether the theoretical results in Section 5 assume normalized weights while the practical algorithm uses unnormalized weights. The existing diff-diff implementation uses unnormalized weights in the optimization (matching Equation 2).
+5. **Weight normalization** (*resolved 2026-05-24*): Section 5 (page 20) states weights sum to one (`1^T omega = 1^T theta = 1`), but the weight specification in Equation 3 (page 7) uses unnormalized exponential weights. It is unclear whether normalization is applied before or after the optimization, or whether the theoretical results in Section 5 assume normalized weights while the practical algorithm uses unnormalized weights. **Resolution**: the shipped implementation uses unnormalized weights matching Equation 2. The methodology-promotion PR adopts this as a deliberate **library-side choice / deviation from the Section 5 sum-to-one statement**, locked by `tests/test_methodology_trop.py::TestTROPDeviations::test_unnormalized_weights_match_eq2` which directly inspects the per-(i, t) weight matrix at `lambda_unit = lambda_time = 0` and asserts every entry equals 1.0 (sum = N*T, not 1). The source-side ambiguity remains open — clarification from the paper authors / forthcoming reference implementation would let the library either confirm the unnormalized choice or migrate to the normalized form; for now the unnormalized form is the documented library contract.
 
 6. **Nuclear norm penalty in Equation 13** (resolved): the source uses the same unsquared nuclear-norm penalty `lambda_nn ||L||_*` in Equation 13 as in Equation 2 (consistent with the rest of the draft and confirmed against the paper text). The shipped implementation matches.
 

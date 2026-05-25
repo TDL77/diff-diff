@@ -24,7 +24,7 @@ A **Complete** entry has a documented review pass against the primary academic s
 
 The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
 
-**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures (e.g., TROP has a recent paper review but no methodology test file or cross-language anchor yet); others have only the REGISTRY entry and unit tests (e.g., PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
+**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures; others have only the REGISTRY entry and unit tests (e.g., PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
 
 **Not Started** entries have neither a tracker walk-through nor an REGISTRY.md section. This tracker no longer carries any Not Started rows; new estimators are expected to enter as In Progress when their REGISTRY entry lands.
 
@@ -59,7 +59,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | ContinuousDiD | `continuous_did.py` | `contdid` v0.1.0 | **Complete** | 2026-05-20 |
 | ChaisemartinDHaultfoeuille (DCDH) | `chaisemartin_dhaultfoeuille.py` | `DIDmultiplegtDYN` | **Complete** | 2026-05-21 |
 | HeterogeneousAdoptionDiD (HAD) | `had.py`, `had_pretests.py` | `chaisemartin::did_had` (`Credible-Answers/did_had` v2.0.0); `nprobust` for bandwidth | **Complete** | 2026-05-20 |
-| TROP | `trop.py`, `trop_local.py`, `trop_global.py` | (forthcoming; paper-author reference implementation) | **In Progress** | — |
+| TROP | `trop.py`, `trop_local.py`, `trop_global.py` | (forthcoming; paper-author reference implementation) | **Complete** (paper `method="local"`) | 2026-05-24 |
 
 ### Triple-Difference Estimators
 
@@ -823,22 +823,50 @@ These three are feature deferrals (paper-supported extensions that the library h
 
 | Field | Value |
 |-------|-------|
-| Module | `trop.py`, `trop_local.py`, `trop_global.py`, `trop_results.py` |
+| Module | `trop.py`, `trop_local.py`, `trop_results.py` (paper-aligned local method); `trop_global.py` (library-side efficiency adaptation — see "Scope" below) |
 | Primary Reference | Athey, Imbens, Qu & Viviano (2025), *Triply Robust Panel Estimators*, arXiv:2508.21536 |
 | R Reference | Paper-author reference implementation (not yet released as CRAN package) |
-| Status | **In Progress** |
-| Last Review | — |
+| Status | **Complete** (paper `method="local"`, version-pinned to arXiv v2 — see Version Pinning below) |
+| Last Review | 2026-05-24 |
 
-**Documentation in place:**
-- REGISTRY.md section: `## TROP` (local: factor matrix via soft-threshold SVD, exponential-decay unit weights matching paper Eq. 2, LOOCV per Eq. 5, multiple rank-selection methods cv/ic/elbow; global: alternating minimization for nuclear-norm penalty with hard-coded inner-FISTA 20-iteration loop, ATT averaging over D==1 cells, Rust-accelerated LOOCV and bootstrap)
-- **Paper review on file**: `docs/methodology/papers/athey-2025-review.md` (retrospective, merged PR #443 on 2026-05-13)
-- Implementation: 120 unit tests in `tests/test_trop.py`
-- Survey support: Rao-Wu rescaled bootstrap with cross-classified pseudo-strata; Rust backend remains pweight-only
+**Version Pinning:** This methodology promotion is anchored on **arXiv:2508.21536v2** (the version covered by the paper review on file at `docs/methodology/papers/athey-2025-review.md`). The current arXiv version is **v3** (submitted 2026-02-09). A formal v2→v3 source delta-check against the v3 PDF has **NOT** been performed for any of the sections this PR promotes (Eqs. 2-3, Algorithms 1-3, Section 2.2, Section 5.2-5.3, Section 6.1-6.2, Theorem 5.1, Corollary 1, Appendix Theorem 8.1). **Action item:** before the next paper-author reference implementation or substantive v3 release, refresh the paper review against the most recent arXiv version and re-validate the verified-component checklist; until then the promotion stays v2-anchored.
 
-**Outstanding for promotion:**
-- Dedicated `tests/test_methodology_trop.py` with paper-equation-numbered Verified Components walk-through
-- Cross-validation against the paper-author reference implementation (when it becomes available) or against the paper's reported numbers on the empirical applications
-- Documented deviations: bootstrap proportional-failure warnings (5% threshold), alternating-minimization convergence warnings, Rust backend's pweight-only limitation vs. Python's full survey-design support
+**Scope:** This methodology promotion covers the paper-aligned `method="local"` path (paper Algorithm 2: per-(i, t) estimation with observation-specific weights). The library also exposes `method="global"`, documented in `REGISTRY.md` as a "computationally efficient adaptation using the (1-W) masking principle from Eq. 2" — a library-side adaptation, NOT the paper's full Algorithm 2 estimator. Defensive coverage of the global method lives in `tests/test_trop.py::TestTROPGlobalMethod` (704 lines, ~30 tests for the global-method-specific surface) and is not duplicated in the methodology walk-through. Methodology promotion of `method="global"` as a primary surface would require either (a) a paper-side derivation of the global adaptation's equivalence to Algorithm 2 under specific conditions, or (b) a separate library-extension methodology review; both are deferred.
+
+**Verified Components:**
+
+- [x] Eq. 2 weighted nuclear-norm-penalised L estimation: proximal-gradient inner solver (soft-threshold SVD) converges to ``prox_{λ/2}(R)`` under uniform weights; **plain** (non-accelerated) prox-gradient objective ``f(L) + λ‖L‖_*`` is non-increasing across iterations of a toy loop (this verifies the prox + gradient ingredient, NOT the shipped accelerated FISTA outer loop — Nesterov momentum gives the faster ``O(1/k^2)`` rate but does not guarantee per-step monotonicity); the shipped weighted-prox solver on non-uniform weights produces a final objective that is **at-or-below initialisation** (final-vs-initial check via `_weighted_nuclear_norm_solve`, NOT per-iteration monotonicity — the accelerated FISTA loop is allowed to have transient per-step increases) and reduces total singular-value mass below the residual. (Eq. 10 balancing representation / decomposition is the paper's identity built from these ingredients per Section 5.2; direct numerical reconstruction is out of scope — see "Outstanding Concerns".)
+- [x] Eq. 3 per-(i, t) weights: unit distance excludes the target period (``1{u ≠ t}`` mask in the kernel) and uses only periods where both units are untreated (``(1 - W_iu)(1 - W_ju)`` mask).
+- [x] Eqs. 4-5 + Algorithm 1 LOOCV: ``Q(λ)`` sums squared pseudo-treatment effects over ALL control observations where ``D_js = 0`` (including pre-treatment cells of eventually-treated units, paper Eq. 2 control set); two-stage coordinate-descent cycling (footnote 2) returns a tuple of values from the input grids.
+- [x] Corollary 1 (paper p. 23) — **single-draw sanity checks consistent with the three unbiasedness conditions, not a repeated-MC mean-bias study**: each of the three balance conditions (a) unit balance, (b) time balance, (c) ``B = 0`` is exercised on a targeted DGP that makes one condition trivially hold while keeping the others sub-optimal. The assertion in each case is a single-realisation ``|att - τ| < 3 * se`` band using the estimator's own bootstrap SE — this is a smoke check, NOT a repeated-draw Monte Carlo bias study of the paper's conditional-unbiasedness statement under fixed weights. A stronger MC bias study at fixed λ values is deferred (would multiply test runtime by ~30x for marginal additional evidence given the existing 3-σ band already catches order-of-magnitude bias regressions).
+- [x] Theorem 5.1 (paper p. 23) — **simulation sanity check, not a direct theorem lock**: the paper's bias bound ``|E[τ_hat - τ | L]| <= ||Δ_u|| · ||Δ_t|| · ||B||_*`` is stated for FIXED, non-data-dependent weights. The library's TROP fit uses data-dependent LOOCV-tuned λ values, so the direct conditional bias bound is not tested here. Instead, the methodology test verifies the bound's empirical realisation: TROP RMSE strictly below DID RMSE under a confounded factor DGP with ``true τ = 0`` (calibration measurement: TROP/DID RMSE ratio ≈ 0.34 at ``factor_strength = 1.0``). The direct fixed-weight bound test is deferred — would require exposing oracle Γ / Λ / B from a paper-aligned DGP and computing each component of the bound from instrumented internals.
+- [x] Section 2.2 special-case reductions: **DiD benchmark sanity check** (not a direct algebraic-equivalence proof) — on a no-interactive-FE multi-period panel (additive unit + time effects only, no factor structure), TROP with ``λ_nn = ∞`` + uniform weights produces an ATT within 0.5 of `DifferenceInDifferences` fitted as `outcome ~ treat * post_flag` (basic 2×2 design with `[const, D, T, D×T]`, extended to repeated observations within each treat×post cell). This is **empirical numerical agreement on a friendly DGP**, NOT a proof of the paper Section 2.2 algebraic reduction (which would require either a true 2-period block-assignment panel where the basic-DiD comparator is the algebraic target, or a comparison against `TwoWayFixedEffects` — both deferred). **Matrix Completion code path exercised, not equivalence-checked** — TROP with uniform weights + finite ``λ_nn`` engages the nuclear-norm prox solver (effective_rank > 0) and recovers ATT better than the DiD-style baseline on a factor-confounded DGP; this verifies the code path activates but does NOT prove equivalence with an independent MC reference implementation (which would require either an external MC port or a hand-written reference solver). SC / SDID reductions deferred — see "Outstanding Concerns".
+- [x] Eq. 13 + Algorithm 2 per-(i, t) estimation: ``treatment_effects`` dict contains one finite ``τ_hat_it`` per treated cell; the aggregate ATT equals the unweighted mean of per-cell effects (Eq. 1). **Tests cover block adoption with a constant treatment effect**; **absorbing-state staggered adoption** and **heterogeneous per-cell effects** (paper Remark 6.1) are SUPPORTED by the code path but not directly verified in this methodology surface. **Section 6.1 non-absorbing / on-off / switching assignment patterns are explicitly OUT OF SCOPE** — the implementation rejects non-absorbing D-matrices via `trop_local.py` absorbing-state validation, and the methodology test enforces the rejection contract via `TestTROPDeviations::test_event_style_d_rejected_with_value_error` (event-style D being one specific non-absorbing pattern; the same absorbing-state validator catches all 1→0 transitions). Cross-coverage of the staggered-cohort fit path is `tests/test_methodology_trop.py::TestTROPAlgorithm1LOOCV::test_control_set_includes_pretreat_of_eventually_treated`.
+- [x] Algorithm 3 stratified pairs bootstrap: under an unbalanced (3 treated, 17 control) panel, the stratified sampler reliably produces ≥ 67% successful bootstrap draws and a positive finite SE.
+- [x] Section 3 / Eq. 6 semi-synthetic factor DGP: five recovery tests verify limiting-case uniform weights, unit-weight bias reduction, time-weight bias reduction, factor-model bias reduction with effective_rank > 0, and null-DGP recovery centred near zero.
+- [x] safe_inference contract: confidence interval uses the t-distribution with df = max(1, n_treated_obs - 1), consistent with p_value (matches REGISTRY `## TROP` "Inference CI distribution" note, post safe_inference migration).
+
+**Test Coverage:**
+
+- 36 methodology tests (10 classes) in `tests/test_methodology_trop.py`.
+- Defensive guards (107 tests in `tests/test_trop.py`): D-matrix absorbing-state validation, silent-warning audit, FISTA convergence warnings, bootstrap-failure-rate proportional warning, bootstrap NaN-SE propagation, module-split smoke tests.
+
+**Deviations from paper:**
+
+- **Gap #5 (weight normalisation)**: paper Section 5 (p. 20) states weights sum to one (``1ᵀω = 1ᵀθ = 1``), but Eq. 3 (p. 7) writes unnormalised exponential weights. The shipped implementation matches Eq. 2 (unnormalised). Locked by `tests/test_methodology_trop.py::TestTROPDeviations::test_unnormalized_weights_match_eq2`.
+- **Gap #9 (unbalanced panels)**: paper assumes a balanced ``N × T`` panel; the library accepts unbalanced panels with missing control / pre-treatment cells. **The methodology test exercises 10% random drops on the control + pre-treatment subset** (TROP fit completes and returns finite ATT). Three additional unbalanced-panel regressions are in `tests/test_trop.py::TestPR110FeedbackRound8`. Missing-treated-cell handling and thinner pre-period donor support are NOT directly covered by a dedicated regression — those edge cases lean on the absorbing-state monotonicity validation in `trop_local.py` and the validator-side tests in `tests/test_trop.py::TestDMatrixValidation`. Locked by `TestTROPDeviations::test_unbalanced_panels_supported`.
+- **Rank selection**: the library follows the paper's implicit rank-selection via nuclear-norm soft-thresholding (paper review Gap #8). `TROP.__init__` does NOT expose a discrete `rank_selection` parameter; effective rank is reported via `TROPResults.effective_rank` (sum of singular values divided by largest) as a diagnostic, not as a user-selectable mode. Earlier REGISTRY prose mentioning "cv / ic / elbow" rank-selection methods was an overclaim — corrected in this PR. Locked by `TestTROPDeviations::test_rank_selection_is_implicit_via_nuclear_norm`.
+- **`λ_nn = ∞` → 1e10 internal conversion**: results metadata stores the original ``inf`` value (REGISTRY `## TROP` "λ_nn=∞ implementation" edge-case note) while computations use 1e10 as a numerical sentinel. Locked by `TestTROPDeviations::test_lambda_nn_inf_stored_unchanged`.
+- **Bootstrap proportional 5% failure-rate warning** and **FISTA / outer-loop convergence warnings**: defensive surfaces introduced under the Phase 2 silent-failure audit (REGISTRY `## TROP` "Bootstrap minimum" and "alternating-minimization convergence" notes). Covered in `tests/test_trop.py::TestTROPBootstrapFailureRateGuard` and `TestTROPConvergenceWarnings`.
+
+**Outstanding Concerns:**
+
+- **Equation 14 covariate extension** (paper Section 6.2): the library does NOT implement covariates. `TROP.fit()` has no ``covariates`` keyword argument, and the corresponding Theorem 8.1 (paper Appendix, pp. 36-37) covariate-triple-robustness result is correspondingly out of scope. Non-support is locked by `TestTROPDeviations::test_covariates_not_supported`. Deferred until use cases motivate the X threading through `trop_local.py` / `trop_global.py` / LOOCV / bootstrap.
+- **SC / SDID special-case reductions** (paper Section 2.2 third bullet): the paper claims TROP reduces to SC and SDID under ``λ_nn = ∞`` and "specific choices of unit and time weights", but the exact ``(ω, θ)`` maps are not provided in the paper text. The library does not expose an SC- or SDID-matching weight setter (only the Eq. 3 ``λ_unit`` / ``λ_time`` decay rates). Cross-language anchor against `SyntheticDiD` is deferred until paper-author code clarifies the weight map.
+- **Rust backend survey scope**: the Rust accelerated paths remain pweight-only; full survey-design (strata, PSU, FPC via Rao-Wu) falls back to the Python bootstrap loop. Cross-backend parity is covered by `tests/test_trop.py` defensive surfaces.
+- **Eq. 10 balancing decomposition** (paper Section 5.2 + Eq. 10): numerical reconstruction of the four-term identity ``Y_NT_hat = L_NT + θ·(Y_pre_N - L_pre_N) + ω·(Y_T_co - L_T_co) - Σ θ_t ω_i (Y_it_co - L_it_co)`` requires the internal per-(i, t) weight vectors ``θ_s^{i,t}`` / ``ω_j^{i,t}``, which are not exposed on the public TROP API. The Eq. 2 ingredients that the Eq. 10 derivation builds on (soft-threshold SVD, **plain prox-gradient monotonicity** — NOT the shipped accelerated FISTA outer loop, which uses Nesterov momentum and does not guarantee per-step monotonicity — weighted-prox solver) are independently verified in `TestTROPNuclearNormProx`. Direct Eq. 10 lock deferred — would require exposing the internal weight vectors as a results-side diagnostic or instrumenting the test against the solver's intermediate state.
+
+**R Parity:** Deferred until the paper-author reference implementation is released ("forthcoming" per the paper). Tracker entry will be reopened when it lands.
 
 ---
 
@@ -1338,10 +1366,9 @@ Promotion priority for the **In Progress** entries, ordered by what's blocked on
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
-6. **TROP** — paper review recently merged (PR #443); needs methodology file and cross-language anchor (when paper-author reference becomes available).
-7. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
-8. **ConleySpatialHAC** — paper review + committed R `conleyreg` goldens; needs dedicated methodology test file + summary R-parity table in this tracker.
-9. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
+6. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
+7. **ConleySpatialHAC** — paper review + committed R `conleyreg` goldens; needs dedicated methodology test file + summary R-parity table in this tracker.
+8. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
 
 ---
 
