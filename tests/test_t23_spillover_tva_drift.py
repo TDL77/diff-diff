@@ -260,7 +260,7 @@ def test_rings_sensitivity_grid_endpoints(panel):
     for outer in (50.0, 100.0, 150.0, 200.0):
         est = SpilloverDiD(rings=[0.0, outer], conley_coords=("lat", "lon"))
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+            _silence_spillover_matmul_warnings()
             res = est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
         assert res.spillover_effects is not None
         delta_1 = float(res.spillover_effects.iloc[0]["coef"])
@@ -282,7 +282,7 @@ def test_rings_grid_d_bar_100_to_200_identical(panel):
     for outer in (100.0, 150.0, 200.0):
         est = SpilloverDiD(rings=[0.0, outer], conley_coords=("lat", "lon"))
         with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
+            _silence_spillover_matmul_warnings()
             res = est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
         results.append(res.att)
     np.testing.assert_allclose(results, results[0] * np.ones(3), atol=1e-10)
@@ -335,30 +335,56 @@ def test_summary_renders_without_warning(spillover_fit):
     assert len(out) > 0
 
 
+def _assert_only_known_matmul_warnings(captured) -> None:
+    """Shared assertion body for the §5 / §6 warning-policy guards.
+
+    Asserts the only emitted warnings on a recorded
+    ``warnings.catch_warnings(record=True)`` list are the three known
+    benign ``*encountered in matmul`` ``RuntimeWarning`` flavors. Any
+    other warning surfaces the diff via the assertion message.
+    """
+    unexpected = []
+    for msg in captured:
+        is_matmul_runtime = issubclass(
+            msg.category, RuntimeWarning
+        ) and "encountered in matmul" in str(msg.message)
+        if not is_matmul_runtime:
+            unexpected.append((msg.category.__name__, str(msg.message)))
+    assert not unexpected, (
+        f"SpilloverDiD.fit emitted unexpected warnings on the T23 DGP: "
+        f"{unexpected}. If a new warning is genuinely expected, broaden "
+        f"`_silence_spillover_matmul_warnings()` and update the §5/§6 "
+        f"notebook narrative accordingly."
+    )
+
+
 def test_spillover_fit_emits_only_known_matmul_warnings(panel):
-    """Pin the EXACT warning surface of the headline SpilloverDiD fit so
-    future library changes can't silently introduce new warnings into the
-    tutorial output (T19-pattern warning-policy guard). The notebook's
-    narrow `RuntimeWarning` matmul filter masks ONLY the three known
+    """§5 warning-policy guard (T19-pattern). The notebook's narrow
+    `RuntimeWarning` matmul filter masks ONLY the three known
     `*encountered in matmul` warnings; any other warning category or
     other RuntimeWarning message must surface."""
     est = SpilloverDiD(rings=[0.0, D_BAR_KM], conley_coords=("lat", "lon"))
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
         est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
+    _assert_only_known_matmul_warnings(w)
 
-    # Partition into expected (matmul RuntimeWarning) vs unexpected (anything else)
-    unexpected = []
-    for msg in w:
-        is_matmul_runtime = issubclass(
-            msg.category, RuntimeWarning
-        ) and "encountered in matmul" in str(msg.message)
-        if not is_matmul_runtime:
-            unexpected.append((msg.category.__name__, str(msg.message)))
 
-    assert not unexpected, (
-        f"SpilloverDiD.fit emitted unexpected warnings on the T23 DGP: "
-        f"{unexpected}. If a new warning is genuinely expected, broaden "
-        f"`_silence_spillover_matmul_warnings()` and update the §6 "
-        f"notebook narrative accordingly."
-    )
+def test_spillover_conley_fit_emits_only_known_matmul_warnings(panel):
+    """§6 warning-policy guard, parallel to §5 but on the Conley path
+    (vcov_type="conley", conley_cutoff_km=d_bar, conley_lag_cutoff in {0, 1}).
+    If the Conley branch starts emitting a new warning, a maintainer must
+    either widen `_silence_spillover_matmul_warnings()` and update the §6
+    narrative or fix the underlying cause."""
+    for lag in (0, 1):
+        est = SpilloverDiD(
+            rings=[0.0, D_BAR_KM],
+            conley_coords=("lat", "lon"),
+            vcov_type="conley",
+            conley_cutoff_km=D_BAR_KM,
+            conley_lag_cutoff=lag,
+        )
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            est.fit(panel, outcome="y", unit="unit", time="time", treatment="D")
+        _assert_only_known_matmul_warnings(w)
