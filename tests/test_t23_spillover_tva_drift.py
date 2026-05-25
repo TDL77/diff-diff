@@ -241,21 +241,32 @@ def test_naive_twfe_understates_tau_total(naive_fit):
 
 
 def test_naive_att_endpoint_matches_quoted(naive_fit):
-    """§3 quoted endpoint: round-to-1 pin (looser than round-to-2 for BLAS safety)."""
-    assert round(naive_fit.att, 1) == -4.3
+    """§3 quoted endpoint: 2-decimal pin matching the published `-4.29`
+    in the notebook, README, and CHANGELOG. The well-conditioned naive
+    MultiPeriodDiD fit is stable across BLAS paths to better than 0.005,
+    so 2-decimal pinning is safe (in contrast to the borderline-rank-
+    deficient `rings=[0,50]` sensitivity point, which we keep at
+    round-to-1)."""
+    assert round(naive_fit.att, 2) == -4.29
 
 
 def test_spillover_did_recovers_tau_total(spillover_fit):
-    """§5 quoted: SpilloverDiD tau_total ≈ -7.34 ± 0.12, recovers true -7.4."""
+    """§5 quoted: SpilloverDiD tau_total = -7.34, recovers true -7.4
+    (within 0.5 tolerance bound). Endpoint pinned to 2 decimals
+    matching the published `-7.34` in the notebook, README, and
+    CHANGELOG — well-conditioned fit, BLAS-stable at 2 decimals."""
     assert abs(spillover_fit.att - TAU_TOTAL) < 0.5
-    assert round(spillover_fit.att, 1) == -7.3
+    assert round(spillover_fit.att, 2) == -7.34
 
 
 def test_spillover_did_recovers_delta_1(spillover_fit):
-    """§5 quoted: SpilloverDiD delta_1 ≈ -4.53 ± 0.07, recovers true -4.5."""
+    """§5 quoted: SpilloverDiD delta_1 = -4.53, recovers true -4.5
+    (within 0.5 tolerance bound). Endpoint pinned to 2 decimals
+    matching the published `-4.53` in the notebook, README, and
+    CHANGELOG — well-conditioned fit, BLAS-stable at 2 decimals."""
     delta_1 = float(spillover_fit.spillover_effects.iloc[0]["coef"])
     assert abs(delta_1 - DELTA_1) < 0.5
-    assert round(delta_1, 1) == -4.5
+    assert round(delta_1, 2) == -4.53
 
 
 def test_rings_sensitivity_grid_endpoints(panel):
