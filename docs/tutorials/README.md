@@ -119,6 +119,14 @@ End-to-end HAD walkthrough on a BRFSS-shape stratified survey design (5 strata x
 - `did_had_pretest_workflow` on both overall and event-study paths under `survey_design=`, walking the Phase 4.5 C0 QUG-deferred verdict suffix and the stratified-clustered Stute multiplier bootstrap
 - Companion drift-test file (`tests/test_t22_had_survey_design_drift.py`)
 
+### 23. SpilloverDiD on a TVA-style Spillover Panel (`23_spillover_tva.ipynb`)
+Practitioner workflow for `SpilloverDiD` (Butts 2021 ring-indicator estimator + Gardner 2022 two-stage residualize-then-fit) on a synthetic TVA-style panel (4 periods, 200 units = 25 treated + 120 near-control + 55 far-control) reproducing the Butts §4 Table 1 Panel A ~40% understatement direction:
+- When place-based interventions cause geographic spillovers, naive multi-period TWFE on the full sample understates the direct effect because near-controls absorb the spillover (here: ATT recovers as -4.29 vs true `tau_total = -7.4`, a 42% understatement)
+- `SpilloverDiD(rings=[0.0, 100.0], conley_coords=("lat", "lon"))` cleanly recovers both `tau_total` (-7.34) and the near-band spillover coefficient `delta_1` (-4.53)
+- Choosing the spillover bandwidth via a `rings` sensitivity grid at outer edges 50 / 100 / 150 / 200 km, with the documented "undershooting `d_bar`" failure mode at 50 km
+- Conley spatial-HAC variance under `vcov_type="conley", conley_cutoff_km=100, conley_lag_cutoff in {0, 1}` per Butts §3.1
+- Companion drift-test file (`tests/test_t23_spillover_tva_drift.py`)
+
 ## Running the Notebooks
 
 1. Install diff-diff with dependencies:
