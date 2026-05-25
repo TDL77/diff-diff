@@ -463,6 +463,26 @@ def test_seed_specific_geometry_pins_match_quoted(panel):
         pair_d = dist[triu]
         return float((pair_d <= 100.0).sum() / len(pair_d) * 100.0)
 
+    def _cross_band_max_pair_km(d1, d2):
+        lats1, lons1 = d1["lat"].values, d1["lon"].values
+        lats2, lons2 = d2["lat"].values, d2["lon"].values
+        cross = (
+            np.sqrt((lats1[:, None] - lats2[None, :]) ** 2 + (lons1[:, None] - lons2[None, :]) ** 2)
+            * deg_to_km
+        )
+        return float(cross.max())
+
+    def _within_band_median_pair_km(d):
+        lats = d["lat"].values
+        lons = d["lon"].values
+        n = len(lats)
+        dist = (
+            np.sqrt((lats[:, None] - lats[None, :]) ** 2 + (lons[:, None] - lons[None, :]) ** 2)
+            * deg_to_km
+        )
+        triu = np.triu(np.ones((n, n), dtype=bool), k=1)
+        return float(np.median(dist[triu]))
+
     # §2 quoted: "clustered around (0,0); max ~12 km from origin, cluster diameter ~22 km at seed 23"
     assert round(_max_dist_from_origin_km(treated)) == 12, _max_dist_from_origin_km(treated)
     assert round(_band_diameter_km(treated)) == 22, _band_diameter_km(treated)
@@ -472,12 +492,20 @@ def test_seed_specific_geometry_pins_match_quoted(panel):
     # §2 quoted: "~224-331 km north"
     assert round(_min_dist_from_origin_km(far)) == 224, _min_dist_from_origin_km(far)
     assert round(_max_dist_from_origin_km(far)) == 331, _max_dist_from_origin_km(far)
-    # §6 quoted: "lat extent is ~131 km" for far band
+    # §6 quoted: "max within-band pairwise distance is ~131 km" for far band
+    # (NOT "lat extent" — geometrically the lat extent is ~111 km; 131 km is
+    # the pairwise band diameter accounting for lon dispersion too)
     assert round(_band_diameter_km(far)) == 131, _band_diameter_km(far)
     # §6 quoted: "100% of within-band pairs are within 100 km" for near band
     assert round(_pct_pairs_within_100km(near)) == 100, _pct_pairs_within_100km(near)
     # §6 quoted: "~95% of within-band pair distances are within 100 km" for far band
     assert round(_pct_pairs_within_100km(far)) == 95, _pct_pairs_within_100km(far)
+    # §6 quoted: "treated × near-control pairs (max pairwise separation ~90 km)"
+    assert round(_cross_band_max_pair_km(treated, near)) == 90, _cross_band_max_pair_km(
+        treated, near
+    )
+    # §6 quoted: "median far/far pairwise distance is ~56 km"
+    assert round(_within_band_median_pair_km(far)) == 56, _within_band_median_pair_km(far)
 
 
 def _assert_post_filter_warning_surface_is_clean(captured) -> None:
