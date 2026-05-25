@@ -254,7 +254,7 @@ where `D^k_{it} := D_i * 1{K_it = k}` and `K_it` is years since treatment turned
   - Agriculture employment: standard DiD = -5.1% per decade. With spillovers controlled, total effect = -7.4% per decade. **Spillover bias = +2.3 pp; canonical DiD UNDERESTIMATED the agricultural decline by ~40%.** Spillover-on-control coefficients are negative (-3.7%, -1.6%, -3.0%, -1.6% per decade across the 4 distance bins) — consistent with farm-worker out-migration to higher-paying TVA manufacturing jobs.
   - Manufacturing employment: standard DiD = +5.6% per decade. With spillovers controlled, total effect = +3.5% per decade. **Spillover bias = +2.1 pp; canonical DiD OVERESTIMATED the manufacturing gain by ~40%.** Spillover coefficients are negative (-2.0%, -2.5%, -3.3%, -3.0%), consistent with "urban shadow" effects whereby firms relocate INTO the TVA from neighboring areas.
 - Interpretation (page 21): "the long-run spillovers cause the original estimates to be about 40 percent too small for agriculture employment and 40 percent too large for manufacturing employment."
-- Useful design choice for diff-diff T22 tutorial DGP: a TVA-style bias-correction percentage of ~40% is large enough to be visible without being implausible.
+- Useful design choice for diff-diff T23 tutorial DGP: a TVA-style bias-correction percentage of ~40% is large enough to be visible without being implausible. (Tutorial slot 22 went to `22_had_survey_design.ipynb`; SpilloverDiD landed in slot 23 — `docs/tutorials/23_spillover_tva.ipynb`.)
 
 ### Empirical illustration — Opportunity Zones (Appendix B)
 - Application: revisits Chen, Glaeser, and Wessel (2021) on the 2017 federal Opportunity Zone program's effect on home prices.
