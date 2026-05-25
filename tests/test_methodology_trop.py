@@ -344,13 +344,14 @@ class TestTROPNuclearNormProx:
     finiteness / non-triviality, and verifies ``treatment_effects`` is
     populated with finite entries (the framework that Eq. 10 derives).
 
-    Origin: ported from
-    `tests/test_trop.py::TestTROPNuclearNormSolver` plus the
-    weighted-solver convergence test
+    Origin: ported from the pre-migration `TestTROPNuclearNormSolver`
+    class in `test_trop.py` (three of four methods migrated; the one
+    remaining defensive `test_zero_weights_no_division_error` stayed in
+    `test_trop.py`) plus the weighted-solver convergence test
     `test_weighted_nuclear_norm_solver_convergence` and the weighted-
-    nuclear-norm objective test `test_issue_c_weighted_nuclear_norm`
-    from `TestPaperConformanceFixes`. The zero-weights defensive test
-    stayed in `test_trop.py`.
+    nuclear-norm objective test `test_issue_c_weighted_nuclear_norm`,
+    both originally in a pre-migration `TestPaperConformanceFixes`
+    class that was deleted in the methodology-promotion PR.
     """
 
     def test_proximal_step_size_correctness(self):
@@ -476,8 +477,10 @@ class TestTROPNuclearNormProx:
         comparison; for the DID-vs-MC ranking on a confounded factor DGP
         see `TestTROPSpecialCases::test_matrix_completion_reduction_uniform_weights_finite_nn`.
 
-        Origin: ported from
-        `tests/test_trop.py::TestPaperConformanceFixes::test_issue_c_weighted_nuclear_norm`.
+        Origin: ported from the pre-migration
+        `TestPaperConformanceFixes::test_issue_c_weighted_nuclear_norm`
+        in `test_trop.py` (the pre-migration class was deleted in the
+        methodology-promotion PR; the test was migrated here).
         """
         rng = np.random.default_rng(456)
 
@@ -533,8 +536,10 @@ class TestTROPNuclearNormProx:
         """Eq. 2 nuclear-norm regularisation: the fitted L has strictly
         smaller total singular-value mass than the input Y.
 
-        Origin: ported from
-        `tests/test_trop.py::TestPaperConformanceFixes::test_weighted_nuclear_norm_solver_convergence`.
+        Origin: ported from the pre-migration
+        `TestPaperConformanceFixes::test_weighted_nuclear_norm_solver_convergence`
+        in `test_trop.py` (the pre-migration class was deleted in the
+        methodology-promotion PR; the test was migrated here).
         """
         trop_est = TROP(
             lambda_time_grid=[0.0],
@@ -650,9 +655,11 @@ class TestTROPEquation3Weights:
 
     Three direct paper-formula assertions:
 
-    - ``test_distance_excludes_target_period`` (extracted from
-      ``TestPaperConformanceFixes::test_issue_b``): end-to-end fit
-      smoke that the target-period anomaly does not dominate.
+    - ``test_distance_excludes_target_period`` (extracted from the
+      pre-migration ``TestPaperConformanceFixes::test_issue_b`` in
+      `test_trop.py` — the pre-migration class was deleted in the
+      methodology-promotion PR): end-to-end fit smoke that the
+      target-period anomaly does not dominate.
     - ``test_unit_distance_uses_untreated_only_mask`` (NEW): direct
       assertion that ``TROP._compute_unit_distance_for_obs`` matches
       the paper's
@@ -664,10 +671,11 @@ class TestTROPEquation3Weights:
       assertion that the per-(i, t) weight matrix's time-axis
       column equals ``exp(-lambda_time * |t - s|)``.
 
-    Origin: target-period-exclusion test ported from
-    `tests/test_trop.py::TestPaperConformanceFixes::test_issue_b_distance_excludes_target_period`;
-    the unit-distance-mask and time-decay assertions are new direct
-    Eq. 3 locks.
+    Origin: target-period-exclusion test ported from the pre-migration
+    `TestPaperConformanceFixes::test_issue_b_distance_excludes_target_period`
+    in `test_trop.py` (the pre-migration class was deleted in the
+    methodology-promotion PR); the unit-distance-mask and time-decay
+    assertions are new direct Eq. 3 locks.
     """
 
     def test_distance_excludes_target_period(self):
@@ -846,11 +854,13 @@ class TestTROPAlgorithm1LOOCV:
     converges to a grid point.
 
     Origin:
-    `test_issue_a_control_includes_pretreatment_obs` ported from
-    `TestPaperConformanceFixes`; one tightly-scoped cycling-convergence
-    assertion ported from `TestCyclingSearch`. Other LOOCV tests
-    (fallback when all fits fail; single-value-grid degenerate case) are
-    defensive surfaces and stayed in `test_trop.py`.
+    `test_issue_a_control_includes_pretreatment_obs` ported from the
+    pre-migration `TestPaperConformanceFixes` class in `test_trop.py`
+    (deleted in the methodology-promotion PR); one tightly-scoped
+    cycling-convergence assertion ported from
+    `tests/test_trop.py::TestCyclingSearch` (which retains its other
+    LOOCV tests for the fallback / single-value-grid surfaces — those
+    are defensive and stayed in `test_trop.py`).
     """
 
     def test_control_set_includes_pretreat_of_eventually_treated(self):
@@ -1141,10 +1151,11 @@ class TestTROPTheorem51TripleRobustness:
     components jointly absorb the confounding.
 
     Tests are NEW. The MC-ranking pattern also dedupes the
-    factor-DGP coverage from
-    `tests/test_trop.py::TestTROPvsSDID::test_trop_handles_factor_dgp`
-    (which only asserted ``att != 0``, not ranking against DID;
-    deleted in this PR).
+    factor-DGP coverage from the pre-migration
+    `TestTROPvsSDID::test_trop_handles_factor_dgp` in `test_trop.py`
+    (which only asserted ``att != 0``, not ranking against DID; the
+    pre-migration `TestTROPvsSDID` class was deleted in the
+    methodology-promotion PR).
     """
 
     def test_trop_rmse_strictly_below_did_under_factor_confounding(self, ci_params):
@@ -1251,10 +1262,11 @@ class TestTROPSpecialCases:
     until paper-author code clarifies the weight map. (Documented in
     `METHODOLOGY_REVIEW.md` ``TROP`` section under Deviations.)
 
-    Tests are NEW. The factor-DGP smoke previously at
-    `tests/test_trop.py::TestTROPvsSDID::test_trop_handles_factor_dgp`
-    is subsumed by `TestTROPTheorem51TripleRobustness` (which tests
-    a stronger MC-ranking claim).
+    Tests are NEW. The factor-DGP smoke previously in the
+    pre-migration `TestTROPvsSDID::test_trop_handles_factor_dgp` is
+    subsumed by `TestTROPTheorem51TripleRobustness` (which tests a
+    stronger MC-ranking claim); the pre-migration `TestTROPvsSDID`
+    class was deleted in the methodology-promotion PR.
     """
 
     def test_did_reduction_lambda_nn_inf_uniform_weights(self):
@@ -1503,11 +1515,13 @@ class TestTROPAlgorithm3Bootstrap:
     correlation. This is a pairs bootstrap, NOT a multiplier / Rao-Wu
     bootstrap.
 
-    Origin: ported from
-    `tests/test_trop.py::TestPaperConformanceFixes::test_issue_d_stratified_bootstrap`.
-    Bootstrap-failure-rate and bootstrap-NaN-SE guards are defensive
-    surfaces and stayed in `test_trop.py::TestTROPBootstrapFailureRateGuard`
-    and `test_trop.py::TestTROPBootstrapNaNSE`.
+    Origin: ported from the pre-migration
+    `TestPaperConformanceFixes::test_issue_d_stratified_bootstrap` in
+    `test_trop.py` (the pre-migration class was deleted in the
+    methodology-promotion PR). Bootstrap-failure-rate and bootstrap-
+    NaN-SE guards are defensive surfaces and stayed in
+    `tests/test_trop.py::TestTROPBootstrapFailureRateGuard` and
+    `tests/test_trop.py::TestTROPBootstrapNaNSE`.
     """
 
     def test_stratified_pairs_resampling_completes(self, ci_params):
@@ -1589,12 +1603,13 @@ class TestTROPEquation6FactorDGPRecovery:
     DGP is built via `_make_trop_factor_panel` (wraps
     `diff_diff.prep.generate_factor_data`).
 
-    Origin: 5 tests ported verbatim from
-    `tests/test_trop.py::TestMethodologyVerification` (L552-878):
-    limiting-case uniform weights, unit-weight bias reduction,
-    time-weight bias reduction, factor-model bias reduction, and
-    paper-DGP null-recovery. Verified that the ported tests still pass
-    after relocation.
+    Origin: 5 tests ported verbatim from the pre-migration
+    `TestMethodologyVerification` class in `test_trop.py` (the
+    pre-migration class was deleted in the methodology-promotion PR;
+    original line range L552-878): limiting-case uniform weights,
+    unit-weight bias reduction, time-weight bias reduction, factor-
+    model bias reduction, and paper-DGP null-recovery. Verified that
+    the ported tests still pass after relocation.
     """
 
     def test_limiting_case_uniform_weights(self):
@@ -1900,36 +1915,39 @@ class TestTROPDeviations:
     Each test is independent (no bare cross-references to defensive
     tests in ``test_trop.py``; pointers live in this class docstring).
 
-    Cross-references for context (NOT duplicated assertions):
+    Cross-references for context (NOT duplicated assertions, NOT
+    locked by tests in this class):
     - `tests/test_trop.py::TestTROPBootstrapFailureRateGuard`
-      (bootstrap proportional 5% failure-rate warning).
+      (bootstrap proportional 5% failure-rate warning — defensive
+      surface, stays in `test_trop.py`).
     - `tests/test_trop.py::TestTROPConvergenceWarnings`
-      (FISTA / outer-loop convergence warnings).
+      (FISTA / outer-loop convergence warnings — defensive surface,
+      stays in `test_trop.py`).
     - `tests/test_trop.py::TestSilentWarningAudit`
-      (Phase 2 silent-failure audit).
+      (Phase 2 silent-failure audit — defensive surface, stays in
+      `test_trop.py`).
     - `tests/test_trop.py::TestDMatrixValidation`
-      (absorbing-state validation).
+      (absorbing-state validation — defensive surface, stays in
+      `test_trop.py`).
 
-    Tests cover:
+    Tests in this class cover:
     - Gap #5 (unnormalised weights match Eq. 2, not Section 5
       sum-to-one).
     - lambda_nn=infinity internal conversion to 1e10 sentinel.
+    - lambda_time / lambda_unit rejection of inf grid values.
     - Gap #9 (unbalanced panels supported beyond paper's balanced-
       panel assumption).
     - Event-style D rejection.
-    - Non-absorbing treatment rejection (Section 6 paper extends; impl
-      currently rejects).
     - Eq. 14 covariate extension not supported (Theorem 8.1
       correspondingly out of scope).
     - Rank selection is implicit via nuclear-norm soft-thresholding
       (no discrete ``rank_selection`` constructor parameter exposed;
       paper Section 5.3 + Appendix matches this choice).
+    - n_bootstrap < 2 rejection (no analytical SE; bootstrap required).
     - LOOCV happy-path uses the user-supplied grid verbatim
       (fallback-to-defaults side covered defensively in `test_trop.py`).
-    - Bootstrap-failure proportional warning at 5% threshold.
-    - FISTA convergence warning fires on max_iter exhaustion.
-    - safe_inference joint-NaN contract on degenerate inputs.
     - Inference CI uses t-distribution post safe_inference migration.
+    - safe_inference NaN-propagation contract on degenerate SE inputs.
     """
 
     def test_unnormalized_weights_match_eq2(self):
