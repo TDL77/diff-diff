@@ -272,6 +272,56 @@ class ImputationDiDBootstrapMixin:
 
         return result
 
+    def _build_nan_bootstrap_results(
+        self,
+        original_event_study: Optional[Dict[int, Dict[str, Any]]],
+        original_group: Optional[Dict[Any, Dict[str, Any]]],
+    ) -> ImputationBootstrapResults:
+        """Build an all-NaN ImputationBootstrapResults for degenerate-design
+        bootstrap paths (n_clusters<2 or n_psu<2).
+
+        Per-horizon and per-group dicts are populated with NaN entries keyed
+        by the same horizons/groups as the analytical originals so that the
+        downstream post-bootstrap override loop in :meth:`ImputationDiD.fit`
+        iterates over them and propagates NaN to ``event_study_effects[h]["se"]``
+        / ``group_effects[g]["se"]`` (rather than silently no-oping by
+        finding ``None``).
+        """
+        n_nan = float("nan")
+        ci_nan: Tuple[float, float] = (n_nan, n_nan)
+
+        es_ses: Optional[Dict[int, float]] = None
+        es_cis: Optional[Dict[int, Tuple[float, float]]] = None
+        es_ps: Optional[Dict[int, float]] = None
+        if original_event_study:
+            es_ses = {h: n_nan for h in original_event_study}
+            es_cis = {h: ci_nan for h in original_event_study}
+            es_ps = {h: n_nan for h in original_event_study}
+
+        g_ses: Optional[Dict[Any, float]] = None
+        g_cis: Optional[Dict[Any, Tuple[float, float]]] = None
+        g_ps: Optional[Dict[Any, float]] = None
+        if original_group:
+            g_ses = {g: n_nan for g in original_group}
+            g_cis = {g: ci_nan for g in original_group}
+            g_ps = {g: n_nan for g in original_group}
+
+        return ImputationBootstrapResults(
+            n_bootstrap=self.n_bootstrap,
+            weight_type=self.bootstrap_weights,
+            alpha=self.alpha,
+            overall_att_se=n_nan,
+            overall_att_ci=ci_nan,
+            overall_att_p_value=n_nan,
+            event_study_ses=es_ses,
+            event_study_cis=es_cis,
+            event_study_p_values=es_ps,
+            group_ses=g_ses,
+            group_cis=g_cis,
+            group_p_values=g_ps,
+            bootstrap_distribution=None,
+        )
+
     def _run_bootstrap(
         self,
         original_att: float,
@@ -313,11 +363,36 @@ class ImputationDiDBootstrapMixin:
             or resolved_survey.fpc is not None
         )
 
+        # Fail-closed when the analytical-cluster path has fewer than 2
+        # independent clusters. Without this guard, the multiplier bootstrap
+        # SE collapses to ~0 from BLAS roundoff (NOT NaN), and downstream
+        # zero-SE checks miss the degenerate-design case.
+        if not _use_survey_bootstrap and n_clusters < 2:
+            warnings.warn(
+                f"Bootstrap with n_clusters={n_clusters} (<2 independent "
+                "clusters) produces degenerate variance; returning NaN SE.",
+                UserWarning,
+                stacklevel=3,
+            )
+            return self._build_nan_bootstrap_results(original_event_study, original_group)
+
         # Generate ALL weights upfront: shape (n_bootstrap, n_clusters)
         if _use_survey_bootstrap:
             psu_weights, psu_ids = _generate_survey_multiplier_weights_batch(
                 self.n_bootstrap, resolved_survey, self.bootstrap_weights, rng
             )
+            # Fail-closed when the survey-PSU path has fewer than 2 PSUs.
+            # Same BLAS-roundoff failure mode as the non-survey cluster path
+            # above; same NaN-propagation contract.
+            if len(psu_ids) < 2:
+                warnings.warn(
+                    f"Survey-PSU bootstrap with n_psu={len(psu_ids)} (<2 "
+                    "independent PSUs) produces degenerate variance from "
+                    "BLAS roundoff; returning NaN SE.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                return self._build_nan_bootstrap_results(original_event_study, original_group)
             # Reindex PSU weights to match cluster_ids ordering.
             # cluster_ids are unique PSU values from _compute_cluster_psi_sums;
             # psu_ids are unique PSU values from the survey weight generator.

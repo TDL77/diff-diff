@@ -379,12 +379,14 @@ ImputationDiD(
     anticipation: int = 0,
     alpha: float = 0.05,
     cluster: str | None = None,                  # Defaults to unit-level clustering
+    vcov_type: str = "hc1",                      # {"hc1"} only — IF-based variance per Borusyak et al. (2024) Theorem 3
     n_bootstrap: int = 0,                        # 0 = analytical (Theorem 3 variance)
     bootstrap_weights: str = "rademacher",       # "rademacher", "mammen", or "webb"
     seed: int | None = None,
     rank_deficient_action: str = "warn",
     horizon_max: int | None = None,              # Max event-study horizon
     aux_partition: str = "cohort_horizon",        # "cohort_horizon", "cohort", or "horizon"
+    pretrends: bool = False,                     # Include pre-treatment horizons in event study
 )
 ```
 
@@ -402,6 +404,7 @@ imp.fit(
     covariates: list[str] = None,
     aggregate: str = None,         # None, "simple", "event_study", "group", or "all"
     balance_e: int = None,
+    survey_design: SurveyDesign = None,  # Optional design-based inference (pweight + analytical strata/PSU/FPC or replicate BRR/Fay/JK1/JKn/SDR)
 ) -> ImputationDiDResults
 ```
 
@@ -1278,7 +1281,15 @@ ImputationDiDResults, TwoStageDiDResults, StackedDiDResults, and EfficientDiDRes
 
 Each event study effect dict contains: `effect`, `se`, `t_stat`, `p_value`, `conf_int`, `n_obs` (or `n_groups`).
 
-**Methods:** `summary()`, `print_summary()`, `to_dataframe()`
+**Variance metadata** (`ImputationDiDResults` carries these; other staggered Results may surface a subset):
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `vcov_type` | `str` | Variance estimator family (`"hc1"` for IF-based estimators; permanently narrow on `ImputationDiD` / `CallawaySantAnna` / `TripleDifference` per IF-vs-sandwich taxonomy) |
+| `cluster_name` | `str | None` | Effective cluster column name (e.g. `"unit"` for default `cluster=None`); `None` under survey designs (the survey block already names PSU/strata) |
+| `n_clusters` | `int | None` | Number of effective clusters; `None` under survey designs |
+
+**Methods:** `summary()`, `print_summary()`, `to_dataframe()`, `to_dict()` (flat dict of headline aliases + `vcov_type` + conditional `cluster_name`/`n_clusters`/`n_bootstrap`/`inference_method`)
 
 ### ContinuousDiDResults
 

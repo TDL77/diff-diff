@@ -348,16 +348,19 @@ Sant'Anna 2021 for `CallawaySantAnna`; Borusyak-Jaravel-Spiess 2024 for
 This split is a structural property of the estimator's variance derivation,
 not a missing feature. The `vcov_type` input contract for IF-based estimators
 is **permanently narrow** at `{"hc1"}`. Enforced today on
-`CallawaySantAnna` and `TripleDifference`; the same narrow contract is
-expected when `ImputationDiD` and `EfficientDiD` reach `vcov_type` threading.
+`CallawaySantAnna`, `TripleDifference`, and `ImputationDiD`; the same narrow
+contract is expected when `EfficientDiD` reaches `vcov_type` threading.
 
 **Note:** This routing is a documented synthesis. The clustered-`hc1`
 activation path is estimator-specific: `CallawaySantAnna` synthesizes
 `SurveyDesign(psu=X)` internally and routes through the existing
 PSU-meat machinery (`_compute_stratified_psu_meat`); `TripleDifference`
 computes the algebraically equivalent CR1 directly from cluster-summed
-IFs inline. The CR1 Liang-Zeger algebra on the IF is Williams (2000) /
-Hansen (2007) in both cases — no new methodology is introduced.
+IFs inline; `ImputationDiD` computes the Theorem 3 conservative variance
+(`sigma_sq = (cluster_psi_sums**2).sum()`) directly from per-cluster
+influence-function sums. The CR1 Liang-Zeger algebra on the IF is
+Williams (2000) / Hansen (2007) in all three cases — no new methodology
+is introduced.
 
 ---
 
@@ -1307,6 +1310,9 @@ where `W_it(h) = 1[K_it = h]` are lead indicators, estimated on `Omega_0` only.
 - **Bootstrap inference:** Uses multiplier bootstrap on the Theorem 3 influence function: `psi_i = sum_t v_it * epsilon_tilde_it`. Cluster-level psi sums are pre-computed for each aggregation target (overall, per-horizon, per-group), then perturbed with multiplier weights (Rademacher by default; configurable via `bootstrap_weights` parameter to use Mammen or Webb weights, matching CallawaySantAnna). This is a library extension (not in the paper) consistent with CallawaySantAnna/SunAbraham bootstrap patterns.
 - **Auxiliary residuals (Equation 8):** Uses v_it-weighted tau_tilde_g formula: `tau_tilde_g = sum(v_it * tau_hat_it) / sum(v_it)` within each partition group. Zero-weight groups (common in event-study SE computation) fall back to unweighted mean.
 - **Note:** Both the iterative FE solver (`_iterative_fe`, Step 1) and the iterative alternating-projection demeaning helper (`_iterative_demean`, used in covariate residualization and the pre-trend test) emit `UserWarning` when `max_iter` exhausts without reaching `tol`, via `diff_diff.utils.warn_if_not_converged`. Silent return of the current iterate was classified as a silent failure under the Phase 2 audit and replaced with an explicit signal to match the logistic/Poisson IRLS pattern in `linalg.py`.
+- **Note:** `vcov_type` is permanently narrow to `{"hc1"}` per the Theorem 3 IF-based variance decomposition. Analytical-sandwich families `{classical, hc2, hc2_bm}` are rejected at `__init__` — the per-unit influence function aggregation has no equivalent single design matrix on which hat-matrix leverage or Bell-McCaffrey Satterthwaite DOF can be defined. `cluster=<col>` invokes per-cluster IF summation (Theorem 3 equation 7 conservative variance, `sigma_sq = (cluster_psi_sums**2).sum()` — plain CR1 with no Stata-style `(n-1)/(n-p)` finite-sample factor because the IF has no design-matrix `p` in the OLS sense); `cluster=None` (the default) routes the SAME Theorem 3 cluster-summed IF variance with `cluster_var = unit` (the unit column passed to `fit()`), so the summary renders `"CR1 cluster-robust at <unit>, G=<n_units>"` rather than the generic `"HC1"` label; `survey_design=` invokes TSL on the combined IF. Under bootstrap (`n_bootstrap > 0`) the analytical variance-family label is suppressed in `summary()` because `fit()` overwrites the reported SE/CI/p-value with bootstrap_results (mirrors the canonical `DiDResults` gate at `results.py:213-226`). `vcov_type='conley'` is deferred to the ImputationDiD Conley follow-up row in TODO.md.
+- **Note:** `cluster=<col>` combined with a replicate-weight `SurveyDesign` raises `NotImplementedError` at `fit()`. Replicate-weight variance ignores PSU/cluster structure entirely (replicates encode the design implicitly), so honoring `cluster=` would silently no-op while populating `cluster_name`/`n_clusters` on Results dishonestly. Either omit `cluster=` (the replicate weights encode the design structure implicitly) or use a non-replicate survey design (with explicit strata/psu/fpc). Mirrors the `CallawaySantAnna` and `TripleDifference` fail-closed guards.
+- **Note:** Bootstrap path returns NaN SE when fewer than 2 independent clusters/PSUs are available (`n_clusters < 2` for the analytical-cluster bootstrap path, `n_psu < 2` for the survey-PSU bootstrap path). Without this guard the multiplier bootstrap SE collapses to ≈0 from BLAS roundoff (NOT NaN), and downstream zero-SE guards check exact 0 and miss the degenerate-design case. NaN propagates to all inference fields (SE/CI/p-value) plus per-horizon and per-group bootstrap dicts.
 
 **Reference implementation(s):**
 - Stata: `did_imputation` (Borusyak, Jaravel, Spiess; available from SSC)
