@@ -5,7 +5,11 @@
 **PDF reviewed:** https://arxiv.org/abs/2508.21536v2 (version-pinned arXiv abstract for v2)
 **Review date:** 2026-02-08
 
-**Version-pinning note (2026-05-25):** The current arXiv version of arXiv:2508.21536 is **v3**. The 2026-05-24 methodology promotion ships against this v2-pinned review; a formal v2-vs-v3 delta-check for TROP-relevant methodology changes (Eqs. 2-3, Algorithms 1-3, Section 2.2, Section 5.2-5.3, Section 6.1-6.2, Theorem 5.1, Corollary 1, Appendix Theorem 8.1) has NOT been performed. **Action item**: when the paper-author reference implementation lands (currently "forthcoming"), refresh this review against the most recent arXiv version and re-validate that the verified-component checklist still maps cleanly. Pending that refresh, the methodology promotion is anchored on v2 as documented here.
+**Version-pinning note (2026-05-25):** The current arXiv version of arXiv:2508.21536 is **v3** (submitted 2026-02-09, +4 KB vs v2). The 2026-05-24 methodology promotion ships against this v2-pinned review; a formal v2-vs-v3 delta-check for TROP-relevant methodology changes (Eqs. 2-3, Algorithms 1-3, Section 2.2, Section 5.2-5.3, Section 6.1-6.2, Theorem 5.1, Corollary 1, Appendix Theorem 8.1) has NOT been performed against the PDF.
+
+**Known v2→v3 structural change** (surfaced by CI codex during PR #491 review on 2026-05-25): v3 adds a `5.1.1 Conditions for exact unbiasedness` subsection that is not present in v2. This appears to be a restructuring of the existing Corollary 1 (three balance conditions → unbiasedness) material into its own subsection, not a methodological change to the conditions themselves. The Corollary 1 content (page 23 in v2) is what `TestTROPCorollary1Unbiasedness` exercises; if v3's 5.1.1 changes the underlying conditions (rather than only restructuring), the test may need to be revisited.
+
+**Action item**: when the paper-author reference implementation lands (currently "forthcoming"), refresh this review against the most recent arXiv version and re-validate that the verified-component checklist still maps cleanly — in particular, confirm v3 `5.1.1 Conditions for exact unbiasedness` is the same set of three balance conditions as v2's Corollary 1. Pending that refresh, the methodology promotion is anchored on v2 as documented here.
 
 ---
 
