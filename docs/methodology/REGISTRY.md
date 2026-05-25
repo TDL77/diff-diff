@@ -2250,7 +2250,6 @@ confidence bands (sup-t) for event study.
 
 *Assumption checks / warnings:*
 - Requires sufficient pre-treatment periods for factor estimation (at least 2)
-- Warns if estimated rank seems too high/low relative to panel dimensions
 - Unit weights can become degenerate if λ_unit too large
 - Returns Q(λ) = ∞ if ANY LOOCV fit fails (Equation 5 compliance)
 
@@ -2347,7 +2346,7 @@ Q(λ) = Σ_{j,s: D_js=0} [τ̂_js^loocv(λ)]²
 - Block bootstrap preserving panel structure (Algorithm 3)
 
 *Edge cases:*
-- Rank selection: automatic via cross-validation, information criterion, or elbow
+- Rank selection: implicit via nuclear-norm soft-thresholding (paper Section 5.3 + Appendix); `TROPResults.effective_rank` reports the diagnostic. No discrete `rank_selection` constructor parameter (cv / ic / elbow) is exposed — earlier prose claiming "automatic via cross-validation, information criterion, or elbow" was an overclaim, corrected in the 2026-05-24 methodology-promotion PR. See the Requirements checklist Rank-selection bullet below.
 - Zero singular values: handled by soft-thresholding
 - Extreme distances: weights regularized to prevent degeneracy
 - LOOCV fit failures: returns Q(λ) = ∞ on first failure (per Equation 5 requirement that Q sums over ALL control observations where D==0); if all parameter combinations fail, falls back to defaults (1.0, 1.0, 0.1)
@@ -2384,7 +2383,7 @@ Q(λ) = Σ_{j,s: D_js=0} [τ̂_js^loocv(λ)]²
 - [x] LOOCV implemented for tuning parameter selection
 - [x] LOOCV uses SUM of squared errors per Equation 5
 - [x] Rank selection implicit via nuclear-norm soft-thresholding (paper Section 5.3 + Appendix); `TROPResults.effective_rank` reports the diagnostic. No discrete `rank_selection` constructor parameter is exposed — earlier mention of "cv / ic / elbow" methods in this checklist was an overclaim, corrected in the methodology-promotion PR. Locked by `tests/test_methodology_trop.py::TestTROPDeviations::test_rank_selection_is_implicit_via_nuclear_norm`.
-- [x] Returns factor loadings and scores for interpretation
+- [x] Returns the fitted factor matrix and an effective-rank diagnostic (`TROPResults.factor_matrix` and `TROPResults.effective_rank`). The library does NOT expose separate factor-loading / factor-score outputs — earlier prose claiming "factor loadings and scores" was an overclaim corrected in the 2026-05-24 methodology-promotion PR (TROP's nuclear-norm soft-thresholded L is delivered as a single (n_periods × n_units) matrix, not decomposed into loading / score components on Results).
 - [x] ATT averages over all D==1 cells (general assignment patterns)
 - [x] No post_periods parameter (D matrix determines treatment timing)
 - [x] D matrix semantics documented (absorbing state, not event indicator)
