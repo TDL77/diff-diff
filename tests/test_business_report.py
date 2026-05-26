@@ -1242,7 +1242,7 @@ class TestHausmanFitFaithfulSkip:
 
 class TestHausmanPretestPropagatesCluster:
     """Round-11 regression: ``EfficientDiDResults`` now persists the
-    ``cluster`` column used at fit time, and ``_pt_hausman`` forwards
+    ``cluster_name`` column used at fit time, and ``_pt_hausman`` forwards
     it to ``EfficientDiD.hausman_pretest``. Without this, clustered
     fits would be replayed under unclustered inference, silently
     publishing an H statistic / p-value for the wrong design.
@@ -1266,7 +1266,7 @@ class TestHausmanPretestPropagatesCluster:
             first_treat="first_treat",
         )
         # Confirm persistence landed.
-        assert getattr(edid, "cluster", None) == "cluster_col"
+        assert getattr(edid, "cluster_name", None) == "cluster_col"
 
         captured: dict = {}
 

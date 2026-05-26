@@ -348,8 +348,9 @@ Sant'Anna 2021 for `CallawaySantAnna`; Borusyak-Jaravel-Spiess 2024 for
 This split is a structural property of the estimator's variance derivation,
 not a missing feature. The `vcov_type` input contract for IF-based estimators
 is **permanently narrow** at `{"hc1"}`. Enforced today on
-`CallawaySantAnna`, `TripleDifference`, and `ImputationDiD`; the same narrow
-contract is expected when `EfficientDiD` reaches `vcov_type` threading.
+`CallawaySantAnna`, `TripleDifference`, `ImputationDiD`, and `EfficientDiD`;
+the same narrow contract is expected when `TwoStageDiD` reaches `vcov_type`
+threading (sandwich + GMM-corrected meat; non-IF, so threading model differs).
 
 **Note:** This routing is a documented synthesis. The clustered-`hc1`
 activation path is estimator-specific: `CallawaySantAnna` synthesizes
@@ -358,9 +359,12 @@ PSU-meat machinery (`_compute_stratified_psu_meat`); `TripleDifference`
 computes the algebraically equivalent CR1 directly from cluster-summed
 IFs inline; `ImputationDiD` computes the Theorem 3 conservative variance
 (`sigma_sq = (cluster_psi_sums**2).sum()`) directly from per-cluster
-influence-function sums. The CR1 Liang-Zeger algebra on the IF is
-Williams (2000) / Hansen (2007) in all three cases — no new methodology
-is introduced.
+influence-function sums; `EfficientDiD` aggregates per-unit EIF within
+clusters, centers, and applies the standard `G/(G-1)` correction
+(`_cluster_aggregate` + `_compute_se_from_eif` at
+`diff_diff/efficient_did.py:79-127`). The CR1 Liang-Zeger algebra on the
+IF is Williams (2000) / Hansen (2007) in all four cases — no new
+methodology is introduced.
 
 ---
 
@@ -1050,6 +1054,9 @@ where `q_{g,e} = pi_g / sum_{g' in G_{trt,e}} pi_{g'}`.
 - **Note:** Cluster-robust SEs use the standard Liang-Zeger clustered sandwich estimator applied to EIF values: aggregate EIF within clusters, center, and compute variance with G/(G-1) small-sample correction. Cluster bootstrap generates multiplier weights at the cluster level (all units in a cluster share the same weight). Analytical clustered SEs are the default when `cluster` is set; cluster bootstrap is opt-in via `n_bootstrap > 0`.
 - **Note:** Hausman pretest operates on the post-treatment event-study vector ES(e) per Theorem A.1. Both PT-All and PT-Post fits are aggregated to ES(e) using cohort-size weights before computing the test statistic H = delta' V^{-1} delta where delta = ES_post - ES_all and V = Cov(ES_post) - Cov(ES_all). Covariance is computed from aggregated ES(e)-level EIF values. The variance-difference matrix V is inverted via Moore-Penrose pseudoinverse to handle finite-sample non-positive-definiteness. Effective rank of V (number of positive eigenvalues) is used as degrees of freedom.
 - **Note:** Last-cohort-as-control (`control_group="last_cohort"`) reclassifies the latest treatment cohort as pseudo-never-treated and drops time periods at `t >= last_g - anticipation`, excluding anticipation-contaminated periods from the pseudo-control's pre-treatment window. This is distinct from CallawaySantAnna's `not_yet_treated` option which dynamically selects not-yet-treated units per (g,t) pair.
+- **Note:** `vcov_type` is permanently narrow to `{"hc1"}` per the Chen-Sant'Anna-Xie (2025) EIF-based variance achieving the semiparametric efficiency bound. Analytical-sandwich families `{classical, hc2, hc2_bm}` are rejected at `__init__` — the per-unit EIF aggregation has no equivalent single design matrix on which hat-matrix leverage or Bell-McCaffrey Satterthwaite DOF can be defined. `cluster=` invokes Liang-Zeger CR1 on cluster-aggregated EIF (`_compute_se_from_eif` with `cluster_indices` at `diff_diff/efficient_did.py:124-127`); `survey_design=` invokes TSL on the combined IF (`_compute_survey_eif_se` at `diff_diff/efficient_did.py:1151-1176`). `vcov_type='conley'` deferred to the EfficientDiD Conley follow-up row in TODO.md.
+- **Note:** Default `cluster=None` (no survey design) renders summary label "HC1 heteroskedasticity-robust" because the per-unit EIF SE `sqrt(mean(EIF²)/n)` is methodologically HC1-style (no Liang-Zeger G/(G-1) finite-sample correction). `EfficientDiDResults.cluster_name` and `n_clusters` stay None under unclustered fits. This diverges from `ImputationDiD` which auto-clusters at unit per Borusyak-Jaravel-Spiess (2024) Theorem 3 — there the default summary renders the CR1 unit-clustered label.
+- **Note (deviation from sibling estimators):** `EfficientDiD.set_params(vcov_type=bad)` raises immediately rather than deferring to `fit()`. EfficientDiD's `set_params` calls `_validate_params()` which invokes `_validate_vcov_type`, matching the existing eager-validation pattern for `pt_assumption`, `control_group`, `bootstrap_weights`, etc. This is intentional — `ImputationDiD`/`TripleDifference`/`CallawaySantAnna` use sklearn mutate-then-validate-at-use, so the same set_params + bad vcov_type sequence is silently accepted there until `fit()` is called.
 
 ---
 

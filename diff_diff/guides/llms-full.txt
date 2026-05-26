@@ -790,6 +790,7 @@ EfficientDiD(
     pt_assumption: str = "all",              # "all" (overidentified) or "post" (just-identified)
     alpha: float = 0.05,
     cluster: str | None = None,              # Column name for cluster-robust SEs (Liang-Zeger on EIF values); cluster-level multiplier bootstrap when n_bootstrap > 0
+    vcov_type: str = "hc1",                  # {"hc1"} only — IF-based variance per Chen-Sant'Anna-Xie (2025); analytical-sandwich families {classical, hc2, hc2_bm} and conley rejected at __init__/set_params
     n_bootstrap: int = 0,                    # Multiplier bootstrap iterations
     bootstrap_weights: str = "rademacher",   # "rademacher", "mammen", or "webb"
     seed: int | None = None,
@@ -1281,13 +1282,13 @@ ImputationDiDResults, TwoStageDiDResults, StackedDiDResults, and EfficientDiDRes
 
 Each event study effect dict contains: `effect`, `se`, `t_stat`, `p_value`, `conf_int`, `n_obs` (or `n_groups`).
 
-**Variance metadata** (`ImputationDiDResults` carries these; other staggered Results may surface a subset):
+**Variance metadata** (`ImputationDiDResults` and `EfficientDiDResults` carry these; other staggered Results may surface a subset):
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `vcov_type` | `str` | Variance estimator family (`"hc1"` for IF-based estimators; permanently narrow on `ImputationDiD` / `CallawaySantAnna` / `TripleDifference` per IF-vs-sandwich taxonomy) |
-| `cluster_name` | `str | None` | Effective cluster column name (e.g. `"unit"` for default `cluster=None`); `None` under survey designs (the survey block already names PSU/strata) |
-| `n_clusters` | `int | None` | Number of effective clusters; `None` under survey designs |
+| `vcov_type` | `str` | Variance estimator family (`"hc1"` for IF-based estimators; permanently narrow on `ImputationDiD` / `CallawaySantAnna` / `TripleDifference` / `EfficientDiD` per IF-vs-sandwich taxonomy) |
+| `cluster_name` | `str | None` | Effective cluster column name (e.g. `"unit"` for default `cluster=None` on `ImputationDiD`; `None` for default on `EfficientDiD` since its per-unit EIF SE is HC1-style not CR1-at-unit); `None` under survey designs (the survey block already names PSU/strata) |
+| `n_clusters` | `int | None` | Number of effective clusters; `None` under survey designs and `None` under EfficientDiD's default unclustered fit |
 
 **Methods:** `summary()`, `print_summary()`, `to_dataframe()`, `to_dict()` (flat dict of headline aliases + `vcov_type` + conditional `cluster_name`/`n_clusters`/`n_bootstrap`/`inference_method`)
 

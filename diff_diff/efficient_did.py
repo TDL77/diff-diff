@@ -10,6 +10,16 @@ kernel-smoothed conditional Omega*(X) (see class docstring for caveats).
 Under PT-All the model is overidentified and EDiD exploits this for
 tighter inference; under PT-Post it reduces to the standard
 single-baseline estimator (Callaway-Sant'Anna).
+
+The variance machinery is purely influence-function-based: per-unit EIF
+values aggregate via ``sqrt(mean(EIF**2)/n)`` (unclustered, HC1-style),
+Liang-Zeger CR1 on cluster-aggregated EIF (under ``cluster=``), or
+Taylor Series Linearization on the combined IF (under ``survey_design=``).
+Because the per-unit EIF aggregation has no equivalent single design
+matrix, analytical-sandwich families ``{classical, hc2, hc2_bm}`` cannot
+be defined and the ``vcov_type`` input contract is permanently narrow to
+``{"hc1"}`` — see ``docs/methodology/REGISTRY.md`` "IF-based variance
+estimators vs analytical-sandwich estimators" for the structural rationale.
 """
 
 import warnings
@@ -158,6 +168,16 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         use the Liang-Zeger clustered sandwich estimator on EIF values.
         With ``n_bootstrap > 0``, bootstrap weights are generated at the
         cluster level (all units in a cluster share the same weight).
+    vcov_type : str, default ``"hc1"``
+        Variance-estimator family. Permanently narrow to ``{"hc1"}`` per
+        the Chen-Sant'Anna-Xie (2025) IF-based variance — analytical-sandwich
+        families ``{classical, hc2, hc2_bm}`` and ``conley`` are rejected
+        at ``__init__`` / ``set_params``. See REGISTRY.md for the
+        methodology rationale (no single design matrix on which hat-matrix
+        leverage or Bell-McCaffrey Satterthwaite DOF can be defined).
+        Use ``cluster=<col>`` for Liang-Zeger CR1 on cluster-aggregated EIF;
+        use ``survey_design=`` for Taylor Series Linearization on the
+        combined IF.
     control_group : str, default ``"never_treated"``
         Which units serve as the comparison group:
         ``"never_treated"`` requires a never-treated cohort (raises if
@@ -203,6 +223,7 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         pt_assumption: str = "all",
         alpha: float = 0.05,
         cluster: Optional[str] = None,
+        vcov_type: str = "hc1",
         control_group: str = "never_treated",
         n_bootstrap: int = 0,
         bootstrap_weights: str = "rademacher",
@@ -216,6 +237,7 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         self.pt_assumption = pt_assumption
         self.alpha = alpha
         self.cluster = cluster
+        self.vcov_type = vcov_type
         self.control_group = control_group
         self.n_bootstrap = n_bootstrap
         self.bootstrap_weights = bootstrap_weights
@@ -263,6 +285,50 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
                     f"sieve_k_max must be a positive integer (or None for auto), "
                     f"got {self.sieve_k_max}"
                 )
+        self._validate_vcov_type(self.vcov_type)
+
+    @staticmethod
+    def _validate_vcov_type(vcov_type: str) -> None:
+        """Validate ``vcov_type`` against EfficientDiD's narrow IF-based contract.
+
+        Permanently accepts ``{"hc1"}`` only — EfficientDiD uses
+        influence-function-based variance per Chen-Sant'Anna-Xie (2025) achieving
+        the semiparametric efficiency bound. The per-unit EIF aggregation has no
+        equivalent single design matrix, so analytical-sandwich families
+        (``classical``, ``hc2``, ``hc2_bm``) cannot be defined; ``conley`` is
+        deferred (see TODO.md). Mirrors the narrow-contract pattern in
+        :class:`ImputationDiD`, :class:`CallawaySantAnna`, and
+        :class:`TripleDifference`.
+        """
+        _accepted_vcov = {"hc1"}
+        _if_incompatible_vcov = {"classical", "hc2", "hc2_bm"}
+        _deferred_vcov = {"conley"}
+
+        if vcov_type in _if_incompatible_vcov:
+            raise ValueError(
+                f"EfficientDiD(vcov_type={vcov_type!r}) is rejected: "
+                f"EfficientDiD uses influence-function-based variance per Chen, "
+                f"Sant'Anna, and Xie (2025) achieving the semiparametric efficiency "
+                f"bound for ATT(g,t). The per-unit EIF aggregation has no equivalent "
+                f"single design matrix on which hat matrix leverage or Bell-McCaffrey "
+                f"Satterthwaite DOF can be defined, so analytical-sandwich families "
+                f"{{classical, hc2, hc2_bm}} are not paper-prescribed. Use "
+                f"vcov_type='hc1' (the default) with cluster=<col> for the "
+                f"Liang-Zeger clustered EIF sandwich estimator."
+            )
+        if vcov_type in _deferred_vcov:
+            raise ValueError(
+                f"EfficientDiD(vcov_type={vcov_type!r}) is not yet supported: "
+                f"spatial-HAC composition with EIF aggregation has no reference "
+                f"implementation today. See TODO.md for the deferred follow-up row. "
+                f"Use vcov_type='hc1' (the default) with cluster=<col> for "
+                f"cluster-robust inference."
+            )
+        if vcov_type not in _accepted_vcov:
+            raise ValueError(
+                f"EfficientDiD(vcov_type={vcov_type!r}) is invalid. "
+                f"Accepted: {sorted(_accepted_vcov)}."
+            )
 
     # -- sklearn compatibility ------------------------------------------------
 
@@ -273,6 +339,7 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
             "anticipation": self.anticipation,
             "alpha": self.alpha,
             "cluster": self.cluster,
+            "vcov_type": self.vcov_type,
             "control_group": self.control_group,
             "n_bootstrap": self.n_bootstrap,
             "bootstrap_weights": self.bootstrap_weights,
@@ -284,13 +351,30 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         }
 
     def set_params(self, **params: Any) -> "EfficientDiD":
-        """Set estimator parameters (sklearn-compatible)."""
-        for key, value in params.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-            else:
+        """Set estimator parameters (sklearn-compatible).
+
+        Atomic: snapshots the original attribute values before applying
+        mutations, validates the new state via ``_validate_params``, and
+        rolls every attribute back to its pre-call value if validation
+        raises. Without this, ``set_params(vcov_type="classical",
+        alpha=0.1)`` would leave ``self.vcov_type`` partially mutated
+        even though the call raised, defeating the eager-validation
+        contract for callers that catch ``ValueError`` and keep using
+        the estimator.
+        """
+        snapshot: Dict[str, Any] = {}
+        for key in params:
+            if not hasattr(self, key):
                 raise ValueError(f"Unknown parameter: {key}")
-        self._validate_params()
+            snapshot[key] = getattr(self, key)
+        for key, value in params.items():
+            setattr(self, key, value)
+        try:
+            self._validate_params()
+        except Exception:
+            for key, value in snapshot.items():
+                setattr(self, key, value)
+            raise
         return self
 
     # -- Main estimation ------------------------------------------------------
@@ -505,8 +589,6 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         # construction in _compute_survey_eif_se and ensures consistent
         # unit-level df for safe_inference t-distribution).
         if resolved_survey is not None:
-            from diff_diff.survey import ResolvedSurveyDesign
-
             row_idx = self._unit_first_panel_row
             unit_weights_s = resolved_survey.weights[row_idx]
             unit_strata = (
@@ -1096,7 +1178,22 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
             efficient_weights=stored_weights if stored_weights else None,
             omega_condition_numbers=stored_cond if stored_cond else None,
             control_group=self.control_group,
-            cluster=self.cluster,
+            # 2-branch cluster_name/n_clusters resolution: suppress under any
+            # survey design (analytical TSL or replicate); populate under bare
+            # ``cluster=``; default to None under unclustered, non-survey fits.
+            # The default per-unit EIF SE ``sqrt(mean(EIF^2)/n)`` is HC1-style
+            # (not auto-cluster-at-unit), so no third unit-default branch.
+            cluster_name=(
+                None
+                if resolved_survey is not None
+                else (self.cluster if self.cluster is not None else None)
+            ),
+            n_clusters=(
+                None
+                if resolved_survey is not None
+                else (n_clusters if self.cluster is not None else None)
+            ),
+            vcov_type=self.vcov_type,
             influence_functions=eif_by_gt if store_eif else None,
             bootstrap_results=bootstrap_results,
             estimation_path="dr" if use_covariates else "nocov",

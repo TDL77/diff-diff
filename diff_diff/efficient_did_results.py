@@ -105,6 +105,16 @@ class EfficientDiDResults:
         ``{(g, t): ndarray}`` — diagnostic: weight vector per target.
     omega_condition_numbers : dict, optional
         ``{(g, t): float}`` — diagnostic: Omega* condition numbers.
+    cluster_name : str or None
+        Cluster column used at fit time (None for unclustered fits;
+        suppressed under any survey design). Populated when ``cluster=``
+        is passed to :meth:`~EfficientDiD.fit`.
+    n_clusters : int or None
+        Number of clusters at fit time (None for unclustered or survey
+        fits). Renders as ``G=<n>`` in the variance-estimator summary line.
+    vcov_type : str
+        Variance-estimator family. Permanently ``"hc1"`` per the
+        Chen-Sant'Anna-Xie (2025) IF-based variance; see REGISTRY.md.
     influence_functions : dict, optional
         ``{(g, t): ndarray(n_units,)}`` — per-unit EIF values for each
         group-time cell.  Only populated when ``store_eif=True`` in
@@ -149,12 +159,19 @@ class EfficientDiDResults:
         default=None, repr=False
     )
     control_group: str = "never_treated"
-    # Cluster column used at fit time (None for unclustered fits). Persisted
-    # so downstream diagnostics — notably ``DiagnosticReport._pt_hausman`` —
-    # can replay the Hausman PT-All vs PT-Post pretest under the same
-    # clustering as the original estimate rather than silently producing
-    # unclustered p-values for a clustered fit.
-    cluster: Optional[str] = None
+    # Cluster column used at fit time (None for unclustered fits, suppressed
+    # under survey designs). Persisted so downstream diagnostics — notably
+    # ``DiagnosticReport._pt_hausman`` — can replay the Hausman PT-All vs
+    # PT-Post pretest under the same clustering as the original estimate
+    # rather than silently producing unclustered p-values for a clustered fit.
+    cluster_name: Optional[str] = None
+    # Number of clusters at fit time (None for unclustered fits, suppressed
+    # under survey designs). Used by the shared ``_format_vcov_label`` helper
+    # to render the ``G=<n>`` suffix on the variance-estimator summary line.
+    n_clusters: Optional[int] = None
+    # Variance-estimator family. Permanently narrow to ``{"hc1"}`` per the
+    # Chen-Sant'Anna-Xie (2025) EIF-based variance — see REGISTRY.md.
+    vcov_type: str = "hc1"
     influence_functions: Optional[Dict[Tuple[Any, Any], "np.ndarray"]] = field(
         default=None, repr=False
     )
@@ -230,7 +247,11 @@ class EfficientDiDResults:
             lines.append(f"{'Control group:':<30} {self.control_group:>10}")
         if self.anticipation > 0:
             lines.append(f"{'Anticipation periods:':<30} {self.anticipation:>10}")
-        if self.n_bootstrap > 0:
+        # Suppress the legacy ``Bootstrap:`` header when ``bootstrap_results``
+        # is present — the new variance/inference-method block below renders
+        # the canonical ``Inference method: bootstrap`` + ``Bootstrap
+        # replications:`` lines, so the old header would duplicate metadata.
+        if self.n_bootstrap > 0 and self.bootstrap_results is None:
             lines.append(f"{'Bootstrap:':<30} {self.n_bootstrap:>10} ({self.bootstrap_weights})")
         lines.append("")
 
@@ -238,6 +259,30 @@ class EfficientDiDResults:
         if self.survey_metadata is not None:
             sm = self.survey_metadata
             lines.extend(_format_survey_block(sm, 85))
+
+        # Variance-estimator / inference-method line. Bootstrap takes precedence
+        # over analytical because ``bootstrap_results`` overwrites SE/CI/p-value
+        # downstream; the analytical HC1/CR1 label would mislabel the reported
+        # numbers. Survey-fit summary block already covers TSL/replicate metadata
+        # so the variance line is suppressed under ``survey_metadata is not None``.
+        if self.bootstrap_results is not None:
+            lines.append(f"{'Inference method:':<30} {'bootstrap':>15}")
+            lines.append(
+                f"{'Bootstrap replications:':<30} {self.bootstrap_results.n_bootstrap:>15}"
+            )
+        elif self.survey_metadata is None:
+            from diff_diff.results import _format_vcov_label
+
+            vcov_label = _format_vcov_label(
+                self.vcov_type,
+                cluster_name=self.cluster_name,
+                n_clusters=self.n_clusters,
+                n_obs=self.n_obs,
+            )
+            if vcov_label:
+                lines.append(f"{'Variance estimator:':<30} {vcov_label:>15}")
+        if self.n_clusters is not None and self.bootstrap_results is None:
+            lines.append(f"{'Number of clusters:':<30} {self.n_clusters:>15}")
 
         # Overall ATT
         lines.extend(
@@ -383,6 +428,47 @@ class EfficientDiDResults:
             raise ValueError(
                 f"Unknown level: {level}. " "Use 'group_time', 'event_study', or 'group'."
             )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert headline results to a flat dictionary.
+
+        Mirrors :meth:`TripleDifferenceResults.to_dict` and
+        :meth:`ImputationDiDResults.to_dict` — surfaces variance metadata
+        (``vcov_type``, ``cluster_name``, ``n_clusters``, ``n_bootstrap``,
+        ``inference_method``) for external adapters that don't render
+        the full summary.
+        """
+        result: Dict[str, Any] = {
+            "att": self.overall_att,
+            "se": self.overall_se,
+            "t_stat": self.overall_t_stat,
+            "p_value": self.overall_p_value,
+            "conf_int_lower": self.overall_conf_int[0],
+            "conf_int_upper": self.overall_conf_int[1],
+            "n_obs": self.n_obs,
+            "n_treated_units": self.n_treated_units,
+            "n_control_units": self.n_control_units,
+            "alpha": self.alpha,
+            "pt_assumption": self.pt_assumption,
+            "estimation_path": self.estimation_path,
+            "vcov_type": self.vcov_type,
+        }
+        if self.cluster_name is not None:
+            result["cluster_name"] = self.cluster_name
+        if self.n_clusters is not None:
+            result["n_clusters"] = self.n_clusters
+        if self.bootstrap_results is not None:
+            # Mirror summary() gate exactly — bootstrap_results can be None
+            # even when n_bootstrap > 0 (e.g. empty eif_by_gt skips the path).
+            result["n_bootstrap"] = self.bootstrap_results.n_bootstrap
+            result["inference_method"] = "bootstrap"
+        elif self.survey_metadata is not None:
+            result["inference_method"] = "survey"
+        elif self.cluster_name is not None:
+            result["inference_method"] = "cluster_robust"
+        else:
+            result["inference_method"] = "heteroskedasticity_robust"
+        return result
 
     @property
     def is_significant(self) -> bool:

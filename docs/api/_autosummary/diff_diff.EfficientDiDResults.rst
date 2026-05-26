@@ -15,6 +15,7 @@
       ~EfficientDiDResults.print_summary
       ~EfficientDiDResults.summary
       ~EfficientDiDResults.to_dataframe
+      ~EfficientDiDResults.to_dict
 
 
 
@@ -28,7 +29,7 @@
       ~EfficientDiDResults.att
       ~EfficientDiDResults.bootstrap_results
       ~EfficientDiDResults.bootstrap_weights
-      ~EfficientDiDResults.cluster
+      ~EfficientDiDResults.cluster_name
       ~EfficientDiDResults.coef_var
       ~EfficientDiDResults.conf_int
       ~EfficientDiDResults.control_group
@@ -40,6 +41,7 @@
       ~EfficientDiDResults.is_significant
       ~EfficientDiDResults.kernel_bandwidth
       ~EfficientDiDResults.n_bootstrap
+      ~EfficientDiDResults.n_clusters
       ~EfficientDiDResults.omega_condition_numbers
       ~EfficientDiDResults.p_value
       ~EfficientDiDResults.pt_assumption
@@ -51,6 +53,7 @@
       ~EfficientDiDResults.significance_stars
       ~EfficientDiDResults.survey_metadata
       ~EfficientDiDResults.t_stat
+      ~EfficientDiDResults.vcov_type
       ~EfficientDiDResults.group_time_effects
       ~EfficientDiDResults.overall_att
       ~EfficientDiDResults.overall_se
