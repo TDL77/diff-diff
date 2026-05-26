@@ -247,7 +247,11 @@ class EfficientDiDResults:
             lines.append(f"{'Control group:':<30} {self.control_group:>10}")
         if self.anticipation > 0:
             lines.append(f"{'Anticipation periods:':<30} {self.anticipation:>10}")
-        if self.n_bootstrap > 0:
+        # Suppress the legacy ``Bootstrap:`` header when ``bootstrap_results``
+        # is present — the new variance/inference-method block below renders
+        # the canonical ``Inference method: bootstrap`` + ``Bootstrap
+        # replications:`` lines, so the old header would duplicate metadata.
+        if self.n_bootstrap > 0 and self.bootstrap_results is None:
             lines.append(f"{'Bootstrap:':<30} {self.n_bootstrap:>10} ({self.bootstrap_weights})")
         lines.append("")
 
