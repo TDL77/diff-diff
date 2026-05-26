@@ -316,8 +316,10 @@ and planned follow-up enhancements:
     pattern; the Conley cluster product kernel becomes a no-op after
     PSU aggregation.
   - The LinearRegression-side ``vcov_type="conley" + survey_design=``
-    gate at ``diff_diff/linalg.py`` is a separate Bertanha-Imbens 2014
-    weighted-Conley roadmap (not Wave E).
+    gate at ``diff_diff/linalg.py`` remains a separate roadmap (not Wave E)
+    — weighted spatial-HAC under probability sampling is an open
+    methodological question; no canonical extension of Conley (1999) exists
+    for the combination.
   - DiagnosticReport routing for ``SpilloverDiDResults(vcov_type="conley",
     survey_design=)`` is queued for a follow-up (the
     ``_APPLICABILITY`` / ``_PT_METHOD`` wiring must register the new

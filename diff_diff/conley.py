@@ -296,10 +296,14 @@ def _validate_conley_estimator_inputs(
         raise ValueError(f"Cluster column '{cluster}' not found in data")
     if survey_design is not None:
         raise NotImplementedError(
-            f"{estimator_name}(vcov_type='conley') + survey_design is a "
-            "follow-up (Bertanha-Imbens 2014 weighted-Conley). Drop "
-            "survey_design for cross-sectional Conley, or use vcov_type='hc1' "
-            "for survey-aware cluster-robust without spatial HAC."
+            f"{estimator_name}(vcov_type='conley') + survey_design is "
+            "deferred — weighted spatial-HAC under probability sampling "
+            "is an open methodological question; no canonical extension "
+            "of Conley (1999) exists for the combination. Drop "
+            "survey_design for unweighted Conley (cross-sectional or panel "
+            "block-decomposed via conley_lag_cutoff > 0), or use "
+            "vcov_type='hc1' for survey-aware cluster-robust without "
+            "spatial HAC."
         )
     if inference == "wild_bootstrap":
         raise NotImplementedError(
