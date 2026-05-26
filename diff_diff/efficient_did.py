@@ -351,13 +351,30 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         }
 
     def set_params(self, **params: Any) -> "EfficientDiD":
-        """Set estimator parameters (sklearn-compatible)."""
-        for key, value in params.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-            else:
+        """Set estimator parameters (sklearn-compatible).
+
+        Atomic: snapshots the original attribute values before applying
+        mutations, validates the new state via ``_validate_params``, and
+        rolls every attribute back to its pre-call value if validation
+        raises. Without this, ``set_params(vcov_type="classical",
+        alpha=0.1)`` would leave ``self.vcov_type`` partially mutated
+        even though the call raised, defeating the eager-validation
+        contract for callers that catch ``ValueError`` and keep using
+        the estimator.
+        """
+        snapshot: Dict[str, Any] = {}
+        for key in params:
+            if not hasattr(self, key):
                 raise ValueError(f"Unknown parameter: {key}")
-        self._validate_params()
+            snapshot[key] = getattr(self, key)
+        for key, value in params.items():
+            setattr(self, key, value)
+        try:
+            self._validate_params()
+        except Exception:
+            for key, value in snapshot.items():
+                setattr(self, key, value)
+            raise
         return self
 
     # -- Main estimation ------------------------------------------------------

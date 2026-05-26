@@ -2521,6 +2521,24 @@ class TestEfficientDiDVcovType:
         with pytest.raises(ValueError, match="hc4"):
             ed.set_params(vcov_type="hc4")
 
+    def test_set_params_rollback_on_validation_failure(self):
+        # set_params is atomic: when validation rejects a batched call, NO
+        # attribute mutation persists. Pre-fix, set_params assigned every
+        # kwarg before invoking _validate_params, so a rejected
+        # `set_params(vcov_type="classical", alpha=0.1, anticipation=2)`
+        # raised but left all three attributes mutated — weakening eager-
+        # validation for callers that catch ValueError and keep using the
+        # estimator.
+        ed = EfficientDiD()
+        original_vcov = ed.vcov_type
+        original_alpha = ed.alpha
+        original_anticipation = ed.anticipation
+        with pytest.raises(ValueError, match="influence-function"):
+            ed.set_params(vcov_type="classical", alpha=0.1, anticipation=2)
+        assert ed.vcov_type == original_vcov
+        assert ed.alpha == original_alpha
+        assert ed.anticipation == original_anticipation
+
     # ---- Surface 7: bootstrap n_psu<2 NaN propagation ---------------------
 
     def test_bootstrap_n_psu_less_than_2_returns_nan(self):
