@@ -88,7 +88,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 
 | Feature | Module | Reference | Status | Last Review |
 |---------|--------|-----------|--------|-------------|
-| ConleySpatialHAC | `conley.py`, `linalg.py` | `conleyreg` (R) / `acreg` (Stata) | **In Progress** | — |
+| ConleySpatialHAC | `conley.py`, `linalg.py` | `conleyreg` (R) / `acreg` (Stata) | **Complete** | 2026-05-26 |
 | Survey Data Support | `survey.py`, `bootstrap_utils.py` | `survey` package (R) | **In Progress** | — |
 
 **Status legend** (matches the contract in [§ What "Complete" means in this tracker](#what-complete-means-in-this-tracker) above):
@@ -1266,26 +1266,57 @@ These are not estimators but variance/inference plumbing used across many estima
 | Module | `conley.py`, `linalg.py` (`_validate_vcov_args`, kernel construction) |
 | Primary Reference | Conley (1999), *GMM Estimation with Cross-Sectional Dependence*, J. Econometrics 92(1), 1-45 |
 | Secondary References | Andrews (1991) HAC theory; Colella, Lalive, Sakalli & Thoenig (2019) for the Stata `acreg` parallel; Düsterhöft (2021) `conleyreg` (CRAN) parity target |
-| Status | **In Progress** |
-| Last Review | — |
+| Status | **Complete** |
+| Last Review | 2026-05-26 |
 
-**Documentation in place:**
-- REGISTRY.md section: `## ConleySpatialHAC` plus three sub-sections (combined spatial + cluster product kernel — Wave A #119; performance/scale — Wave A #120; callable `conley_metric` validation — Wave A #123)
-- **Paper review on file**: `docs/methodology/papers/conley-1999-review.md` (review date 2026-05-09); plus four adjacent paper reviews for the spillover initiative: `butts-2021-review.md`, `butts-2023-review.md` (JUE Insight), `clarke-2017-review.md`, `colella-et-al-2019-review.md`
-- Implementation: 162 tests in `tests/test_conley_vcov.py` (Phase 1 + Phase 2 space-time HAC)
-- Wired through `DifferenceInDifferences`, `MultiPeriodDiD`, `TwoWayFixedEffects` via `vcov_type="conley"` enum
+**Verified Components:**
+- [x] **Eq. 4.2 cross-sectional sandwich (pairwise-distance specialization)** `Var(β) = (X'X)^{-1} (Σ_{i,j} K(d_ij/h) X_i ε_i ε_j X_j') (X'X)^{-1}`. diff-diff implements the real-valued / pairwise-distance form (Conley 1999 Eq. 4.2 plus the "pairwise products at a given distance" remark on page 19); Eq. 3.13 is the lattice-indexed form reserved for grid coordinates — `tests/test_methodology_conley.py::TestConleyEquation42`
+- [x] **Eq. 4.2 limits**: tiny-cutoff → HC0 diagonal; huge-cutoff under uniform → rank-1 correlated limit; K(0) = 1 diagonal contribution always exact — `TestConleyHC0AndRank1Reductions`
+- [x] **Andrews (1991) HAC lag truncation** `(1 - |t-s|/(L+1))` for `0 < |t-s| ≤ L`, matching `conleyreg::time_dist.cpp`; lag 0 excluded to avoid double-counting — `TestConleyAndrewsLagTruncation`
+- [x] **Haversine convention**: Earth radius 6371.01 km matches `conleyreg::haversine_dist`; 1° lat = 111.195 km at equator — `TestConleyHaversineConvention`
+- [x] **Phase 2 panel block-decomposed sandwich** `XeeX = XeeX_spatial + XeeX_serial` matches `conleyreg::time_dist.cpp` at `atol=1e-12`; cluster time-invariance constraint validated on panel path — `TestConleyBlockDecomposition`
+- [x] **Wave A #120 sparse k-d-tree path** produces meat bit-identical to dense at `atol=1e-10` (chord-projection roundoff on haversine absorbed) — `TestConleySparseDenseEquivalence`
 
-**Documentation in place (R parity):**
-- R `conleyreg` goldens committed: `benchmarks/data/r_conleyreg_conley_golden.json`, generator `benchmarks/R/generate_conley_golden.R`
-- Cross-sectional R parity at `atol=1e-6`: `tests/test_conley_vcov.py::TestConleyParityR`
-- Panel (space-time) R parity at `atol=1e-6`: `TestConleyParitySpacetime` (dense path) and `TestConleySparseRParityForced` (sparse path forced)
-- Internal block-decomposition cross-check at machine precision (matches `conleyreg::time_dist.cpp`): `TestConleyParitySpacetime::test_panel_matches_block_decomposed_reference` (inner tolerance `atol=1e-12`)
+**Test Coverage:**
+- `tests/test_methodology_conley.py` (~1600 LoC; 10 paper-anchored / R-parity / deviations classes; 60 tests including 5 `@pytest.mark.slow`)
+- `tests/test_conley_vcov.py` (~3100 LoC remaining after extraction; 11 classes — defensive surface: input validation, NaN/inf guards, dispatch-level validity, estimator-level integration smoke tests, set_params atomicity, sparse-path activation thresholds + density-gate fallback)
 
-**Outstanding for promotion:**
-- Dedicated `tests/test_methodology_conley.py` with paper-equation-numbered Verified Components walk-through (Equation 8 score-covariance, Bartlett kernel, Andrews-style truncation) consolidating the parity tests into a methodology checklist
-- Summary R-parity table in this tracker (currently the parity results are scattered across class-level docstrings in `tests/test_conley_vcov.py`)
-- Document deviation: indefiniteness guard applied to both spatial and cluster kernels (vs. Bartlett's PSD property)
-- Resolution for the Phase 5 spillover-conley dependency on survey-weights interaction (currently raises `NotImplementedError` at the linalg validator)
+**R Comparison Results** (R `conleyreg` v0.1.9, Düsterhöft 2021):
+
+| Fixture | Surface | Tolerance | Test |
+|---------|---------|-----------|------|
+| `small_haversine` | Cross-sectional | `atol=1e-6`, `rtol=1e-6` | `TestConleyParityR::test_parity_small_haversine` |
+| `dense_haversine` | Cross-sectional | `atol=1e-6`, `rtol=1e-6` | `TestConleyParityR::test_parity_dense_haversine` |
+| `lat_lon_realistic` | Cross-sectional | `atol=1e-6`, `rtol=1e-6` | `TestConleyParityR::test_parity_lat_lon_realistic` |
+| `panel_haversine_lag1` | Panel (Phase 2) | `atol=1e-6`, `rtol=1e-6` | `TestConleyParityR::test_parity_panel_haversine_lag1` |
+| `panel_haversine_lag2` | Panel (Phase 2) | `atol=1e-6`, `rtol=1e-6` | `TestConleyParityR::test_parity_panel_haversine_lag2` |
+| `panel_lat_lon_realistic_lag1` | Panel (Phase 2) | `atol=1e-6`, `rtol=1e-6` | `TestConleyParityR::test_parity_panel_lat_lon_realistic_lag1` |
+| Sparse k-d-tree (forced) on cross-sectional fixtures | Cross-sectional | `atol=1e-6`, `rtol=1e-6` | `TestConleyParityR::test_sparse_forced_matches_r_cross_sectional` |
+| Internal block-decomposition cross-check | Phase 2 algebraic identity vs `conleyreg::time_dist.cpp` | `atol=1e-12` | `TestConleyBlockDecomposition::test_panel_matches_block_decomposed_reference` |
+| Time-asymmetric kernel literal-matching (spatial kernel does NOT propagate to temporal component) | Phase 2 contract | `atol=1e-10` | `TestConleyParityR::test_time_asymmetric_kernel_matches_r_literal` |
+
+Goldens at `benchmarks/data/r_conleyreg_conley_golden.json`; generator at `benchmarks/R/generate_conley_golden.R` (Earth radius 6371.01 km matches `conleyreg::haversine_dist`).
+
+**Corrections Made:**
+- **PR (this PR):** Closed Outstanding-for-promotion items via the new methodology test file (`tests/test_methodology_conley.py`), the inline R-parity summary table above, the consolidated deviations-area classes (`TestConleyLibraryExtensions` + `TestConleyDeviationsFromR` + `TestConleyDeferrals`), and the Phase 5 reframing.
+- **Cited-paper correction (this PR):** Stripped Bertanha-Imbens 2014 citation across 16 sites (`linalg.py` × 8, `conley.py` × 1, `llms-full.txt` × 2, `REGISTRY.md` × 4, `spillover.rst` × 1). NBER w20773 is *External Validity in Fuzzy Regression Discontinuity Designs* (JBES 2020), unrelated to weighted spatial-HAC. Replaced with: "weighted spatial-HAC under probability sampling is an open methodological question; no canonical extension of Conley (1999) exists for the combination." At REGISTRY sites the replacement is wrapped in the canonical `**Note (open methodological question):**` label per CLAUDE.md "Documenting Deviations (AI Review Compatibility)".
+
+**Deviations from the paper / from R / library extensions** (consolidated; see REGISTRY `## ConleySpatialHAC` § Note (deviation / source specialization) for full text):
+- **1-D radial Bartlett vs. paper's 2-D separable Eq. 3.14 PSD-guaranteed form** — practitioner specialization matching R `conleyreg`, Stata `acreg`, Hsiang (2010); not formally PSD-guaranteed. Indefiniteness guard at `-1e-12` applies to both spatial and cluster kernels (REGISTRY L3609). `TestConleyDeviationsFromR::test_1d_radial_bartlett_vs_2d_separable_eq314` + `TestConleyLibraryExtensions::test_indefiniteness_guard_fires_on_negative_eigenvalue`.
+- **Combined spatial + cluster product kernel** (Wave A #119, library extension; no R correspondence; two limit-fixture anchors): `K_total[i, j] = K_space(d_ij/h) · 1{c_i = c_j}`. Cluster time-invariance contract enforced on panel path. Anchor 1 (all-unique-clusters → HC0 diagonal): `TestConleyLibraryExtensions::test_combined_spatial_cluster_kernel_wave_a_119_all_unique`. Anchor 2 (huge-cutoff + uniform → CR1 without Liang-Zeger correction): `TestConleyLibraryExtensions::test_combined_spatial_cluster_kernel_wave_a_119_huge_cutoff`.
+- **Callable `conley_metric` validation** (Wave A #123, library extension; no R correspondence): 6 invariants checked (`(n,n)` shape, finite, non-negative, symmetric to `atol=1e-10`, zero diagonal, float64-castable). `TestConleyLibraryExtensions::test_callable_metric_validation_wave_a_123`.
+- **Sparse k-d-tree fast path** (Wave A #120, library extension; auto-activates at `n > 5,000` with Bartlett + haversine/euclidean; density gate at 30% falls back to dense). `TestConleyLibraryExtensions::test_sparse_kd_tree_activation_wave_a_120` (activation contract); `TestConleySparseDenseEquivalence` (numerical equivalence).
+- **Time-label normalization** via `np.unique(return_inverse=True)` (REGISTRY L3592-3603): diff-diff normalizes time labels to dense panel-period codes before lag computation; R `conleyreg` uses raw time values literally. diff-diff is the more robust default on non-dense encodings. `TestConleyDeviationsFromR::test_time_label_normalization_deviation_from_r`.
+- **Time-asymmetric kernel** (matches R `conleyreg` literal; library extension would be follow-up): R's `kernel` argument controls the spatial component only; the temporal kernel is unconditionally Bartlett. diff-diff matches this asymmetry exactly. Parity contract in `TestConleyParityR::test_time_asymmetric_kernel_matches_r_literal`; deferral in `TestConleyDeviationsFromR::test_independent_temporal_kernel_deferred`.
+
+**Outstanding Concerns:**
+- **Spillover-conley dependency: resolved.** SpilloverDiD ships Conley + survey via Wave E.1/E.2/E.3 (PR #468 / #474 / #482, stratified-Conley sandwich on PSU totals with within-PSU serial Bartlett HAC for `lag_cutoff > 0`); TwoStageDiD ships Wave E.3 parity (PR #485, `fdf2cebc`).
+- **Generic LinearRegression / DiD / MPD / TWFE + Conley + survey_design: deferred.** Two fail-closed contracts assert the unsupported combination: the estimator-level gate (DiD / MPD / TWFE) lives in `diff_diff/conley.py::_validate_conley_estimator_inputs` (`TestConleyDeferrals::test_did_mpd_twfe_survey_design_not_implemented`); the generic LinearRegression gate lives in `diff_diff/linalg.py::LinearRegression.fit` (`TestConleyDeferrals::test_linear_regression_survey_design_not_implemented`). The `survey_design=` surface is `LinearRegression` only; `compute_robust_vcov` does not accept `survey_design=`.
+- **Generic LinearRegression / compute_robust_vcov + Conley + `weights=`: deferred for any `weight_type` (`pweight` / `aweight` / `fweight`).** Weighted Conley is not implemented on the generic linalg surface. The `pweight` / `survey_design` subset additionally reflects an **open methodological question** — no canonical extension of Conley (1999) exists for weighted spatial-HAC under probability sampling. `TestConleyDeferrals::test_conley_plus_weights_not_implemented`.
+- **SyntheticDiD + Conley**: raises `TypeError`. SyntheticDiD uses bootstrap / jackknife / placebo variance, not the analytical sandwich. `TestConleyDeferrals::test_synthetic_did_conley_typeerror`.
+- **Wild bootstrap + Conley**: `NotImplementedError`. Wild bootstrap is a separate inference path that does not consume the analytical Conley sandwich (REGISTRY L3547). `TestConleyDeferrals::test_wild_bootstrap_conley_not_implemented`.
+- **No default bandwidth**: Conley 1999 doesn't propose a plug-in selector; REGISTRY recommends `(50, 100, 200, 500)` km sensitivity grid mirroring Conley 1999 § 5. `tests/test_conley_vcov.py::TestConleyValidatorHelpers::test_missing_cutoff_raises` enforces the fail-closed contract.
+- **DiagnosticReport routing** for `SpilloverDiDResults(vcov_type="conley", survey_design=)` is queued for a follow-up Wave F PR — `_APPLICABILITY` / `_PT_METHOD` registration is required before the new combination can be claimed consumable downstream.
 
 ---
 
@@ -1352,23 +1383,21 @@ whereas R's `did::att_gt` would error. This is a defensive enhancement that prov
 more graceful handling of edge cases while still signaling invalid inference to users.
 ```
 
-### Priority Order (2026-05-15)
+### Priority Order (2026-05-26)
 
 Promotion priority for the **In Progress** entries, ordered by what's blocked on substantive review work (top of list = needs review next) vs. consolidation pass (bottom of list = mostly tracker walk-through):
 
 **Substantive-review-blocked (no methodology test file, no paper review, no R parity):**
 
-1. **PreTrendsPower** — small surface, established R package (`pretrends`), Roth (2022) is short.
-2. **PowerAnalysis** — larger surface (MDE / power / sample size / simulation paths); REGISTRY already lists Bloom (1995) and Burlig et al. (2020) as primary sources; least urgent if the library's power-analysis utilities are not heavily used.
-3. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
-4. **EfficientDiD** — no paper review on file; substantial implementation work (`tests/test_efficient_did.py` + validation tests) needs paper-vs-code audit against Chen, Sant'Anna & Xie (2025).
-5. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
+1. **PowerAnalysis** — larger surface (MDE / power / sample size / simulation paths); REGISTRY already lists Bloom (1995) and Burlig et al. (2020) as primary sources; least urgent if the library's power-analysis utilities are not heavily used.
+2. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
+3. **EfficientDiD** — no paper review on file; substantial implementation work (`tests/test_efficient_did.py` + validation tests) needs paper-vs-code audit against Chen, Sant'Anna & Xie (2025).
+4. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
-6. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
-7. **ConleySpatialHAC** — paper review + committed R `conleyreg` goldens; needs dedicated methodology test file + summary R-parity table in this tracker.
-8. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
+5. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
+6. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
 
 ---
 

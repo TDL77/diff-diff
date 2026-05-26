@@ -553,8 +553,12 @@ def solve_ols(
           ``conley_lag_cutoff``. Combining with ``cluster_ids`` applies the
           combined spatial + cluster product kernel (a diff-diff convention;
           see :func:`compute_robust_vcov` for details). Combining with
-          ``weights`` raises ``NotImplementedError`` (Bertanha-Imbens 2014
-          weighted-Conley deferred to a follow-up PR).
+          ``weights`` raises ``NotImplementedError`` regardless of
+          ``weight_type``: weighted Conley is not implemented on the generic
+          linalg surface. For probability-sampling weights (``pweight`` /
+          ``survey_design``) the deferral additionally reflects an open
+          methodological question — no canonical extension of Conley (1999)
+          exists for weighted spatial-HAC under probability sampling.
     conley_coords : ndarray of shape (n, 2), optional
         Required when ``vcov_type="conley"``. Two-column array of
         ``[lat, lon]`` (degrees, for ``conley_metric="haversine"``) or
@@ -1119,13 +1123,16 @@ def _validate_vcov_args(
         combined with a ``vcov_type`` that is one-way only (``classical``,
         ``hc2``).
     NotImplementedError
-        If ``vcov_type == "conley"`` is combined with ``weights`` (the
-        Bertanha-Imbens 2014 weighted-Conley methodology is a separate
-        follow-up). NOT raised here for ``hc2_bm + weights``: that
-        weight-type contract is enforced downstream in
-        ``_compute_robust_vcov_numpy`` (which has access to ``weight_type``
-        and rejects ``aweight`` / ``fweight`` while routing ``pweight``
-        through the clubSandwich WLS-CR2 port).
+        If ``vcov_type == "conley"`` is combined with ``weights`` (regardless
+        of ``weight_type``: weighted Conley is not implemented on the
+        generic linalg surface). For ``pweight`` / probability-sampling
+        designs the deferral additionally reflects an open methodological
+        question — no canonical extension of Conley (1999) exists for
+        weighted spatial-HAC under probability sampling. NOT raised here for
+        ``hc2_bm + weights``: that weight-type contract is enforced
+        downstream in ``_compute_robust_vcov_numpy`` (which has access to
+        ``weight_type`` and rejects ``aweight`` / ``fweight`` while routing
+        ``pweight`` through the clubSandwich WLS-CR2 port).
     """
     if vcov_type not in _VALID_VCOV_TYPES:
         raise ValueError(
@@ -1154,14 +1161,23 @@ def _validate_vcov_args(
         # Conley + cluster_ids is now supported (combined spatial + cluster
         # product kernel; see ``docs/methodology/REGISTRY.md`` § ConleySpatialHAC
         # → "Combined spatial + cluster product kernel"). Conley + weights
-        # (Bertanha-Imbens 2014) is still deferred to a follow-up PR — the
-        # design-based weighted-Conley methodology requires its own
-        # treatment.
+        # remains deferred regardless of weight_type — weighted Conley is
+        # not implemented on the generic linalg surface; for probability-
+        # sampling weights the deferral additionally reflects an open
+        # methodological question with no canonical extension of Conley
+        # (1999) for the combination.
         if weights is not None:
             raise NotImplementedError(
-                "vcov_type='conley' with weights is a Phase 2+ follow-up "
-                "(Bertanha-Imbens 2014). Drop weights for cross-sectional "
-                "Conley, or use vcov_type='hc1' for weighted HC1."
+                "vcov_type='conley' with weights is not implemented on the "
+                "generic linalg surface (any weight_type — pweight, "
+                "aweight, or fweight). For probability-sampling weights "
+                "(pweight / survey_design), the deferral additionally "
+                "reflects an open methodological question: no canonical "
+                "extension of Conley (1999) exists for weighted spatial-"
+                "HAC under probability sampling. Drop weights for "
+                "unweighted Conley (cross-sectional or panel block-"
+                "decomposed via conley_lag_cutoff > 0), or use "
+                "vcov_type='hc1' for weighted HC1."
             )
 
 
@@ -1275,8 +1291,12 @@ def compute_robust_vcov(
       ``K_total[i, j] = K_space(d_ij/h) · 1{c_i = c_j}`` (Wave A #119; on
       the panel path the cluster must be constant within each unit across
       periods). Combining with ``weights`` still raises
-      ``NotImplementedError`` (Bertanha-Imbens 2014 weighted-Conley
-      deferred to a follow-up PR).
+      ``NotImplementedError`` regardless of ``weight_type`` (weighted
+      Conley is not implemented on the generic linalg surface); for
+      probability-sampling weights (``pweight`` / ``survey_design``) the
+      deferral additionally reflects an open methodological question, with
+      no canonical extension of Conley (1999) for weighted spatial-HAC
+      under probability sampling.
 
     Parameters
     ----------
@@ -2992,9 +3012,16 @@ class LinearRegression:
         a positive ``conley_cutoff_km``. Combining ``vcov_type="conley"``
         with ``cluster_ids`` applies the combined spatial + cluster product
         kernel (Wave A #119; cluster must be constant within each unit on
-        the panel path). Combining with ``weights`` / ``survey_design``
-        still raises ``NotImplementedError`` (Bertanha-Imbens 2014
-        weighted-Conley deferred to a follow-up PR). The DiD / MPD / TWFE
+        the panel path). Combining with ``weights`` raises
+        ``NotImplementedError`` regardless of ``weight_type`` (weighted
+        Conley is not implemented on the generic linalg surface);
+        combining with ``survey_design`` (``LinearRegression`` only;
+        ``compute_robust_vcov`` has no survey-design surface) likewise
+        raises ``NotImplementedError``. For probability-sampling weights
+        (``pweight`` / ``survey_design``) the deferral additionally
+        reflects an open methodological question, with no canonical
+        extension of Conley (1999) for weighted spatial-HAC under
+        probability sampling. The DiD / MPD / TWFE
         estimators all support panel Conley by passing ``unit`` at fit-time
         (DiD as a fit-time kwarg; MPD/TWFE via the existing ``unit``
         argument), threading ``conley_time`` / ``conley_unit`` into the
@@ -3232,16 +3259,22 @@ class LinearRegression:
         # is set to False on the solve_ols call), and the survey vcov path
         # would silently overwrite the result with a non-Conley variance
         # under a Conley request. Front-door the rejection here so the
-        # contract is enforced uniformly. Phase 5 (Bertanha-Imbens 2014
-        # weighted-Conley) will lift this; Phase 1 supports cross-sectional
-        # unweighted Conley only.
+        # contract is enforced uniformly. Weighted spatial-HAC under
+        # probability sampling is an open methodological question (no
+        # canonical extension of Conley (1999) exists for the combination);
+        # the generic LinearRegression / compute_robust_vcov path supports
+        # unweighted Conley only (cross-sectional or panel block-decomposed
+        # via conley_lag_cutoff > 0).
         if _fit_vcov_type == "conley" and _use_survey_vcov:
             raise NotImplementedError(
                 "LinearRegression(vcov_type='conley', survey_design=...) "
-                "is deferred to Phase 5 (Bertanha-Imbens 2014 weighted-"
-                "Conley). Phase 1 supports cross-sectional unweighted "
-                "Conley only via compute_robust_vcov / LinearRegression "
-                "without a survey design."
+                "is deferred — weighted spatial-HAC under probability "
+                "sampling is an open methodological question; no "
+                "canonical extension of Conley (1999) exists for the "
+                "combination. The generic LinearRegression / "
+                "compute_robust_vcov path supports unweighted Conley only "
+                "(cross-sectional or panel block-decomposed via "
+                "conley_lag_cutoff > 0) without a survey design."
             )
 
         # Resolve effective fit-time weights/weight_type WITHOUT mutating
