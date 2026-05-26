@@ -20,6 +20,7 @@ from diff_diff.efficient_did_results import EfficientDiDResults
 from diff_diff.efficient_did_weights import (
     enumerate_valid_triples,
 )
+from diff_diff.survey import SurveyDesign
 
 # =============================================================================
 # Helpers
@@ -2161,3 +2162,610 @@ class TestSievePartialKSkipWarning:
         assert (
             partial_skip_msgs == []
         ), f"Unexpected partial-skip warning on clean data: {partial_skip_msgs}"
+
+
+# =============================================================================
+# Phase 1b interstitial #4: vcov_type input contract on EfficientDiD
+# =============================================================================
+
+
+def _efficient_clustered_panel(
+    seed: int = 71,
+    n_units: int = 60,
+    n_periods: int = 6,
+    n_states: int = 8,
+) -> pd.DataFrame:
+    """Staggered-adoption panel with a ``state`` cluster column.
+
+    States carry random effects so ``cluster=state`` shifts the analytical
+    SE relative to the default ``cluster=None`` per-unit EIF SE.
+    """
+    rng = np.random.default_rng(seed)
+    units = np.repeat(np.arange(n_units), n_periods)
+    times = np.tile(np.arange(n_periods), n_units)
+
+    unit_to_state = rng.integers(0, n_states, size=n_units)
+    state = np.repeat(unit_to_state, n_periods)
+    state_re = rng.standard_normal(n_states) * 1.2
+
+    cohorts = np.array([2, 3, 4])
+    n_never = n_units // 2
+    n_treated = n_units - n_never
+    first_treat = np.zeros(n_units, dtype=int)
+    first_treat[n_never:] = cohorts[rng.integers(0, len(cohorts), size=n_treated)]
+    first_treat_expanded = np.repeat(first_treat, n_periods)
+
+    unit_fe = rng.standard_normal(n_units) * 1.2
+    time_fe = np.linspace(0, 0.5, n_periods)
+    unit_fe_expanded = np.repeat(unit_fe, n_periods)
+    time_fe_expanded = np.tile(time_fe, n_units)
+    state_fe_expanded = state_re[state]
+
+    post = (times >= first_treat_expanded) & (first_treat_expanded > 0)
+    outcome = (
+        unit_fe_expanded
+        + time_fe_expanded
+        + state_fe_expanded
+        + 1.5 * post
+        + rng.standard_normal(len(units)) * 0.4
+    )
+
+    return pd.DataFrame(
+        {
+            "unit": units,
+            "time": times,
+            "y": outcome,
+            "first_treat": first_treat_expanded,
+            "state": state,
+        }
+    )
+
+
+def _efficient_survey_panel(
+    seed: int = 71,
+    n_units: int = 80,
+    n_periods: int = 5,
+    n_psu: int = 16,
+    n_strata: int = 4,
+) -> pd.DataFrame:
+    """Staggered-adoption panel with analytical survey columns (pweight +
+    panel-constant PSU + stratum). Used for TSL-survey bit-equality tests."""
+    rng = np.random.default_rng(seed)
+    units = np.repeat(np.arange(n_units), n_periods)
+    times = np.tile(np.arange(n_periods), n_units)
+
+    unit_psu = rng.integers(0, n_psu, size=n_units)
+    psu = np.repeat(unit_psu, n_periods)
+    psu_to_stratum = rng.integers(0, n_strata, size=n_psu)
+    stratum = psu_to_stratum[psu]
+
+    cohorts = np.array([2, 3])
+    n_never = n_units // 2
+    n_treated = n_units - n_never
+    first_treat = np.zeros(n_units, dtype=int)
+    first_treat[n_never:] = cohorts[rng.integers(0, len(cohorts), size=n_treated)]
+    first_treat_expanded = np.repeat(first_treat, n_periods)
+
+    unit_fe = rng.standard_normal(n_units) * 1.0
+    time_fe = np.linspace(0, 0.4, n_periods)
+    unit_fe_expanded = np.repeat(unit_fe, n_periods)
+    time_fe_expanded = np.tile(time_fe, n_units)
+
+    post = (times >= first_treat_expanded) & (first_treat_expanded > 0)
+    outcome = (
+        unit_fe_expanded + time_fe_expanded + 1.2 * post + rng.standard_normal(len(units)) * 0.35
+    )
+
+    unit_weight = 1.0 + rng.exponential(0.3, n_units)
+    weight = np.repeat(unit_weight, n_periods)
+
+    return pd.DataFrame(
+        {
+            "unit": units,
+            "time": times,
+            "y": outcome,
+            "first_treat": first_treat_expanded,
+            "psu": psu,
+            "stratum": stratum,
+            "weight": weight,
+        }
+    )
+
+
+def _efficient_replicate_panel(
+    seed: int = 89, n_units: int = 40, n_periods: int = 5, n_rep: int = 8
+):
+    """Staggered-adoption panel with JK1 replicate-weight columns."""
+    rng = np.random.default_rng(seed)
+    units = np.repeat(np.arange(n_units), n_periods)
+    times = np.tile(np.arange(n_periods), n_units)
+
+    cohorts = np.array([2, 3])
+    n_never = n_units // 2
+    n_treated = n_units - n_never
+    first_treat = np.zeros(n_units, dtype=int)
+    first_treat[n_never:] = cohorts[rng.integers(0, len(cohorts), size=n_treated)]
+    first_treat_expanded = np.repeat(first_treat, n_periods)
+
+    unit_fe = rng.standard_normal(n_units) * 1.0
+    time_fe = np.linspace(0, 0.4, n_periods)
+    unit_fe_expanded = np.repeat(unit_fe, n_periods)
+    time_fe_expanded = np.tile(time_fe, n_units)
+
+    post = (times >= first_treat_expanded) & (first_treat_expanded > 0)
+    outcome = (
+        unit_fe_expanded + time_fe_expanded + 1.0 * post + rng.standard_normal(len(units)) * 0.4
+    )
+
+    unit_weight = 1.0 + rng.exponential(0.2, n_units)
+    weight = np.repeat(unit_weight, n_periods)
+
+    data = pd.DataFrame(
+        {
+            "unit": units,
+            "time": times,
+            "y": outcome,
+            "first_treat": first_treat_expanded,
+            "weight": weight,
+        }
+    )
+
+    units_per_rep = max(n_units // n_rep, 1)
+    rep_cols = []
+    for r in range(n_rep):
+        w_r = unit_weight.copy()
+        start = r * units_per_rep
+        end = min((r + 1) * units_per_rep, n_units)
+        w_r[start:end] = 0.0
+        nonzero = w_r > 0
+        w_r[nonzero] = w_r[nonzero] * n_rep / (n_rep - 1)
+        col = f"rep_{r}"
+        data[col] = np.repeat(w_r, n_periods)
+        rep_cols.append(col)
+    return data, rep_cols
+
+
+class TestEfficientDiDVcovType:
+    """Phase 1b interstitial #4: vcov_type input contract on EfficientDiD.
+
+    EfficientDiD uses IF-based variance per Chen-Sant'Anna-Xie (2025) achieving
+    the semiparametric efficiency bound; ``vcov_type`` is permanently narrow
+    to ``{"hc1"}``. Analytical-sandwich families ``{classical, hc2, hc2_bm}``
+    and ``conley`` are rejected at ``__init__`` / ``set_params`` with
+    methodology-rooted messages. Mirrors ImputationDiD PR #492 template.
+
+    Key divergence from ImputationDiD: default ``cluster=None`` SE is the
+    per-unit EIF SE ``sqrt(mean(EIF²)/n)`` — methodologically HC1-style
+    (NOT auto-cluster-at-unit). The summary label "HC1 heteroskedasticity-
+    robust" is methodologically correct here, and ``cluster_name``/``n_clusters``
+    stay None under unclustered fits.
+
+    7-surface matrix:
+      1. Default preserved bit-equally across all 4 aggregate modes
+      2. Cluster path preserved bit-equally across the same aggregate grid
+      3. TSL-survey path preserved bit-equally across the same aggregate grid
+      4. Replicate-survey path preserved bit-equally across the same aggregate grid
+      5. Bootstrap × cluster + bootstrap × survey bit-equal
+      6. set_params(vcov_type=bad) eager revalidation
+      7. Bootstrap n_psu<2 NaN propagation (defensive fix regression)
+
+    Plus 7 introspection tests, 5 input-rejection pins, the
+    ``cluster + replicate_weights`` rejection, and a DR-path bit-equality test.
+    """
+
+    # ---- Surface 1: default bit-equal across aggregation modes ------------
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group", "all"])
+    def test_default_hc1_bit_equal_baseline(self, aggregate):
+        data = _efficient_clustered_panel()
+        common = dict(
+            data=data,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate=aggregate,
+        )
+        r_default = EfficientDiD().fit(**common)
+        r_explicit = EfficientDiD(vcov_type="hc1").fit(**common)
+        assert r_default.overall_att == r_explicit.overall_att
+        assert r_default.overall_se == r_explicit.overall_se
+
+    # ---- Surface 2: cluster path bit-equal --------------------------------
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group", "all"])
+    def test_cluster_hc1_bit_equal_baseline(self, aggregate):
+        data = _efficient_clustered_panel()
+        common = dict(
+            data=data,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate=aggregate,
+        )
+        r_default = EfficientDiD(cluster="state").fit(**common)
+        r_explicit = EfficientDiD(cluster="state", vcov_type="hc1").fit(**common)
+        assert r_default.overall_att == r_explicit.overall_att
+        assert r_default.overall_se == r_explicit.overall_se
+
+    # ---- Surface 3: TSL-survey path bit-equal -----------------------------
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group", "all"])
+    def test_survey_tsl_hc1_bit_equal_baseline(self, aggregate):
+        data = _efficient_survey_panel()
+        design = SurveyDesign(weights="weight", psu="psu", strata="stratum", weight_type="pweight")
+        common = dict(
+            data=data,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate=aggregate,
+            survey_design=design,
+        )
+        r_default = EfficientDiD().fit(**common)
+        r_explicit = EfficientDiD(vcov_type="hc1").fit(**common)
+        assert r_default.overall_att == r_explicit.overall_att
+        assert r_default.overall_se == r_explicit.overall_se
+
+    # ---- Surface 4: replicate-survey path bit-equal -----------------------
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group", "all"])
+    def test_survey_replicate_hc1_bit_equal_baseline(self, aggregate):
+        data, rep_cols = _efficient_replicate_panel()
+        design = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            weight_type="pweight",
+        )
+        common = dict(
+            data=data,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+            aggregate=aggregate,
+        )
+        r_default = EfficientDiD().fit(**common)
+        r_explicit = EfficientDiD(vcov_type="hc1").fit(**common)
+        assert r_default.overall_att == r_explicit.overall_att
+        assert r_default.overall_se == r_explicit.overall_se
+        # Per-horizon / per-group SE override branches must also agree under
+        # the replicate-weight variance path.
+        if aggregate in ("event_study", "all"):
+            assert r_default.event_study_effects is not None
+            assert r_explicit.event_study_effects is not None
+            for h in r_default.event_study_effects:
+                assert (
+                    r_default.event_study_effects[h]["se"]
+                    == r_explicit.event_study_effects[h]["se"]
+                )
+        if aggregate in ("group", "all"):
+            assert r_default.group_effects is not None
+            assert r_explicit.group_effects is not None
+            for g in r_default.group_effects:
+                assert r_default.group_effects[g]["se"] == r_explicit.group_effects[g]["se"]
+
+    # ---- Surface 5: bootstrap × cluster / × survey bit-equal --------------
+
+    def test_bootstrap_cluster_hc1_bit_equal(self, ci_params):
+        data = _efficient_clustered_panel()
+        n_boot = ci_params.bootstrap(199)
+        common = dict(
+            data=data,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="all",
+        )
+        r_default = EfficientDiD(cluster="state", n_bootstrap=n_boot, seed=11).fit(**common)
+        r_explicit = EfficientDiD(
+            cluster="state", n_bootstrap=n_boot, seed=11, vcov_type="hc1"
+        ).fit(**common)
+        assert r_default.bootstrap_results is not None
+        assert r_explicit.bootstrap_results is not None
+        assert (
+            r_default.bootstrap_results.overall_att_se
+            == r_explicit.bootstrap_results.overall_att_se
+        )
+        # Per-horizon / per-group bootstrap SE override branches at
+        # efficient_did.py:1090-1115 must also agree.
+        assert r_default.bootstrap_results.event_study_ses is not None
+        assert r_explicit.bootstrap_results.event_study_ses is not None
+        for h, se in r_default.bootstrap_results.event_study_ses.items():
+            assert se == r_explicit.bootstrap_results.event_study_ses[h]
+        assert r_default.bootstrap_results.group_effect_ses is not None
+        assert r_explicit.bootstrap_results.group_effect_ses is not None
+        for g, se in r_default.bootstrap_results.group_effect_ses.items():
+            assert se == r_explicit.bootstrap_results.group_effect_ses[g]
+
+    def test_bootstrap_survey_hc1_bit_equal(self, ci_params):
+        data = _efficient_survey_panel()
+        design = SurveyDesign(weights="weight", psu="psu", strata="stratum", weight_type="pweight")
+        n_boot = ci_params.bootstrap(199)
+        common = dict(
+            data=data,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+            aggregate="all",
+        )
+        r_default = EfficientDiD(n_bootstrap=n_boot, seed=23).fit(**common)
+        r_explicit = EfficientDiD(n_bootstrap=n_boot, seed=23, vcov_type="hc1").fit(**common)
+        assert r_default.bootstrap_results is not None
+        assert r_explicit.bootstrap_results is not None
+        assert (
+            r_default.bootstrap_results.overall_att_se
+            == r_explicit.bootstrap_results.overall_att_se
+        )
+
+    # ---- Surface 6: set_params eager revalidation -------------------------
+
+    def test_set_params_bad_vcov_caught_immediately(self):
+        # EfficientDiD's set_params calls _validate_params (which now invokes
+        # _validate_vcov_type), so the check fires NOW (not at fit-time).
+        # This intentionally diverges from ImputationDiD/TripleDifference
+        # (which defer to fit-time per sklearn mutate-then-validate-at-use).
+        ed = EfficientDiD()
+        with pytest.raises(ValueError, match="influence-function"):
+            ed.set_params(vcov_type="classical")
+
+    def test_set_params_unknown_vcov_caught_immediately(self):
+        ed = EfficientDiD()
+        with pytest.raises(ValueError, match="hc4"):
+            ed.set_params(vcov_type="hc4")
+
+    # ---- Surface 7: bootstrap n_psu<2 NaN propagation ---------------------
+
+    def test_bootstrap_n_psu_less_than_2_returns_nan(self):
+        # Single-PSU survey design forces the survey-PSU bootstrap path to
+        # hit the n_psu<2 BLAS-roundoff guard. Survey weight_type must be
+        # pweight per EfficientDiD's survey contract.
+        data = _efficient_survey_panel(seed=42)
+        data["single_psu"] = 0
+        data["single_stratum"] = 0
+        design = SurveyDesign(
+            weights="weight",
+            psu="single_psu",
+            strata="single_stratum",
+            weight_type="pweight",
+        )
+        with pytest.warns(UserWarning, match="n_psu=1"):
+            results = EfficientDiD(n_bootstrap=199, seed=5).fit(
+                data,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+        assert results.bootstrap_results is not None
+        assert np.isnan(results.bootstrap_results.overall_att_se)
+        assert np.isnan(results.bootstrap_results.overall_att_p_value)
+        assert all(np.isnan(x) for x in results.bootstrap_results.overall_att_ci)
+        # Derived coef_var propagates NaN through the alias property.
+        assert np.isnan(results.coef_var)
+
+    # ---- DR (covariates) path bit-equal -----------------------------------
+
+    def test_dr_path_hc1_bit_equal(self):
+        # Doubly-robust (covariates=) path uses the same _eif_se / _aggregate_*
+        # variance funnel as the no-cov path — only EIF *construction* differs.
+        # Validates the variance machinery passes through the sieve/OLS DR path
+        # unchanged under explicit vcov_type="hc1".
+        data = make_compustat_dgp(seed=23, n_units=80, n_periods=5)
+        # Use one panel-constant synthetic covariate so DR path engages.
+        rng = np.random.default_rng(23)
+        n_units = data["unit"].nunique()
+        x1_per_unit = rng.standard_normal(n_units)
+        unit_to_x1 = dict(zip(sorted(data["unit"].unique()), x1_per_unit))
+        data = data.copy()
+        data["x1"] = data["unit"].map(unit_to_x1)
+        common = dict(
+            data=data,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            covariates=["x1"],
+            aggregate="event_study",
+        )
+        r_default = EfficientDiD().fit(**common)
+        r_explicit = EfficientDiD(vcov_type="hc1").fit(**common)
+        assert r_default.estimation_path == "dr"
+        assert r_explicit.estimation_path == "dr"
+        assert r_default.overall_att == r_explicit.overall_att
+        assert r_default.overall_se == r_explicit.overall_se
+
+    # ---- Input rejection: methodology-rooted messages ---------------------
+
+    @pytest.mark.parametrize(
+        "bad_vcov,keyword",
+        [
+            ("classical", "influence-function"),
+            ("hc2", "Chen"),
+            ("hc2_bm", "Bell-McCaffrey"),
+            ("hc2_bm", "hat matrix"),
+        ],
+    )
+    def test_reject_invalid_vcov_at_init(self, bad_vcov, keyword):
+        with pytest.raises(ValueError, match=keyword):
+            EfficientDiD(vcov_type=bad_vcov)
+
+    def test_reject_conley_at_init(self):
+        with pytest.raises(ValueError, match="spatial-HAC"):
+            EfficientDiD(vcov_type="conley")
+
+    def test_reject_unknown_vcov_at_init(self):
+        with pytest.raises(ValueError, match="hc4"):
+            EfficientDiD(vcov_type="hc4")
+
+    # ---- cluster + survey blanket rejection (covers replicate subset) -----
+
+    def test_cluster_plus_replicate_weights_rejected(self):
+        # cluster + survey_design is blanket-rejected at efficient_did.py:357,
+        # which transitively covers cluster + replicate_weights. Asserting
+        # via NotImplementedError on a JK1 replicate design.
+        data, rep_cols = _efficient_replicate_panel()
+        data["state"] = (data["unit"] // 4).astype(int)
+        design = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            weight_type="pweight",
+        )
+        with pytest.raises(NotImplementedError, match="cluster and survey_design"):
+            EfficientDiD(cluster="state").fit(
+                data,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    # ---- Introspection / safety-gate tests --------------------------------
+
+    def test_default_vcov_type_is_hc1(self):
+        assert EfficientDiD().vcov_type == "hc1"
+
+    def test_get_params_includes_vcov_type(self):
+        params = EfficientDiD().get_params()
+        assert "vcov_type" in params
+        assert params["vcov_type"] == "hc1"
+
+    def test_results_carries_vcov_type(self):
+        data = _efficient_clustered_panel()
+        r = EfficientDiD().fit(
+            data, outcome="y", unit="unit", time="time", first_treat="first_treat"
+        )
+        assert r.vcov_type == "hc1"
+
+    def test_to_dict_includes_vcov_type(self):
+        data = _efficient_clustered_panel()
+        r = EfficientDiD().fit(
+            data, outcome="y", unit="unit", time="time", first_treat="first_treat"
+        )
+        d = r.to_dict()
+        assert d["vcov_type"] == "hc1"
+        # Headline alias keys are present per the TripleDifference precedent.
+        for k in ("att", "se", "t_stat", "p_value", "conf_int_lower", "conf_int_upper"):
+            assert k in d
+        # Default unclustered fit → no cluster_name / n_clusters in dict.
+        assert "cluster_name" not in d
+        assert "n_clusters" not in d
+        assert d["inference_method"] == "heteroskedasticity_robust"
+
+    def test_to_dict_under_cluster(self):
+        data = _efficient_clustered_panel()
+        r = EfficientDiD(cluster="state").fit(
+            data, outcome="y", unit="unit", time="time", first_treat="first_treat"
+        )
+        d = r.to_dict()
+        assert d["cluster_name"] == "state"
+        assert d["n_clusters"] is not None and d["n_clusters"] > 1
+        assert d["inference_method"] == "cluster_robust"
+
+    def test_summary_includes_vcov_type_label_default(self):
+        # Default cluster=None (no survey, no bootstrap) → HC1 label, NOT CR1.
+        # This is methodologically correct for EfficientDiD: the per-unit EIF
+        # SE `sqrt(mean(EIF²)/n)` is HC1-style (no Liang-Zeger G/(G-1)
+        # finite-sample correction). Diverges from ImputationDiD (BJS Theorem 3
+        # auto-clusters at unit by construction).
+        data = _efficient_clustered_panel()
+        r = EfficientDiD().fit(
+            data, outcome="y", unit="unit", time="time", first_treat="first_treat"
+        )
+        text = r.summary()
+        assert "Variance estimator:" in text
+        assert "HC1 heteroskedasticity-robust" in text
+        # No CR1 cluster label under default cluster=None.
+        assert "CR1 cluster-robust" not in text
+        # Results metadata stays None under default fits (no auto-cluster-at-unit).
+        assert r.cluster_name is None
+        assert r.n_clusters is None
+
+    def test_summary_renders_cluster_label_under_cluster(self):
+        data = _efficient_clustered_panel()
+        r = EfficientDiD(cluster="state").fit(
+            data, outcome="y", unit="unit", time="time", first_treat="first_treat"
+        )
+        text = r.summary()
+        assert "Variance estimator:" in text
+        assert "CR1 cluster-robust" in text
+        assert "state" in text
+        assert "Number of clusters:" in text
+        assert r.cluster_name == "state"
+        assert r.n_clusters is not None and r.n_clusters > 1
+
+    def test_summary_suppresses_variance_label_under_bootstrap(self, ci_params):
+        # Under bootstrap fits, bootstrap_results overwrites SE/CI/p-value, so
+        # the analytical variance-family label would misstate the inference
+        # source. Mirror the canonical DiDResults gate at results.py:213-226.
+        data = _efficient_clustered_panel()
+        n_boot = ci_params.bootstrap(199)
+        r = EfficientDiD(n_bootstrap=n_boot, seed=7).fit(
+            data, outcome="y", unit="unit", time="time", first_treat="first_treat"
+        )
+        text = r.summary()
+        assert "Inference method:" in text
+        assert "bootstrap" in text
+        # Analytical variance-family label must be suppressed.
+        assert "Variance estimator:" not in text
+        assert "HC1 heteroskedasticity-robust" not in text
+        assert "CR1 cluster-robust" not in text
+
+    def test_cluster_name_suppressed_under_survey(self):
+        data = _efficient_survey_panel()
+        design = SurveyDesign(weights="weight", psu="psu", strata="stratum", weight_type="pweight")
+        r = EfficientDiD().fit(
+            data,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert r.cluster_name is None
+        assert r.n_clusters is None
+
+    def test_cluster_name_suppressed_under_replicate_survey(self):
+        # Replicate-weight survey designs have psu=None — gate must be on
+        # `resolved_survey is not None`, NOT `resolved_survey.psu is not None`.
+        # Mirror ImputationDiD R2 fix pattern.
+        data, rep_cols = _efficient_replicate_panel()
+        design = SurveyDesign(
+            weights="weight",
+            replicate_weights=rep_cols,
+            replicate_method="JK1",
+            weight_type="pweight",
+        )
+        r = EfficientDiD().fit(
+            data,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            survey_design=design,
+        )
+        assert r.cluster_name is None
+        assert r.n_clusters is None
+        text = r.summary()
+        assert "Number of clusters:" not in text
+        assert "CR1 cluster-robust" not in text
+
+    def test_fit_clone_idempotent_on_vcov_type(self):
+        data = _efficient_clustered_panel()
+        ed1 = EfficientDiD(vcov_type="hc1")
+        r1 = ed1.fit(data, outcome="y", unit="unit", time="time", first_treat="first_treat")
+        ed2 = EfficientDiD(**ed1.get_params())
+        r2 = ed2.fit(data, outcome="y", unit="unit", time="time", first_treat="first_treat")
+        assert r1.overall_att == r2.overall_att
+        assert r1.overall_se == r2.overall_se
+        assert r1.vcov_type == r2.vcov_type

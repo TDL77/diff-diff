@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added / Changed
+- **EfficientDiD `vcov_type` threading + Results metadata harmonization (Phase 1b interstitial #4, permanently narrow).** `EfficientDiD(vcov_type=...)` now accepts `{"hc1"}` only (default). Analytical-sandwich families `{classical, hc2, hc2_bm}` and `conley` are REJECTED at `__init__` / `set_params` with methodology-rooted messages — EfficientDiD uses influence-function-based variance per Chen-Sant'Anna-Xie (2025) achieving the semiparametric efficiency bound; the per-unit EIF aggregation has no single design matrix on which hat-matrix leverage or Bell-McCaffrey Satterthwaite DOF can be defined. `cluster=` (Liang-Zeger CR1 on cluster-aggregated EIF) and `survey_design=` (TSL on combined IF) paths are unchanged. **BC break on `EfficientDiDResults`:** the `cluster` field renamed to `cluster_name`; new `n_clusters` + `vcov_type` fields added; `to_dict()` method added (mirrors TripleDifferenceResults). `DiagnosticReport._pt_hausman` updated to read the renamed `cluster_name` field for the Hausman pretest replay (`diff_diff/diagnostic_report.py:2444`). `EfficientDiD.set_params(vcov_type=bad)` raises immediately rather than deferring to `fit()` — intentional eager-validation pattern matching EfficientDiD's existing handling of `pt_assumption`/`control_group` etc, diverging from `ImputationDiD`/`TripleDifference`/`CallawaySantAnna` (which use sklearn mutate-then-validate-at-use). Survey-PSU bootstrap path returns NaN SE when fewer than 2 independent PSUs are available (was ≈0 SE from BLAS roundoff). New summary block: `Variance estimator: <label>` line rendered after the survey block when not under bootstrap; suppressed under bootstrap (replaced with `Inference method: bootstrap` + `Bootstrap replications: <n>`). Default `cluster=None` (no survey) renders "HC1 heteroskedasticity-robust" — methodologically correct because the per-unit EIF SE `sqrt(mean(EIF²)/n)` is HC1-style (no Liang-Zeger G/(G-1) finite-sample correction); diverges from `ImputationDiD` which auto-clusters at unit per BJS Theorem 3.
+
 ## [3.4.2] - 2026-05-25
 
 ### Fixed

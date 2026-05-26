@@ -113,6 +113,28 @@ class EfficientDiDBootstrapMixin:
             psu_weights, psu_ids = _gen_survey_weights(
                 self.n_bootstrap, resolved_survey, self.bootstrap_weights, rng
             )
+            # Single-cluster (G<2) survey-PSU multiplier bootstrap collapses
+            # to constant multiplier draws → BLAS roundoff produces ≈0
+            # variance (NOT NaN). Downstream zero-SE guards check exact 0 and
+            # miss this. EfficientDiD's cluster path is already protected by
+            # ``_validate_and_build_cluster_mapping`` (n_clusters≥2 at fit-time)
+            # and the unit path is protected by the balanced-panel validator;
+            # only the survey-PSU branch reaches the bootstrap with <2 PSUs.
+            if len(psu_ids) < 2:
+                warnings.warn(
+                    f"Survey-PSU bootstrap with n_psu={len(psu_ids)} (<2 "
+                    "independent PSUs) produces degenerate variance from BLAS "
+                    "roundoff; returning NaN SE.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                return self._build_nan_bootstrap_results(
+                    group_time_effects,
+                    aggregate,
+                    balance_e,
+                    treatment_groups,
+                    cohort_fractions,
+                )
             # Build unit -> PSU column map
             if resolved_survey.psu is not None:
                 psu_id_to_col = {int(p): c for c, p in enumerate(psu_ids)}
@@ -239,7 +261,7 @@ class EfficientDiDBootstrapMixin:
                     bootstrap_event_study[e],
                     alpha=self.alpha,
                     context=f"event study (e={e})",
-                    )
+                )
                 es_ses[e] = se
                 es_cis[e] = ci
                 es_pvs[e] = pv
@@ -253,7 +275,7 @@ class EfficientDiDBootstrapMixin:
                     bootstrap_group[g],
                     alpha=self.alpha,
                     context=f"group effect (g={g})",
-                    )
+                )
                 g_ses[g] = se
                 g_cis[g] = ci
                 g_pvs[g] = pv
@@ -357,3 +379,71 @@ class EfficientDiDBootstrapMixin:
                 "effect": float(np.sum(w * effs)),
             }
         return result
+
+    def _build_nan_bootstrap_results(
+        self,
+        group_time_effects: Dict[Tuple[Any, Any], Dict[str, Any]],
+        aggregate: Optional[str],
+        balance_e: Optional[int],
+        treatment_groups: List[Any],
+        cohort_fractions: Dict[float, float],
+    ) -> EDiDBootstrapResults:
+        """Return an all-NaN ``EDiDBootstrapResults`` for degenerate bootstrap.
+
+        Used when survey-PSU bootstrap collapses to G<2 PSUs and would
+        otherwise produce ≈0 SE from BLAS roundoff. Each NaN dict is keyed
+        to the same (g,t)/event-time/group reductions the downstream
+        override loop at ``efficient_did.py:1078-1115`` expects, so the
+        override finds each key and overwrites analytical SE with NaN.
+        Setting these dicts to ``None`` instead would let the analytical
+        SE leak through, defeating the NaN-propagation contract; keying
+        an empty dict would silently no-op the override for every key.
+        ``event_study_ses``/``group_effect_ses`` are ``None`` (not empty)
+        when ``aggregate`` does not request them, matching the
+        ``is not None`` gates at ``efficient_did.py:1090, 1109``.
+        """
+        gt_pairs = list(group_time_effects.keys())
+        gt_ses: Dict[Tuple[Any, Any], float] = {gt: np.nan for gt in gt_pairs}
+        gt_cis: Dict[Tuple[Any, Any], Tuple[float, float]] = {
+            gt: (np.nan, np.nan) for gt in gt_pairs
+        }
+        gt_pvs: Dict[Tuple[Any, Any], float] = {gt: np.nan for gt in gt_pairs}
+
+        original_atts = np.array([group_time_effects[gt]["effect"] for gt in gt_pairs])
+
+        es_ses = es_cis = es_pvs = None
+        if aggregate in ("event_study", "all"):
+            es_info = self._prepare_es_agg_boot(
+                gt_pairs, original_atts, cohort_fractions, balance_e
+            )
+            if es_info:
+                es_ses = {e: np.nan for e in es_info.keys()}
+                es_cis = {e: (np.nan, np.nan) for e in es_info.keys()}
+                es_pvs = {e: np.nan for e in es_info.keys()}
+
+        g_ses = g_cis = g_pvs = None
+        if aggregate in ("group", "all"):
+            g_info = self._prepare_group_agg_boot(gt_pairs, original_atts, treatment_groups)
+            if g_info:
+                g_ses = {g: np.nan for g in g_info.keys()}
+                g_cis = {g: (np.nan, np.nan) for g in g_info.keys()}
+                g_pvs = {g: np.nan for g in g_info.keys()}
+
+        return EDiDBootstrapResults(
+            n_bootstrap=self.n_bootstrap,
+            weight_type=self.bootstrap_weights,
+            alpha=self.alpha,
+            overall_att_se=np.nan,
+            overall_att_ci=(np.nan, np.nan),
+            overall_att_p_value=np.nan,
+            group_time_ses=gt_ses,
+            group_time_cis=gt_cis,
+            group_time_p_values=gt_pvs,
+            event_study_ses=es_ses,
+            event_study_cis=es_cis,
+            event_study_p_values=es_pvs,
+            group_effect_ses=g_ses,
+            group_effect_cis=g_cis,
+            group_effect_p_values=g_pvs,
+            bootstrap_distribution=None,
+        )

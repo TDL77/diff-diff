@@ -2441,7 +2441,7 @@ class DiagnosticReport:
         fit_anticipation = getattr(r, "anticipation", None)
         if isinstance(fit_anticipation, (int, float)) and np.isfinite(fit_anticipation):
             hausman_kwargs["anticipation"] = int(fit_anticipation)
-        fit_cluster = getattr(r, "cluster", None)
+        fit_cluster = getattr(r, "cluster_name", None)
         if isinstance(fit_cluster, str) and fit_cluster:
             hausman_kwargs["cluster"] = fit_cluster
 
