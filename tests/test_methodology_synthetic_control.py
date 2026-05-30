@@ -314,6 +314,15 @@ def test_outer_v_nonconvergence_warning():
         )
 
 
+def test_n_starts_one_runs():
+    # n_starts=1 uses only the uniform start (short-circuits the heuristic candidates)
+    # and still produces a valid nested fit.
+    df, _, _ = _make_panel()
+    res = synthetic_control(df, "y", "treated", "unit", "year", seed=0, n_starts=1)
+    assert np.isfinite(res.att)
+    assert abs(sum(res.donor_weights.values()) - 1.0) < 1e-6
+
+
 def test_non_finite_outcome_rejected():
     df, years, T0 = _make_panel()
     df = df.copy()

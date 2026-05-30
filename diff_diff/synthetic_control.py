@@ -944,40 +944,50 @@ def _v_starts(
         theta = theta - np.mean(theta)
         return theta if np.all(np.isfinite(theta)) else None
 
+    # Candidates are generated lazily and we stop as soon as n_starts are collected,
+    # so a small n_starts does not pay for heuristic starts it would only discard. In
+    # particular n_starts=1 returns the uniform start without running the O(k) univariate
+    # inner-solve loop below. The candidate ORDER (uniform -> inverse-variance ->
+    # univariate-fit -> Dirichlet) is unchanged, so any given n_starts yields the same
+    # set as before — only unused work is skipped.
+    target = max(n_starts, 1)
     candidates: List[np.ndarray] = [np.zeros(k)]  # uniform V
 
     # inverse row variance of the standardized predictors over donors+treated
-    combined = np.column_stack([X0s, X1s.reshape(-1, 1)])
-    row_var = np.var(combined, axis=1, ddof=1)
-    inv_var = np.where(row_var > 0, 1.0 / np.maximum(row_var, 1e-12), 0.0)
-    if np.sum(inv_var) > 0:
-        t = _to_theta(inv_var / np.sum(inv_var))
-        if t is not None:
-            candidates.append(t)
+    if len(candidates) < target:
+        combined = np.column_stack([X0s, X1s.reshape(-1, 1)])
+        row_var = np.var(combined, axis=1, ddof=1)
+        inv_var = np.where(row_var > 0, 1.0 / np.maximum(row_var, 1e-12), 0.0)
+        if np.sum(inv_var) > 0:
+            t = _to_theta(inv_var / np.sum(inv_var))
+            if t is not None:
+                candidates.append(t)
 
-    # univariate-fit start: v_i ∝ 1 / (pre-outcome MSPE of W solved with V=e_i)
-    uni_mspe = np.empty(k)
-    for i in range(k):
-        e = np.zeros(k)
-        e[i] = 1.0
-        w_i, _ = _inner_solve_W(X1s, X0s, e, inner_max_iter, inner_min_decrease)
-        uni_mspe[i] = float(np.mean((Z1 - Z0 @ w_i) ** 2))
-    inv_mspe = np.where(uni_mspe > 0, 1.0 / np.maximum(uni_mspe, 1e-12), 0.0)
-    if np.sum(inv_mspe) > 0:
-        t = _to_theta(inv_mspe / np.sum(inv_mspe))
-        if t is not None:
-            candidates.append(t)
+    # univariate-fit start: v_i ∝ 1 / (pre-outcome MSPE of W solved with V=e_i).
+    # Skipped entirely when enough candidates are already collected (saves k inner solves).
+    if len(candidates) < target:
+        uni_mspe = np.empty(k)
+        for i in range(k):
+            e = np.zeros(k)
+            e[i] = 1.0
+            w_i, _ = _inner_solve_W(X1s, X0s, e, inner_max_iter, inner_min_decrease)
+            uni_mspe[i] = float(np.mean((Z1 - Z0 @ w_i) ** 2))
+        inv_mspe = np.where(uni_mspe > 0, 1.0 / np.maximum(uni_mspe, 1e-12), 0.0)
+        if np.sum(inv_mspe) > 0:
+            t = _to_theta(inv_mspe / np.sum(inv_mspe))
+            if t is not None:
+                candidates.append(t)
 
     # random Dirichlet draws to reach n_starts (bounded attempts as a backstop)
     attempts = 0
     max_attempts = 10 * n_starts + 20
-    while len(candidates) < n_starts and attempts < max_attempts:
+    while len(candidates) < target and attempts < max_attempts:
         attempts += 1
         t = _to_theta(rng.dirichlet(np.ones(k)))
         if t is not None:
             candidates.append(t)
 
-    return candidates[: max(n_starts, 1)]
+    return candidates[:target]
 
 
 def _outer_solve_V(
