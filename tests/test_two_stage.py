@@ -2190,3 +2190,36 @@ class TestTwoStageDiDVcovType:
             )
         assert np.isnan(r.overall_se)
         assert np.isnan(r.bootstrap_results.overall_att_se)
+
+    # ---- metadata reflects the post-drop fit sample (codex P2) ----
+
+    def test_n_clusters_reflects_post_drop_fit_sample(self):
+        """Always-treated units are dropped before estimation, so reported
+        n_clusters must equal the POST-DROP effective cluster count the GMM
+        sandwich uses (cluster_ids = df[cluster_var] on the post-drop df), not
+        the full-input cluster count. Regression for the codex P2 metadata bug.
+        """
+        # Restrict to time >= 3 so the first_treat=3 cohort becomes
+        # always-treated (treated in every observed period) and is dropped.
+        data = generate_test_data(n_units=80, seed=20)
+        data = data[data["time"] >= 3].copy()
+        first_by_unit = data.groupby("unit")["first_treat"].first()
+        min_t = data["time"].min()
+        always_treated = first_by_unit[(first_by_unit > 0) & (first_by_unit <= min_t)].index
+        assert len(always_treated) > 0, "fixture should contain always-treated units"
+        full_units = data["unit"].nunique()
+        expected_g = full_units - len(always_treated)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r = TwoStageDiD().fit(
+                data, outcome="outcome", unit="unit", time="time", first_treat="first_treat"
+            )
+        assert r.cluster_name == "unit"
+        assert r.n_clusters == expected_g, (
+            f"n_clusters should be the post-drop count {expected_g}, "
+            f"got {r.n_clusters} (full input has {full_units})"
+        )
+        assert r.n_clusters < full_units  # would equal full_units under the bug
+        # to_dict mirrors the corrected count
+        assert r.to_dict()["n_clusters"] == expected_g

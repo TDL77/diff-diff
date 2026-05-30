@@ -2067,20 +2067,27 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         # Resolve cluster_name / n_clusters for Results metadata. Suppress under
         # ANY survey design (the summary survey block already reports the
         # design's PSU/strata/replicate metadata; replicate-weight variance
-        # ignores cluster entirely). Otherwise:
-        #   bare cluster= -> the user-named cluster column
-        #   cluster=None  -> the Gardner GMM sandwich still clusters at the unit
-        #                    column by default (cluster_var = unit above), so the
-        #                    summary label reports unit-cluster CR1, not HC1.
+        # ignores cluster entirely). Otherwise count clusters on the POST-DROP
+        # fit sample `df` (always-treated units were removed above at the
+        # `df = df[~df[unit].isin(always_treated_units)]` step), NOT the full
+        # input `data`: the GMM sandwich computes variance over
+        # `cluster_ids=df[cluster_var].values` (see the `_compute_gmm_variance`
+        # call sites), so the reported G must match that effective count — using
+        # `data` would overstate the clusters the SE is actually based on when an
+        # always-treated unit/cluster is excluded. Branches:
+        #   bare cluster= -> the user-named cluster column (df[self.cluster])
+        #   cluster=None  -> the Gardner GMM sandwich clusters at `unit` by
+        #                    default (cluster_var = unit above), so the summary
+        #                    label reports unit-cluster CR1, not HC1.
         if resolved_survey is not None:
             _cluster_name_for_results: Optional[str] = None
             _n_clusters_for_results: Optional[int] = None
         elif self.cluster is not None:
             _cluster_name_for_results = self.cluster
-            _n_clusters_for_results = int(data[self.cluster].nunique())
+            _n_clusters_for_results = int(df[self.cluster].nunique())
         else:
             _cluster_name_for_results = unit
-            _n_clusters_for_results = int(data[unit].nunique())
+            _n_clusters_for_results = int(df[unit].nunique())
 
         # Construct results
         self.results_ = TwoStageDiDResults(
