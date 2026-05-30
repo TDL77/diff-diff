@@ -416,6 +416,25 @@ def test_poor_fit_warning():
         synthetic_control(df, "y", "treated", "unit", "year", seed=0)
 
 
+def test_poor_fit_warning_flat_treated_pre_path():
+    # Flat treated pre-path (SD == 0) that donors near 10 cannot reproduce: RMSPE > 0
+    # must still warn (the former `pre_sd > 0` gate suppressed this case).
+    rng = np.random.default_rng(2)
+    years = list(range(2000, 2010))
+    T0 = 7
+    rows = []
+    for j in range(4):
+        for yr in years:
+            rows.append({"unit": f"d{j}", "year": yr, "y": 10 + rng.normal(0, 0.1), "treated": 0})
+    for i, yr in enumerate(years):
+        rows.append(
+            {"unit": "treated", "year": yr, "y": (5.0 if i < T0 else 8.0), "treated": int(i >= T0)}
+        )
+    df = pd.DataFrame(rows)
+    with pytest.warns(UserWarning, match="Pre-treatment fit is poor"):
+        synthetic_control(df, "y", "treated", "unit", "year", seed=0)
+
+
 # ---------------------------------------------------------------------------
 # Validation 7: duplicate predictor labels rejected
 # ---------------------------------------------------------------------------

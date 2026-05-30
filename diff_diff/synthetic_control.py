@@ -424,9 +424,14 @@ class SyntheticControl:
         pre_rmspe = float(np.sqrt(np.mean(pre_gaps**2)))
         att = float(np.mean(post_gaps))
 
-        # Poor-fit warning (REGISTRY contract; mirrors synthetic_did.py).
+        # Poor-fit warning (REGISTRY contract: warn when pre-RMSPE exceeds the SD of
+        # the treated unit's pre-period outcomes). This includes a FLAT treated pre-path
+        # (pre_sd == 0): any non-trivial RMSPE then means the synthetic cannot reproduce
+        # a constant series. A scale-aware absolute floor (`_fit_tol`) guards against a
+        # spurious warning on a near-perfect flat fit (RMSPE ~ roundoff).
         pre_sd = float(np.std(Z1, ddof=1)) if Z1.size > 1 else 0.0
-        if pre_sd > 0 and pre_rmspe > pre_sd:
+        _fit_tol = 1e-8 * max(float(np.max(np.abs(Z1))) if Z1.size else 0.0, 1.0)
+        if pre_rmspe > pre_sd and pre_rmspe > _fit_tol:
             warnings.warn(
                 f"Pre-treatment fit is poor: RMSPE ({pre_rmspe:.4f}) exceeds the "
                 f"standard deviation of treated pre-treatment outcomes ({pre_sd:.4f}). "
