@@ -406,6 +406,8 @@ class SyntheticControl:
             converged = True
         else:
             v, w, converged, mspe_v = _outer_solve_V(
+                X1,
+                X0,
                 X1s,
                 X0s,
                 Z1,
@@ -913,6 +915,8 @@ def _inner_solve_W(
 
 def _v_starts(
     k: int,
+    X1: np.ndarray,
+    X0: np.ndarray,
     X1s: np.ndarray,
     X0s: np.ndarray,
     Z1: np.ndarray,
@@ -922,11 +926,14 @@ def _v_starts(
     inner_max_iter: int,
     inner_min_decrease: float,
 ) -> List[np.ndarray]:
-    """Build a list of starting ``theta`` vectors for the outer V search.
+    """Build a list of DISTINCT starting ``theta`` vectors for the outer V search.
 
-    Heuristic starts: uniform V; inverse-row-variance V; univariate-fit V
+    Heuristic starts: uniform V; inverse-row-variance V (computed from the
+    UNSTANDARDIZED predictors ``X1``/``X0`` — on the standardized rows every variance
+    is 1 by construction, so it would collapse to the uniform start); univariate-fit V
     (v_i ∝ 1/MSPE_i from solving with mass concentrated on predictor i). Remaining
-    starts are random Dirichlet draws. Non-finite candidates are dropped
+    starts are random Dirichlet draws. Candidates are de-duplicated so the multistart
+    never runs the same Nelder-Mead seed twice; non-finite candidates are dropped
     (validation 10); uniform is always retained.
     """
 
@@ -944,24 +951,28 @@ def _v_starts(
         theta = theta - np.mean(theta)
         return theta if np.all(np.isfinite(theta)) else None
 
-    # Candidates are generated lazily and we stop as soon as n_starts are collected,
-    # so a small n_starts does not pay for heuristic starts it would only discard. In
-    # particular n_starts=1 returns the uniform start without running the O(k) univariate
-    # inner-solve loop below. The candidate ORDER (uniform -> inverse-variance ->
-    # univariate-fit -> Dirichlet) is unchanged, so any given n_starts yields the same
-    # set as before — only unused work is skipped.
+    def _add_unique(t: Optional[np.ndarray], pool: List[np.ndarray]) -> None:
+        # Append only DISTINCT, finite candidates so the multistart never runs the same
+        # Nelder-Mead seed twice (codex: a degenerate heuristic must not waste a start).
+        if t is not None and not any(np.allclose(t, e, atol=1e-9) for e in pool):
+            pool.append(t)
+
+    # Candidates are generated lazily and we stop as soon as `target` DISTINCT starts are
+    # collected, so a small n_starts does not pay for heuristic starts it would only
+    # discard. In particular n_starts=1 returns the uniform start without running the
+    # O(k) univariate inner-solve loop below.
     target = max(n_starts, 1)
     candidates: List[np.ndarray] = [np.zeros(k)]  # uniform V
 
-    # inverse row variance of the standardized predictors over donors+treated
+    # inverse row variance of the UNSTANDARDIZED predictors over donors+treated.
+    # (On the standardized rows every variance is ~1, so this would collapse to the
+    # uniform start — using the raw scales makes it a genuinely different seed.)
     if len(candidates) < target:
-        combined = np.column_stack([X0s, X1s.reshape(-1, 1)])
+        combined = np.column_stack([X0, X1.reshape(-1, 1)])
         row_var = np.var(combined, axis=1, ddof=1)
         inv_var = np.where(row_var > 0, 1.0 / np.maximum(row_var, 1e-12), 0.0)
         if np.sum(inv_var) > 0:
-            t = _to_theta(inv_var / np.sum(inv_var))
-            if t is not None:
-                candidates.append(t)
+            _add_unique(_to_theta(inv_var / np.sum(inv_var)), candidates)
 
     # univariate-fit start: v_i ∝ 1 / (pre-outcome MSPE of W solved with V=e_i).
     # Skipped entirely when enough candidates are already collected (saves k inner solves).
@@ -974,23 +985,21 @@ def _v_starts(
             uni_mspe[i] = float(np.mean((Z1 - Z0 @ w_i) ** 2))
         inv_mspe = np.where(uni_mspe > 0, 1.0 / np.maximum(uni_mspe, 1e-12), 0.0)
         if np.sum(inv_mspe) > 0:
-            t = _to_theta(inv_mspe / np.sum(inv_mspe))
-            if t is not None:
-                candidates.append(t)
+            _add_unique(_to_theta(inv_mspe / np.sum(inv_mspe)), candidates)
 
-    # random Dirichlet draws to reach n_starts (bounded attempts as a backstop)
+    # random Dirichlet draws to fill the remaining slots with DISTINCT starts
     attempts = 0
-    max_attempts = 10 * n_starts + 20
+    max_attempts = 20 * n_starts + 20
     while len(candidates) < target and attempts < max_attempts:
         attempts += 1
-        t = _to_theta(rng.dirichlet(np.ones(k)))
-        if t is not None:
-            candidates.append(t)
+        _add_unique(_to_theta(rng.dirichlet(np.ones(k))), candidates)
 
     return candidates[:target]
 
 
 def _outer_solve_V(
+    X1: np.ndarray,
+    X0: np.ndarray,
     X1s: np.ndarray,
     X0s: np.ndarray,
     Z1: np.ndarray,
@@ -1029,7 +1038,9 @@ def _outer_solve_V(
         powell_options["ftol"] = powell_options.pop("fatol")
 
     rng = np.random.default_rng(seed)
-    starts = _v_starts(k, X1s, X0s, Z1, Z0, n_starts, rng, inner_max_iter, inner_min_decrease)
+    starts = _v_starts(
+        k, X1, X0, X1s, X0s, Z1, Z0, n_starts, rng, inner_max_iter, inner_min_decrease
+    )
 
     best_x: np.ndarray = starts[0]
     best_fun = np.inf
