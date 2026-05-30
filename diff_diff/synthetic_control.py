@@ -294,6 +294,18 @@ class SyntheticControl:
         if missing:
             raise ValueError(f"Missing columns: {missing}")
 
+        # Reject missing structural values up front: a NaN treatment status would be
+        # silently dropped by groupby(...).max() (a partially-missing donor history
+        # could be misclassified as never-treated), and NaN unit/time break the panel
+        # structure. Done BEFORE classification so donor-pool composition is honest.
+        for col in (treatment, unit, time):
+            if bool(data[col].isna().to_numpy().any()):
+                raise ValueError(
+                    f"Column {col!r} contains missing (NaN) values; treatment, unit, and "
+                    "time must be fully observed (a missing treatment status would "
+                    "silently change donor classification)."
+                )
+
         # Validate the treatment indicator on the FULL input BEFORE classifying
         # units: a non-{0,1} history would otherwise be silently dropped from both
         # the treated and never-treated sets by _resolve_treated_and_donors, quietly

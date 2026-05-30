@@ -171,6 +171,23 @@ def test_non_binary_treatment_rejected():
         synthetic_control(df, "y", "treated", "unit", "year", seed=0)
 
 
+def test_missing_treatment_value_rejected():
+    # A donor with a missing treatment cell would be silently classified by
+    # groupby(...).max() (NaN dropped) — must fail closed before classification.
+    df, years, T0 = _make_panel()
+    df = df.copy()
+    df.loc[(df["unit"] == "d0") & (df["year"] == years[0]), "treated"] = np.nan
+    with pytest.raises(ValueError, match="missing"):
+        synthetic_control(df, "y", "treated", "unit", "year", seed=0)
+
+
+def test_estimators_module_reexport():
+    # Backward-compat import surface (mirrors SyntheticDiD / TwoWayFixedEffects).
+    from diff_diff.estimators import SyntheticControl as SC
+
+    assert SC is SyntheticControl
+
+
 # ---------------------------------------------------------------------------
 # Validation 3 + 9: explicit post canonicalized; gap path order-independent
 # ---------------------------------------------------------------------------
