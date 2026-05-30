@@ -102,6 +102,19 @@ def _detect_rank_deficiency(
     are linearly dependent. The pivoting ensures we drop the "least important"
     columns (those with smallest contribution to the column space).
 
+    Rank detection is scale-invariant. A raw pivoted QR runs first; if the design
+    is genuinely rank-deficient (the deficiency persists under equilibration) its
+    raw pivot selects which columns to drop, preserving the established drop
+    order. But if the raw deficiency DISAPPEARS once columns are equilibrated to
+    unit 2-norm (a scale artifact), the higher equilibrated rank and its pivot
+    selection are used instead. This repairs the case where a column on a large
+    raw scale (e.g. an unstandardized covariate ~1e8) inflates the rank threshold
+    — which is anchored to the largest pivot diagonal — and false-drops
+    well-scaled columns (intercept / treatment / interaction) on an otherwise
+    full-rank design. In both branches the retained columns are guaranteed full
+    rank (pivoted QR has strictly decreasing |R[i,i]|). For a genuinely collinear
+    design with no scale disparity the dropped column is unchanged.
+
     Parameters
     ----------
     X : ndarray of shape (n, k)
@@ -123,30 +136,56 @@ def _detect_rank_deficiency(
     """
     n, k = X.shape
 
-    # Compute pivoted QR decomposition: X @ P = Q @ R
-    # P is a permutation matrix, represented as pivot indices
-    Q, R, pivot = qr(X, mode="economic", pivoting=True)
-
-    # Determine rank tolerance
-    # R's qr() uses tol = 1e-07 by default, which is sqrt(eps) ≈ 1.49e-08
-    # We use 1e-07 to match R's lm() behavior for consistency
+    # R's qr() uses tol = 1e-07 by default (sqrt(eps) ≈ 1.49e-08); we use 1e-07.
     if rcond is None:
         rcond = 1e-07
 
-    # The diagonal of R contains information about linear independence
-    # After pivoting, |R[i,i]| is decreasing
-    r_diag = np.abs(np.diag(R))
+    def _rank_and_pivot(M: np.ndarray) -> Tuple[int, np.ndarray]:
+        # Pivoted QR: M @ P = Q @ R. The rank threshold is anchored to the
+        # largest pivot diagonal |R[0,0]| (decreasing after pivoting).
+        _Q, R, piv = qr(M, mode="economic", pivoting=True)
+        r_diag = np.abs(np.diag(R))
+        if r_diag[0] == 0:
+            return 0, piv
+        return int(np.sum(r_diag > rcond * r_diag[0])), piv
 
-    # Find numerical rank: count singular values above threshold
-    # The threshold is relative to the largest diagonal element
-    if r_diag[0] == 0:
-        rank = 0
+    # Stage 1 — raw pivoted QR. The common full-rank case exits here with zero
+    # added cost, and (when the design IS genuinely rank-deficient) this raw
+    # pivot is what selects which columns to drop, so the established
+    # drop-column selection for collinear designs is preserved exactly.
+    rank_raw, pivot_raw = _rank_and_pivot(X)
+    if rank_raw == k:
+        return k, np.array([], dtype=int), pivot_raw
+
+    # Stage 2 — raw QR reported a deficiency. That can be GENUINE collinearity
+    # or a SCALE artifact: the threshold is anchored to the largest pivot
+    # diagonal, so a column on a large raw scale (e.g. an unstandardized
+    # covariate ~1e8) inflates the threshold and false-drops well-scaled columns
+    # (intercept / treatment / interaction) on an otherwise full-rank design.
+    # Equilibrate each column to unit 2-norm and re-detect the rank COUNT only;
+    # if it is higher, the raw drop was scale-induced. Zero-norm columns keep
+    # scale 1.0 (no divide-by-zero; still pivot last).
+    col_norms = np.sqrt(np.einsum("ij,ij->j", X, X))
+    safe_norms = np.where(col_norms > 0, col_norms, 1.0)
+    rank_eq, pivot_eq = _rank_and_pivot(X / safe_norms)
+
+    if rank_eq > rank_raw:
+        # SCALE-INDUCED under-count: the raw threshold was inflated by a
+        # large-scale column. Trust the equilibrated rank AND its pivot — its
+        # first `rank_eq` columns are independent under the scale-corrected
+        # criterion (pivoted QR has strictly decreasing |R[i,i]|, so the kept
+        # set is guaranteed full rank and the retained design is identified).
+        # The raw pivot's tail is NOT reused here because, with a scale-corrupted
+        # ordering, its first `rank_eq` columns need not coincide with a
+        # scale-corrected independent subset.
+        rank, pivot = rank_eq, pivot_eq
     else:
-        tol = rcond * r_diag[0]
-        rank = int(np.sum(r_diag > tol))
+        # GENUINE collinearity (no scale disparity): preserve the established
+        # raw pivot drop selection so the dropped column is unchanged.
+        rank, pivot = rank_raw, pivot_raw
 
-    # Columns after rank position (in pivot order) are linearly dependent
-    # We need to map back to original column indices
+    # Columns after the rank position (in pivot order) are linearly dependent.
+    # The pivot indexes the ORIGINAL columns, so no remapping is needed.
     if rank < k:
         dropped_cols = np.sort(pivot[rank:])
     else:
@@ -250,6 +289,27 @@ def _expand_vcov_with_nan(
     ix = np.ix_(kept_cols, kept_cols)
     vcov_full[ix] = vcov_reduced
     return vcov_full
+
+
+def _equilibrated_lstsq(X: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Solve OLS via column-equilibrated lstsq for scale robustness.
+
+    ``scipy_lstsq``'s ``cond=1e-7`` truncates singular values relative to the
+    largest, so a column on a large scale truncates the genuine small-scale
+    direction and returns finite-but-wrong coefficients (e.g. a covariate ~1e8
+    alongside a 0/1 dummy). Equilibrating each column to unit 2-norm before the
+    solve and unscaling the result (``beta = beta_scaled / norm``) is
+    algebraically exact for the raw system and numerically scale-invariant.
+
+    Zero-norm columns use scale 1.0 (their coefficient is unidentified anyway and
+    is handled by the rank-deficiency path upstream).
+    """
+    col_norms = np.sqrt(np.einsum("ij,ij->j", X, X))
+    safe_norms = np.where(col_norms > 0, col_norms, 1.0)
+    coef_scaled = scipy_lstsq(
+        X / safe_norms, y, lapack_driver="gelsd", check_finite=False, cond=1e-07
+    )[0]
+    return coef_scaled / safe_norms
 
 
 def _solve_ols_rust(
@@ -1032,15 +1092,29 @@ def _solve_ols_numpy(
             )
         # else: "silent" - no warning
 
-        # Extract kept columns for the reduced solve
-        kept_cols = np.array([i for i in range(k) if i not in dropped_cols])
+        # Extract kept columns for the reduced solve. dtype=int so an EMPTY
+        # comprehension (rank 0, every column dropped) yields an int index array,
+        # not the float64 default that raised "arrays used as indices must be of
+        # integer (or boolean) type" on X[:, kept_cols].
+        kept_cols = np.array([i for i in range(k) if i not in dropped_cols], dtype=int)
+
+        # Rank-0 design: every column dropped (e.g. a constant covariate that
+        # collapses to all-zero after FE demeaning). Nothing is identifiable; the
+        # warn/error branch above already fired, so return all-NaN cleanly here.
+        if kept_cols.size == 0:
+            coefficients = np.full(k, np.nan)
+            fitted = np.zeros_like(y)
+            residuals = y - fitted
+            vcov = np.full((k, k), np.nan) if return_vcov else None
+            if return_fitted:
+                return coefficients, residuals, fitted, vcov
+            return coefficients, residuals, vcov
+
         X_reduced = X[:, kept_cols]
 
-        # Solve the reduced system (now full-rank)
-        # Use cond=1e-07 for consistency with Rust backend and QR rank tolerance
-        coefficients_reduced = scipy_lstsq(
-            X_reduced, y, lapack_driver="gelsd", check_finite=False, cond=1e-07
-        )[0]
+        # Solve the reduced system (now full-rank), equilibrated for scale
+        # robustness (see _equilibrated_lstsq).
+        coefficients_reduced = _equilibrated_lstsq(X_reduced, y)
 
         # Expand coefficients to full size with NaN for dropped columns
         coefficients = _expand_coefficients_with_nan(coefficients_reduced, k, kept_cols)
@@ -1068,9 +1142,10 @@ def _solve_ols_numpy(
             )
             vcov = _expand_vcov_with_nan(vcov_reduced, k, kept_cols)
     else:
-        # Full-rank case: proceed normally
-        # Use cond=1e-07 for consistency with Rust backend and QR rank tolerance
-        coefficients = scipy_lstsq(X, y, lapack_driver="gelsd", check_finite=False, cond=1e-07)[0]
+        # Full-rank case: proceed normally. Equilibrate columns before the lstsq
+        # so a large-scale column cannot truncate the genuine small-scale
+        # direction (cond=1e-07 is relative to the largest singular value).
+        coefficients = _equilibrated_lstsq(X, y)
 
         # Compute residuals and fitted values
         fitted = np.dot(X, coefficients)
@@ -2653,7 +2728,10 @@ def solve_logit(
                 UserWarning,
                 stacklevel=2,
             )
-        kept_cols = np.array([i for i in range(k) if i not in dropped_cols])
+        # dtype=int for consistency with the other rank-deficiency sites. The
+        # prepended intercept column guarantees rank >= 1, so kept_cols is never
+        # empty here (no rank-0 / empty-index hazard in the logistic path).
+        kept_cols = np.array([i for i in range(k) if i not in dropped_cols], dtype=int)
         X_solve = X_with_intercept[:, kept_cols]
     else:
         kept_cols = np.arange(k)
@@ -4052,7 +4130,13 @@ def solve_poisson(
                 stacklevel=2,
             )
         dropped_set = set(int(d) for d in dropped_cols)
-        kept_cols = np.array([i for i in range(k_orig) if i not in dropped_set])
+        kept_cols = np.array([i for i in range(k_orig) if i not in dropped_set], dtype=int)
+        if kept_cols.size == 0:
+            raise ValueError(
+                "Rank-deficient design matrix in Poisson regression collapsed to "
+                "rank 0 (no identifiable columns). Cannot fit Poisson model. "
+                "Check for constant or fully-collinear covariates."
+            )
         X = X[:, kept_cols]
 
     n, k = X.shape
@@ -4081,7 +4165,13 @@ def solve_poisson(
                     stacklevel=2,
                 )
             eff_dropped = set(int(d) for d in eff_rank_info[1])
-            eff_kept = np.array([i for i in range(k) if i not in eff_dropped])
+            eff_kept = np.array([i for i in range(k) if i not in eff_dropped], dtype=int)
+            if eff_kept.size == 0:
+                raise ValueError(
+                    "Effective (positive-weight) sample collapsed to rank 0 (no "
+                    "identifiable columns). Cannot fit Poisson model on this "
+                    "subpopulation. Check for constant or fully-collinear covariates."
+                )
             X = X[:, eff_kept]
             if len(dropped_cols) > 0:
                 kept_cols = kept_cols[eff_kept]

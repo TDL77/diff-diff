@@ -1326,8 +1326,12 @@ class CallawaySantAnna(
                             stacklevel=2,
                         )
                     cho = None  # Force lstsq path for ALL rank-deficient cases
+                    # dtype=int so an empty result (rank 0) is an int index array;
+                    # X_ctrl always carries an intercept column (positive norm,
+                    # independent), so kept_cols.size >= 1 here in practice.
                     kept_cols = np.array(
-                        [i for i in range(X_ctrl.shape[1]) if i not in dropped_cols]
+                        [i for i in range(X_ctrl.shape[1]) if i not in dropped_cols],
+                        dtype=int,
                     )
                 else:
                     kept_cols = None  # Full rank — use all columns
