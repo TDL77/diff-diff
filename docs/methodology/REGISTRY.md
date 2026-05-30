@@ -348,9 +348,13 @@ Sant'Anna 2021 for `CallawaySantAnna`; Borusyak-Jaravel-Spiess 2024 for
 This split is a structural property of the estimator's variance derivation,
 not a missing feature. The `vcov_type` input contract for IF-based estimators
 is **permanently narrow** at `{"hc1"}`. Enforced today on
-`CallawaySantAnna`, `TripleDifference`, `ImputationDiD`, and `EfficientDiD`;
-the same narrow contract is expected when `TwoStageDiD` reaches `vcov_type`
-threading (sandwich + GMM-corrected meat; non-IF, so threading model differs).
+`CallawaySantAnna`, `TripleDifference`, `ImputationDiD`, `EfficientDiD`, and
+`TwoStageDiD`. `TwoStageDiD` is sandwich-class rather than pure-IF — its
+variance is the Gardner (2022) two-stage GMM sandwich — but reaches the same
+narrow `{"hc1"}` contract for a meat-specific reason: the GMM-corrected score
+`S_g = gamma_hat' c_g - X'_{2g} eps_{2g}` folds first-stage FE uncertainty into
+the meat, so no single hat matrix spans both stages and `{classical, hc2,
+hc2_bm}` have no derivation (see the TwoStageDiD section).
 
 **Note:** This routing is a documented synthesis. The clustered-`hc1`
 activation path is estimator-specific: `CallawaySantAnna` synthesizes
@@ -1401,6 +1405,7 @@ Our implementation uses multiplier bootstrap on the GMM influence function: clus
 - **Note:** Both the iterative FE solver (`_iterative_fe`, Stage 1) and the iterative alternating-projection demeaning helper (`_iterative_demean`, used in covariate residualization) emit `UserWarning` when `max_iter` exhausts without reaching `tol`, via `diff_diff.utils.warn_if_not_converged`. Silent return of the current iterate was classified as a silent failure under the Phase 2 audit and replaced with an explicit signal to match the logistic/Poisson IRLS pattern in `linalg.py`.
 - **Note:** When the Stage-2 bread `X'_2 W X_2` is singular, both the analytical TSL variance (`two_stage.py`) and the multiplier-bootstrap bread (`two_stage_bootstrap.py`) now emit a `UserWarning` before falling back to `np.linalg.lstsq`. Previously this fallback was silent. Sibling of axis-A finding #17 in the Phase 2 silent-failures audit; surfaced by the repo-wide lstsq-fallback pattern grep that accompanied the StaggeredTripleDifference fix.
 - **Note:** The GMM sandwich and bootstrap paths both use `scipy.sparse.linalg.factorized` for the Stage 1 normal-equations solve `(X'_{10} W X_{10}) gamma = X'_1 W X_2` and fall back to dense `lstsq` when the sparse factorization raises `RuntimeError` on a near-singular matrix. Both fallback sites emit a `UserWarning` (silent-failure audit axis C) so callers know SE estimates came from the degraded path rather than the fast sparse path.
+- **Note:** `vcov_type` is permanently narrow to `{"hc1"}` (Phase 1b threading). TwoStageDiD's variance is the Gardner (2022) two-stage GMM cluster-sandwich `V = (X'_2 W X_2)^{-1} (S' S) (X'_2 W X_2)^{-1}` with the per-cluster GMM-corrected score `S_g = gamma_hat' c_g - X'_{2g} eps_{2g}`. Analytical-sandwich families `{classical, hc2, hc2_bm}` are rejected at `__init__`/`fit()`: the GMM-corrected meat folds first-stage FE estimation uncertainty into the score via the `gamma_hat' c_g` term, so there is no single hat matrix spanning both stages on which HC2 leverage or Bell-McCaffrey Satterthwaite DOF can be defined, and the Gardner first-stage correction has not been derived for the leverage-corrected or homoskedastic meat structures (no reference implementation — `clubSandwich` covers single-equation WLS/OLS CR2, not two-stage GMM; mirrors the SpilloverDiD `vcov_type="classical"` rejection). `cluster=<col>` selects the cluster level; `cluster=None` (the default) still clusters at the `unit` column (`cluster_var = unit`), so the summary renders `"CR1 cluster-robust at <unit>, G=<n_units>"` rather than the generic `"HC1"` label. **Note (deviation from R):** the did2s GMM sandwich uses NO finite-sample multiplier (meat `= S' S`), so the rendered `CR1` family label carries no Stata-style `(n-1)/(n-p)` or `G/(G-1)` factor (matches R `did2s`; same FSA-free convention as ImputationDiD's Theorem 3 variance). Under bootstrap (`n_bootstrap > 0`) the analytical variance-family label is suppressed in `summary()` because `fit()` overwrites the reported SE/CI/p-value with `bootstrap_results` (mirrors `DiDResults` at `results.py:213-226`). `cluster=<col>` combined with a replicate-weight survey design raises `NotImplementedError` (replicate-refit variance ignores `cluster=`). `vcov_type='conley'` is deferred to the TwoStageDiD Conley follow-up row in TODO.md.
 
 **Reference implementation(s):**
 - R: `did2s::did2s()` (Kyle Butts & John Gardner)

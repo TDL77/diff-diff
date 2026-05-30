@@ -15,6 +15,7 @@
       ~TwoStageDiDResults.print_summary
       ~TwoStageDiDResults.summary
       ~TwoStageDiDResults.to_dataframe
+      ~TwoStageDiDResults.to_dict
 
 
 
@@ -50,4 +51,7 @@
       ~TwoStageDiDResults.n_untreated_obs
       ~TwoStageDiDResults.n_treated_units
       ~TwoStageDiDResults.n_control_units
+      ~TwoStageDiDResults.vcov_type
+      ~TwoStageDiDResults.cluster_name
+      ~TwoStageDiDResults.n_clusters
 

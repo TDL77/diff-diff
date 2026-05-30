@@ -216,6 +216,56 @@ class TwoStageDiDBootstrapMixin:
 
         return S, bread, unique_clusters
 
+    def _build_nan_bootstrap_results(
+        self,
+        original_event_study: Optional[Dict[int, Dict[str, Any]]],
+        original_group: Optional[Dict[Any, Dict[str, Any]]],
+    ) -> TwoStageBootstrapResults:
+        """Build an all-NaN TwoStageBootstrapResults for degenerate-design
+        bootstrap paths (n_clusters<2 / n_psu<2).
+
+        Per-horizon and per-group dicts are populated with NaN entries keyed by
+        the SAME horizons/groups as the analytical originals so the downstream
+        post-bootstrap override loop in :meth:`TwoStageDiD.fit` iterates over
+        them and propagates NaN to ``event_study_effects[h]["se"]`` /
+        ``group_effects[g]["se"]`` (rather than silently no-oping by finding
+        ``None``).
+        """
+        n_nan = float("nan")
+        ci_nan: Tuple[float, float] = (n_nan, n_nan)
+
+        es_ses: Optional[Dict[int, float]] = None
+        es_cis: Optional[Dict[int, Tuple[float, float]]] = None
+        es_ps: Optional[Dict[int, float]] = None
+        if original_event_study:
+            es_ses = {h: n_nan for h in original_event_study}
+            es_cis = {h: ci_nan for h in original_event_study}
+            es_ps = {h: n_nan for h in original_event_study}
+
+        g_ses: Optional[Dict[Any, float]] = None
+        g_cis: Optional[Dict[Any, Tuple[float, float]]] = None
+        g_ps: Optional[Dict[Any, float]] = None
+        if original_group:
+            g_ses = {g: n_nan for g in original_group}
+            g_cis = {g: ci_nan for g in original_group}
+            g_ps = {g: n_nan for g in original_group}
+
+        return TwoStageBootstrapResults(
+            n_bootstrap=self.n_bootstrap,
+            weight_type=self.bootstrap_weights,
+            alpha=self.alpha,
+            overall_att_se=n_nan,
+            overall_att_ci=ci_nan,
+            overall_att_p_value=n_nan,
+            event_study_ses=es_ses,
+            event_study_cis=es_cis,
+            event_study_p_values=es_ps,
+            group_ses=g_ses,
+            group_cis=g_cis,
+            group_p_values=g_ps,
+            bootstrap_distribution=None,
+        )
+
     def _run_bootstrap(
         self,
         df: pd.DataFrame,
@@ -277,8 +327,11 @@ class TwoStageDiDBootstrapMixin:
 
         X_2_static = D.reshape(-1, 1)
         coef_static = solve_ols(
-            X_2_static, y_tilde, return_vcov=False,
-            weights=survey_weights, weight_type=survey_weight_type,
+            X_2_static,
+            y_tilde,
+            return_vcov=False,
+            weights=survey_weights,
+            weight_type=survey_weight_type,
         )[0]
         eps_2_static = y_tilde - np.dot(X_2_static, coef_static)
 
@@ -300,6 +353,28 @@ class TwoStageDiDBootstrapMixin:
 
         n_clusters = len(unique_clusters)
 
+        # Degenerate-design guard (load-bearing). The bootstrap perturbs exactly
+        # `n_clusters` cluster scores: `boot_att_vec = all_weights @ S_static`
+        # with `all_weights` shape (B, n_clusters) and `S_static` shape
+        # (n_clusters, k). With <2 clusters the multiplier draws collapse to
+        # constants and BLAS roundoff yields a ~0 SE (NOT NaN), producing
+        # near-infinite t-stats for inference that is actually undefined. Fail
+        # closed with all-NaN bootstrap results. `n_clusters` is the POST-DROP
+        # effective cluster count and dominates the survey generator's PSU count
+        # (post-drop clusters are a subset of the full-domain PSUs), so this also
+        # catches the Wave E.3 always-treated-drop-collapse case where the
+        # full-domain resolved_survey still retains >=2 PSUs. See
+        # feedback_bootstrap_g_less_than_2_blas_roundoff.
+        if n_clusters < 2:
+            warnings.warn(
+                f"TwoStageDiD bootstrap: n_clusters={n_clusters} (<2). Cluster "
+                "variance is unidentified with fewer than 2 clusters; returning "
+                "NaN bootstrap inference so downstream statistics NaN-propagate.",
+                UserWarning,
+                stacklevel=3,
+            )
+            return self._build_nan_bootstrap_results(original_event_study, original_group)
+
         # Generate bootstrap weights — PSU-level when survey design is present
         _use_survey_bootstrap = resolved_survey is not None and (
             resolved_survey.strata is not None
@@ -311,6 +386,21 @@ class TwoStageDiDBootstrapMixin:
             psu_weights, psu_ids = _generate_survey_multiplier_weights_batch(
                 self.n_bootstrap, resolved_survey, self.bootstrap_weights, rng
             )
+            # Defense-in-depth + ImputationDiD-precedent parity
+            # (imputation_bootstrap.py:387): NaN-out when the survey generator
+            # itself yields <2 PSUs. Dominated by the ungated n_clusters guard
+            # above (post-drop clusters are a subset of the full-domain PSUs, so
+            # n_clusters<2 already fired whenever len(psu_ids)<2), but kept
+            # explicit so the survey path's degeneracy is self-evident.
+            if len(psu_ids) < 2:
+                warnings.warn(
+                    f"TwoStageDiD survey-PSU bootstrap: n_psu={len(psu_ids)} "
+                    "(<2). Cluster variance is unidentified; returning NaN "
+                    "bootstrap inference.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+                return self._build_nan_bootstrap_results(original_event_study, original_group)
             # Map unique_clusters (PSU values) to PSU weight columns.
             # When survey+PSU is active, cluster_var == "_survey_cluster" so
             # unique_clusters are the PSU ids used in S-score aggregation.
@@ -396,8 +486,11 @@ class TwoStageDiDBootstrapMixin:
                             X_2_es[i, horizon_to_col[h_int]] = 1.0
 
                 coef_es = solve_ols(
-                    X_2_es, y_tilde, return_vcov=False,
-                    weights=survey_weights, weight_type=survey_weight_type,
+                    X_2_es,
+                    y_tilde,
+                    return_vcov=False,
+                    weights=survey_weights,
+                    weight_type=survey_weight_type,
                 )[0]
                 eps_2_es = y_tilde - np.dot(X_2_es, coef_es)
 
@@ -464,8 +557,11 @@ class TwoStageDiDBootstrapMixin:
                         X_2_grp[i, group_to_col[g]] = 1.0
 
             coef_grp = solve_ols(
-                X_2_grp, y_tilde, return_vcov=False,
-                weights=survey_weights, weight_type=survey_weight_type,
+                X_2_grp,
+                y_tilde,
+                return_vcov=False,
+                weights=survey_weights,
+                weight_type=survey_weight_type,
             )[0]
             eps_2_grp = y_tilde - np.dot(X_2_grp, coef_grp)
 

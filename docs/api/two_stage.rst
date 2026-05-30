@@ -71,6 +71,7 @@ Results container for two-stage DiD estimation.
       ~TwoStageDiDResults.summary
       ~TwoStageDiDResults.print_summary
       ~TwoStageDiDResults.to_dataframe
+      ~TwoStageDiDResults.to_dict
 
 TwoStageBootstrapResults
 ------------------------

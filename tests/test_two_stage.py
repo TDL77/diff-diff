@@ -1910,3 +1910,283 @@ class TestTwoStageDiDWaveE3ParityAlwaysTreated:
         assert np.isfinite(result.overall_se)
         assert result.survey_metadata is not None
         assert result.survey_metadata.n_psu == 6
+
+
+# =============================================================================
+# Phase 1b interstitial #5 (final): vcov_type threading on TwoStageDiD
+# =============================================================================
+
+from diff_diff import SurveyDesign  # noqa: E402
+
+
+def _add_survey_cols(data, n_rep=8):
+    """Add a constant pweight 'w' + unit-constant JK1 replicate-weight columns.
+
+    Each replicate zeroes one block of units and rescales survivors by
+    n_rep/(n_rep-1) (JK1 convention), broadcast panel-constant per unit.
+    """
+    d = data.copy()
+    d["w"] = 1.0
+    units = np.sort(d["unit"].unique())
+    n_units = len(units)
+    unit_pos = {u: i for i, u in enumerate(units)}
+    rows = d["unit"].map(unit_pos).values
+    units_per_rep = max(n_units // n_rep, 1)
+    rep_cols = []
+    for r in range(n_rep):
+        w_r = np.ones(n_units)
+        start = r * units_per_rep
+        end = min((r + 1) * units_per_rep, n_units)
+        w_r[start:end] = 0.0
+        nz = w_r > 0
+        w_r[nz] = w_r[nz] * n_rep / (n_rep - 1)
+        d[f"rep_{r}"] = w_r[rows]
+        rep_cols.append(f"rep_{r}")
+    return d, rep_cols
+
+
+def _fit_ts(est, data, **kw):
+    """Fit helper suppressing convergence/bootstrap-size warnings."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return est.fit(
+            data,
+            outcome="outcome",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            **kw,
+        )
+
+
+def _assert_results_bit_equal(r0, r1):
+    """Assert two TwoStageDiDResults are numerically identical (NaN-aware)."""
+
+    def _eq(a, b):
+        return a == b or (np.isnan(a) and np.isnan(b))
+
+    assert _eq(r0.overall_att, r1.overall_att)
+    assert _eq(r0.overall_se, r1.overall_se)
+    for attr in ("event_study_effects", "group_effects"):
+        e0 = getattr(r0, attr)
+        e1 = getattr(r1, attr)
+        if e0 is None:
+            assert e1 is None
+            continue
+        assert set(e0) == set(e1)
+        for k in e0:
+            for f in ("effect", "se"):
+                assert _eq(e0[k][f], e1[k][f]), f"{attr}[{k}][{f}] differs"
+
+
+class TestTwoStageDiDVcovType:
+    """Phase 1b interstitial #5 (final): vcov_type input contract on TwoStageDiD.
+
+    TwoStageDiD's variance is the Gardner (2022) two-stage GMM cluster-sandwich
+    (``V = bread @ (S' S) @ bread``; always clusters, default at the unit
+    column). ``vcov_type`` is permanently narrow to ``{"hc1"}``;
+    analytical-sandwich families ``{classical, hc2, hc2_bm}`` and ``conley`` are
+    rejected with GMM-meat-specific messages. Mirrors the ImputationDiD
+    interstitial #3 template
+    (``tests/test_imputation.py::TestImputationDiDVcovType``).
+    """
+
+    # ---- introspection / defaults ----
+
+    def test_default_vcov_type(self):
+        est = TwoStageDiD()
+        assert est.vcov_type == "hc1"
+        assert est.get_params()["vcov_type"] == "hc1"
+
+    def test_results_carry_vcov_metadata(self):
+        data = generate_test_data(n_units=80, seed=1)
+        r = _fit_ts(TwoStageDiD(), data, aggregate="all")
+        assert r.vcov_type == "hc1"
+        assert r.cluster_name == "unit"
+        assert r.n_clusters == 80
+
+    def test_to_dict_carries_vcov(self):
+        data = generate_test_data(n_units=80, seed=1)
+        d = _fit_ts(TwoStageDiD(), data).to_dict()
+        assert d["vcov_type"] == "hc1"
+        assert d["cluster_name"] == "unit"
+        assert d["n_clusters"] == 80
+        assert d["inference_method"] == "cluster"
+
+    def test_convenience_function_threads_vcov_type(self):
+        data = generate_test_data(n_units=60, seed=2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r = two_stage_did(data, "outcome", "unit", "time", "first_treat", vcov_type="hc1")
+        assert r.vcov_type == "hc1"
+        with pytest.raises(ValueError):
+            two_stage_did(data, "outcome", "unit", "time", "first_treat", vcov_type="classical")
+
+    def test_fit_clone_idempotence(self):
+        data = generate_test_data(n_units=60, seed=3)
+        est = TwoStageDiD()
+        r1 = _fit_ts(est, data)
+        clone = TwoStageDiD(**est.get_params())
+        r2 = _fit_ts(clone, data)
+        assert clone.vcov_type == "hc1"
+        assert r1.overall_att == pytest.approx(r2.overall_att)
+        assert r1.overall_se == pytest.approx(r2.overall_se)
+
+    # ---- rejections ----
+
+    @pytest.mark.parametrize("bad", ["classical", "hc2", "hc2_bm", "conley", "garbage"])
+    def test_invalid_vcov_type_rejected_at_init(self, bad):
+        with pytest.raises(ValueError, match=bad):
+            TwoStageDiD(vcov_type=bad)
+
+    @pytest.mark.parametrize("bad", ["classical", "hc2", "hc2_bm", "conley"])
+    def test_fit_revalidates_after_set_params(self, bad):
+        data = generate_test_data(n_units=60, seed=4)
+        est = TwoStageDiD()
+        est.set_params(vcov_type=bad)  # sklearn mutate-then-validate-at-use
+        assert est.vcov_type == bad
+        with pytest.raises(ValueError, match=bad):
+            est.fit(data, outcome="outcome", unit="unit", time="time", first_treat="first_treat")
+
+    def test_rejection_messages_are_methodology_specific(self):
+        with pytest.raises(ValueError, match="GMM"):
+            TwoStageDiD(vcov_type="hc2")
+        with pytest.raises(ValueError, match="Conley|spatial"):
+            TwoStageDiD(vcov_type="conley")
+
+    # ---- summary labels ----
+
+    def test_summary_default_renders_unit_cluster_cr1(self):
+        data = generate_test_data(n_units=80, seed=5)
+        s = _fit_ts(TwoStageDiD(), data).summary()
+        assert "CR1 cluster-robust at unit" in s
+        assert "HC1 heteroskedasticity" not in s
+
+    def test_summary_explicit_cluster_renders_named_cr1(self):
+        data = generate_test_data(n_units=80, seed=6)
+        data["st"] = data["unit"] % 6
+        r = _fit_ts(TwoStageDiD(cluster="st"), data)
+        assert r.cluster_name == "st" and r.n_clusters == 6
+        assert "CR1 cluster-robust at st, G=6" in r.summary()
+
+    def test_summary_suppresses_variance_label_under_bootstrap(self):
+        data = generate_test_data(n_units=80, seed=7)
+        s = _fit_ts(TwoStageDiD(n_bootstrap=199, seed=7), data).summary()
+        assert "Inference method:" in s and "bootstrap" in s
+        assert "Variance estimator:" not in s
+
+    def test_cluster_name_suppressed_under_tsl_survey(self):
+        data, _ = _add_survey_cols(generate_test_data(n_units=80, seed=8))
+        r = _fit_ts(TwoStageDiD(), data, survey_design=SurveyDesign(weights="w"))
+        assert r.cluster_name is None
+        assert r.n_clusters is None
+
+    def test_cluster_name_suppressed_under_replicate_survey(self):
+        data, rep_cols = _add_survey_cols(generate_test_data(n_units=80, seed=9))
+        design = SurveyDesign(weights="w", replicate_weights=rep_cols, replicate_method="JK1")
+        r = _fit_ts(TwoStageDiD(), data, survey_design=design)
+        assert r.cluster_name is None
+        assert r.n_clusters is None
+
+    # ---- bit-equality regression guards (vcov_type='hc1' is a pure no-op) ----
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group", "all"])
+    def test_default_path_bit_equal(self, aggregate):
+        data = generate_test_data(n_units=80, seed=10)
+        r0 = _fit_ts(TwoStageDiD(), data, aggregate=aggregate)
+        r1 = _fit_ts(TwoStageDiD(vcov_type="hc1"), data, aggregate=aggregate)
+        _assert_results_bit_equal(r0, r1)
+
+    @pytest.mark.parametrize("aggregate", [None, "event_study", "group", "all"])
+    def test_cluster_path_bit_equal(self, aggregate):
+        data = generate_test_data(n_units=80, seed=11)
+        data["st"] = data["unit"] % 7
+        r0 = _fit_ts(TwoStageDiD(cluster="st"), data, aggregate=aggregate)
+        r1 = _fit_ts(TwoStageDiD(cluster="st", vcov_type="hc1"), data, aggregate=aggregate)
+        _assert_results_bit_equal(r0, r1)
+
+    def test_tsl_survey_path_bit_equal(self):
+        data, _ = _add_survey_cols(generate_test_data(n_units=80, seed=12))
+        design = SurveyDesign(weights="w")
+        r0 = _fit_ts(TwoStageDiD(), data, survey_design=design, aggregate="all")
+        r1 = _fit_ts(TwoStageDiD(vcov_type="hc1"), data, survey_design=design, aggregate="all")
+        _assert_results_bit_equal(r0, r1)
+
+    def test_replicate_survey_path_bit_equal(self):
+        data, rep_cols = _add_survey_cols(generate_test_data(n_units=80, seed=13))
+        design = SurveyDesign(weights="w", replicate_weights=rep_cols, replicate_method="JK1")
+        r0 = _fit_ts(TwoStageDiD(), data, survey_design=design, aggregate="event_study")
+        r1 = _fit_ts(
+            TwoStageDiD(vcov_type="hc1"), data, survey_design=design, aggregate="event_study"
+        )
+        _assert_results_bit_equal(r0, r1)
+
+    def test_bootstrap_path_bit_equal(self):
+        data = generate_test_data(n_units=80, seed=14)
+        r0 = _fit_ts(TwoStageDiD(n_bootstrap=199, seed=99), data, aggregate="all")
+        r1 = _fit_ts(TwoStageDiD(n_bootstrap=199, seed=99, vcov_type="hc1"), data, aggregate="all")
+        _assert_results_bit_equal(r0, r1)
+        b0, b1 = r0.bootstrap_results, r1.bootstrap_results
+        assert b0.overall_att_se == b1.overall_att_se
+        if b0.event_study_ses:
+            assert b0.event_study_ses == b1.event_study_ses
+        if b0.group_ses:
+            assert b0.group_ses == b1.group_ses
+
+    # ---- cluster + replicate rejection ----
+
+    def test_cluster_plus_replicate_weights_rejected(self):
+        data, rep_cols = _add_survey_cols(generate_test_data(n_units=80, seed=15))
+        data["st"] = data["unit"] % 5
+        design = SurveyDesign(weights="w", replicate_weights=rep_cols, replicate_method="JK1")
+        with pytest.raises(NotImplementedError, match="replicate"):
+            TwoStageDiD(cluster="st").fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+            )
+
+    # ---- bootstrap G<2 NaN guard (both entry paths) ----
+
+    def test_bootstrap_single_cluster_returns_nan(self):
+        data = generate_test_data(n_units=80, seed=16)
+        data["solo"] = 1  # single cluster
+        est = TwoStageDiD(cluster="solo", n_bootstrap=199, seed=3)
+        with pytest.warns(UserWarning, match="n_clusters=1"):
+            r = est.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                aggregate="all",
+            )
+        assert np.isnan(r.overall_se)
+        assert np.isnan(r.coef_var)
+        assert np.isnan(r.bootstrap_results.overall_att_se)
+        assert all(np.isnan(x) for x in r.bootstrap_results.overall_att_ci)
+        if r.bootstrap_results.event_study_ses:
+            assert all(np.isnan(v) for v in r.bootstrap_results.event_study_ses.values())
+        if r.bootstrap_results.group_ses:
+            assert all(np.isnan(v) for v in r.bootstrap_results.group_ses.values())
+
+    def test_bootstrap_single_psu_survey_returns_nan(self):
+        data, _ = _add_survey_cols(generate_test_data(n_units=80, seed=17))
+        data["onepsu"] = 0  # single PSU
+        design = SurveyDesign(weights="w", psu="onepsu")
+        est = TwoStageDiD(n_bootstrap=199, seed=3)
+        with pytest.warns(UserWarning):
+            r = est.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                survey_design=design,
+                aggregate="event_study",
+            )
+        assert np.isnan(r.overall_se)
+        assert np.isnan(r.bootstrap_results.overall_att_se)
