@@ -990,8 +990,12 @@ def _v_starts(
             w_i, conv_i = _inner_solve_W(X1s, X0s, e, inner_max_iter, inner_min_decrease)
             inner_total += 1
             if not conv_i:
+                # Don't trust a truncated solve: inf -> 0 inverse-MSPE weight, so this
+                # predictor doesn't shape the heuristic start.
                 inner_nonconv += 1
-            uni_mspe[i] = float(np.mean((Z1 - Z0 @ w_i) ** 2))
+                uni_mspe[i] = np.inf
+            else:
+                uni_mspe[i] = float(np.mean((Z1 - Z0 @ w_i) ** 2))
         inv_mspe = np.where(uni_mspe > 0, 1.0 / np.maximum(uni_mspe, 1e-12), 0.0)
         if np.sum(inv_mspe) > 0:
             _add_unique(_to_theta(inv_mspe / np.sum(inv_mspe)), candidates)
@@ -1035,12 +1039,24 @@ def _outer_solve_V(
     # suppresses its own per-call warning during the search; we aggregate here.
     _st = {"total": 0, "nonconv": 0}
 
+    # Finite penalty for a non-converged evaluation: the objective is convex in w, so its
+    # maximum over the simplex is attained at a single-donor vertex. Penalizing above that
+    # bound guarantees a truncated W*(V) can never win the argmin, while staying FINITE
+    # (np.inf would flood scipy's simplex arithmetic with RuntimeWarnings).
+    _vertex_mspe = [float(np.mean((Z1 - Z0[:, j]) ** 2)) for j in range(Z0.shape[1])]
+    _penalty = 10.0 * (max(_vertex_mspe) + 1.0) if _vertex_mspe else 1.0
+
     def objective(theta: np.ndarray) -> float:
         v = _softmax(theta)
         w, conv = _inner_solve_W(X1s, X0s, v, inner_max_iter, inner_min_decrease)
         _st["total"] += 1
         if not conv:
+            # A truncated W*(V) is unusable for V ranking: in an argmin search even a
+            # single non-converged evaluation could win and silently flip the selected V.
+            # Penalize above the feasible objective bound so it can never be chosen (and
+            # is tallied for the aggregated warning below).
             _st["nonconv"] += 1
+            return _penalty
         return float(np.mean((Z1 - Z0 @ w) ** 2))
 
     nm_options = {"maxiter": 1000, "xatol": 1e-8, "fatol": 1e-8}
@@ -1091,16 +1107,17 @@ def _outer_solve_V(
         )
 
     # Aggregate intermediate inner Frank-Wolfe non-convergence across the whole nested
-    # search (univariate starts + every objective evaluation). Per-call FW warnings are
-    # suppressed during the search, so without this the outer optimizer could silently
-    # rank truncated W*(V) solves. Threshold mirrors synthetic_did.py's 5% rule.
-    if _st["nonconv"] > 0.05 * max(_st["total"], 1):
+    # search (univariate starts + every objective evaluation). Non-converged objective
+    # evaluations were excluded from V ranking (returned as +inf); warn on ANY such
+    # occurrence — unlike a bootstrap summary, an argmin search is sensitive to even one
+    # truncated solve, so no rate threshold is appropriate here.
+    if _st["nonconv"] > 0:
         warnings.warn(
             f"Inner Frank-Wolfe did not converge on {_st['nonconv']} of {_st['total']} "
             f"weight solves during nested V selection (inner_max_iter={inner_max_iter}); "
-            "the outer search may have ranked truncated W*(V) solutions, so the selected "
-            "V / donor weights / ATT may be sub-optimal. Increase inner_max_iter or relax "
-            "inner_min_decrease.",
+            "those evaluations were excluded from V ranking, but the search space was "
+            "effectively restricted, so the selected V / donor weights / ATT may be "
+            "sub-optimal. Increase inner_max_iter or relax inner_min_decrease.",
             UserWarning,
             stacklevel=3,
         )
