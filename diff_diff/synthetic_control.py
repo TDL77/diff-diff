@@ -40,8 +40,11 @@ from diff_diff.utils import _sc_weight_fw, safe_inference, warn_if_not_converged
 
 __all__ = ["SyntheticControl", "synthetic_control"]
 
-# Aggregation operators allowed for predictor / special-predictor averaging.
-_OP_FUNCS: Dict[str, Any] = {"mean": np.mean, "sum": np.sum, "median": np.median}
+# Aggregation operators allowed for predictor / special-predictor rows. Restricted to
+# LINEAR combinations of pre-period values, matching ADH (2010) §2.3
+# (`Ȳ_i^{K_m} = Σ_s k_s Y_is`): mean (k_s = 1/T0) and sum (k_s = 1). Non-linear
+# aggregations (e.g. median) are intentionally NOT supported.
+_OP_FUNCS: Dict[str, Any] = {"mean": np.mean, "sum": np.sum}
 
 # Interpretability floor: donor weights below this are dropped from the reported
 # ``donor_weights`` dict (mirrors prep.py's 1e-6 sparsification). The full weight
@@ -57,7 +60,7 @@ class _PredictorSpec:
     kind: str  # "predictor_avg" | "special" | "lag"
     var: str
     periods: List[Any]
-    op: str  # "mean" | "sum" | "median" | "identity"
+    op: str  # "mean" | "sum" | "identity"
 
 
 def _softmax(theta: np.ndarray) -> np.ndarray:
@@ -256,8 +259,9 @@ class SyntheticControl:
         predictors : list of str, optional
             Columns averaged over ``predictor_window`` (using ``predictors_op``)
             to form predictor rows.
-        predictors_op : {"mean", "sum", "median"}, default "mean"
-            Aggregation operator for ``predictors``.
+        predictors_op : {"mean", "sum"}, default "mean"
+            Aggregation operator for ``predictors`` (linear combinations only, per
+            ADH 2010 §2.3).
         predictor_window : list, optional
             Pre-periods over which ``predictors`` are averaged. Defaults to all
             pre periods. Must be a non-empty subset of the pre periods.
@@ -724,8 +728,15 @@ def _validate_predictors(
     whereas R ``dataprep`` uses ``na.rm=TRUE`` — a documented deviation (see REGISTRY).
     """
     pre_set = set(pre_periods)
+    pre_index = {p: i for i, p in enumerate(pre_periods)}
     specs: List[_PredictorSpec] = []
     labels: set = set()
+
+    def _canon(periods: List[Any]) -> List[Any]:
+        # Unique + calendar-sorted, so reordered/duplicated period lists are
+        # equivalent (e.g. [c,b,a] == [a,b,c]; a repeated period does not
+        # re-weight a "mean"). Assumes membership already checked by _check_periods.
+        return sorted(dict.fromkeys(periods), key=lambda p: pre_index[p])
 
     def _add(label: str, kind: str, var: str, periods: List[Any], op: str) -> None:
         if label in labels:
@@ -755,6 +766,7 @@ def _validate_predictors(
         if predictor_window is not None:
             window = list(predictor_window)
             _check_periods(window, "predictor_window")
+            window = _canon(window)
         else:
             window = list(pre_periods)
         for var in predictors:
@@ -774,6 +786,7 @@ def _validate_predictors(
                 )
             periods = list(periods)
             _check_periods(periods, f"special predictor {var!r}")
+            periods = _canon(periods)  # reordered/duplicated -> same canonical spec
             # Full ordered period list in the label so distinct period sets sharing
             # the same endpoints/length (e.g. [2000,2002,2004] vs [2000,2003,2004])
             # do not collide — the label is also the v_weights / balance key.
@@ -791,6 +804,7 @@ def _validate_predictors(
         else:
             lag_periods = list(pre_period_outcomes)
             _check_periods(lag_periods, "pre_period_outcomes")
+            lag_periods = _canon(lag_periods)
         for p in lag_periods:
             _add(f"{outcome}_{p}", "lag", outcome, [p], "identity")
 

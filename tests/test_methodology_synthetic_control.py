@@ -341,6 +341,59 @@ def test_distinct_special_period_sets_not_duplicate():
     assert len(set(res.v_weights)) == 2  # two distinct labels
 
 
+def test_reordered_special_periods_are_duplicates():
+    # Same var/op with reordered periods canonicalize to the same spec -> duplicate.
+    df, years, T0 = _make_panel(T=8, T0=6)
+    with pytest.raises(ValueError, match="Duplicate predictor label"):
+        SyntheticControl(seed=0).fit(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            special_predictors=[
+                ("y", [years[0], years[1], years[2]], "mean"),
+                ("y", [years[2], years[1], years[0]], "mean"),
+            ],
+        )
+
+
+def test_duplicate_predictor_window_periods_deduped():
+    # A repeated period in predictor_window must not re-weight the mean: the
+    # deduped window [y0,y0,y1] matches the explicit [y0,y1].
+    df, years, T0 = _make_panel()
+    r_dup = synthetic_control(
+        df,
+        "y",
+        "treated",
+        "unit",
+        "year",
+        predictors=["y"],
+        predictor_window=[years[0], years[0], years[1]],
+        seed=0,
+    )
+    r_uniq = synthetic_control(
+        df,
+        "y",
+        "treated",
+        "unit",
+        "year",
+        predictors=["y"],
+        predictor_window=[years[0], years[1]],
+        seed=0,
+    )
+    assert abs(r_dup.att - r_uniq.att) < 1e-9
+
+
+def test_median_op_rejected():
+    # median is a non-linear aggregation, not an ADH linear combination.
+    df, _, _ = _make_panel()
+    with pytest.raises(ValueError, match="must be one of"):
+        SyntheticControl(seed=0).fit(
+            df, "y", "treated", "unit", "year", predictors=["x"], predictors_op="median"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Validation 6: poor pre-fit warning
 # ---------------------------------------------------------------------------

@@ -603,7 +603,7 @@ scm.fit(
     post_periods: list | None = None,       # inferred from D==1 periods if None
     treated_unit=None,                      # inferred as the single ever-treated unit if None
     predictors: list[str] | None = None,    # columns averaged over predictor_window
-    predictors_op: str = "mean",            # "mean" | "sum" | "median"
+    predictors_op: str = "mean",            # "mean" | "sum" (linear combinations only, ADH 2010 §2.3)
     predictor_window: list | None = None,   # pre-periods to average over (default: all pre)
     special_predictors=None,                # list of (var, periods, op) triples
     pre_period_outcomes=None,               # "all" or list; per-period outcome lags
