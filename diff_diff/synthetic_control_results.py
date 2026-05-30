@@ -69,8 +69,9 @@ class SyntheticControlResults:
         Root mean squared prediction error over the pre-treatment periods (the
         primary fit diagnostic).
     mspe_v : float, optional
-        The outer-objective value (pre-period outcome MSPE of ``W*(V*)``) when
-        ``v_method="nested"``; None on the custom path.
+        The outer-objective value (pre-period outcome MSPE of ``W*(V*)``),
+        populated only when the nested outer search actually runs; None on the
+        ``v_method="custom"`` path and on the degenerate single-donor path.
     treated_unit : Any
         The treated unit's identifier.
     pre_periods, post_periods : list
