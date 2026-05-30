@@ -3361,6 +3361,7 @@ def two_stage_did(
     aggregate: Optional[str] = None,
     balance_e: Optional[int] = None,
     survey_design: object = None,
+    vcov_type: str = "hc1",
     **kwargs,
 ) -> TwoStageDiDResults:
     """
@@ -3392,6 +3393,11 @@ def two_stage_did(
         PSU, and FPC for design-based GMM sandwich variance. Strata enters
         survey df for t-distribution inference.
         Both analytical (n_bootstrap=0) and bootstrap inference are supported.
+    vcov_type : str, default="hc1"
+        Variance estimator family; permanently narrow to ``{"hc1"}`` (the Gardner
+        2022 two-stage GMM cluster-sandwich). Analytical-sandwich families
+        ``{"classical", "hc2", "hc2_bm"}`` and ``"conley"`` are rejected. See
+        :class:`TwoStageDiD`.
     **kwargs
         Additional keyword arguments passed to TwoStageDiD constructor.
 
@@ -3408,7 +3414,7 @@ def two_stage_did(
     ...                         'first_treat', aggregate='event_study')
     >>> results.print_summary()
     """
-    est = TwoStageDiD(**kwargs)
+    est = TwoStageDiD(vcov_type=vcov_type, **kwargs)
     return est.fit(
         data,
         outcome=outcome,

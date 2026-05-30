@@ -1979,6 +1979,43 @@ def _assert_results_bit_equal(r0, r1):
                 assert _eq(e0[k][f], e1[k][f]), f"{attr}[{k}][{f}] differs"
 
 
+def _assert_full_bootstrap_nan(r):
+    """Assert the FULL public NaN-propagation contract under a degenerate
+    bootstrap (n_clusters<2 / n_psu<2): every overall + per-horizon + per-group
+    inference field is NaN, not just the SE (REGISTRY NaN-inference contract).
+    """
+    # Overall inference fields
+    assert np.isnan(r.overall_se)
+    assert np.isnan(r.overall_t_stat)
+    assert np.isnan(r.overall_p_value)
+    assert all(np.isnan(x) for x in r.overall_conf_int)
+    assert np.isnan(r.coef_var)
+    # Bootstrap payload
+    b = r.bootstrap_results
+    assert np.isnan(b.overall_att_se)
+    assert np.isnan(b.overall_att_p_value)
+    assert all(np.isnan(x) for x in b.overall_att_ci)
+    if b.event_study_ses:
+        assert all(np.isnan(v) for v in b.event_study_ses.values())
+    if b.group_ses:
+        assert all(np.isnan(v) for v in b.group_ses.values())
+    # Per-horizon event-study inference fields (skip reference-period markers,
+    # which carry n_obs == 0 and are not real effects).
+    for eff in (r.event_study_effects or {}).values():
+        if eff.get("n_obs", 1) == 0:
+            continue
+        assert np.isnan(eff["se"])
+        assert np.isnan(eff["t_stat"])
+        assert np.isnan(eff["p_value"])
+        assert all(np.isnan(x) for x in eff["conf_int"])
+    # Per-group inference fields
+    for eff in (r.group_effects or {}).values():
+        assert np.isnan(eff["se"])
+        assert np.isnan(eff["t_stat"])
+        assert np.isnan(eff["p_value"])
+        assert all(np.isnan(x) for x in eff["conf_int"])
+
+
 class TestTwoStageDiDVcovType:
     """Phase 1b interstitial #5 (final): vcov_type input contract on TwoStageDiD.
 
@@ -2164,14 +2201,7 @@ class TestTwoStageDiDVcovType:
                 first_treat="first_treat",
                 aggregate="all",
             )
-        assert np.isnan(r.overall_se)
-        assert np.isnan(r.coef_var)
-        assert np.isnan(r.bootstrap_results.overall_att_se)
-        assert all(np.isnan(x) for x in r.bootstrap_results.overall_att_ci)
-        if r.bootstrap_results.event_study_ses:
-            assert all(np.isnan(v) for v in r.bootstrap_results.event_study_ses.values())
-        if r.bootstrap_results.group_ses:
-            assert all(np.isnan(v) for v in r.bootstrap_results.group_ses.values())
+        _assert_full_bootstrap_nan(r)
 
     def test_bootstrap_single_psu_survey_returns_nan(self):
         data, _ = _add_survey_cols(generate_test_data(n_units=80, seed=17))
@@ -2188,8 +2218,7 @@ class TestTwoStageDiDVcovType:
                 survey_design=design,
                 aggregate="event_study",
             )
-        assert np.isnan(r.overall_se)
-        assert np.isnan(r.bootstrap_results.overall_att_se)
+        _assert_full_bootstrap_nan(r)
 
     # ---- metadata reflects the post-drop fit sample (codex P2) ----
 
