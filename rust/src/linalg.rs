@@ -63,8 +63,34 @@ pub fn solve_ols<'py>(
     let x_owned = x_arr.to_owned();
     let y_owned = y_arr.to_owned();
 
-    // Convert ndarray to faer for SVD computation
-    let x_faer = ndarray_to_faer(&x_owned);
+    // Column equilibration: scale each column to unit 2-norm before the SVD so
+    // rank detection (threshold = s_max * rcond, anchored to the largest singular
+    // value) is invariant to per-column scaling. Without this a column on a large
+    // scale (e.g. an unscaled covariate ~1e8) truncates the genuine small-scale
+    // direction and returns finite-but-wrong coefficients. Coefficients are
+    // unscaled back to raw scale below, BEFORE fitted/residuals/vcov, so all
+    // raw-scale quantities (x_arr) stay consistent. Mirrors the Python backend's
+    // _detect_rank_deficiency / _equilibrated_lstsq equilibration.
+    let mut safe_norms = Array1::<f64>::zeros(k);
+    for j in 0..k {
+        let mut acc = 0.0_f64;
+        for i in 0..n {
+            let v = x_owned[[i, j]];
+            acc += v * v;
+        }
+        let norm = acc.sqrt();
+        safe_norms[j] = if norm > 0.0 { norm } else { 1.0 };
+    }
+    let mut x_scaled = x_owned.clone();
+    for j in 0..k {
+        let s = safe_norms[j];
+        for i in 0..n {
+            x_scaled[[i, j]] /= s;
+        }
+    }
+
+    // Convert ndarray to faer for SVD computation (on the equilibrated matrix)
+    let x_faer = ndarray_to_faer(&x_scaled);
 
     // Compute thin SVD using faer: X = U * S * V^T
     let svd = match x_faer.thin_svd() {
@@ -130,10 +156,16 @@ pub fn solve_ols<'py>(
         // else: leave as 0 (truncate this singular value)
     }
 
-    // Compute coefficients: β = V * (S^{-1} * U^T * y)
-    let coefficients = vt.t().dot(&s_inv_uty);
+    // Compute coefficients on the equilibrated design: β_scaled = V * (S^{-1} * U^T * y)
+    let mut coefficients = vt.t().dot(&s_inv_uty);
 
-    // Compute fitted values and residuals
+    // Unscale back to raw scale (β = β_scaled / column_norm) BEFORE computing
+    // fitted/residuals/vcov, so those operate on the raw x_arr consistently.
+    for j in 0..k {
+        coefficients[j] /= safe_norms[j];
+    }
+
+    // Compute fitted values and residuals (raw x_arr with unscaled coefficients)
     let fitted = x_arr.dot(&coefficients);
     let residuals = &y_arr - &fitted;
 

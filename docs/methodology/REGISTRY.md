@@ -76,6 +76,7 @@ where τ is the ATT.
 - Rank-deficient design matrix (collinearity): warns and sets NA for dropped coefficients (R-style, matches `lm()`)
   - Tolerance: `1e-07` (matches R's `qr()` default), relative to largest diagonal element of R in QR decomposition
   - Controllable via `rank_deficient_action` parameter: "warn" (default), "error", or "silent"
+  - **Note (scale invariance):** the shared `diff_diff/linalg.py` rank check re-detects on column-equilibrated (unit 2-norm) columns when the raw pass reports a deficiency (adopting the higher equilibrated rank and its scale-corrected pivot selection only when a large-scale column inflated the threshold; genuine collinearity keeps the raw selection), and the least-squares solve equilibrates columns then unscales the coefficients — so rank detection and the fit are invariant to per-column scaling; for a well-scaled collinear design the dropped column is unchanged, while a scale-induced under-count adopts the scale-corrected equilibrated selection (which may differ from the raw choice but is guaranteed to retain an identified subset). This covers every covariate fit routed through `solve_ols` — DiD, TwoWayFixedEffects, MultiPeriodDiD, ImputationDiD, TwoStageDiD, and TripleDifference. CallawaySantAnna and StaggeredTripleDifference fit their covariate outcome-regression nuisance via estimator-local `cho_solve`(X'X) / `lstsq` that are not yet equilibrated — see the CallawaySantAnna rank-deficiency Note's scope caveat.
 
 **Reference implementation(s):**
 - R: `fixest::feols()` with interaction term
@@ -204,6 +205,7 @@ where V is the VCV sub-matrix for post-treatment δ_e coefficients.
   not observed at all event times contribute to the periods they are present for.
 - Rank-deficient design matrix (collinearity): warns and sets NA for dropped
   coefficients (R-style, matches `lm()`)
+  - **Note (scale invariance):** shared `diff_diff/linalg.py` behavior — rank detection re-checks on column-equilibrated columns and the solve equilibrates/unscales, so detection and fit are invariant to per-column scaling. For a well-scaled collinear design the dropped column is unchanged; a scale-induced under-count adopts the scale-corrected equilibrated selection (which may differ from the raw choice but retains an identified subset). See the CallawaySantAnna rank-deficiency Note.
 - Average ATT (`avg_att`) is NA if any post-period effect is unidentified
   (R-style NA propagation)
 - NaN inference for undefined statistics:
@@ -275,6 +277,7 @@ This matches the behavior of R's `fixest::feols()` with absorbed FE.
 - Treatment perfectly collinear with FE raises error with informative message listing dropped columns
 - Covariate collinearity emits warning but estimation continues (ATT still identified)
 - Rank-deficient design matrix: warns and sets NA for dropped coefficients (R-style, matches `lm()`)
+  - **Note (scale invariance):** shared `diff_diff/linalg.py` behavior — rank detection re-checks on column-equilibrated columns and the solve equilibrates/unscales, so detection and fit are invariant to per-column scaling. For a well-scaled collinear design the dropped column is unchanged; a scale-induced under-count adopts the scale-corrected equilibrated selection (which may differ from the raw choice but retains an identified subset). See the CallawaySantAnna rank-deficiency Note.
 - Unbalanced panels handled via proper demeaning
 - Multi-period `time` parameter: only binary (0/1) post indicator is recommended; multi-period values
   produce `treated × period_number` rather than `treated × post_indicator`. A `UserWarning` is
@@ -465,9 +468,10 @@ The multiplier bootstrap uses random weights w_i with E[w]=0 and Var(w)=1:
     This prevents control contamination when `base_period="universal"` and the base
     period is later than the evaluation period (e.g., pre-treatment ATT with universal base)
 - Rank-deficient design matrix (covariate collinearity):
-  - Detection: Pivoted QR decomposition with tolerance `1e-07` (R's `qr()` default)
+  - Detection: Pivoted QR decomposition with tolerance `1e-07` (R's `qr()` default), with a **column-equilibration re-check** (unit 2-norm) that makes the rank *count* invariant to per-column scaling; the dropped-column selection is unchanged for well-scaled collinear designs (a scale-induced under-count instead adopts the scale-corrected equilibrated selection)
   - Handling: Warns and drops linearly dependent columns, sets NA for dropped coefficients (R-style, matches `lm()`)
   - Parameter: `rank_deficient_action` controls behavior: "warn" (default), "error", or "silent"
+  - **Note:** Rank detection and the least-squares solve are invariant to per-column scaling in BOTH the Python and Rust backends. The rank threshold is anchored to the largest pivot/singular value, so a column on a large raw scale (e.g. an unstandardized covariate in raw population or currency units) previously inflated the threshold and false-dropped the intercept/treatment/interaction to NaN on an otherwise full-rank design — or truncated the small-scale direction in the solve, returning finite-but-wrong coefficients. Detection now runs a raw pivoted QR first and only re-checks on column-equilibrated (unit 2-norm) columns when the raw pass reports a deficiency. If the equilibrated rank is higher (a scale-induced false-drop), the equilibrated rank AND its pivot selection are adopted — its first `rank` columns are independent under the scale-corrected criterion, so the retained design is guaranteed identified; otherwise (genuine collinearity, no scale disparity) the raw rank and pivot selection are kept unchanged. The solve equilibrates columns and unscales the coefficients. This repairs the scale bug while leaving everything else unchanged: it is a no-op for full-rank well-conditioned designs (R-parity unaffected) and does **not** change which column is dropped in a *well-scaled* collinear design (the established raw pivot selection is preserved). A scale-induced under-count instead adopts the scale-corrected equilibrated selection — which may differ from the raw choice in a mixed scale+collinearity design but is guaranteed to retain an identified (full-rank) subset. This shared `diff_diff/linalg.py` behavior covers every covariate outcome-regression fit routed through `solve_ols` — DiD, TwoWayFixedEffects, MultiPeriodDiD, ImputationDiD, TwoStageDiD, and TripleDifference. **Scope caveat:** CallawaySantAnna's covariate outcome-regression (`_compute_all_att_gt_covariate_reg`) and doubly-robust (`_doubly_robust`) nuisance solves — and StaggeredTripleDifference's *primary* per-cohort OR solve (which falls back to `solve_ols` only on the survey path) — fit via estimator-local `cho_solve` on `X'X` and `scipy.linalg.lstsq(cond=1e-7)` that do **not** route through `solve_ols`, so they are not yet scale-equilibrated. (TripleDifference's OR point-estimate fit DOES route through `solve_ols` at `triple_diff.py:1438/1444`, so it is already scale-robust; only its DR/OR influence-function SE uses local matrix inverses.) Making the local OR fits scale-robust is tracked as a follow-up (see TODO.md), bundled with the DR/OR influence-function rank-guard for CS / TripleDifference / StaggeredTripleDifference.
 - Non-finite inference values:
   - Analytic SE: Returns NaN to signal invalid inference (not biased via zeroing)
   - Bootstrap: Drops non-finite samples, warns, and adjusts p-value floor accordingly. SE, CI, and p-value are all NaN if the original point estimate is non-finite, SE is non-finite or zero (e.g., n_valid=1 with ddof=1, or identical samples)
@@ -1173,7 +1177,7 @@ where weights ŵ_{g,e} = n_{g,e} / Σ_g n_{g,e} (sample share of cohort g at eve
 - `min_pre_periods`/`min_post_periods` parameters: removed (previously deprecated with `FutureWarning`; callers passing these will now get `TypeError`)
 - Variance fallback: when full weight vector cannot be constructed for overall ATT SE, uses simplified variance (ignores covariances between periods) with `UserWarning`
 - Rank-deficient design matrix (covariate collinearity):
-  - Detection: Pivoted QR decomposition with tolerance `1e-07` (R's `qr()` default)
+  - Detection: Pivoted QR decomposition with tolerance `1e-07` (R's `qr()` default), with a **column-equilibration re-check** (unit 2-norm) that makes the rank *count* invariant to per-column scaling; the dropped-column selection is unchanged for well-scaled collinear designs (a scale-induced under-count instead adopts the scale-corrected equilibrated selection)
   - Handling: Warns and drops linearly dependent columns, sets NA for dropped coefficients (R-style, matches `lm()`)
   - Parameter: `rank_deficient_action` controls behavior: "warn" (default), "error", or "silent"
 - NaN inference for undefined statistics:
@@ -2094,6 +2098,7 @@ contract changes.
   Set `pscore_fallback="unconditional"` for legacy behavior.
 - Warns on singular GMM covariance matrix (falls back to pseudoinverse)
 - **Note:** Rank-deficient X'WX in the per-pair outcome-regression influence-function step now emits ONE aggregate `UserWarning` at `fit()` time (counting affected (g, g_c, t) cells and reporting the max condition number), instead of silently falling back to `np.linalg.lstsq`. Axis-A finding #17 in the Phase 2 silent-failures audit.
+- **Note (scale invariance scope):** TripleDifference's covariate outcome-regression POINT-ESTIMATE fit routes through `solve_ols` (`triple_diff.py:1438/1444`), so it inherits this PR's column-equilibration repair (see the CallawaySantAnna rank-deficiency Note) and is scale-robust. Only the per-pair influence-function VARIANCE step uses estimator-local cross-products (`X'WX`) — that is the DR/OR influence-function SE rank-guard tracked as a follow-up in TODO.md, not a point-estimate scale exposure.
 - **Note:** The per-pair propensity-score Hessian inversion in `_compute_pscore` (used under `estimation_method` in `{ipw, dr}`) previously fell back from `np.linalg.inv(X'WX)` to `np.linalg.lstsq` silently. `fit()` now emits a sibling aggregate `UserWarning` with cell count + max condition number so rank-deficient PS designs can't quietly degrade IPW/DR influence-function corrections. Sibling of axis-A finding #17, surfaced during PR #334 CI review.
 
 *Data structure:*
@@ -2103,6 +2108,7 @@ Balanced panel. Key variables:
 - `Q_i` (`eligibility`): binary, time-invariant eligibility indicator
 - Treatment: `D_{i,t} = 1{t >= S_i AND Q_i = 1}` (absorbing)
 - Covariates `X_i`: time-invariant (first observation per unit used)
+- **Note (scale invariance scope):** StaggeredTripleDifference's *primary* per-cohort outcome-regression fit uses estimator-local `cho_solve`(X'X) (it routes through `solve_ols` only on the survey/fallback path), so unlike the `solve_ols`-routed estimators it is NOT yet covered by this PR's column-equilibration repair (see the CallawaySantAnna rank-deficiency Note) — a covariate on a very large raw scale can in principle perturb the nuisance fit. Tracked as a follow-up in TODO.md (bundled with the DR/OR influence-function rank-guard).
 - **Note:** `first_treat=inf` (R-style never-enabled marker) is accepted and normalized to `0` internally. The recoding now emits a `UserWarning` reporting the affected row count so the reclassification is not silent (axis-E silent coercion under the Phase 2 audit, mirroring the StaggeredDiD behavior). Pass `first_treat=0` directly to avoid the warning.
 
 *Estimator equation (Equation 4.1 in paper, as implemented):*

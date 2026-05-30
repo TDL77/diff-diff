@@ -1408,6 +1408,146 @@ class TestNumericalStability:
             inf = reg.get_inference(i)
             assert np.isfinite(inf.coefficient)
 
+    def test_solve_ols_scale_invariance_fitted_values(self):
+        """Rank detection + solve are invariant to per-column scaling.
+
+        A large-scale column previously inflated the rank threshold (anchored to
+        the largest pivot/singular value) and false-dropped well-scaled columns to
+        NaN, or truncated the small-scale direction in the lstsq solve. After
+        column equilibration, solve_ols(X) and solve_ols(X @ diag(s)) give the same
+        fitted values/residuals, coefficients scale inversely, and t-stats (vcov is
+        scale-equivariant) are invariant.
+        """
+        rng = np.random.default_rng(0)
+        n = 200
+        X = np.column_stack([np.ones(n), rng.standard_normal(n), rng.standard_normal(n)])
+        y = 1.0 + 2.0 * X[:, 1] - 0.5 * X[:, 2] + rng.standard_normal(n) * 0.1
+        s = np.array([1.0, 1e8, 1e-4])  # pathological per-column scaling
+
+        coef_raw, resid_raw, vcov_raw = solve_ols(X, y)
+        coef_scaled, resid_scaled, vcov_scaled = solve_ols(X * s, y)
+
+        # full-rank design stays full-rank under any scaling (the headline bug)
+        assert np.all(np.isfinite(coef_scaled))
+        # fitted values / residuals invariant
+        np.testing.assert_allclose(resid_raw, resid_scaled, atol=1e-8)
+        np.testing.assert_allclose(X @ coef_raw, (X * s) @ coef_scaled, atol=1e-8)
+        # coefficients scale inversely with the column scaling
+        np.testing.assert_allclose(coef_scaled, coef_raw / s, rtol=1e-6)
+        # t-stats invariant (vcov is scale-equivariant: SE_j scales like 1/s_j)
+        t_raw = coef_raw / np.sqrt(np.diag(vcov_raw))
+        t_scaled = coef_scaled / np.sqrt(np.diag(vcov_scaled))
+        np.testing.assert_allclose(t_raw, t_scaled, rtol=1e-5)
+
+    def test_did_finite_att_with_large_scale_covariate(self):
+        """End-to-end: a full-rank DiD with a 1e8-scale covariate returns a finite
+        ATT equal to the O(1)-rescaled run (no scale-induced NaN)."""
+        from diff_diff import DifferenceInDifferences, generate_did_data
+
+        df = generate_did_data(
+            n_units=400, n_periods=2, treatment_period=1, treatment_effect=2.5, seed=42
+        ).copy()
+        rng = np.random.default_rng(0)
+        # outcome-relevant, treatment-imbalanced covariate on a huge scale
+        cov = (rng.standard_normal(len(df)) + 2.0 * df["treated"].to_numpy()) * 1e8
+        df["cov"] = cov
+        df["outcome"] = df["outcome"].astype(float) + 3e-8 * df["cov"]
+
+        res = DifferenceInDifferences().fit(
+            df, outcome="outcome", treatment="treated", time="post", covariates=["cov"]
+        )
+        assert np.isfinite(
+            res.att
+        ), "ATT is NaN for a full-rank design with a large-scale covariate"
+
+        # same data with the covariate rescaled to O(1) gives the same ATT
+        df_small = df.copy()
+        df_small["cov"] = df["cov"] / 1e8
+        df_small["outcome"] = df["outcome"]  # outcome already includes the effect
+        res_small = DifferenceInDifferences().fit(
+            df_small,
+            outcome="outcome",
+            treatment="treated",
+            time="post",
+            covariates=["cov"],
+        )
+        np.testing.assert_allclose(res.att, res_small.att, rtol=1e-6)
+
+    def test_solve_ols_rank_zero_returns_nan_not_indexerror(self):
+        """A design that collapses to rank 0 returns all-NaN coefficients with a
+        warning, not a cryptic IndexError (empty float index array)."""
+        import warnings
+
+        n = 50
+        X = np.zeros((n, 3))  # rank 0
+        y = np.random.default_rng(2).standard_normal(n)
+        with pytest.warns(UserWarning, match="[Rr]ank-deficient"):
+            coef, resid, vcov = solve_ols(X, y)
+        assert coef.shape == (3,)
+        assert np.all(np.isnan(coef))  # nothing identifiable
+        np.testing.assert_allclose(resid, y)  # fitted = 0
+        assert vcov.shape == (3, 3) and np.all(np.isnan(vcov))
+
+    def test_rank_detection_scale_repair_preserves_raw_drop_selection(self):
+        """The scale-invariance repair must NOT change which column is dropped in a
+        genuinely collinear, well-scaled design: the dropped column equals the raw
+        pivoted-QR choice (the repair only raises the rank when a large-scale column
+        false-inflated the threshold)."""
+        from scipy.linalg import qr
+
+        from diff_diff.linalg import _detect_rank_deficiency
+
+        rng = np.random.default_rng(3)
+        X = rng.standard_normal((100, 3))
+        X = np.column_stack([X, X[:, 0] + X[:, 1]])  # rank 3 of 4, well-scaled
+        rank, dropped, _ = _detect_rank_deficiency(X)
+
+        # reference: the raw pivoted-QR drop selection
+        _Q, R, piv = qr(X, mode="economic", pivoting=True)
+        rd = np.abs(np.diag(R))
+        raw_rank = int(np.sum(rd > 1e-7 * rd[0]))
+        raw_dropped = np.sort(piv[raw_rank:])
+
+        assert rank == 3
+        np.testing.assert_array_equal(dropped, raw_dropped)
+
+    def test_rank_detection_mixed_scale_and_collinearity_keeps_identified_subset(self):
+        """Mixed case: a design that is genuinely rank-deficient AND contains a
+        huge-scale independent column. The rank COUNT must be scale-corrected (3,
+        not under-counted by the huge column), the RETAINED columns must be full
+        rank (an identified subset — the property that actually matters), the
+        huge independent column must NOT be dropped, and downstream inference on
+        the kept coefficients must be valid (finite, non-negative vcov diagonal)."""
+        from diff_diff.linalg import _detect_rank_deficiency
+
+        rng = np.random.default_rng(0)
+        n = 200
+        x0 = rng.standard_normal(n)
+        x1 = rng.standard_normal(n)
+        z = rng.standard_normal(n)
+        X = np.column_stack([x0, x1, x0 + x1, 1e8 * z])  # rank 3; col 3 huge+indep
+        rank, dropped, _ = _detect_rank_deficiency(X)
+        kept = np.array([i for i in range(4) if i not in set(dropped.tolist())], dtype=int)
+
+        assert rank == 3  # scale-corrected count, not under-counted by the huge col
+        assert len(dropped) == 1
+        assert 3 not in dropped  # the huge INDEPENDENT column is never dropped
+        # the RETAINED design is full rank (an identified subset) — equilibrate
+        # before matrix_rank so the check is itself scale-invariant
+        kept_eq = X[:, kept] / np.sqrt((X[:, kept] ** 2).sum(axis=0))
+        assert np.linalg.matrix_rank(kept_eq) == len(kept)
+        # downstream inference on the kept coefficients is valid
+        y = x0 + 2 * x1 + 0.5 * (1e-8 * (1e8 * z)) + rng.standard_normal(n) * 0.1
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            coef, _resid, vcov = solve_ols(X, y)
+        assert np.all(np.isfinite(coef[kept]))  # kept coefficients identified
+        assert np.isnan(coef[dropped[0]])  # the redundant column is NaN
+        vd = np.diag(vcov)[kept]
+        assert np.all(np.isfinite(vd)) and np.all(vd >= 0)  # valid kept-coef VCV
+
 
 class TestEstimatorIntegration:
     """Integration tests verifying estimators produce correct results."""
@@ -1900,3 +2040,38 @@ class TestSolvePoisson:
         y = rng.poisson(1.5, size=n).astype(float)
         beta, _ = solve_poisson(X, y)
         assert len(beta) == 2  # not 3
+
+    def test_rank_zero_design_raises_valueerror(self):
+        """A rank-0 design (all-zero, every column dropped) raises a clear
+        ValueError instead of a cryptic IndexError on an empty integer index
+        array. solve_poisson does not prepend an intercept, so rank 0 is
+        reachable (unlike solve_logit)."""
+        import warnings
+
+        rng = np.random.default_rng(0)
+        n = 60
+        y = rng.poisson(2.0, size=n).astype(float)
+        X = np.zeros((n, 2))  # rank 0
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match="rank 0"):
+                solve_poisson(X, y)
+
+    def test_rank_zero_positive_weight_subset_raises_valueerror(self):
+        """The effective (positive-weight) sample collapsing to rank 0 also raises
+        a clear ValueError (the eff_kept branch)."""
+        import warnings
+
+        rng = np.random.default_rng(1)
+        n = 60
+        y = rng.poisson(2.0, size=n).astype(float)
+        # Full design is full rank (variation lives in the zero-weight rows), but
+        # the positive-weight subsample is all-zero -> rank 0 on that subset.
+        X = np.zeros((n, 2))
+        X[n // 2 :, :] = rng.standard_normal((n - n // 2, 2))
+        weights = np.ones(n)
+        weights[n // 2 :] = 0.0  # only the all-zero rows carry positive weight
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match="rank 0"):
+                solve_poisson(X, y, weights=weights)
