@@ -113,7 +113,10 @@ derivative-free Powell polish. ``v_method="custom"`` takes a user-supplied ``cus
    efficiency-only choice. Predictor/outcome aggregation also **fails closed** on any
    non-finite cell, whereas R ``dataprep`` uses ``na.rm=TRUE`` — restrict
    ``predictor_window`` / ``special_predictors`` periods to where a variable is observed.
-   See ``docs/methodology/REGISTRY.md`` §SyntheticControl for all deviation labels.
+   Predictor rows support only **equal-weight** linear combinations (``mean``, ``sum``,
+   per-period lags); ADH (2010) §2.3's general weighted form ``Σ_s k_s Y_is`` with
+   arbitrary ``k_s`` (and non-linear ops such as ``median``) is not accepted in this
+   release. See ``docs/methodology/REGISTRY.md`` §SyntheticControl for all deviation labels.
 
 Example Usage
 -------------
