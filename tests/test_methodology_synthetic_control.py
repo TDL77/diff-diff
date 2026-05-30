@@ -322,6 +322,41 @@ def test_inner_v_search_nonconvergence_warning():
         synthetic_control(df, "y", "treated", "unit", "year", seed=0, inner_max_iter=1)
 
 
+def test_single_inner_nonconvergence_excluded_from_v_ranking(monkeypatch):
+    # A single LOW-RATE non-converged objective evaluation must be EXCLUDED from V
+    # ranking (penalized out of the argmin), not merely warned about: force exactly one
+    # objective eval (the uniform-start eval, max(v) < 0.9) to report conv=False and
+    # assert (a) the any-occurrence warning fires, and (b) the selected V is a genuine
+    # small-MSPE fit (mspe_v << penalty), i.e. the truncated candidate did not win.
+    import importlib
+
+    # NB: ``diff_diff.synthetic_control`` the attribute is the convenience *function*
+    # (it shadows the submodule, same as ``diff_diff.trop``), so reach the module via
+    # importlib to monkeypatch its module-global _inner_solve_W.
+    sc = importlib.import_module("diff_diff.synthetic_control")
+
+    df, _, _ = _make_panel()
+    real_solve = sc._inner_solve_W
+    state = {"failed": False}
+
+    def patched(X1s, X0s, v, max_iter, min_decrease):
+        w, conv = real_solve(X1s, X0s, v, max_iter, min_decrease)
+        if not state["failed"] and float(np.max(v)) < 0.9:  # a spread V => an objective eval
+            state["failed"] = True
+            return w, False
+        return w, conv
+
+    monkeypatch.setattr(sc, "_inner_solve_W", patched)
+    with pytest.warns(UserWarning, match="during nested V selection"):
+        res = synthetic_control(df, "y", "treated", "unit", "year", seed=0)
+
+    assert state["failed"]  # the patch actually fired on an objective evaluation
+    assert np.isfinite(res.att)
+    # Exclusion proof: the chosen V's outer-objective MSPE is a real (small) value, not
+    # the large penalty a truncated candidate would have carried.
+    assert res.mspe_v is not None and res.mspe_v < 1.0
+
+
 def test_n_starts_one_runs():
     # n_starts=1 uses only the uniform start (short-circuits the heuristic candidates)
     # and still produces a valid nested fit.
