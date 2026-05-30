@@ -294,6 +294,12 @@ class SyntheticControl:
         if missing:
             raise ValueError(f"Missing columns: {missing}")
 
+        # Validate the treatment indicator on the FULL input BEFORE classifying
+        # units: a non-{0,1} history would otherwise be silently dropped from both
+        # the treated and never-treated sets by _resolve_treated_and_donors, quietly
+        # changing the donor pool / weights / ATT.
+        _check_binary(data[treatment].to_numpy(), treatment)
+
         # --- treated unit + donor pool ---
         treated_id, donor_ids = _resolve_treated_and_donors(
             data, treatment, unit, treated_unit, donor_pool
@@ -304,8 +310,7 @@ class SyntheticControl:
         sub = cast(pd.DataFrame, data[data[unit].isin(keep_ids)])
         all_periods = sorted(sub[time].unique())
 
-        # binary treatment + balanced panel checks (on the analysis subset)
-        _check_binary(sub[treatment].to_numpy(), treatment)
+        # balanced panel check (on the analysis subset)
         _check_balanced(sub, unit, time, keep_ids, all_periods)
 
         # --- pre/post period resolution + canonicalization + cross-checks ---
@@ -628,14 +633,25 @@ def _resolve_periods(
 
     pre_periods = all_periods[: len(all_periods) - len(post)]
 
-    # No-anticipation cross-check vs the treated unit's D column (validation 2):
-    # the treated unit must be untreated (D==0) in every pre period.
+    # Absorbing-treatment cross-check vs the treated unit's D column (validation 2),
+    # enforced on BOTH the inferred and explicit branches:
+    #   - no anticipation: the treated unit must be untreated (D==0) in every pre period;
+    #   - uninterrupted exposure: the treated unit must be treated (D==1) in every post
+    #     period (an explicit suffix like [t2, t3] over a path 0,0,1,0 would otherwise
+    #     average a treated period with an untreated one).
     anticipated = [p for p in pre_periods if treated_d[p] == 1]
     if anticipated:
         raise ValueError(
             f"Treated unit has D==1 in pre periods {anticipated}; this violates the "
             "no-anticipation / absorbing-treatment assumption. Redefine post_periods "
             "to begin at the first treated period."
+        )
+    untreated_post = [p for p in post if treated_d[p] != 1]
+    if untreated_post:
+        raise ValueError(
+            f"Treated unit has D==0 in post periods {untreated_post}; absorbing "
+            "treatment requires uninterrupted exposure (D==1) in every post period. "
+            "Check post_periods against the treatment column."
         )
 
     if len(pre_periods) == 0:

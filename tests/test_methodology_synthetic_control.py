@@ -151,6 +151,26 @@ def test_anticipation_in_pre_rejected():
         SyntheticControl(seed=0).fit(df, "y", "treated", "unit", "year", post_periods=years[T0:])
 
 
+def test_untreated_period_in_post_rejected():
+    # Absorbing exposure: a D==0 period inside the (contiguous) post suffix must be
+    # rejected, not averaged into the ATT (treated path 0,...,1,0 with post=[T0:]).
+    df, years, T0 = _make_panel()
+    df = df.copy()
+    df.loc[(df["unit"] == "treated") & (df["year"] == years[-1]), "treated"] = 0
+    with pytest.raises(ValueError, match="uninterrupted exposure|D==0 in post"):
+        SyntheticControl(seed=0).fit(df, "y", "treated", "unit", "year", post_periods=years[T0:])
+
+
+def test_non_binary_treatment_rejected():
+    # A non-{0,1} treatment code must fail closed (else the unit is silently dropped
+    # from both treated and donor sets, changing the donor pool / weights / ATT).
+    df, years, T0 = _make_panel()
+    df = df.copy()
+    df.loc[(df["unit"] == "d0") & (df["year"] == years[0]), "treated"] = 2
+    with pytest.raises(ValueError, match="binary"):
+        synthetic_control(df, "y", "treated", "unit", "year", seed=0)
+
+
 # ---------------------------------------------------------------------------
 # Validation 3 + 9: explicit post canonicalized; gap path order-independent
 # ---------------------------------------------------------------------------
