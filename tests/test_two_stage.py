@@ -2252,3 +2252,29 @@ class TestTwoStageDiDVcovType:
         assert r.n_clusters < full_units  # would equal full_units under the bug
         # to_dict mirrors the corrected count
         assert r.to_dict()["n_clusters"] == expected_g
+
+    def test_n_clusters_counts_nan_cluster_like_the_variance(self):
+        """The GMM sandwich counts clusters via np.unique(cluster_ids), which
+        keeps a single NaN group; Series.nunique() would drop NaN. n_clusters
+        metadata must match the variance so a `cluster=` column with missing IDs
+        cannot make the reported G undercount the SE's actual cluster count.
+        Regression for the codex round-3 P2.
+        """
+        data = generate_test_data(n_units=80, seed=21)
+        data["cl"] = (data["unit"] % 6).astype(float)
+        data.loc[data["unit"].isin([0, 1, 2]), "cl"] = np.nan
+        # No always-treated drop here (cohorts start at t=3, min_time=0), so
+        # df == data; count clusters the way the variance does.
+        expected_g = int(np.unique(data["cl"].values).size)
+        n_valid = int(data.loc[data["cl"].notna(), "cl"].nunique())
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r = TwoStageDiD(cluster="cl").fit(
+                data, outcome="outcome", unit="unit", time="time", first_treat="first_treat"
+            )
+        assert r.cluster_name == "cl"
+        assert r.n_clusters == expected_g
+        # NaN is counted as a cluster (Series.nunique() would have dropped it),
+        # so G strictly exceeds the distinct non-NaN cluster count.
+        assert r.n_clusters > n_valid
+        assert r.to_dict()["n_clusters"] == expected_g

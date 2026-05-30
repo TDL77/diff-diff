@@ -2067,27 +2067,25 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         # Resolve cluster_name / n_clusters for Results metadata. Suppress under
         # ANY survey design (the summary survey block already reports the
         # design's PSU/strata/replicate metadata; replicate-weight variance
-        # ignores cluster entirely). Otherwise count clusters on the POST-DROP
-        # fit sample `df` (always-treated units were removed above at the
-        # `df = df[~df[unit].isin(always_treated_units)]` step), NOT the full
-        # input `data`: the GMM sandwich computes variance over
-        # `cluster_ids=df[cluster_var].values` (see the `_compute_gmm_variance`
-        # call sites), so the reported G must match that effective count — using
-        # `data` would overstate the clusters the SE is actually based on when an
-        # always-treated unit/cluster is excluded. Branches:
-        #   bare cluster= -> the user-named cluster column (df[self.cluster])
-        #   cluster=None  -> the Gardner GMM sandwich clusters at `unit` by
-        #                    default (cluster_var = unit above), so the summary
-        #                    label reports unit-cluster CR1, not HC1.
+        # ignores cluster entirely). Otherwise count clusters EXACTLY the way the
+        # GMM sandwich does — `np.unique(df[cluster_var].values)` — so the
+        # reported G can never disagree with the SE:
+        #   - `df` (not the full input `data`) excludes always-treated units
+        #     dropped above at `df = df[~df[unit].isin(always_treated_units)]`,
+        #     matching the post-drop `cluster_ids=df[cluster_var].values` fed to
+        #     `_compute_gmm_variance`;
+        #   - `np.unique` (not `Series.nunique()`, which drops NaN) keeps the
+        #     same single NaN group the variance forms, so missing cluster IDs
+        #     cannot make the metadata undercount.
+        # `cluster_var` is `self.cluster`, or the `unit` column when
+        # `cluster=None` (the Gardner sandwich always clusters at unit by
+        # default), so the summary renders the unit-cluster CR1 label, not HC1.
         if resolved_survey is not None:
             _cluster_name_for_results: Optional[str] = None
             _n_clusters_for_results: Optional[int] = None
-        elif self.cluster is not None:
-            _cluster_name_for_results = self.cluster
-            _n_clusters_for_results = int(df[self.cluster].nunique())
         else:
-            _cluster_name_for_results = unit
-            _n_clusters_for_results = int(df[unit].nunique())
+            _cluster_name_for_results = self.cluster if self.cluster is not None else unit
+            _n_clusters_for_results = int(np.unique(df[cluster_var].values).size)
 
         # Construct results
         self.results_ = TwoStageDiDResults(
