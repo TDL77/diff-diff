@@ -271,6 +271,8 @@ def test_empty_special_period_list_rejected():
 
 
 def test_non_finite_predictor_rejected():
+    # PARTIAL missingness in a predictor window: fail closed (deliberate deviation
+    # from R Synth's na.rm=TRUE — see REGISTRY). All-NA windows behave identically.
     df, years, T0 = _make_panel()
     df = df.copy()
     df.loc[(df["unit"] == "d0") & (df["year"] == years[0]), "x"] = np.nan
@@ -283,6 +285,32 @@ def test_non_finite_predictor_rejected():
             "year",
             predictors=["x"],
             predictor_window=[years[0], years[1]],
+        )
+
+
+def test_all_na_predictor_window_rejected():
+    # FULLY-missing predictor window: same fail-closed contract as partial (no na.rm).
+    df, years, T0 = _make_panel()
+    df = df.copy()
+    df.loc[(df["unit"] == "d0") & (df["year"].isin([years[0], years[1]])), "x"] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        SyntheticControl(seed=0).fit(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            predictors=["x"],
+            predictor_window=[years[0], years[1]],
+        )
+
+
+def test_outer_v_nonconvergence_warning():
+    # Outer V-search non-convergence must not be silent (optimizer capped at 1 iter).
+    df, _, _ = _make_panel()
+    with pytest.warns(UserWarning, match="Outer V-search"):
+        synthetic_control(
+            df, "y", "treated", "unit", "year", seed=0, optimizer_options={"maxiter": 1}
         )
 
 

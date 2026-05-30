@@ -82,8 +82,8 @@ Convenience Function
 Predictors and V selection
 --------------------------
 
-Predictor rows of ``X1`` (treated) / ``X0`` (donors) are built, in this canonical order
-(matching R ``Synth::dataprep``), from:
+Predictor rows of ``X1`` (treated) / ``X0`` (donors) are built, in this canonical row
+order (the ordering matches R ``Synth::dataprep``), from:
 
 .. list-table::
    :header-rows: 1
@@ -110,7 +110,10 @@ derivative-free Powell polish. ``v_method="custom"`` takes a user-supplied ``cus
    optimizer are pinned from the R ``Synth`` source — they are not specified in
    Abadie-Diamond-Hainmueller (2010). The outer objective uses all pre periods rather than
    R's ``time.optimize.ssr`` window, so the nested ``V`` differs from R by an
-   efficiency-only choice. See ``docs/methodology/REGISTRY.md`` §SyntheticControl.
+   efficiency-only choice. Predictor/outcome aggregation also **fails closed** on any
+   non-finite cell, whereas R ``dataprep`` uses ``na.rm=TRUE`` — restrict
+   ``predictor_window`` / ``special_predictors`` periods to where a variable is observed.
+   See ``docs/methodology/REGISTRY.md`` §SyntheticControl for all deviation labels.
 
 Example Usage
 -------------

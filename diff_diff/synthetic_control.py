@@ -718,8 +718,10 @@ def _validate_predictors(
 ) -> List[_PredictorSpec]:
     """Build the normalized, collision-checked predictor specification list.
 
-    Canonical row order: covariate/predictor averages -> special predictors ->
-    per-period outcome lags (matches R ``Synth::dataprep``).
+    Canonical row ORDER: covariate/predictor averages -> special predictors ->
+    per-period outcome lags (the row order matches R ``Synth::dataprep``). NOTE: the
+    aggregation itself fails closed on any non-finite cell (handled in ``fit``),
+    whereas R ``dataprep`` uses ``na.rm=TRUE`` — a documented deviation (see REGISTRY).
     """
     pre_set = set(pre_periods)
     specs: List[_PredictorSpec] = []
@@ -1002,17 +1004,32 @@ def _outer_solve_V(
 
     best_x: np.ndarray = starts[0]
     best_fun = np.inf
+    outer_converged = False
     for theta0 in starts:
         res = minimize(objective, theta0, method="Nelder-Mead", options=nm_options)
+        outer_converged = outer_converged or bool(res.success)
         if res.fun < best_fun:
             best_fun = float(res.fun)
             best_x = res.x
 
     # Derivative-free polish from the incumbent (best-of, mirrors R optimx).
     res_p = minimize(objective, best_x, method="Powell", options=powell_options)
+    outer_converged = outer_converged or bool(res_p.success)
     if res_p.fun < best_fun:
         best_fun = float(res_p.fun)
         best_x = res_p.x
+
+    # Surface a silent under-optimized V: if neither the multistart Nelder-Mead nor
+    # the Powell polish reported success (e.g. optimizer_options={"maxiter": 1}), the
+    # selected V / donor weights / ATT may be sub-optimal.
+    if not outer_converged:
+        warnings.warn(
+            "Outer V-search (Nelder-Mead / Powell) did not converge; the selected "
+            "predictor-importance matrix V (and the resulting donor weights / ATT) may "
+            "be sub-optimal. Increase optimizer_options['maxiter'] or n_starts.",
+            UserWarning,
+            stacklevel=3,
+        )
 
     v_star = _softmax(best_x)
     w_star, converged = _inner_solve_W(X1s, X0s, v_star, inner_max_iter, inner_min_decrease)
