@@ -314,6 +314,14 @@ def test_outer_v_nonconvergence_warning():
         )
 
 
+def test_inner_v_search_nonconvergence_warning():
+    # Intermediate inner solves during the nested V search must not be silent: forcing
+    # inner_max_iter=1 makes them truncate, and the estimator emits an aggregated warning.
+    df, _, _ = _make_panel()
+    with pytest.warns(UserWarning, match="during nested V selection"):
+        synthetic_control(df, "y", "treated", "unit", "year", seed=0, inner_max_iter=1)
+
+
 def test_n_starts_one_runs():
     # n_starts=1 uses only the uniform start (short-circuits the heuristic candidates)
     # and still produces a valid nested fit.

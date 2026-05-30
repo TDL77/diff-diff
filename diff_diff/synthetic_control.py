@@ -925,8 +925,12 @@ def _v_starts(
     rng: np.random.Generator,
     inner_max_iter: int,
     inner_min_decrease: float,
-) -> List[np.ndarray]:
+) -> Tuple[List[np.ndarray], int, int]:
     """Build a list of DISTINCT starting ``theta`` vectors for the outer V search.
+
+    Returns ``(candidates, n_inner_solves, n_inner_nonconverged)`` — the latter two
+    count the inner Frank-Wolfe solves run by the univariate-fit heuristic so the
+    caller can surface aggregate intermediate non-convergence.
 
     Heuristic starts: uniform V; inverse-row-variance V (computed from the
     UNSTANDARDIZED predictors ``X1``/``X0`` — on the standardized rows every variance
@@ -976,12 +980,17 @@ def _v_starts(
 
     # univariate-fit start: v_i ∝ 1 / (pre-outcome MSPE of W solved with V=e_i).
     # Skipped entirely when enough candidates are already collected (saves k inner solves).
+    inner_total = 0
+    inner_nonconv = 0
     if len(candidates) < target:
         uni_mspe = np.empty(k)
         for i in range(k):
             e = np.zeros(k)
             e[i] = 1.0
-            w_i, _ = _inner_solve_W(X1s, X0s, e, inner_max_iter, inner_min_decrease)
+            w_i, conv_i = _inner_solve_W(X1s, X0s, e, inner_max_iter, inner_min_decrease)
+            inner_total += 1
+            if not conv_i:
+                inner_nonconv += 1
             uni_mspe[i] = float(np.mean((Z1 - Z0 @ w_i) ** 2))
         inv_mspe = np.where(uni_mspe > 0, 1.0 / np.maximum(uni_mspe, 1e-12), 0.0)
         if np.sum(inv_mspe) > 0:
@@ -994,7 +1003,7 @@ def _v_starts(
         attempts += 1
         _add_unique(_to_theta(rng.dirichlet(np.ones(k))), candidates)
 
-    return candidates[:target]
+    return candidates[:target], inner_total, inner_nonconv
 
 
 def _outer_solve_V(
@@ -1021,9 +1030,17 @@ def _outer_solve_V(
         w, converged = _inner_solve_W(X1s, X0s, v, inner_max_iter, inner_min_decrease)
         return v, w, converged, float(np.mean((Z1 - Z0 @ w) ** 2))
 
+    # Track inner Frank-Wolfe non-convergence across ALL intermediate evaluations so
+    # the outer search cannot silently rank truncated W*(V) solves (codex). `_inner_solve_W`
+    # suppresses its own per-call warning during the search; we aggregate here.
+    _st = {"total": 0, "nonconv": 0}
+
     def objective(theta: np.ndarray) -> float:
         v = _softmax(theta)
-        w, _ = _inner_solve_W(X1s, X0s, v, inner_max_iter, inner_min_decrease)
+        w, conv = _inner_solve_W(X1s, X0s, v, inner_max_iter, inner_min_decrease)
+        _st["total"] += 1
+        if not conv:
+            _st["nonconv"] += 1
         return float(np.mean((Z1 - Z0 @ w) ** 2))
 
     nm_options = {"maxiter": 1000, "xatol": 1e-8, "fatol": 1e-8}
@@ -1038,9 +1055,11 @@ def _outer_solve_V(
         powell_options["ftol"] = powell_options.pop("fatol")
 
     rng = np.random.default_rng(seed)
-    starts = _v_starts(
+    starts, start_total, start_nonconv = _v_starts(
         k, X1, X0, X1s, X0s, Z1, Z0, n_starts, rng, inner_max_iter, inner_min_decrease
     )
+    _st["total"] += start_total
+    _st["nonconv"] += start_nonconv
 
     best_x: np.ndarray = starts[0]
     best_fun = np.inf
@@ -1067,6 +1086,21 @@ def _outer_solve_V(
             "Outer V-search (Nelder-Mead / Powell) did not converge; the selected "
             "predictor-importance matrix V (and the resulting donor weights / ATT) may "
             "be sub-optimal. Increase optimizer_options['maxiter'] or n_starts.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    # Aggregate intermediate inner Frank-Wolfe non-convergence across the whole nested
+    # search (univariate starts + every objective evaluation). Per-call FW warnings are
+    # suppressed during the search, so without this the outer optimizer could silently
+    # rank truncated W*(V) solves. Threshold mirrors synthetic_did.py's 5% rule.
+    if _st["nonconv"] > 0.05 * max(_st["total"], 1):
+        warnings.warn(
+            f"Inner Frank-Wolfe did not converge on {_st['nonconv']} of {_st['total']} "
+            f"weight solves during nested V selection (inner_max_iter={inner_max_iter}); "
+            "the outer search may have ranked truncated W*(V) solutions, so the selected "
+            "V / donor weights / ATT may be sub-optimal. Increase inner_max_iter or relax "
+            "inner_min_decrease.",
             UserWarning,
             stacklevel=3,
         )
