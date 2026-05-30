@@ -140,6 +140,16 @@ class TwoStageDiDResults:
     bootstrap_results: Optional[TwoStageBootstrapResults] = field(default=None, repr=False)
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None, repr=False)
+    # --- Variance-estimator metadata (Phase 1b vcov_type threading) ---
+    # vcov_type is permanently narrow to {"hc1"} per the Gardner (2022) GMM
+    # cluster-sandwich. cluster_name/n_clusters carry the cluster label (the
+    # Gardner sandwich always clusters — default at the unit column, see
+    # two_stage.py:1547) so summary() renders the unit-cluster CR1 label rather
+    # than generic HC1. Both are None under any survey design (the survey block
+    # already reports the design's PSU/strata metadata).
+    vcov_type: str = "hc1"
+    cluster_name: Optional[str] = None
+    n_clusters: Optional[int] = None
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property
@@ -217,6 +227,38 @@ class TwoStageDiDResults:
         if self.survey_metadata is not None:
             sm = self.survey_metadata
             lines.extend(_format_survey_block(sm, 85))
+
+        # Variance-estimator label (Phase 1b vcov_type), with two suppression
+        # gates mirroring DiDResults.summary() (results.py:213-226) and
+        # ImputationDiDResults.summary():
+        #   1. Bootstrap fits: fit() overwrites the reported SE/CI/p-value with
+        #      bootstrap_results, so the analytical variance-family label would
+        #      mislabel the inference source — surface "Inference method:
+        #      bootstrap" + the replication count instead.
+        #   2. Survey fits: _format_survey_block above already reports the design
+        #      (weight type, strata/PSU counts, replicate method), so a parallel
+        #      variance line would be redundant/misleading.
+        # Default cluster=None still clusters at the unit column (Gardner GMM
+        # sandwich, two_stage.py:1547), so cluster_name carries the unit column
+        # and _format_vcov_label renders the unit-cluster CR1 label, not HC1.
+        if self.bootstrap_results is not None:
+            lines.append(f"{'Inference method:':<30} {'bootstrap':>15}")
+            lines.append(
+                f"{'Bootstrap replications:':<30} {self.bootstrap_results.n_bootstrap:>15}"
+            )
+            lines.append("")
+        elif self.survey_metadata is None:
+            from diff_diff.results import _format_vcov_label
+
+            vcov_label = _format_vcov_label(
+                self.vcov_type,
+                cluster_name=self.cluster_name,
+                n_clusters=self.n_clusters,
+                n_obs=self.n_obs,
+            )
+            if vcov_label:
+                lines.append(f"{'Variance estimator:':<30} {vcov_label:>15}")
+                lines.append("")
 
         # Overall ATT
         lines.extend(
@@ -410,6 +452,55 @@ class TwoStageDiDResults:
             raise ValueError(
                 f"Unknown level: {level}. Use 'event_study', 'group', or 'observation'."
             )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert headline results to a dictionary.
+
+        Provides flat aliases (``att``/``se``/``t_stat``/``p_value``/
+        ``conf_int_lower``/``conf_int_upper``) plus variance-estimator metadata
+        (``vcov_type``, optional ``cluster_name``/``n_clusters``, optional
+        ``n_bootstrap``, ``inference_method``). Per-cohort / per-horizon detail is
+        exposed via :meth:`to_dataframe`. ``inference_method`` reports
+        ``"cluster"`` for the default fit because the Gardner GMM sandwich
+        clusters at the unit column (``n_clusters`` populated) — consistent with
+        the CR1-at-unit summary label.
+
+        Returns
+        -------
+        Dict[str, Any]
+            Headline overall ATT plus inference metadata.
+        """
+        result: Dict[str, Any] = {
+            "att": self.overall_att,
+            "se": self.overall_se,
+            "t_stat": self.overall_t_stat,
+            "p_value": self.overall_p_value,
+            "conf_int_lower": self.overall_conf_int[0],
+            "conf_int_upper": self.overall_conf_int[1],
+            "n_obs": self.n_obs,
+            "n_treated_obs": self.n_treated_obs,
+            "n_untreated_obs": self.n_untreated_obs,
+            "n_treated_units": self.n_treated_units,
+            "n_control_units": self.n_control_units,
+            "alpha": self.alpha,
+            "anticipation": self.anticipation,
+            "vcov_type": self.vcov_type,
+        }
+        if self.cluster_name is not None:
+            result["cluster_name"] = self.cluster_name
+        if self.n_clusters is not None:
+            result["n_clusters"] = self.n_clusters
+        if self.bootstrap_results is not None:
+            result["n_bootstrap"] = self.bootstrap_results.n_bootstrap
+            result["inference_method"] = "bootstrap"
+        elif self.survey_metadata is not None:
+            result["inference_method"] = "survey"
+        elif self.n_clusters is not None:
+            result["inference_method"] = "cluster"
+        else:
+            result["inference_method"] = "analytical"
+        return result
 
     @property
     def is_significant(self) -> bool:

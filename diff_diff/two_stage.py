@@ -1256,6 +1256,16 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         pre-trends assessment. Pre-period effects should be ~0 under
         parallel trends. Only affects event_study aggregation; overall
         ATT and group aggregation are unchanged.
+    vcov_type : str, default="hc1"
+        Variance estimator family. Permanently narrow to ``{"hc1"}`` — the
+        Gardner (2022) two-stage GMM cluster-sandwich. Analytical-sandwich
+        families ``{"classical", "hc2", "hc2_bm"}`` and ``"conley"`` are
+        rejected at ``__init__`` / ``fit()`` because the GMM-corrected meat
+        folds first-stage estimation uncertainty into the score, leaving no
+        single hat matrix on which hat-matrix leverage or Bell-McCaffrey
+        Satterthwaite DOF can be defined. Use ``cluster=<col>`` to select the
+        cluster level; ``cluster=None`` (the default) clusters at the unit
+        level, so the summary renders the unit-cluster CR1 label.
 
     Attributes
     ----------
@@ -1309,6 +1319,7 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         rank_deficient_action: str = "warn",
         horizon_max: Optional[int] = None,
         pretrends: bool = False,
+        vcov_type: str = "hc1",
     ):
         if rank_deficient_action not in ("warn", "error", "silent"):
             raise ValueError(
@@ -1320,10 +1331,12 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                 f"bootstrap_weights must be 'rademacher', 'mammen', or 'webb', "
                 f"got '{bootstrap_weights}'"
             )
+        self._validate_vcov_type(vcov_type)
 
         self.anticipation = anticipation
         self.alpha = alpha
         self.cluster = cluster
+        self.vcov_type = vcov_type
         self.n_bootstrap = n_bootstrap
         self.bootstrap_weights = bootstrap_weights
         self.seed = seed
@@ -1387,6 +1400,11 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         ValueError
             If required columns are missing or data validation fails.
         """
+        # Re-validate vcov_type at fit-time so sklearn-style set_params
+        # mutations (e.g. set_params(vcov_type="classical")) are re-checked
+        # rather than silently accepted by the attribute setter.
+        self._validate_vcov_type(self.vcov_type)
+
         # ---- Data validation ----
         required_cols = [outcome, unit, time, first_treat]
         if covariates:
@@ -1416,6 +1434,16 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             raise ValueError(
                 "Cannot use n_bootstrap > 0 with replicate-weight survey designs. "
                 "Replicate weights provide their own variance estimation."
+            )
+        if _uses_replicate_ts and self.cluster is not None:
+            raise NotImplementedError(
+                "TwoStageDiD(cluster=...) with a replicate-weight survey design "
+                "is not supported: replicate-weight variance "
+                "(compute_replicate_refit_variance) estimates the SE by "
+                "per-replicate re-fit and ignores cluster= entirely, so the "
+                "cluster specification would be silently dropped. Use cluster= "
+                "with analytical/TSL inference (no replicate weights), or a "
+                "replicate-weight design without cluster=."
             )
         # Validate within-unit constancy for panel survey designs
         if resolved_survey is not None:
@@ -2036,6 +2064,29 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                                 eff_val, se_val, alpha=self.alpha
                             )[0]
 
+        # Resolve cluster_name / n_clusters for Results metadata. Suppress under
+        # ANY survey design (the summary survey block already reports the
+        # design's PSU/strata/replicate metadata; replicate-weight variance
+        # ignores cluster entirely). Otherwise count clusters EXACTLY the way the
+        # GMM sandwich does — `np.unique(df[cluster_var].values)` — so the
+        # reported G can never disagree with the SE:
+        #   - `df` (not the full input `data`) excludes always-treated units
+        #     dropped above at `df = df[~df[unit].isin(always_treated_units)]`,
+        #     matching the post-drop `cluster_ids=df[cluster_var].values` fed to
+        #     `_compute_gmm_variance`;
+        #   - `np.unique` (not `Series.nunique()`, which drops NaN) keeps the
+        #     same single NaN group the variance forms, so missing cluster IDs
+        #     cannot make the metadata undercount.
+        # `cluster_var` is `self.cluster`, or the `unit` column when
+        # `cluster=None` (the Gardner sandwich always clusters at unit by
+        # default), so the summary renders the unit-cluster CR1 label, not HC1.
+        if resolved_survey is not None:
+            _cluster_name_for_results: Optional[str] = None
+            _n_clusters_for_results: Optional[int] = None
+        else:
+            _cluster_name_for_results = self.cluster if self.cluster is not None else unit
+            _n_clusters_for_results = int(np.unique(df[cluster_var].values).size)
+
         # Construct results
         self.results_ = TwoStageDiDResults(
             treatment_effects=treated_df,
@@ -2057,6 +2108,9 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             anticipation=self.anticipation,
             bootstrap_results=bootstrap_results,
             survey_metadata=survey_metadata,
+            vcov_type=self.vcov_type,
+            cluster_name=_cluster_name_for_results,
+            n_clusters=_n_clusters_for_results,
         )
 
         self.is_fitted_ = True
@@ -3204,12 +3258,63 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
     # sklearn-compatible interface
     # =========================================================================
 
+    @staticmethod
+    def _validate_vcov_type(vcov_type: str) -> None:
+        """Validate ``vcov_type`` against TwoStageDiD's narrow GMM-sandwich
+        variance contract.
+
+        Called from ``__init__`` AND ``fit()`` so sklearn-style
+        ``set_params(vcov_type=...)`` mutations are re-checked at use time rather
+        than silently accepted by the setter (mirrors the ImputationDiD /
+        TripleDifference / CallawaySantAnna pattern). TwoStageDiD's variance is
+        the Gardner (2022) two-stage GMM cluster-sandwich
+        (``V = bread @ (S' S) @ bread`` with the per-cluster GMM-corrected score
+        ``S_g = gamma_hat' c_g - X_2g' eps_2g``); the contract is permanently
+        narrow to ``{"hc1"}``.
+        """
+        _accepted_vcov = {"hc1"}
+        _sandwich_incompatible = {"classical", "hc2", "hc2_bm"}
+        _deferred_vcov = {"conley"}
+
+        if vcov_type in _sandwich_incompatible:
+            raise ValueError(
+                f"TwoStageDiD(vcov_type={vcov_type!r}) is rejected: TwoStageDiD "
+                "uses the Gardner (2022) two-stage GMM sandwich, whose meat is "
+                "the per-cluster GMM-corrected score "
+                "S_g = gamma_hat' c_g - X_2g' eps_2g, which folds first-stage FE "
+                "estimation uncertainty into the score via the gamma_hat' c_g "
+                "term. Hat-matrix leverage (hc2) and Bell-McCaffrey "
+                "Satterthwaite DOF (hc2_bm) are defined for textbook "
+                "single-equation OLS residuals; there is no single hat matrix "
+                "spanning both stages, and the Gardner first-stage correction "
+                "has not been derived for the leverage-corrected or "
+                "homoskedastic (classical) meat structures (no reference "
+                "implementation — clubSandwich covers single-equation WLS/OLS "
+                "CR2, not two-stage GMM). Use vcov_type='hc1' (the default) with "
+                "cluster=<col> for cluster-robust inference."
+            )
+        if vcov_type in _deferred_vcov:
+            raise ValueError(
+                f"TwoStageDiD(vcov_type={vcov_type!r}) is not yet supported: "
+                "TwoStageDiD's GMM sandwich (_compute_gmm_variance) has no "
+                "spatial-HAC path today (the Conley machinery lives in the "
+                "separate SpilloverDiD helper). See TODO.md for the deferred "
+                "follow-up row. Use vcov_type='hc1' (the default) with "
+                "cluster=<col> for cluster-robust inference."
+            )
+        if vcov_type not in _accepted_vcov:
+            raise ValueError(
+                f"TwoStageDiD(vcov_type={vcov_type!r}) is invalid. "
+                f"Accepted: {sorted(_accepted_vcov)}."
+            )
+
     def get_params(self) -> Dict[str, Any]:
         """Get estimator parameters (sklearn-compatible)."""
         return {
             "anticipation": self.anticipation,
             "alpha": self.alpha,
             "cluster": self.cluster,
+            "vcov_type": self.vcov_type,
             "n_bootstrap": self.n_bootstrap,
             "bootstrap_weights": self.bootstrap_weights,
             "seed": self.seed,
@@ -3254,6 +3359,7 @@ def two_stage_did(
     aggregate: Optional[str] = None,
     balance_e: Optional[int] = None,
     survey_design: object = None,
+    vcov_type: str = "hc1",
     **kwargs,
 ) -> TwoStageDiDResults:
     """
@@ -3285,6 +3391,11 @@ def two_stage_did(
         PSU, and FPC for design-based GMM sandwich variance. Strata enters
         survey df for t-distribution inference.
         Both analytical (n_bootstrap=0) and bootstrap inference are supported.
+    vcov_type : str, default="hc1"
+        Variance estimator family; permanently narrow to ``{"hc1"}`` (the Gardner
+        2022 two-stage GMM cluster-sandwich). Analytical-sandwich families
+        ``{"classical", "hc2", "hc2_bm"}`` and ``"conley"`` are rejected. See
+        :class:`TwoStageDiD`.
     **kwargs
         Additional keyword arguments passed to TwoStageDiD constructor.
 
@@ -3301,7 +3412,7 @@ def two_stage_did(
     ...                         'first_treat', aggregate='event_study')
     >>> results.print_summary()
     """
-    est = TwoStageDiD(**kwargs)
+    est = TwoStageDiD(vcov_type=vcov_type, **kwargs)
     return est.fit(
         data,
         outcome=outcome,
