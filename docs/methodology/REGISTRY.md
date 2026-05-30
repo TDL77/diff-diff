@@ -1951,7 +1951,7 @@ Convergence criterion: stop when objective decrease < min_decrease² (default mi
 
 ## TripleDifference
 
-**Primary source:** [Ortiz-Villavicencio, M., & Sant'Anna, P.H.C. (2025). Better Understanding Triple Differences Estimators. arXiv:2505.09942.](https://arxiv.org/abs/2505.09942)
+**Primary source:** [Ortiz-Villavicencio, M., & Sant'Anna, P.H.C. (2025). Better Understanding Triple Differences Estimators. arXiv:2505.09942v3.](https://arxiv.org/abs/2505.09942v3). Paper review on file: `docs/methodology/papers/ortiz-villavicencio-santanna-2025-review.md`.
 
 **Key implementation requirements:**
 
@@ -2061,7 +2061,7 @@ contract changes.
 
 ## StaggeredTripleDifference
 
-**Primary source:** [Ortiz-Villavicencio, M., & Sant'Anna, P.H.C. (2025). Better Understanding Triple Differences Estimators. arXiv:2505.09942.](https://arxiv.org/abs/2505.09942)
+**Primary source:** [Ortiz-Villavicencio, M., & Sant'Anna, P.H.C. (2025). Better Understanding Triple Differences Estimators. arXiv:2505.09942v3.](https://arxiv.org/abs/2505.09942v3). Paper review on file: `docs/methodology/papers/ortiz-villavicencio-santanna-2025-review.md`.
 
 **Key implementation requirements:**
 
