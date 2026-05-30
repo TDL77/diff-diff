@@ -21,6 +21,7 @@ This document provides the academic foundations and key implementation requireme
    - [WooldridgeDiD (ETWFE)](#wooldridgedid-etwfe)
 3. [Advanced Estimators](#advanced-estimators)
    - [SyntheticDiD](#syntheticdid)
+   - [SyntheticControl](#syntheticcontrol)
    - [TripleDifference](#tripledifference)
    - [StaggeredTripleDifference](#staggeredtripledifference)
    - [TROP](#trop)
@@ -1951,6 +1952,46 @@ Convergence criterion: stop when objective decrease < min_decrease² (default mi
 - [x] Jackknife: analytical p-value (not empirical)
 - [x] Returns both unit and time weights for interpretation
 - [x] Column centering (intercept=True) in Frank-Wolfe optimization
+
+---
+
+## SyntheticControl
+
+**Primary source:** [Abadie, A., Diamond, A., & Hainmueller, J. (2010). "Synthetic Control Methods for Comparative Case Studies: Estimating the Effect of California's Tobacco Control Program." *JASA*, 105(490), 493–505.](https://doi.org/10.1198/jasa.2009.ap08746) Method originates in Abadie & Gardeazabal (2003). Paper reviews on file: `docs/methodology/papers/abadie-diamond-hainmueller-2010-review.md` (primary), `...-2015-review.md`, `abadie-2021-review.md`, `chernozhukov-wuthrich-zhu-2021-review.md`.
+
+Classic synthetic control (donor/unit weights only) for a single treated unit, distinct from `SyntheticDiD` (Arkhangelsky et al. 2021), which adds time weights and ridge regularization. Equation (1) of ADH 2010 shows classic SCM **generalizes the TWFE/DiD model** (recovered when the factor loadings `λ_t` are constant in time).
+
+**Assumption checks / warnings:**
+- **One treated unit, block (absorbing) assignment** after `T0`; remaining units are the never-exposed donor pool (Section 2.2). Rejects >1 ever-treated unit (pass `treated_unit=` + curate `donor_pool=`); rejects an ever-treated unit in the donor pool (contamination).
+- **No anticipation / absorbing treatment.** `post_periods` must be a contiguous suffix of the time axis, cross-checked against the treated unit's `D` column (`D==1` in any pre period → `ValueError`), on both the inferred and explicit branches.
+- **Good pre-treatment fit is required, not assumed** (journal p. 495). Emits a `UserWarning` when pre-period RMSPE exceeds the SD of the treated unit's pre-period outcomes.
+- **No interference / SUTVA across units; donor-pool curation** (exclude units with their own intervention/large shocks) — analyst-supplied via `donor_pool=`.
+
+**Estimator (Section 2.3):**
+- Predictor matrices `X1` (k×1 treated) / `X0` (k×J donors) = covariates `Z` + linear combinations of pre-period outcomes (`predictors` averaged over `predictor_window`, `special_predictors`, and/or per-period outcome lags `pre_period_outcomes`). Canonical row order: predictor averages → special predictors → outcome lags (matches R `Synth::dataprep`).
+- **Inner solve:** `W*(V) = argmin_W (X1 − X0 W)' diag(V) (X1 − X0 W)` s.t. `w_j ≥ 0, Σ w_j = 1`. Implemented by folding `V^½` into the predictors (`packed = [V^½·X0 | V^½·X1]`) and calling the Frank-Wolfe simplex solver `utils._sc_weight_fw(intercept=False, zeta=0)`.
+- **Outer solve (`v_method="nested"`):** choose diagonal PSD `V` minimizing the pre-period **outcome** MSPE `mean((Z1 − Z0·W*(V))²)`. `v_method="custom"` skips the outer search and uses a user-supplied `custom_v` (trace-normalized).
+- **Effect:** gap path `α̂_1t = Y_1t − Σ_j w_j·Y_jt`; `att` = mean post-period gap; `pre_rmspe` = pre-period fit diagnostic.
+
+**Inference:** **No analytical standard error** (Section 2.4) — `se`/`t_stat`/`p_value`/`conf_int` are NaN. The paper proposes in-space placebo permutation inference with the post/pre RMSPE-ratio statistic and `rank/(J+1)` p-value (deferred to a follow-up PR; `_placebo_gaps`/`_rmspe_ratio` are reserved on the results object).
+
+**Notes / deviations:**
+- **Note:** The standardization divisor `divisor = sqrt(apply(cbind(X0,X1), 1, var))` (per-predictor SD over donors+treated, ddof=1) and the inner/outer optimizer are **not specified in ADH 2010** (which defers these numerics to Abadie & Gardeazabal 2003 App. B / the `Synth` software). The divisor is pinned from the R `Synth::synth` source; `solution.v` lives in this scaled predictor space, so the deterministic R-parity test feeds `custom_v` in the same scaled space.
+- **Note:** The outer objective minimizes the pre-period outcome MSPE over **all** pre periods, whereas R `Synth` uses a `time.optimize.ssr` window (1960–1969 in the Basque example). The nested `V` therefore differs from R by an efficiency-only choice (the paper notes inferential validity holds for *any* `V`), so end-to-end nested parity is a tolerance band, not equality.
+- **Note:** `V` is parametrized on the unit simplex via a softmax of an unconstrained vector (trace-normalization is identification-fixing, not a constraint loss); the multistart Nelder-Mead + derivative-free Powell polish approximates R's best-of-`optimx` behavior over the non-smooth outer objective.
+- **Note:** The 1×SD poor-fit threshold is a defensive implementation choice matching the `SyntheticDiD` convention; ADH 2010 gives only the qualitative guidance "do not use SCM when the fit is poor" (no numeric cutoff).
+- **Deviation from R:** `standardize="none"` disables predictor standardization entirely; R `Synth` always scales by the predictor SD. Provided for diagnostics; changes the geometry of the `V` objective.
+
+**Reference implementation:** authors' `Synth` package for R/MATLAB/Stata (`Synth::synth`). **R-parity anchor:** the Basque Country study (Abadie-Gardeazabal 2003, `data("basque")`) — published synthetic = region 10 (Cataluña) 0.851 + region 14 (Madrid) 0.149, `loss.v` 0.0089. Two-tier test (`tests/test_methodology_synthetic_control.py`): Tier-1 feeds R's `solution.v` via `custom_v` → donor weights match to atol 1e-3 (deterministic); Tier-2 checks the nested fit in a band.
+
+**Requirements checklist:**
+- [x] Donor weights on the unit simplex; exactly one treated unit, block assignment.
+- [x] Predictors = covariates + linear combinations of pre-period outcomes (incl. "all pre-period outcomes" default).
+- [x] Inner simplex-constrained weighted LS via `_sc_weight_fw` with diagonal PSD `V`.
+- [x] Outer nested `V` (pre-period outcome MSPE) + user-supplied `custom_v`.
+- [x] Gap path + pre-period RMSPE + predictor-balance table.
+- [x] No analytical SE (NaN inference); placebo permutation inference deferred to a follow-up PR.
+- [x] Predictor-leakage, absorbing-suffix/no-anticipation, empty-window, duplicate-label, and inner-non-convergence validation gates.
 
 ---
 

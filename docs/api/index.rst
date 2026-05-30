@@ -23,6 +23,7 @@ Core estimator classes for DiD analysis:
    diff_diff.StackedDiD
    diff_diff.TripleDifference
    diff_diff.TROP
+   diff_diff.SyntheticControl
    diff_diff.ContinuousDiD
    diff_diff.HeterogeneousAdoptionDiD
    diff_diff.EfficientDiD
@@ -57,6 +58,7 @@ Result containers returned by estimators:
    diff_diff.TripleDifferenceResults
    diff_diff.StackedDiDResults
    diff_diff.TROPResults
+   diff_diff.SyntheticControlResults
    diff_diff.ContinuousDiDResults
    diff_diff.DoseResponseCurve
    diff_diff.HeterogeneousAdoptionDiDResults
@@ -309,6 +311,7 @@ Estimators
    stacked_did
    triple_diff
    trop
+   synthetic_control
    continuous_did
    had
    efficient_did

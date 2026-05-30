@@ -8,6 +8,7 @@ This module contains the core DiD estimators:
 Additional estimators are in separate modules:
 - TwoWayFixedEffects: See diff_diff.twfe
 - SyntheticDiD: See diff_diff.synthetic_did
+- SyntheticControl: See diff_diff.synthetic_control
 
 For backward compatibility, all estimators are re-exported from this module.
 """

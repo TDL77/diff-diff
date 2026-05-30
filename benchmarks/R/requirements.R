@@ -17,6 +17,7 @@ required_packages <- c(
   "DIDHAD",        # de Chaisemartin et al. (2025) HAD estimator (HAD Phase 4 R-parity)
   "YatchewTest",   # Yatchew (1997) linearity test (HAD yatchew R-parity)
   "nprobust",      # Calonico-Cattaneo-Farrell local-linear (DIDHAD dependency)
+  "Synth",         # Abadie-Diamond-Hainmueller (2010) synthetic control (SyntheticControl R-parity; ships data(basque))
 
   # Utilities
   "jsonlite",      # JSON output for Python interop
