@@ -443,7 +443,7 @@ class CallawaySantAnnaAggregationMixin:
         unit: str,
         precomputed: Optional["PrecomputedData"] = None,
         return_psi: bool = False,
-    ) -> "Union[float, Tuple[float, np.ndarray]]":
+    ) -> "Union[Tuple[float, Optional[int]], Tuple[float, np.ndarray, Optional[int]]]":
         """
         Compute SE with weight influence function (wif) adjustment.
 
@@ -458,6 +458,15 @@ class CallawaySantAnnaAggregationMixin:
         Formula (matching R's did::aggte):
             agg_inf_i = Σ_k w_k × inf_i_k + wif_i × ATT_k
             se = sqrt(mean(agg_inf^2) / n)
+
+        Returns
+        -------
+        ``(se, effective_df)`` when ``return_psi=False``; ``(se, psi_total,
+        effective_df)`` when ``return_psi=True``. This 2-tuple / 3-tuple arity is
+        held on EVERY branch — including the empty-IF (``se=0.0``) and non-finite-IF
+        (``se=NaN``) early returns — so callers that unpack two or three values fail
+        soft instead of raising on degenerate influence functions. ``effective_df``
+        is non-None only for replicate designs that dropped replicates.
         """
         # Extract global unit info for correct pg = n_g / N_total scaling.
         # Without this, the local path builds the unit set from only units in
@@ -486,15 +495,37 @@ class CallawaySantAnnaAggregationMixin:
             n_global_units=n_global_units,
         )
 
+        # Consistent return arity across ALL branches: return_psi=True -> 3-tuple
+        # (se, psi, effective_df); return_psi=False -> 2-tuple (se, effective_df).
+        # The empty / non-finite-IF branches must match so callers that unpack three
+        # values (``_aggregate_event_study``) or two (``_aggregate_simple``) fail soft
+        # (NaN SE) instead of raising on degenerate IF/WIF edge cases.
         if len(psi_total) == 0:
-            return (0.0, psi_total) if return_psi else 0.0
+            return (0.0, psi_total, None) if return_psi else (0.0, None)
 
         # Check for NaN propagation from non-finite WIF
         if not np.all(np.isfinite(psi_total)):
-            return (np.nan, psi_total) if return_psi else np.nan
+            return (np.nan, psi_total, None) if return_psi else (np.nan, None)
 
-        # Use design-based variance when full survey design is available
-        # Use unit-level resolved survey (panel IF is indexed by unit, not obs)
+        se, effective_df = self._se_from_psi(psi_total, precomputed)
+        if return_psi:
+            return (se, psi_total, effective_df)
+        return (se, effective_df)
+
+    def _se_from_psi(
+        self,
+        psi_total: np.ndarray,
+        precomputed: Optional["PrecomputedData"] = None,
+    ) -> "Tuple[float, Optional[int]]":
+        """Standard error (and per-statistic effective df) from a combined IF vector.
+
+        Routes a finite, non-empty influence-function vector through the same
+        variance estimator the per-event-time and simple-aggregation SE paths use:
+        replicate-weight variance, full survey-design variance, or the simple
+        ``sqrt(sum(psi^2))``. Callers must guard emptiness/finiteness first.
+        Returns ``(se, effective_df)``; ``effective_df`` is non-None only for
+        replicate designs that dropped replicates.
+        """
         resolved_survey = (
             precomputed.get("resolved_survey_unit") if precomputed is not None else None
         )
@@ -514,9 +545,7 @@ class CallawaySantAnnaAggregationMixin:
                 se = np.nan
             else:
                 se = np.sqrt(max(variance, 0.0))
-            if return_psi:
-                return (se, psi_total, effective_df)
-            return (se, effective_df)
+            return se, effective_df
 
         if resolved_survey is not None and (
             resolved_survey.strata is not None
@@ -530,15 +559,10 @@ class CallawaySantAnnaAggregationMixin:
                 se = np.nan
             else:
                 se = np.sqrt(max(variance, 0.0))
-            if return_psi:
-                return (se, psi_total, None)
-            return (se, None)
+            return se, None
 
         variance = np.sum(psi_total**2)
-        se = np.sqrt(variance)
-        if return_psi:
-            return (se, psi_total, None)
-        return (se, None)
+        return np.sqrt(variance), None
 
     def _aggregate_event_study(
         self,
@@ -671,6 +695,10 @@ class CallawaySantAnnaAggregationMixin:
             _psi_vectors.append(psi_e)
             _psi_event_times.append(e)
 
+        # Reset the Eq. (4.14) overall before any early return so a reused estimator
+        # instance never reads a stale value from a prior fit.
+        self._event_study_overall = None
+
         # Batch inference for all relative periods
         if not agg_effects_list:
             return {}
@@ -768,6 +796,44 @@ class CallawaySantAnnaAggregationMixin:
 
         # Attach VCV to self for CallawaySantAnna to pick up
         self._event_study_vcov = event_study_vcov
+
+        # Eq. (4.14) overall ATT: the unweighted mean of the post-treatment
+        # event-study effects ES(e). Stashed on self (mirroring _event_study_vcov)
+        # so the StaggeredTripleDifference estimator can expose it as overall_att_es;
+        # CallawaySantAnna leaves it unread. Post-treatment is the library predicate
+        # e >= -anticipation (matching _aggregate_simple and the default overall_att),
+        # NOT a hardcoded e >= 0.
+        #
+        # The POINT ESTIMATE averages EVERY finite post-treatment ES(e) effect (read
+        # from event_study_effects by event-time key), so it is always the true Eq.
+        # 4.14 average -- it must NOT be silently restricted to horizons with a finite
+        # influence function. The SE is the influence function of that mean (the
+        # average of the per-event-time combined IFs, via the same survey-aware
+        # variance routine as the per-e effects). If any contributing horizon lacks a
+        # finite, well-formed combined IF (a finite ES(e) can have a non-finite
+        # WIF/IF, which the per-e path already surfaces as a NaN SE), the combined IF
+        # for the mean is undefined: the SE is NaN while the point estimate is
+        # retained, and the consumer (fit) warns and NaN-propagates the inference.
+        post_e = [
+            e
+            for e in event_study_effects
+            if e >= -self.anticipation and np.isfinite(event_study_effects[e]["effect"])
+        ]
+        if post_e:
+            att_es = float(np.mean([event_study_effects[e]["effect"] for e in post_e]))
+            psi_by_e = {e: psi for e, psi in zip(_psi_event_times, _psi_vectors)}
+            psis = [psi_by_e.get(e) for e in post_e]
+            se_es: float = np.nan
+            eff_df_es: Optional[int] = None
+            if all(p is not None and len(p) > 0 and np.all(np.isfinite(p)) for p in psis):
+                if len({len(p) for p in psis}) == 1:
+                    psi_es = np.column_stack(psis).mean(axis=1)
+                    se_es, eff_df_es = self._se_from_psi(psi_es, precomputed)
+            self._event_study_overall = {
+                "att": att_es,
+                "se": float(se_es),
+                "effective_df": eff_df_es,
+            }
 
         return event_study_effects
 

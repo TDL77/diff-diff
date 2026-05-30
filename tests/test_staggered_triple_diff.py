@@ -143,6 +143,40 @@ class TestStaggeredTripleDiffBasic:
         assert "Staggered Triple Difference" in summary
         assert "ATT" in summary
 
+    def test_overall_att_es_result_surface(self, simple_data):
+        """Opt-in Eq. 4.14 overall (overall_att_es) is exposed on the result surface
+        (attribute, summary(), to_dict()) under aggregate='event_study', and is None
+        for the default (no event-study) fit."""
+        res = StaggeredTripleDifference().fit(
+            simple_data,
+            "outcome",
+            "unit",
+            "period",
+            "first_treat",
+            "eligibility",
+            aggregate="event_study",
+        )
+        es_fields = (
+            "overall_att_es",
+            "overall_se_es",
+            "overall_t_stat_es",
+            "overall_p_value_es",
+            "overall_conf_int_es",
+        )
+        assert res.overall_att_es is not None and np.isfinite(res.overall_att_es)
+        for f in es_fields:
+            assert getattr(res, f) is not None
+        assert "Eq. 4.14" in res.summary()
+        d = res.to_dict()
+        for f in es_fields:
+            assert f in d
+        # Default fit (no event-study aggregation): fields are None and absent from to_dict.
+        res_default = StaggeredTripleDifference().fit(
+            simple_data, "outcome", "unit", "period", "first_treat", "eligibility"
+        )
+        assert res_default.overall_att_es is None
+        assert "overall_att_es" not in res_default.to_dict()
+
     def test_to_dataframe_group_time(self, simple_data):
         est = StaggeredTripleDifference()
         res = est.fit(simple_data, "outcome", "unit", "period", "first_treat", "eligibility")
@@ -411,9 +445,7 @@ class TestStaggeredTripleDiffEdgeCases:
             UserWarning,
             match=rf"{n_inf_rows} row\(s\) have first_treat=inf; recoding to 0",
         ):
-            res = est.fit(
-                data, "outcome", "unit", "period", "first_treat", "eligibility"
-            )
+            res = est.fit(data, "outcome", "unit", "period", "first_treat", "eligibility")
         assert np.isfinite(res.overall_att)
 
     def test_survey_design_invalid_type_raises(self, simple_data):
@@ -574,12 +606,10 @@ class TestStaggeredTripleDiffORSolveFallback:
                 covariates=["x1", "x2", "x3"],
             )
         or_warnings = [
-            w for w in caught
-            if "outcome-regression influence-function step" in str(w.message)
+            w for w in caught if "outcome-regression influence-function step" in str(w.message)
         ]
         assert len(or_warnings) == 1, (
-            f"Expected exactly one aggregate OR lstsq-fallback warning, "
-            f"got {len(or_warnings)}."
+            f"Expected exactly one aggregate OR lstsq-fallback warning, " f"got {len(or_warnings)}."
         )
         msg = str(or_warnings[0].message)
         assert "(g, g_c, t) pair(s)" in msg
@@ -616,10 +646,7 @@ class TestStaggeredTripleDiffORSolveFallback:
                 "eligibility",
                 covariates=["x1", "x2", "x3"],
             )
-        ps_warnings = [
-            w for w in caught
-            if "propensity-score Hessian" in str(w.message)
-        ]
+        ps_warnings = [w for w in caught if "propensity-score Hessian" in str(w.message)]
         assert len(ps_warnings) == 1, (
             f"Expected exactly one aggregate PS-Hessian lstsq-fallback "
             f"warning under IPW, got {len(ps_warnings)}: "
@@ -654,9 +681,7 @@ class TestStaggeredTripleDiffORSolveFallback:
                 "eligibility",
                 covariates=["x1", "x2"],
             )
-        lstsq_warnings = [
-            w for w in caught if "Rank-deficient X'WX" in str(w.message)
-        ]
+        lstsq_warnings = [w for w in caught if "Rank-deficient X'WX" in str(w.message)]
         assert lstsq_warnings == [], (
             f"Unexpected lstsq-fallback warning on clean covariates: "
             f"{[str(w.message) for w in lstsq_warnings]}"
@@ -670,10 +695,6 @@ class TestStaggeredTripleDiffORSolveFallback:
 
         with _w.catch_warnings(record=True) as caught:
             _w.simplefilter("always")
-            est.fit(
-                simple_data, "outcome", "unit", "period", "first_treat", "eligibility"
-            )
-        lstsq_warnings = [
-            w for w in caught if "Rank-deficient X'WX" in str(w.message)
-        ]
+            est.fit(simple_data, "outcome", "unit", "period", "first_treat", "eligibility")
+        lstsq_warnings = [w for w in caught if "Rank-deficient X'WX" in str(w.message)]
         assert lstsq_warnings == []

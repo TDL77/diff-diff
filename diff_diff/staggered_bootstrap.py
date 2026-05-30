@@ -81,6 +81,12 @@ class CSBootstrapResults:
         Bootstrap p-values for group effects.
     bootstrap_distribution : Optional[np.ndarray]
         Full bootstrap distribution of overall ATT (if requested).
+    overall_att_es_se : Optional[float]
+        Bootstrap standard error for the paper Eq. 4.14 overall (event-study average).
+    overall_att_es_ci : Optional[Tuple[float, float]]
+        Bootstrap confidence interval for the Eq. 4.14 overall.
+    overall_att_es_p_value : Optional[float]
+        Bootstrap p-value for the Eq. 4.14 overall.
     """
 
     n_bootstrap: int
@@ -100,6 +106,10 @@ class CSBootstrapResults:
     group_effect_p_values: Optional[Dict[Any, float]] = None
     bootstrap_distribution: Optional[np.ndarray] = field(default=None, repr=False)
     cband_crit_value: Optional[float] = None
+    # Paper Eq. (4.14) overall (event-study average) bootstrap inference.
+    overall_att_es_se: Optional[float] = None
+    overall_att_es_ci: Optional[Tuple[float, float]] = None
+    overall_att_es_p_value: Optional[float] = None
 
 
 # =============================================================================
@@ -485,8 +495,18 @@ class CallawaySantAnnaBootstrapMixin:
         event_study_ses = None
         event_study_cis = None
         event_study_p_values = None
+        # Paper Eq. (4.14) overall (event-study average) bootstrap inference; stays
+        # NaN unless event-study draws exist. Mirrors the analytical overall_att_es.
+        overall_att_es_se = np.nan
+        overall_att_es_ci = (np.nan, np.nan)
+        overall_att_es_p_value = np.nan
 
-        if bootstrap_event_study is not None and event_study_info is not None:
+        # ``rel_periods`` can be empty when balance_e (or an empty event study) leaves
+        # no relative periods; guard the column_stack so the bootstrap mirrors the
+        # analytical empty/NaN surface instead of raising "need at least one array to
+        # concatenate". event_study_ses stays None and the Eq. 4.14 overall bootstrap
+        # stays NaN (the analytical fit path emits the requested-but-undefined warning).
+        if bootstrap_event_study is not None and event_study_info is not None and rel_periods:
             es_effects = np.array([event_study_info[e]["effect"] for e in rel_periods])
             es_boot_matrix = np.column_stack([bootstrap_event_study[e] for e in rel_periods])
             es_ses, es_ci_lo, es_ci_hi, es_pv = _compute_effect_bootstrap_stats_batch_func(
@@ -499,6 +519,34 @@ class CallawaySantAnnaBootstrapMixin:
                 e: (float(es_ci_lo[i]), float(es_ci_hi[i])) for i, e in enumerate(rel_periods)
             }
             event_study_p_values = {e: float(es_pv[i]) for i, e in enumerate(rel_periods)}
+
+            # Eq. (4.14) overall = unweighted mean of post-treatment ES(e) (e >=
+            # -anticipation, matching post_treatment_mask above). The per-draw mean
+            # over those event times is the bootstrap distribution of the overall.
+            es_post = [
+                e
+                for e in rel_periods
+                if e >= -self.anticipation
+                and e in event_study_info
+                and np.isfinite(event_study_info[e]["effect"])
+            ]
+            if es_post:
+                original_es_overall = float(
+                    np.mean([event_study_info[e]["effect"] for e in es_post])
+                )
+                boot_es_overall = np.column_stack([bootstrap_event_study[e] for e in es_post]).mean(
+                    axis=1
+                )
+                (
+                    overall_att_es_se,
+                    overall_att_es_ci,
+                    overall_att_es_p_value,
+                ) = _compute_effect_bootstrap_stats_func(
+                    original_es_overall,
+                    boot_es_overall,
+                    alpha=self.alpha,
+                    context="overall ATT (event-study average)",
+                )
 
         # Batch compute bootstrap statistics for group effects
         group_effect_ses = None
@@ -564,10 +612,11 @@ class CallawaySantAnnaBootstrapMixin:
             overall_se = np.nan
             overall_ci = (np.nan, np.nan)
             overall_p_value = np.nan
+            overall_att_es_se = np.nan
+            overall_att_es_ci = (np.nan, np.nan)
+            overall_att_es_p_value = np.nan
             gt_ses = {gt: np.nan for gt in gt_ses} if gt_ses else gt_ses
-            gt_cis = (
-                {gt: (np.nan, np.nan) for gt in gt_cis} if gt_cis else gt_cis
-            )
+            gt_cis = {gt: (np.nan, np.nan) for gt in gt_cis} if gt_cis else gt_cis
             gt_p_values = {gt: np.nan for gt in gt_p_values} if gt_p_values else gt_p_values
             if event_study_ses:
                 event_study_ses = {k: np.nan for k in event_study_ses}
@@ -597,6 +646,9 @@ class CallawaySantAnnaBootstrapMixin:
             group_effect_p_values=group_effect_p_values,
             bootstrap_distribution=bootstrap_overall,
             cband_crit_value=cband_crit_value,
+            overall_att_es_se=overall_att_es_se,
+            overall_att_es_ci=overall_att_es_ci,
+            overall_att_es_p_value=overall_att_es_p_value,
         )
 
     def _prepare_event_study_aggregation(

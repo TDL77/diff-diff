@@ -2205,10 +2205,13 @@ functions across comparison groups. Minimizes asymptotic variance subject to `su
 Event study (Equation 4.13): cohort-share-weighted average across cohorts for each
 relative time `e = t - g`. Reuses `CallawaySantAnnaAggregationMixin._aggregate_event_study()`.
 
-Overall ATT: cohort-size-weighted average across post-treatment (g,t) pairs.
-Reuses `CallawaySantAnnaAggregationMixin._aggregate_simple()`. Note: this is the
-simple post-treatment aggregation, not the paper's Equation 4.14 (which averages
-over event-study effects).
+Overall ATT: two summaries are available. (1) The default `overall_att` is the
+cohort-size-weighted average across post-treatment (g,t) pairs (reuses
+`CallawaySantAnnaAggregationMixin._aggregate_simple()`) — the library-wide
+Callaway-Sant'Anna "simple" convention, matching R `agg_ddd(type="simple")`.
+(2) The opt-in `overall_att_es` is the paper's Equation 4.14 overall — the unweighted
+mean of the post-treatment event-study effects ES(e) — populated when
+`aggregate="event_study"` or `"all"` (see the labeled Note below).
 
 Group effects: average across post-treatment time periods for each cohort.
 Reuses `CallawaySantAnnaAggregationMixin._aggregate_by_group()`.
@@ -2216,15 +2219,29 @@ Reuses `CallawaySantAnnaAggregationMixin._aggregate_by_group()`.
 All aggregation SEs include the WIF (Weight Influence Function) adjustment for
 uncertainty in cohort-share weights, inherited from the CallawaySantAnna mixin.
 
-- **Deviation from R:** Aggregation weights and WIF use the eligible-treated
-  population `P(S=g, Q=1)` (matching the paper's Eq 4.13, where `G_i` is defined
-  only for `Q=1` units). R's `agg_ddd()` uses `P(S=g)` (all units in the enabling
-  group, including ineligible). This is implemented by setting `unit_cohorts=0` for
-  ineligible units before calling the aggregation mixin.
+- **Deviation from R:** Aggregation weights (and the WIF) use the eligible-treated
+  population `P(S=g, Q=1)` — matching the paper's Eq 4.13, where `G_i` is defined
+  only for `Q=1` units (`G_i = g` iff `S_i = g` and `Q_i = 1`), so the paper's
+  `P(G=g)` *is* `P(S=g, Q=1)`. R's `agg_ddd()` instead weights by `P(S=g)` (all units
+  in the enabling group, including ineligible). Implemented by setting `unit_cohorts=0`
+  for ineligible units before calling the aggregation mixin. Group-time `ATT(g,t)`
+  values are identical to R; only the weighted average across (g,t) pairs differs —
+  this is the source of the larger tolerance in the R cross-validation tests.
 - **Note:** Per-cohort group-effect SEs include WIF via the inherited mixin.
   R's `agg_ddd(type="group")` uses `wif=NULL` for per-cohort aggregation since
   within-cohort weights are fixed. This makes our per-cohort group-effect SEs
   slightly conservative relative to R.
+- **Note:** The default overall ATT (`overall_att`) is the Callaway-Sant'Anna simple
+  post-treatment (g,t) average — the library-wide convention across staggered
+  estimators — and is NOT the paper's Equation 4.14 overall (which averages the
+  event-study effects). The paper's Eq 4.14 form is exposed opt-in as `overall_att_es`
+  (populated only when `aggregate` is `"event_study"`/`"all"`), computed as the
+  unweighted mean of the post-treatment ES(e) over `e >= -anticipation`. Its analytical
+  SE is the influence function of that mean (the average of the per-event-time combined
+  IFs, routed through the same survey-aware variance estimator as the per-e effects);
+  a multiplier-bootstrap SE replaces it when `n_bootstrap > 0`. The two summaries answer
+  different questions and generally differ; `overall_att_es` is cross-validated against
+  R `agg_ddd(type="eventstudy")$overall.att`/`overall.se`.
 
 *Standard errors:*
 
@@ -2267,11 +2284,6 @@ confidence bands (sup-t) for event study.
   (TSL) or `compute_replicate_if_variance()` (replicate weights). Bootstrap
   uses PSU-level multiplier weights. The R `triplediff` package does not
   support survey weights.
-- **Deviation from R:** Event-study and simple aggregation reuse
-  `CallawaySantAnnaAggregationMixin` cohort-size weights (`n_treated` per cohort)
-  instead of R's `agg_ddd()` group-probability weights (`pg = P(G=g)` over all
-  units including ineligible). Group-time ATT(g,t) values are identical; only the
-  weighted average across (g,t) pairs differs.
 
 *Edge cases:*
 - Single comparison group: GMM reduces to w=[1], no matrix inversion
@@ -2283,7 +2295,11 @@ confidence bands (sup-t) for event study.
 - No valid (g,t) pairs at all: raises `ValueError`
 
 **Reference implementation(s):**
-- R `triplediff` (companion package by paper authors) — not yet validated against
+- R `triplediff` (companion package by paper authors) — cross-validated in
+  `tests/test_methodology_staggered_triple_diff.py` (group-time ATT/SE for both control
+  groups, plus the Eq. 4.14 overall `overall_att_es` against `agg_ddd(type="eventstudy")`).
+  CSV fixtures are gitignored and regenerated on-the-fly from
+  `benchmarks/R/benchmark_staggered_triplediff.R`; the JSON golden is committed.
 
 **Requirements checklist:**
 - [x] Panel data with (unit, time, enabling-group S, eligibility Q, outcome Y)
