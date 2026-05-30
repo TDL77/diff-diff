@@ -249,6 +249,54 @@ def test_empty_special_period_list_rejected():
 
 
 # ---------------------------------------------------------------------------
+# Fail-closed on non-finite data entering the matching problem
+# ---------------------------------------------------------------------------
+
+
+def test_non_finite_predictor_rejected():
+    df, years, T0 = _make_panel()
+    df = df.copy()
+    df.loc[(df["unit"] == "d0") & (df["year"] == years[0]), "x"] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        SyntheticControl(seed=0).fit(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            predictors=["x"],
+            predictor_window=[years[0], years[1]],
+        )
+
+
+def test_non_finite_outcome_rejected():
+    df, years, T0 = _make_panel()
+    df = df.copy()
+    df.loc[(df["unit"] == "d1") & (df["year"] == years[2]), "y"] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        synthetic_control(df, "y", "treated", "unit", "year", seed=0)
+
+
+def test_distinct_special_period_sets_not_duplicate():
+    # Same var/op, same endpoints + length, different intermediate period -> distinct
+    # predictors, must NOT be rejected as duplicates.
+    df, years, T0 = _make_panel(T=8, T0=6)
+    res = SyntheticControl(seed=0).fit(
+        df,
+        "y",
+        "treated",
+        "unit",
+        "year",
+        special_predictors=[
+            ("y", [years[0], years[2], years[4]], "mean"),
+            ("y", [years[0], years[3], years[4]], "mean"),
+        ],
+    )
+    assert len(res.v_weights) == 2
+    assert len(set(res.v_weights)) == 2  # two distinct labels
+
+
+# ---------------------------------------------------------------------------
 # Validation 6: poor pre-fit warning
 # ---------------------------------------------------------------------------
 

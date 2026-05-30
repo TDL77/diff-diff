@@ -339,18 +339,43 @@ class SyntheticControl:
         Z1 = Y.loc[pre_periods, treated_id].to_numpy(dtype=float)
         Z0 = Y.loc[pre_periods, donor_ids].to_numpy(dtype=float)  # (n_pre, J)
 
+        # Fail closed on non-finite outcomes for the treated/donor panel: NaN/inf in
+        # the outcome would silently propagate into the gap path / ATT (and into Z for
+        # the nested objective).
+        outcome_block = Y.loc[all_periods, [treated_id] + donor_ids].to_numpy(dtype=float)
+        if not np.all(np.isfinite(outcome_block)):
+            raise ValueError(
+                f"Outcome {outcome!r} contains non-finite (NaN/inf) values for the "
+                "treated unit or a donor over the analysis periods; synthetic control "
+                "requires a complete outcome panel."
+            )
+
         X1, X0, labels = _build_predictor_matrix(pivots, specs, treated_id, donor_ids)
+        # Fail closed on non-finite predictor cells (e.g. a covariate that is only
+        # observed on a subset of the pre periods averaged over the full pre window).
+        bad = [
+            labels[i]
+            for i in range(len(labels))
+            if not (np.isfinite(X1[i]) and np.all(np.isfinite(X0[i, :])))
+        ]
+        if bad:
+            raise ValueError(
+                f"Predictor(s) {bad} have non-finite (NaN/inf) values for the treated "
+                "unit or a donor over their selected periods. Restrict predictor_window / "
+                "special_predictors periods to where the variable is observed."
+            )
         X1s, X0s, _ = _standardize(X1, X0, self.standardize)
 
         k = X1s.shape[0]
         J = len(donor_ids)
 
         # --- solve for V and donor weights ---
+        # mspe_v is the OUTER-objective value; it is populated only when a nested V
+        # search actually ran (None on the custom and single-donor paths).
+        mspe_v: Optional[float] = None
         if self.v_method == "custom":
             v = self._prepare_custom_v(k)
             w, converged = _inner_solve_W(X1s, X0s, v, self.inner_max_iter, self.inner_min_decrease)
-            resid = Z1 - Z0 @ w
-            mspe_v: Optional[float] = float(np.mean(resid**2))
         elif J == 1:
             # Degenerate: a single donor forces w = [1.0]; V is irrelevant.
             warnings.warn(
@@ -363,7 +388,6 @@ class SyntheticControl:
             v = np.ones(k) / k
             w = np.array([1.0])
             converged = True
-            mspe_v = float(np.mean((Z1 - Z0 @ w) ** 2))
         else:
             v, w, converged, mspe_v = _outer_solve_V(
                 X1s,
@@ -736,7 +760,10 @@ def _validate_predictors(
                 )
             periods = list(periods)
             _check_periods(periods, f"special predictor {var!r}")
-            label = f"{var}@{op}({periods[0]}-{periods[-1]}:{len(periods)})"
+            # Full ordered period list in the label so distinct period sets sharing
+            # the same endpoints/length (e.g. [2000,2002,2004] vs [2000,2003,2004])
+            # do not collide — the label is also the v_weights / balance key.
+            label = f"{var}@{op}[{','.join(str(p) for p in periods)}]"
             _add(label, "special", var, periods, op)
 
     # 3) per-period outcome lags

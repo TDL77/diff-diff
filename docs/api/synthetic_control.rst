@@ -127,6 +127,10 @@ Basic usage with covariate and special predictors::
         unit="region",
         time="year",
         predictors=["invest", "school.high"],
+        # Set predictor_window explicitly when a covariate is only observed on a
+        # subset of the pre periods — the default averages over ALL pre periods and
+        # fails closed if any selected cell is non-finite.
+        predictor_window=[1964, 1965, 1966, 1967, 1968, 1969],
         special_predictors=[("gdpcap", [1960, 1965, 1969], "mean")],
     )
     results.print_summary()

@@ -619,8 +619,12 @@ scm.fit(
 from diff_diff import SyntheticControl
 
 scm = SyntheticControl(v_method='nested', seed=0)
+# Set predictor_window explicitly when a covariate is observed on only a subset of
+# the pre periods — the default averages over ALL pre periods and fails closed on
+# non-finite cells.
 results = scm.fit(data, outcome='gdpcap', treatment='treated', unit='region', time='year',
                   predictors=['invest', 'school.high'],
+                  predictor_window=[1964, 1965, 1966, 1967, 1968, 1969],
                   special_predictors=[('gdpcap', [1960, 1965, 1969], 'mean')])
 results.print_summary()
 gap_df = results.get_gap_df()       # period, gap, phase
