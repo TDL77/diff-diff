@@ -119,6 +119,7 @@ Quick Links
    tutorials/05_honest_did
    tutorials/06_power_analysis
    tutorials/07_pretrends_power
+   tutorials/24_staggered_vs_collapsed_power
 
 .. toctree::
    :maxdepth: 1
