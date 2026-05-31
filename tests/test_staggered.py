@@ -1441,10 +1441,14 @@ class TestRankGuardedAnalyticalSE:
 
     @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
     def test_error_mode_raises_before_rank_guard(self, method):
-        # rank_deficient_action="error" is enforced upstream at the
-        # point-estimate solve, which raises before the IF rank-guard is
-        # reached; so the IF guard (truncate + warn/silent) only governs the
-        # non-error modes.
+        # rank_deficient_action="error" raises upstream at the point-estimate
+        # solve when the covariate DESIGN is rank-deficient at its 1e-7 threshold
+        # (here an EXACT duplicate), before the IF rank-guard. NOTE: this is not a
+        # promise that every near-singular IF bread raises under "error" — a cell
+        # that is near-singular yet still design-full-rank can pass this gate and
+        # still be IF-column-dropped, because the IF guard's 1e-10 equilibrated-Gram
+        # threshold is stricter than the 1e-7 design check (the Gram squares X's
+        # condition number); see REGISTRY "rank_deficient_action enforcement".
         data = generate_staggered_data_with_covariates(seed=789)
         data["x2c"] = 2.0 * data["x1"]  # exactly collinear with x1
         with pytest.raises(ValueError, match="(?i)rank-deficient"):
