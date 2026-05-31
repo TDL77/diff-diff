@@ -3219,51 +3219,67 @@ Violation types:
 **Key implementation requirements:**
 
 *Assumption checks / warnings:*
-- Requires specification of outcome variance and intraclass correlation
-- Warns if power is very low (<0.5) or sample size insufficient
-- Cluster randomization requires cluster-level parameters
+- Requires the outcome SD `sigma` (validated finite and ≥ 0); within-unit (serial) equicorrelation via `rho` (default 0).
+- The analytical methods validate `n_pre ≥ 1`, `n_post ≥ 1`, `rho ∈ [-1/(T-1), 1)`, positive group counts (`n_treated`, `n_control` > 0), and `treat_frac ∈ (0, 1)` — each raises `ValueError` on violation. The analytical path does **not** emit low-power / insufficient-sample warnings (those live only on the simulation path).
+- Survey / cluster design effects enter via the multiplicative `deff` parameter (default 1.0; `deff < 1` emits a `UserWarning`); there is no separate cluster-randomization parameter set.
 
 *Estimator equation (as implemented):*
 
-- **Note:** The formulas in this "Estimator equation" block are under active methodology review
-  (2026-05; source audits at `docs/methodology/papers/bloom-1995-review.md` and
-  `docs/methodology/papers/burlig-preonas-woerman-2020-review.md`, against Bloom (1995) and Burlig,
-  Preonas & Woerman (2020)). The audits identified discrepancies with `diff_diff/power.py` to be
-  reconciled in a follow-up PR (tracked in `TODO.md`): (1) the MDE multiplier is written with the
-  t-distribution, but the analytical path uses the normal (z) approximation following Bloom — Burlig
-  Eq. 1 uses t; (2) the SE expression's `1/sqrt(1-R^2)` and cluster-size `m` terms are not what the
-  code implements (its `basic_did` variance is `2*sigma^2*(1/n_T+1/n_C)`, with no R^2 term); (3) the
-  sample-size formula below omits the `T(1-T)` allocation factor that the code applies (via
-  `treat_frac*(1-treat_frac)`); and (4) the panel `(1+(T-1)*rho)/T` factor is an
-  equicorrelated/Moulton design effect, **not** Burlig's serial-correlation-robust (SCR) variance
-  (their Eq. 2), so the Burlig attribution for the analytical panel path is an overclaim pending
-  re-attribution or implementation. These notes document the known state; this block is not yet a
-  corrected contract.
+Critical values use the **normal (z)** distribution (Bloom 1995), not t.
 
-Minimum detectable effect (MDE):
+Minimum detectable effect (MDE) — Bloom (1995), p.549:
 ```
-MDE = (t_{α/2} + t_{1-κ}) × SE(τ̂)
+MDE = (z_{1-α/2} + z_{1-κ}) × SE(τ̂)        [two-sided]
+MDE = (z_{1-α}   + z_{1-κ}) × SE(τ̂)        [one-sided]
 ```
-where κ is target power (typically 0.8).
+where κ is target power (typically 0.8) and z_q is the standard-normal quantile.
 
-Standard error for DiD:
-```
-SE(τ̂) = σ × √(1/n_T + 1/n_C) × √(1 + ρ(m-1)) / √(1 - R²)
-```
-where:
-- ρ = intraclass correlation
-- m = cluster size
-- R² = variance explained by covariates
+- **Deviation from R:** the MDE multiplier uses the **normal** distribution
+  following Bloom (1995), whereas Burlig et al. (2020) Eq. 1 and `pwr::pwr.t.test`
+  use the **t** distribution. This is a deliberate large-sample approximation
+  (exact as the number of units grows; mildly anti-conservative — a few percent —
+  for very small unit counts). The parity reference for the analytical path is
+  therefore normal-based (`pwr::pwr.norm.test` / a hand-derived `qnorm` golden),
+  **not** `pwr.t.test`.
 
-Power function:
+Standard error — DiD with m = n_pre pre-periods and r = n_post post-periods: the
+within-unit equicorrelated special case of Burlig, Preonas & Woerman (2020),
+Eq. 2 (ψ^B = ψ^A = ψ^X = ρσ²):
 ```
-Power = Φ(|τ|/SE - z_{α/2})
+SE(τ̂) = σ × √( (1/n_T + 1/n_C) × (1/m + 1/r) × (1 - ρ) )
 ```
+where ρ is the within-unit (serial) equicorrelation. Cross-period correlation
+**lowers** the DiD variance (differencing cancels the shared within-unit
+component), so the MDE *decreases* as ρ increases — the opposite of a Moulton
+mean-inflation factor. Valid range: ρ ∈ [-1/(T-1), 1), T = m + r; `n_pre ≥ 1` and
+`n_post ≥ 1` are required and validated before computation (for *all* designs,
+not only T > 2).
 
-Sample size for target power:
+The basic 2×2 design (n_pre = n_post = 1) is the m = r = 1 special case (Burlig
+footnote 11): SE = σ × √( 2 × (1/n_T + 1/n_C) × (1 - ρ) ), which reduces to the
+DiD analog of Bloom (1995) Eq. 1 — σ × √( 2 × (1/n_T + 1/n_C) ) — at ρ = 0.
+
+- **Note:** only the **equicorrelated** special case (a single ρ) is implemented;
+  the fully general serial-correlation-robust form with independent ψ^B, ψ^A, ψ^X
+  (Burlig Eq. 2) is not. The equicorrelated case has lineage Frison & Pocock
+  (1992) / McKenzie (2012), which Burlig generalizes.
+- **Note:** the analytical path does not model Bloom's covariate-adjustment factor
+  (1 - R²); R² = 0 is assumed. Survey design effects enter separately via the
+  multiplicative `deff` parameter (Kish 1965).
+
+Power function — exact two-tailed normal:
 ```
-n = 2(t_{α/2} + t_{1-κ})² σ² / MDE²
+Power = 1 - Φ(z_{1-α/2} - |τ|/SE) + Φ(-z_{1-α/2} - |τ|/SE)
 ```
+(the lower-tail term is negligible but retained for exactness).
+
+Sample size for target power (treatment fraction f = n_T/n; allocation factor
+f(1-f), maximized at f = 1/2; M = z_{1-α/2 or 1-α} + z_{1-κ}):
+```
+n = 2 M² σ² (1 - ρ) / ( δ² f(1-f) )                  [basic 2×2, m=r=1 case]
+n = M² σ² (1/m + 1/r)(1 - ρ) / ( δ² f(1-f) )         [panel]
+```
+where δ is the target effect.
 
 *Standard errors:*
 - Analytical formulas (no estimation uncertainty in power calculation)
@@ -3271,27 +3287,27 @@ n = 2(t_{α/2} + t_{1-κ})² σ² / MDE²
 
 *Edge cases:*
 - Very small effects: may require infeasibly large samples
-- High ICC: dramatically reduces effective sample size
+- Within-unit equicorrelation ρ: higher ρ *lowers* the DiD variance (and hence the MDE and required N) because the difference-in-differences cancels the shared within-unit component (Burlig Eq. 2 equicorrelated case) — the opposite of survey/cluster design effects (`deff`), which inflate variance (see the `deff` Note below)
 - Unequal allocation: optimal is often 50-50 but depends on costs
 - **Note:** `data_generator_kwargs` keys that overlap with registry-managed simulation inputs (`treatment_effect`, `noise_sd`, `n_units`, `n_periods`, `treatment_fraction`, `treatment_period`, `n_pre`, `n_post`) are rejected with `ValueError` to prevent silent desync between the DGP and result metadata. `n_pre` and `n_post` are derived from `treatment_period` and `n_periods` in factor-model DGPs (SyntheticDiD, TROP); the 3-way intersection check naturally scopes the rejection to those estimators only. Use the corresponding `simulate_power()` parameters directly, or pass a custom `data_generator` to override the DGP entirely.
 - **Note:** `simulate_sample_size()` rejects `n_per_cell` in `data_generator_kwargs` for `TripleDifference` because `n_per_cell` is derived from `n_units` (the search variable). A fixed override would freeze the effective sample size across bisection iterations, making the search degenerate. Use `simulate_power()` with a fixed `n_per_cell` override instead, or pass a custom `data_generator`.
 - **Note:** The simulation-based power registry (`simulate_power`, `simulate_mde`, `simulate_sample_size`) uses a single-cohort staggered DGP by default. Estimators configured with `control_group="not_yet_treated"`, `clean_control="strict"`, or `anticipation>0` will receive a `UserWarning` because the default DGP does not match their identification strategy. Users must supply `data_generator_kwargs` (e.g., `cohort_periods=[2, 4]`, `never_treated_frac=0.0`) or a custom `data_generator` to match the estimator design.
 - **Note:** The `TripleDifference` registry adapter uses `generate_ddd_data`, a fixed 2×2×2 factorial DGP (group × partition × time). The `n_periods`, `treatment_period`, and `treatment_fraction` parameters are ignored — DDD always simulates 2 periods with balanced groups. `n_units` is mapped to `n_per_cell = max(2, n_units // 8)` (effective total N = `n_per_cell × 8`), so non-multiples of 8 are rounded down and values below 16 are clamped to 16. A `UserWarning` is emitted when simulation inputs differ from the effective DDD design. When rounding occurs, all result objects (`SimulationPowerResults`, `SimulationMDEResults`, `SimulationSampleSizeResults`) set `effective_n_units` to the actual sample size used; it is `None` when no rounding occurred. `simulate_sample_size()` snaps bisection candidates to multiples of 8 so that `required_n` is always a realizable DDD sample size. Passing `n_per_cell` in `data_generator_kwargs` suppresses the effective-N rounding warning but not warnings for ignored parameters (`n_periods`, `treatment_period`, `treatment_fraction`).
-- **Note:** The analytical power methods (`PowerAnalysis.power/mde/sample_size` and the `compute_power/compute_mde/compute_sample_size` convenience functions) accept a `deff` parameter (survey design effect, default 1.0). This inflates variance multiplicatively: `Var(ATT) *= deff`, and inflates required sample size: `n_total *= deff`. The `deff` parameter is **not redundant** with `rho` (intra-cluster correlation): `rho` models within-unit serial correlation in panel data via the Moulton factor `1 + (T-1)*rho`, while `deff` models the survey design effect from stratified multi-stage sampling (clustering + unequal weighting). A survey panel study may need both. Values `deff > 0` are accepted; `deff < 1.0` (net variance reduction, e.g., from stratification gain) emits a warning.
+- **Note:** The analytical power methods (`PowerAnalysis.power/mde/sample_size` and the `compute_power/compute_mde/compute_sample_size` convenience functions) accept a `deff` parameter (survey design effect, default 1.0). This inflates variance multiplicatively: `Var(ATT) *= deff`, and inflates required sample size: `n_total *= deff`. The `deff` parameter is **not redundant** with `rho` (intra-cluster correlation): `rho` models within-unit (serial) equicorrelation in panel data via the Burlig (2020) Eq. 2 equicorrelated factor `(1/m + 1/r)(1 - rho)`, while `deff` models the survey design effect from stratified multi-stage sampling (clustering + unequal weighting). A survey panel study may need both. Values `deff > 0` are accepted; `deff < 1.0` (net variance reduction, e.g., from stratification gain) emits a warning.
 - **Note:** `simulate_power()` catches a narrow set of exception types — `ValueError`, `numpy.linalg.LinAlgError`, `KeyError`, `RuntimeError`, `ZeroDivisionError` — raised inside the per-simulation fit and result-extraction block, increments a per-effect failure counter, and skips the replicate. Programming errors (`TypeError`, `AttributeError`, `NameError`, `IndexError`, etc.) are allowed to propagate so that bugs in the estimator or custom result extractor surface loudly instead of being absorbed as simulation failures. The primary-effect failure count is surfaced on the result object as `SimulationPowerResults.n_simulation_failures`; a `UserWarning` still fires when the failure rate exceeds 10% for any effect size, and all-failed runs raise `RuntimeError`. This replaces the prior bare `except Exception` that swallowed root causes and kept the counter internal to the function (axis C — silent fallback — under the Phase 2 audit).
 - **Note:** `SurveyPowerConfig._build_survey_design()` no longer caches its return value in `self._cached_survey_design`. Reassigning `config.survey_design` (either replacing a user-supplied `SurveyDesign` with another, or toggling between `None` and a user-supplied design) after the first call used to silently return the stale cached design; the method now returns the live `self.survey_design` (or the default construction when `None`) every call. Other config fields (`n_strata`, `icc`, `weight_variation`, etc.) never influenced the returned design, so the staleness surface was specifically `survey_design` reassignment. Construction is microseconds — the cache never earned its complexity. Axis-J finding #28 in the Phase 2 silent-failures audit.
 - **Note:** The simulation-based power functions (`simulate_power/simulate_mde/simulate_sample_size`) accept a `survey_config` parameter (`SurveyPowerConfig` dataclass). When set, the simulation loop uses `generate_survey_did_data` instead of the default registry DGP, and automatically injects `SurveyDesign(weights="weight", strata="stratum", psu="psu", fpc="fpc")` into the estimator's `fit()` call. Supported estimators: DifferenceInDifferences, TwoWayFixedEffects, MultiPeriodDiD, CallawaySantAnna, SunAbraham, ImputationDiD, TwoStageDiD, StackedDiD, EfficientDiD. Unsupported (raises `ValueError`): TROP, SyntheticDiD, TripleDifference (generate_survey_did_data produces staggered cohort data incompatible with factor-model/DDD DGPs). `survey_config` and `data_generator` are mutually exclusive. `data_generator_kwargs` may not contain keys managed by `SurveyPowerConfig` (n_strata, psu_per_stratum, etc.) but may contain passthrough DGP params (unit_fe_sd, add_covariates, strata_sizes). Repeated cross-section survey power (`panel=False`) is only supported for `CallawaySantAnna(panel=False)` with a matching `data_generator_kwargs={"panel": False}`; both mismatch directions are rejected. `estimator_kwargs` may not contain `survey_design` when `survey_config` is set (use `SurveyPowerConfig(survey_design=...)` instead). Estimator settings that require a multi-cohort DGP (`control_group="not_yet_treated"`, `control_group="last_cohort"`, `clean_control="strict"`) are rejected because the survey DGP uses a single cohort; use the custom `data_generator` path for these configurations. `simulate_sample_size` raises the bisection floor to `n_strata * psu_per_stratum * 2` to ensure viable survey structure and rejects `strata_sizes` in `data_generator_kwargs` (it depends on `n_units` which varies during bisection).
 
 **Reference implementation(s):**
-- R: `pwr` package (general), `DeclareDesign` (simulation-based)
-- Stata: `power` command
+- R: `pwr::pwr.norm.test` (analytical path — normal-based, matching D1; **not** `pwr.t.test`, which is noncentral-t), `DeclareDesign` (simulation-based)
+- Stata: `pcpanel` (Burlig et al. 2020 panel variance), `power` command (cross-sectional)
 
 **Requirements checklist:**
-- [ ] MDE calculation given sample size and variance parameters
-- [ ] Power calculation given effect size and sample size
-- [ ] Sample size calculation given MDE and target power
-- [ ] Simulation-based power for complex designs
-- [ ] Cluster adjustment for clustered designs
+- [x] MDE calculation given sample size and variance parameters
+- [x] Power calculation given effect size and sample size
+- [x] Sample size calculation given MDE and target power
+- [x] Simulation-based power for complex designs
+- [x] Cluster adjustment for clustered designs (within-unit `rho` + survey `deff`)
 
 ---
 
@@ -3382,7 +3398,7 @@ should be a deliberate user choice.
 | BaconDecomposition | bacondecomp | `bacon()` |
 | HonestDiD | HonestDiD | `createSensitivityResults()` |
 | PreTrendsPower | pretrends | `pretrends()` |
-| PowerAnalysis | pwr / DeclareDesign / pcpanel | `pwr.t.test()` / simulation — **under review** (see `## PowerAnalysis` Note: the analytical path is normal-based, so `pwr.t.test` is not the faithful parity target; the panel parity reference is Stata `pcpanel`) |
+| PowerAnalysis | pwr / DeclareDesign / pcpanel | `pwr::pwr.norm.test` (analytical, normal-based — D1) + `pcpanel` (Burlig 2020 panel, equicorrelated case) + simulation. The analytical multiplier is normal (z), so `pwr.t.test` is **not** the faithful parity target. |
 
 ---
 

@@ -245,9 +245,17 @@ Power Analysis
 
 - **Burlig, F., Preonas, L., & Woerman, M. (2020).** "Panel Data and Experimental Design." *Journal of Development Economics*, 144, 102458. https://doi.org/10.1016/j.jdeveco.2020.102458
 
-  Essential reference for power analysis in panel DiD designs. Discusses how serial correlation affects power and derives serial-correlation-robust (SCR) variance formulas for panel data. (Note: the library's analytical panel-power path currently uses an equicorrelated/Moulton approximation, **not** Burlig et al.'s SCR formula; this attribution is under methodology review — see ``docs/methodology/REGISTRY.md`` ``## PowerAnalysis``.)
+  Essential reference for power analysis in panel DiD designs. Derives serial-correlation-robust (SCR) variance formulas (their Eq. 2) and shows that serial correlation can *raise or lower* the MDE depending on the cross-period covariance. The library's analytical panel-power path implements the **within-unit equicorrelated special case** of Eq. 2 — ``Var = σ²(1/n_T+1/n_C)(1/m+1/r)(1−ρ)`` (lineage: Frison & Pocock 1992 → McKenzie 2012 → Burlig et al.); the fully general SCR form with independent pre/post/cross-period covariances is not yet implemented. See ``docs/methodology/REGISTRY.md`` ``## PowerAnalysis``.
 
 - **Djimeu, E. W., & Houndolo, D.-G. (2016).** "Power Calculation for Causal Inference in Social Science: Sample Size and Minimum Detectable Effect Determination." *Journal of Development Effectiveness*, 8(4), 508-527. https://doi.org/10.1080/19439342.2016.1244555
+
+- **Frison, L., & Pocock, S. J. (1992).** "Repeated Measures in Clinical Trials: Analysis Using Mean Summary Statistics and Its Implications for Design." *Statistics in Medicine*, 11(13), 1685-1704. https://doi.org/10.1002/sim.4780111304
+
+  Origin of the constant-correlation (equicorrelated) repeated-measures variance that Burlig, Preonas & Woerman (2020) generalize; the lineage source for the library's analytical panel-power formula.
+
+- **McKenzie, D. (2012).** "Beyond Baseline and Follow-Up: The Case for More T in Experiments." *Journal of Development Economics*, 99(2), 210-221. https://doi.org/10.1016/j.jdeveco.2012.01.002
+
+  Establishes the power gains from multiple pre/post periods in panel experiments (the ``(m+r)/(mr)`` period factor); the ψ = 0 special case of Burlig, Preonas & Woerman (2020) Eq. 2.
 
 General Causal Inference
 ------------------------
