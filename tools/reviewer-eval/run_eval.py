@@ -176,16 +176,26 @@ def cmd_run(args: argparse.Namespace) -> int:
         progress=lambda m: print(f"  {m}"),
     )
     ok = sum(1 for r in results if r.ok)
-    # Manifest scopes `compare` to THIS invocation's runs (resumed + infra-errored
-    # included — they carry run_ids), so a later rerun into the same subdir can't
-    # silently mix experiments into one bundle. Empty run_ids are dropped (M1).
-    run_ids = [r.run_id for r in results if r.run_id]
-    if len(run_ids) != len(results):
+    infra = [r for r in results if not r.ok]
+    if infra:
+        # Fail closed: an INFRA_ERROR (a notebook case, or a codex/worktree failure)
+        # means the experiment is incomplete. Don't write a manifest — so `compare`
+        # can't present a partial run as a valid A/B — and exit non-zero. The OK runs
+        # stay cached, so a re-run resumes them and only retries the failures.
+        for r in infra[:10]:
+            print(
+                f"  INFRA_ERROR: {r.case_id} {r.config_id} r{r.repeat_idx}: {r.infra_error}",
+                file=sys.stderr,
+            )
         print(
-            f"  warning: {len(results) - len(run_ids)} run(s) had no run_id; "
-            "omitted from the manifest",
+            f"\n{ok}/{len(results)} runs ok, {len(infra)} FAILED — no manifest written. "
+            "Fix the failing case(s) and re-run (ok runs resume from cache).",
             file=sys.stderr,
         )
+        return 2
+    # Manifest scopes `compare` to THIS invocation's runs, so a later rerun into the
+    # same subdir can't silently mix experiments into one bundle.
+    run_ids = [r.run_id for r in results if r.run_id]
     write_json(
         _manifest_path(args.subdir),
         {"run_ids": run_ids, "configs": [c.id for c in configs]},

@@ -121,11 +121,27 @@ def run_matrix(
     results: list[RunResult] = []
     pending: list[tuple[Case, Config, int]] = []
 
-    # Resume: load any already-completed runs, keyed on the experiment identity.
+    def _prompt_matches(case, cached) -> bool:
+        # Reuse a cached run ONLY if the model would see byte-identical input now —
+        # so an edit to the prompt builder / materializer / case busts the cache,
+        # regardless of whether the run-key fingerprint happened to capture it.
+        # Dissolves the "is the cache identity complete?" question into one check.
+        if not cached.prompt_sha:
+            return False  # legacy artifact w/o a recorded prompt: rerun to be safe
+        try:
+            return reviewer.prompt_sha_for(case) == cached.prompt_sha
+        except AttributeError:
+            return True  # minimal reviewer w/o prompt_sha_for: fall back to key match
+        except Exception as exc:  # noqa: BLE001 - can't verify -> rerun
+            log(f"WARNING: prompt re-verify failed for {case.id}: {exc}; will rerun")
+            return False
+
+    # Resume: load any already-completed runs, keyed on the experiment identity,
+    # AND verified to match the prompt the reviewer would build now.
     for case, config, r in jobs:
         key = run_key(case.id, config.id, r, config_tags[config.id], case_tags[case.id])
         cached = store.load(key)
-        if cached is not None and cached.ok:
+        if cached is not None and cached.ok and _prompt_matches(case, cached):
             results.append(cached)
             log(f"resume: {case.id} {config.id} r{r} (cached)")
         else:

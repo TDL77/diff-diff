@@ -58,7 +58,9 @@ gpt-5.5 format differently) is read directly.
 ## What faithful reproduction means
 
 The candidate is measured the way CI will run it: `adapters/ci_prompt.py`
-rebuilds the CI prompt (base-sourced `pr_review.md` + `git diff --name-status` +
+rebuilds the CI prompt (the **current** `pr_review.md` — the prompt under
+validation, identical for both arms; deliberately NOT base-sourced, see
+`adapters/ci_prompt.py` — + `git diff --name-status` +
 `--unified=5` with the same pathspec exclusions; REGISTRY is **not** inlined —
 Codex reads it from the worktree), `adapters/worktree.py` materializes each case
 in a detached worktree, and `adapters/codex_reviewer.py` reuses the production

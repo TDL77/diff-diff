@@ -149,6 +149,20 @@ class CodexReviewer:
             raise
         return prompt, mat.worktree_dir, mat.head_sha
 
+    def prompt_sha_for(self, case) -> str:
+        """Hash of the exact prompt this case WOULD produce now (materialize +
+        build + teardown). The runner uses it to verify a cached run before
+        resuming it: reuse iff the model would see byte-identical input — so editing
+        the prompt builder, the materializer, or the case busts the cache without
+        having to guess which inputs to fingerprint.
+        """
+        prompt, wt_dir, _head = self.build_prompt_for_case(case, worktree_key=f"{case.id}.__sha__")
+        try:
+            return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+        finally:
+            with self._wt_lock:
+                worktree.cleanup(wt_dir, self.repo_root)
+
     def review(self, case, config: Config, repeat_idx: int) -> ReviewOutput:
         if config.effort != "xhigh":
             raise NotImplementedError(

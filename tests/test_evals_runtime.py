@@ -478,3 +478,77 @@ def test_build_prompt_cleans_worktree_on_build_failure(monkeypatch):
     with pytest.raises(NotImplementedError):
         r.build_prompt_for_case(case, worktree_key="c.A.r0")
     assert cleaned == ["/tmp/reviewer-eval-test/wt-leaktest"], "worktree must be cleaned on failure"
+
+
+# --------------------------------------------------------------------------- #
+# Verify-on-resume (PR #510 round 2): a cached run is reused ONLY if the model
+# would see byte-identical input now — covers harness-code edits the run key
+# can't fingerprint.
+# --------------------------------------------------------------------------- #
+
+
+def test_resume_reruns_when_built_prompt_changes(monkeypatch):
+    from engine.models import STRATUM_HISTORICAL, Case, Config
+    from engine.runner import run_matrix
+    from engine.store import RunStore
+
+    store = RunStore("/tmp/reviewer-eval-test/runs-promptchange")
+    for f in pathlib.Path(store.root).glob("*.json"):
+        f.unlink()
+    cfg = [Config(id="A", model="gpt-5.4")]
+    case = Case(id="x", stratum=STRATUM_HISTORICAL)
+
+    # Run 1: the stub builds "PROMPT" (default) and caches review "## V1".
+    r1 = _make_reviewer(monkeypatch, review_md="## V1\n")
+    run_matrix([case], cfg, r1, store, k=1, max_parallel=1)
+
+    # Same case/config (=> same run key), but the BUILT PROMPT now differs.
+    r2 = _make_reviewer(monkeypatch, review_md="## V2\n")
+    monkeypatch.setattr(
+        r2,
+        "build_prompt_for_case",
+        lambda case, worktree_key=None: (
+            "PROMPT-CHANGED",
+            "/tmp/reviewer-eval-test/wt",
+            "deadbeef",
+        ),
+        raising=True,
+    )
+    results = run_matrix([case], cfg, r2, store, k=1, max_parallel=1)
+    assert results[0].review_markdown.startswith(
+        "## V2"
+    ), "stale cached review was reused despite the built prompt changing"
+
+
+def test_run_fails_closed_on_infra_error(tmp_path, monkeypatch):
+    """cmd_run must exit non-zero and write NO manifest when any run hits INFRA_ERROR."""
+    import run_eval
+
+    monkeypatch.setattr(run_eval, "RUNS_DIR", str(tmp_path / "runs"))
+
+    class _Boom:
+        # cli_version must match config/configs.json's pin so the A/B CLI-equality
+        # assert doesn't fire before we reach the infra path.
+        def cli_version(self):
+            return "codex-cli 0.130.0"
+
+        def experiment_tag(self, config):
+            return "tag"
+
+        def case_tag(self, case):
+            return "ctag"
+
+        def prompt_sha_for(self, case):
+            return "psha"
+
+        def review(self, case, config, repeat_idx):
+            raise RuntimeError("simulated codex failure")
+
+    monkeypatch.setattr(run_eval, "_build_reviewer", lambda repo_root: _Boom(), raising=True)
+    rc = run_eval.cmd_run(
+        _ns(configs="A", strata=["s1_synthetic"], subdir="full", k=1, max_parallel=1)
+    )
+    assert rc != 0, "run must fail closed on INFRA_ERROR"
+    assert not (
+        tmp_path / "runs" / "full-manifest.json"
+    ).exists(), "no manifest on an infra-failed run"
