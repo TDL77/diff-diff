@@ -158,21 +158,24 @@ def _scm_panel(n_donors=4, T=8, T0=6, effect=3.0, seed=0):
 
 @pytest.fixture  # function-scoped: some tests run in_space_placebo(), which mutates the result
 def scm_fit():
-    warnings.filterwarnings("ignore")
     df = _scm_panel(n_donors=4)
     # Cheap optimizer settings keep the pure-Python fixture fast; the report path,
-    # not solver accuracy, is what these tests exercise.
-    res = synthetic_control(
-        df,
-        "y",
-        "treated",
-        "unit",
-        "year",
-        seed=0,
-        n_starts=1,
-        optimizer_options={"maxiter": 50},
-        inner_min_decrease=1e-3,
-    )
+    # not solver accuracy, is what these tests exercise. Scope the warning
+    # suppression to this call via catch_warnings() so it does not mutate the
+    # global filter state for later tests in the same worker.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            seed=0,
+            n_starts=1,
+            optimizer_options={"maxiter": 50},
+            inner_min_decrease=1e-3,
+        )
     return res, df
 
 
