@@ -361,19 +361,24 @@ def _rank_guarded_inv(
     Column-drop (not minimum-norm) generalized inverse: when ``A`` is
     rank-deficient the guarded path keeps the ``rank`` most-independent columns
     (pivoted QR on the equilibrated Gram) and inverts that principal submatrix,
-    zero-filling the dropped rows/cols. This is the SAME generalized-inverse
-    convention the point estimate uses (``_detect_rank_deficiency`` / R's
-    ``lm()`` column drop), so the influence-function SE equals the
-    well-conditioned (near-collinear) limit: replacing the exactly-collinear
-    covariate with a near-collinear (full-rank) one yields the same SE to working
-    precision. A minimum-norm pseudo-inverse would instead diverge from
-    column-drop whenever the IF multiplier leaves ``range(A)`` — e.g. an
-    outcome-regression bread fit on the *control* (or a treated sub-cell) sample
-    multiplied by a mean from a cell where the covariate is NOT collinear — so it
-    is rejected here. With column-drop there is no such divergence; a covariate
-    that is rank-deficient only within one cell still legitimately enters the
-    other cells' full-rank fits, so the ATT and SE reflect that (poor) covariate
-    specification, consistently with the point estimate.
+    zero-filling the dropped rows/cols. This is a column-drop in the SAME FAMILY
+    as the point estimate (``_detect_rank_deficiency`` / R's ``lm()``; drop
+    redundant columns, not a minimum-norm pseudo-inverse), but the column
+    selection is computed on the equilibrated Gram and is scale-invariant — so it
+    may drop a different *member* of a collinear set than the point estimate's
+    raw pivot under mixed-scale *exact* collinearity (a documented deviation that
+    leaves the SE unchanged, since the identified subspace is the same whichever
+    redundant member is dropped; see ``docs/methodology/REGISTRY.md``). It is
+    still a column-drop, so the influence-function SE equals the well-conditioned
+    (near-collinear) limit: replacing the exactly-collinear covariate with a
+    near-collinear (full-rank) one yields the same SE to working precision. A
+    minimum-norm pseudo-inverse would instead diverge from column-drop whenever
+    the IF multiplier leaves ``range(A)`` — e.g. an outcome-regression bread fit
+    on the *control* (or a treated sub-cell) sample multiplied by a mean from a
+    cell where the covariate is NOT collinear — so it is rejected here. With
+    column-drop there is no such divergence; a covariate that is rank-deficient
+    only within one cell still legitimately enters the other cells' full-rank
+    fits, so the ATT and SE reflect that (poor) covariate specification.
 
     The fast (well-conditioned) path returns ``np.linalg.solve(A, I)``
     unchanged, so well-conditioned fits are numerically unaffected.
