@@ -66,7 +66,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | Estimator | Module | R Reference | Status | Last Review |
 |-----------|--------|-------------|--------|-------------|
 | TripleDifference | `triple_diff.py` | `triplediff::ddd()` | **Complete** | 2026-02-18 |
-| StaggeredTripleDifference | `staggered_triple_diff.py` | `triplediff::ddd(panel=TRUE)` + `agg_ddd()` | **In Progress** | — |
+| StaggeredTripleDifference | `staggered_triple_diff.py` | `triplediff::ddd(panel=TRUE)` + `agg_ddd()` | **Complete** | 2026-05-30 |
 
 ### Counterfactual / Synthetic Estimators
 
@@ -940,21 +940,39 @@ These three are feature deferrals (paper-supported extensions that the library h
 | Module | `staggered_triple_diff.py`, `staggered_triple_diff_results.py` |
 | Primary Reference | Ortiz-Villavicencio & Sant'Anna (2025) — same paper as TripleDifference, staggered case |
 | R Reference | `triplediff::ddd(panel=TRUE)` + `agg_ddd()` (per `benchmarks/R/benchmark_staggered_triplediff.R`) |
-| Status | **In Progress** |
-| Last Review | — |
+| Status | **Complete** |
+| Last Review | 2026-05-30 |
 
 **Documentation in place:**
+- Paper review: `docs/methodology/papers/ortiz-villavicencio-santanna-2025-review.md` (full-paper, equal-depth, arXiv:2505.09942v3; shared primary source with TripleDifference) — PR #499
 - REGISTRY.md section: `## StaggeredTripleDifference` (per-cohort comparisons against three sub-groups, DR/RA/IPW per component, GMM-optimal closed-form inverse-variance weighting, event-study via CS mixin, IF-based SEs, multiplier bootstrap for simultaneous bands, survey support)
-- `tests/test_methodology_staggered_triple_diff.py`: 6 tests across 3 classes (never-treated comparison, not-yet-treated comparison, aggregation)
-- Dedicated unit-test suite: `tests/test_staggered_triple_diff.py` (~680 lines, full coverage of DR/RA/IPW paths, both control-group modes, GMM weighting, event-study aggregation, edge cases)
-- Survey-specific: `tests/test_survey_staggered_ddd.py`
+- `tests/test_methodology_staggered_triple_diff.py`: R cross-validation (group-time ATT/SE, both control groups) + paper-equation-anchored Verified Components (below)
+- Dedicated unit-test suite: `tests/test_staggered_triple_diff.py` (full coverage of DR/RA/IPW paths, both control-group modes, GMM weighting, event-study aggregation, edge cases)
+- Survey-specific: `tests/test_survey_staggered_ddd.py` (incl. the Eq-4.14 overall under survey weighting)
 
-**Outstanding for promotion:**
-- Paper review under `docs/methodology/papers/` covering Ortiz-Villavicencio & Sant'Anna (2025) for the staggered case (the primary paper is shared with TripleDifference, but no dedicated review file exists on disk yet)
-- R parity validation against `triplediff::ddd(panel=TRUE)` + `agg_ddd()` (per `benchmarks/R/benchmark_staggered_triplediff.R`) — CSV fixtures not committed (gitignored); tests skip without local R + `triplediff` (tracked in TODO.md row, PR #245)
-- Per-cohort group-effect SE convention: implementation includes WIF (conservative vs R's `wif=NULL`); documented in REGISTRY, deferred decision on whether to add an opt-in WIF-disable path (tracked in TODO.md row, PR #245)
-- Formal Verified Components walk-through here
-- Cluster-robust analytical SEs accepted but not wired (deferred per REGISTRY)
+**Verified Components (validated against the paper + R):**
+- **Identification (Theorem 4.1 / Eq. 4.5):** RA = IPW = DR coincide without covariates.
+- **Three-term DDD decomposition (Eq. 4.1):** post-treatment ATT(g,t) recover a known constant effect.
+- **GMM combination (Eqs. 4.11-4.12):** optimal weights sum to one; a single comparison group reduces to `w=[1]`.
+- **Event study (Eq. 4.13):** ES(e) equals the eligible-treated cohort-share-weighted average of ATT(g, g+e).
+- **Overall (Eq. 4.14 / Cor. 4.2):** opt-in `overall_att_es` = unweighted mean of post-treatment ES(e), cross-validated against R `agg_ddd(type="eventstudy")$overall.att`/`overall.se`.
+
+**R Comparison Results** (`benchmarks/R/benchmark_staggered_triplediff.R`; `triplediff::ddd(panel=TRUE)` + `agg_ddd()`; CSV fixtures gitignored / regenerated on-the-fly, JSON golden committed):
+
+| Quantity | Tolerance | Observed agreement |
+|----------|-----------|--------------------|
+| Group-time ATT(g,t) | rtol 0.1% | exact |
+| Group-time SE(g,t) | rtol 1% | matches |
+| Event-study ES(e) | rtol 25% | within (per-e eligible-treated weighting deviation) |
+| Overall ATT, Eq. 4.14 (`overall_att_es`) | rtol 10% | ≤5% (weighting deviation averages out in the mean) |
+| Overall SE, Eq. 4.14 (`overall_se_es`) | rtol 3% | ≤0.5% |
+
+The paper-equation-anchored Verified Components above are deterministic and run without R.
+The R cross-validation in this table runs only when local `R` + `triplediff` are available
+(it skips otherwise — the fixtures are gitignored); making those fixtures deterministic in
+CI and extending covariate-adjusted R parity are tracked follow-ups in `TODO.md`.
+
+**Documented deviations (verified non-masking; REGISTRY `## StaggeredTripleDifference`):** comparison-cohort admissibility (matches R `triplediff`, base-period/anticipation-aware; paper uses `g_c > max(g,t)`); aggregation weights `P(S=g,Q=1)` (matches paper Eq. 4.13 where `G_i` is defined only for `Q=1`, not R's `P(S=g)`) — drives the 25% aggregation tolerance; per-cohort group-effect WIF (conservative vs R `wif=NULL`); default `overall_att` is the CS-simple post-treatment average (paper Eq. 4.14 available opt-in as `overall_att_es`); cluster-robust analytical SEs accepted-but-deferred (multiplier bootstrap provides unit-level clustering).
 
 ---
 
@@ -1396,8 +1414,7 @@ Promotion priority for the **In Progress** entries, ordered by what's blocked on
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
-5. **StaggeredTripleDifference** — shares the primary paper (Ortiz-Villavicencio & Sant'Anna 2025) with TripleDifference, but no dedicated paper review on file yet; needs R parity (R fixtures gitignored — tracked in TODO.md, PR #245).
-6. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
+5. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
 
 ---
 

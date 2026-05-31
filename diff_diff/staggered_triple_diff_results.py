@@ -55,6 +55,15 @@ class StaggeredTripleDiffResults:
         Number of eligible units (Q = 1).
     n_ineligible : int
         Number of ineligible units (Q = 0).
+    overall_att_es : float, optional
+        Paper Eq. (4.14) "overall" ATT: the unweighted mean of the post-treatment
+        event-study effects ES(e). Populated only when ``aggregate`` is
+        ``"event_study"`` or ``"all"``; ``None`` otherwise. Distinct from
+        ``overall_att`` (the Callaway-Sant'Anna simple post-treatment (g,t) average,
+        which is the default headline ATT).
+    overall_se_es, overall_t_stat_es, overall_p_value_es, overall_conf_int_es : optional
+        Standard error, t-statistic, p-value, and confidence interval for
+        ``overall_att_es``; ``None`` when ``overall_att_es`` is ``None``.
     """
 
     group_time_effects: Dict[Tuple[Any, Any], Dict[str, Any]]
@@ -94,6 +103,16 @@ class StaggeredTripleDiffResults:
     )
     epv_threshold: float = 10
     pscore_fallback: str = "error"
+    # Paper Eq. (4.14) "overall" ATT: the unweighted mean of the post-treatment
+    # event-study effects ES(e). Populated only when aggregate in {"event_study",
+    # "all"}; None otherwise. Distinct from the default ``overall_att`` (the
+    # Callaway-Sant'Anna simple post-treatment (g,t) average). See REGISTRY
+    # ## StaggeredTripleDifference "Aggregation".
+    overall_att_es: Optional[float] = None
+    overall_se_es: Optional[float] = None
+    overall_t_stat_es: Optional[float] = None
+    overall_p_value_es: Optional[float] = None
+    overall_conf_int_es: Optional[Tuple[float, float]] = None
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property
@@ -193,6 +212,28 @@ class StaggeredTripleDiffResults:
                 f"[{self.overall_conf_int[0]:.4f}, {self.overall_conf_int[1]:.4f}]",
             ]
         )
+
+        # Paper Eq. (4.14) overall (event-study average), when computed
+        # (aggregate in {"event_study", "all"}). The headline ATT above remains the
+        # Callaway-Sant'Anna simple post-treatment (g,t) average.
+        if (
+            self.overall_att_es is not None
+            and self.overall_se_es is not None
+            and self.overall_conf_int_es is not None
+        ):
+            p_es = self.overall_p_value_es if self.overall_p_value_es is not None else float("nan")
+            t_es = self.overall_t_stat_es if self.overall_t_stat_es is not None else float("nan")
+            sig_es = _get_significance_stars(p_es)
+            lines.extend(
+                [
+                    "",
+                    "Overall ATT (event-study average, paper Eq. 4.14):",
+                    f"{'ATT':<15} {self.overall_att_es:>12.4f} {self.overall_se_es:>12.4f} "
+                    f"{t_es:>10.3f} {p_es:>10.4f} {sig_es:>6}",
+                    f"{conf_level}% Confidence Interval: "
+                    f"[{self.overall_conf_int_es[0]:.4f}, {self.overall_conf_int_es[1]:.4f}]",
+                ]
+            )
 
         cv = self.coef_var
         if np.isfinite(cv):
@@ -429,6 +470,12 @@ class StaggeredTripleDiffResults:
             d["group_effects"] = self.group_effects
         if self.comparison_group_counts is not None:
             d["comparison_group_counts"] = self.comparison_group_counts
+        if self.overall_att_es is not None:
+            d["overall_att_es"] = self.overall_att_es
+            d["overall_se_es"] = self.overall_se_es
+            d["overall_t_stat_es"] = self.overall_t_stat_es
+            d["overall_p_value_es"] = self.overall_p_value_es
+            d["overall_conf_int_es"] = self.overall_conf_int_es
         return d
 
     @property

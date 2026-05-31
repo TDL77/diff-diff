@@ -129,7 +129,7 @@ Triply Robust Panel (TROP)
 Triple Difference (DDD)
 -----------------------
 
-- **Ortiz-Villavicencio, M., & Sant'Anna, P. H. C. (2025).** "Better Understanding Triple Differences Estimators." *Working Paper*. https://arxiv.org/abs/2505.09942
+- **Ortiz-Villavicencio, M., & Sant'Anna, P. H. C. (2025).** "Better Understanding Triple Differences Estimators." *arXiv:2505.09942v3*. https://arxiv.org/abs/2505.09942v3
 
   This paper shows that common DDD implementations (taking the difference between two DiDs, or applying three-way fixed effects regressions) are generally invalid when identification requires conditioning on covariates. The ``TripleDifference`` class implements their regression adjustment, inverse probability weighting, and doubly robust estimators.
 

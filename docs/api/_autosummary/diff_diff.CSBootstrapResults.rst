@@ -34,6 +34,9 @@
       ~CSBootstrapResults.overall_att_se
       ~CSBootstrapResults.overall_att_ci
       ~CSBootstrapResults.overall_att_p_value
+      ~CSBootstrapResults.overall_att_es_se
+      ~CSBootstrapResults.overall_att_es_ci
+      ~CSBootstrapResults.overall_att_es_p_value
       ~CSBootstrapResults.group_time_ses
       ~CSBootstrapResults.group_time_cis
       ~CSBootstrapResults.group_time_p_values

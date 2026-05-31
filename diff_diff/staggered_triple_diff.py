@@ -87,7 +87,7 @@ class StaggeredTripleDifference(
     References
     ----------
     Ortiz-Villavicencio, M. & Sant'Anna, P.H.C. (2025). "Better Understanding
-    Triple Differences Estimators." arXiv:2505.09942.
+    Triple Differences Estimators." arXiv:2505.09942v3.
     """
 
     def __init__(
@@ -599,6 +599,12 @@ class StaggeredTripleDifference(
         overall_att, overall_se, overall_effective_df = self._aggregate_simple(
             group_time_effects, influence_func_info, df_agg, unit, precomputed_agg
         )
+        # Preserve the ORIGINAL survey df before the simple-overall statistic mutates
+        # it below. The Eq. 4.14 overall (overall_att_es) must fall back to this
+        # original df, never to the simple overall's per-statistic replicate df — the
+        # two statistics can drop different replicate subsets, so reusing the simple
+        # overall's df would silently give overall_att_es the wrong p-value/CI.
+        df_survey_original = df_survey
         # Use per-statistic effective df from replicate aggregation if available;
         # otherwise fall back to the original df from the survey design.
         if overall_effective_df is not None:
@@ -632,6 +638,55 @@ class StaggeredTripleDifference(
                 df_agg,
                 unit,
             )
+
+        # Paper Eq. (4.14) overall ATT (event-study average): an opt-in summary
+        # alongside the default CS-simple ``overall_att``. ``_aggregate_event_study``
+        # stashes it on ``self._event_study_overall``; populated only when the
+        # event-study aggregation ran. Analytical inference here; the bootstrap block
+        # below overrides the SE when ``n_bootstrap > 0`` (mirroring ``overall_se``).
+        overall_att_es = None
+        overall_se_es = None
+        overall_t_stat_es = None
+        overall_p_value_es = None
+        overall_conf_int_es = None
+        # Whether the ANALYTICAL Eq. 4.14 SE was non-finite while its point estimate
+        # was finite (i.e. a contributing horizon's influence function was non-finite).
+        # Captured before any bootstrap override so the terminal warning below does not
+        # misdiagnose a bootstrap-side NaN SE (e.g. cluster-unidentified) as an
+        # analytical-IF failure (the bootstrap path emits its own warning).
+        analytical_overall_es_se_nonfinite = False
+        if aggregate in ("event_study", "all"):
+            es_overall = getattr(self, "_event_study_overall", None)
+            if es_overall is not None:
+                overall_att_es = es_overall["att"]
+                overall_se_es = es_overall["se"]
+                analytical_overall_es_se_nonfinite = bool(
+                    np.isfinite(overall_att_es) and not np.isfinite(overall_se_es)
+                )
+                es_eff_df = es_overall.get("effective_df")
+                # Fall back to the ORIGINAL survey df, not the simple-overall's mutated
+                # per-statistic df (P1 fix): overall_att_es has its own replicate df.
+                df_for_es = es_eff_df if es_eff_df is not None else df_survey_original
+                overall_t_stat_es, overall_p_value_es, overall_conf_int_es = safe_inference(
+                    overall_att_es, overall_se_es, alpha=self.alpha, df=df_for_es
+                )
+            else:
+                # Event-study aggregation was requested but yielded no post-treatment
+                # horizon: this is "requested but undefined" -> NaN + warning (the
+                # library's overall-aggregation contract, matching _aggregate_simple),
+                # distinct from "not requested" which leaves the fields None.
+                warnings.warn(
+                    "Event-study aggregation was requested but no post-treatment "
+                    "horizons are available for the Eq. 4.14 overall (overall_att_es); "
+                    "returning NaN.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                overall_att_es = np.nan
+                overall_se_es = np.nan
+                overall_t_stat_es, overall_p_value_es, overall_conf_int_es = safe_inference(
+                    np.nan, np.nan, alpha=self.alpha, df=df_survey
+                )
 
         # Reject replicate-weight designs for bootstrap — replicate variance
         # is an analytical alternative, not compatible with bootstrap
@@ -670,6 +725,17 @@ class StaggeredTripleDifference(
                 )
                 overall_conf_int = bootstrap_results.overall_att_ci
                 overall_p_value = bootstrap_results.overall_att_p_value
+
+                # Mirror the override for the Eq. (4.14) event-study-average overall
+                # (only when event-study aggregation produced it). A NaN bootstrap SE
+                # (e.g. cluster-unidentified) correctly NaNs the inference.
+                if overall_att_es is not None and bootstrap_results.overall_att_es_se is not None:
+                    overall_se_es = bootstrap_results.overall_att_es_se
+                    overall_t_stat_es, overall_p_value_es, overall_conf_int_es = safe_inference(
+                        overall_att_es, overall_se_es, alpha=self.alpha, df=df_survey
+                    )
+                    overall_conf_int_es = bootstrap_results.overall_att_es_ci
+                    overall_p_value_es = bootstrap_results.overall_att_es_p_value
                 if bootstrap_results.cband_crit_value is not None:
                     cband_crit_value = bootstrap_results.cband_crit_value
 
@@ -743,6 +809,29 @@ class StaggeredTripleDifference(
                         )
                         group_effects[g_key]["t_stat"] = t_val
 
+        # Eq. 4.14 overall: an ANALYTICAL non-finite SE under a finite point estimate
+        # (a contributing horizon's influence function is non-finite, or the variance is
+        # unidentified — e.g. a single-PSU/cluster design). Surface it — never NaN the SE
+        # silently. Gated on the analytical-origin flag (captured before the bootstrap
+        # override) and the final state still being non-finite: a bootstrap that supplies a
+        # finite SE rescues it (no warning), and a bootstrap that NaNs the SE for unrelated
+        # reasons (e.g. cluster-unidentified) is reported by the bootstrap's own warning,
+        # not misdiagnosed here as an analytical-IF failure.
+        if (
+            analytical_overall_es_se_nonfinite
+            and overall_se_es is not None
+            and not np.isfinite(overall_se_es)
+        ):
+            warnings.warn(
+                "Eq. 4.14 overall (overall_att_es) point estimate is defined but its "
+                "standard error is undefined (NaN): either a contributing post-treatment "
+                "event-study horizon has a non-finite influence function, or the variance "
+                "is unidentified (e.g. a single-PSU/cluster survey design). overall_se_es "
+                "and its inference fields are NaN.",
+                UserWarning,
+                stacklevel=2,
+            )
+
         n_treated_units = int(np.sum((unit_cohorts > 0) & (eligibility_per_unit == 1)))
         n_control_units = n_units - n_treated_units
         n_never_enabled = int(np.sum(unit_cohorts == 0))
@@ -780,6 +869,11 @@ class StaggeredTripleDifference(
             epv_diagnostics=epv_diagnostics if epv_diagnostics else None,
             epv_threshold=self.epv_threshold,
             pscore_fallback=self.pscore_fallback,
+            overall_att_es=overall_att_es,
+            overall_se_es=overall_se_es,
+            overall_t_stat_es=overall_t_stat_es,
+            overall_p_value_es=overall_p_value_es,
+            overall_conf_int_es=overall_conf_int_es,
         )
         self.is_fitted_ = True
         return self.results_
