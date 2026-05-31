@@ -127,6 +127,14 @@ Practitioner workflow for `SpilloverDiD` (Butts 2021 ring-indicator estimator + 
 - Conley spatial-HAC variance under `vcov_type="conley", conley_cutoff_km=100, conley_lag_cutoff in {0, 1}` — the cutoff = `d_bar` choice follows Butts §3.1, while the `conley_lag_cutoff` serial extension is the library's documented Wave E.2 follow-up synthesis with Newey-West-style serial Bartlett HAC (per REGISTRY "Variance (Wave E.2 follow-up)")
 - Companion drift-test file (`tests/test_t23_spillover_tva_drift.py`)
 
+### 24. Staggered Rollout vs a Collapsed 2×2 (`24_staggered_vs_collapsed_power.ipynb`)
+Power-analysis decision guide for geo experiments (framed on a 50-state staggered rollout) on when to use Callaway-Sant'Anna vs collapsing to a familiar pre/post 2×2:
+- Why the collapsed 2×2 silently targets a *diluted* estimand (and how often its CI misses the true effect-on-treated)
+- The CS event study vs the 2×2's single diluted number
+- How the minimum detectable lift (MDE) changes for each estimator as the rollout gets more staggered — the power gap is a *fast-rollout* phenomenon that closes to near parity as staggering increases
+- When a clean-tail 2×2 is unbiased, the small-holdout and few-clusters caveats, and a CS-vs-2×2 decision guide
+- Fully self-contained: runs live (no committed data files)
+
 ## Running the Notebooks
 
 1. Install diff-diff with dependencies:
