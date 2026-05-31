@@ -41,9 +41,12 @@ permissions:
 jobs:
   doc-snippets:
     name: Validate RST code snippets
+    # Skip unrelated label churn: a non-ready-for-ci label add/remove won't run this job.
     if: >-
       github.event_name != 'pull_request'
-      || contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      || (contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      && (github.event.action != 'labeled' && github.event.action != 'unlabeled'
+      || github.event.label.name == 'ready-for-ci'))
     runs-on: ubuntu-latest
 
     steps:
@@ -63,15 +66,18 @@ jobs:
 
       - name: Run doc snippet tests in pure Python mode
         # PYTHONPATH=. lets the test import diff_diff directly from
-        # source without invoking the maturin/Rust build (mirrors Pure
-        # Python Fallback at rust-test.yml:189-193).
+        # source without invoking the maturin/Rust build (mirrors the
+        # `python-fallback` job in rust-test.yml).
         run: PYTHONPATH=. DIFF_DIFF_BACKEND=python pytest tests/test_doc_snippets.py -v
 
   sphinx-build:
     name: Sphinx HTML build (-W warnings as errors)
+    # Skip unrelated label churn: a non-ready-for-ci label add/remove won't run this job.
     if: >-
       github.event_name != 'pull_request'
-      || contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      || (contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      && (github.event.action != 'labeled' && github.event.action != 'unlabeled'
+      || github.event.label.name == 'ready-for-ci'))
     runs-on: ubuntu-latest
 
     steps:
@@ -104,9 +110,12 @@ jobs:
 
   docs-deps-py39-smoke:
     name: Validate docs deps install on Python 3.9 (floor compat)
+    # Skip unrelated label churn: a non-ready-for-ci label add/remove won't run this job.
     if: >-
       github.event_name != 'pull_request'
-      || contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      || (contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      && (github.event.action != 'labeled' && github.event.action != 'unlabeled'
+      || github.event.label.name == 'ready-for-ci'))
     runs-on: ubuntu-latest
 
     steps:

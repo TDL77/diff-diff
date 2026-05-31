@@ -2074,6 +2074,287 @@ class TestRustTestWorkflowPathFilter:
                 f"or prompt would skip the hardening tests entirely."
             )
 
+    # docs-tests.yml, notebooks.yml, and ci-gate.yml are not AI-review surfaces,
+    # but their ready-for-ci label contracts are asserted by
+    # TestCiWorkflowLabelEventGuard in this file. They must be in rust-test.yml's
+    # path filters too, or a workflow-only edit to them would skip the suite that
+    # locks their contracts.
+    GUARD_COVERED_WORKFLOWS = (
+        ".github/workflows/docs-tests.yml",
+        ".github/workflows/notebooks.yml",
+        ".github/workflows/ci-gate.yml",
+    )
+
+    def test_rust_test_yml_push_filter_covers_guarded_workflows(self, workflow_paths):
+        push_section, _ = workflow_paths
+        for path in self.GUARD_COVERED_WORKFLOWS:
+            assert path in push_section, (
+                f"rust-test.yml `push.paths:` must include {path!r} so an edit "
+                f"to that workflow triggers the suite whose "
+                f"TestCiWorkflowLabelEventGuard locks its ready-for-ci guard."
+            )
+
+    def test_rust_test_yml_pr_filter_covers_guarded_workflows(self, workflow_paths):
+        _, pr_section = workflow_paths
+        for path in self.GUARD_COVERED_WORKFLOWS:
+            assert path in pr_section, (
+                f"rust-test.yml `pull_request.paths:` must include {path!r} "
+                f"(same rationale as push.paths): a PR that only edits that "
+                f"workflow must still run TestCiWorkflowLabelEventGuard."
+            )
+
+
+class TestCiWorkflowLabelEventGuard:
+    """The expensive CI matrices — rust-test.yml, notebooks.yml,
+    docs-tests.yml — are gated on the `ready-for-ci` label and list
+    `labeled`/`unlabeled` in their `pull_request` trigger `types`. Without a
+    label-NAME refinement, churning ANY label (e.g. adding `bug`) on a PR that
+    already carries `ready-for-ci` re-fires the whole matrix — the 4h+
+    pure-Python fallback included — because the guard only checks the label is
+    PRESENT, not that the triggering label IS `ready-for-ci`.
+
+    Locks the fix (PR #269): each guarded job's `if:` must additionally require
+    that, when the triggering action is a label add/remove, the label is
+    `ready-for-ci`. `ci-gate.yml` is exempt — it is the one-step required check
+    and must re-evaluate on every label event to flip the gate red/green when
+    `ready-for-ci` is added/removed."""
+
+    # Each guarded workflow maps to the jobs whose `if:` guard must carry the
+    # refinement. Asserting per NAMED job (not just whole-file presence) means
+    # dropping the refinement from ANY single job — or renaming/removing one —
+    # fails the test, even in multi-job files.
+    EXPECTED_JOBS = {
+        "rust-test.yml": ("rust-tests", "python-tests", "python-fallback"),
+        "notebooks.yml": ("execute-notebooks",),
+        "docs-tests.yml": ("doc-snippets", "sphinx-build", "docs-deps-py39-smoke"),
+    }
+
+    # The exact guard every gated job must carry (folded to one line). Asserting
+    # the WHOLE normalized expression — not just fragment presence — pins the
+    # boolean structure, so a malformed predicate that merely mentions the right
+    # tokens (e.g. `==` flipped to `!=`, or mis-parenthesized) still fails the
+    # test. The folded form was cross-checked against GitHub's `if:` semantics
+    # with a YAML parser at authoring; it evaluates as: run on push or on a
+    # ready-for-ci PR, but skip when an UNRELATED label is added/removed.
+    EXPECTED_GUARD = (
+        "github.event_name != 'pull_request' "
+        "|| (contains(github.event.pull_request.labels.*.name, 'ready-for-ci') "
+        "&& (github.event.action != 'labeled' && github.event.action != 'unlabeled' "
+        "|| github.event.label.name == 'ready-for-ci'))"
+    )
+
+    @staticmethod
+    def _norm(expr):
+        """Collapse all whitespace so guard comparison is robust to line breaks
+        and indentation (YAML `>-` folding) while still pinning every token."""
+        return "".join(expr.split())
+
+    @staticmethod
+    def _job_if_guards(text):
+        """Map each top-level job name -> its `if:` expression folded to one
+        line. Pure-text parse (PyYAML is not a test dependency), relying on the
+        workflows' 2-space job-header / 4-space step-key indentation."""
+        import re
+
+        lines = text.splitlines()
+        try:
+            start = next(i for i, ln in enumerate(lines) if ln.rstrip() == "jobs:")
+        except StopIteration:
+            return {}
+        guards = {}
+        job = None
+        folding = False  # inside a folded/literal `if:` block scalar
+        for ln in lines[start + 1 :]:
+            header = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", ln)
+            if header:
+                job, folding = header.group(1), False
+                continue
+            if job is None:
+                continue
+            key = re.match(r"^    if:\s*(.*)$", ln)
+            if key:
+                rest = key.group(1).strip()
+                folding = rest in (">-", ">", ">+", "|", "|-", "|+")
+                guards[job] = "" if folding else rest
+                continue
+            if folding:
+                if ln.strip() and (len(ln) - len(ln.lstrip())) > 4:
+                    guards[job] = (guards[job] + " " + ln.strip()).strip()
+                elif ln.strip():
+                    folding = False  # dedented to a sibling key — block ended
+        return guards
+
+    @staticmethod
+    def _job_names(text):
+        """Set of all top-level job names (the `  name:` headers under `jobs:`),
+        including jobs with no `if:` — so a newly added unguarded job is still
+        visible to the allowlist check."""
+        import re
+
+        lines = text.splitlines()
+        try:
+            start = next(i for i, ln in enumerate(lines) if ln.rstrip() == "jobs:")
+        except StopIteration:
+            return set()
+        names = set()
+        for ln in lines[start + 1 :]:
+            if re.match(r"^\S", ln):  # back to column 0: out of jobs:
+                break
+            header = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", ln)
+            if header:
+                names.add(header.group(1))
+        return names
+
+    @staticmethod
+    def _pull_request_types(text):
+        """Parse `on:` -> `pull_request:` -> `types:` (SCOPED to that block, so an
+        unrelated `types:` key elsewhere cannot bind). Handles both inline
+        (`types: [a, b]`) and block (`types:` then `- a`) YAML list syntax.
+        Returns the set of trigger event-type strings; empty set if absent."""
+        import re
+
+        in_on = in_pr = collecting = False
+        block = set()
+        for ln in text.splitlines():
+            if re.match(r"^on:\s*$", ln):
+                in_on, in_pr, collecting = True, False, False
+                continue
+            if collecting:  # accumulating a block-style `- item` list under types:
+                item = re.match(r"^      -\s*['\"]?([A-Za-z_]+)['\"]?\s*$", ln)
+                if item:
+                    block.add(item.group(1))
+                    continue
+                return block  # dedented out of the types: list
+            if in_on and re.match(r"^\S", ln):  # a col-0 key: out of the on: block
+                in_on = in_pr = False
+            if in_on and re.match(r"^  pull_request:\s*$", ln):
+                in_pr = True
+                continue
+            if in_pr and re.match(r"^  \S", ln):  # 2-space sibling: out of pull_request
+                in_pr = False
+            if in_pr:
+                inline = re.match(r"^    types:\s*\[([^\]]*)\]", ln)
+                if inline:
+                    return {t.strip() for t in inline.group(1).split(",") if t.strip()}
+                if re.match(r"^    types:\s*$", ln):
+                    collecting, block = True, set()
+        return block
+
+    @staticmethod
+    def _named_step_if(text, step_name):
+        """Fold the `if:` of the step whose `- name:` equals step_name (6-space
+        step item, 8-space `if:`). Anchored to the named step so a later
+        conditional step elsewhere can't shift what this locks. '' if not found."""
+        import re
+
+        in_step = False
+        step_if = ""
+        folding = False
+        for ln in text.splitlines():
+            name = re.match(r"^      - name:\s*(.*\S)\s*$", ln)
+            if name:
+                in_step = name.group(1).strip() == step_name
+                folding = False
+                continue
+            if not in_step:
+                continue
+            key = re.match(r"^        if:\s*(.*)$", ln)
+            if key:
+                rest = key.group(1).strip()
+                folding = rest in (">-", ">", ">+", "|", "|-", "|+")
+                step_if = "" if folding else rest
+                continue
+            if folding:
+                if ln.strip() and (len(ln) - len(ln.lstrip())) > 8:
+                    step_if = (step_if + " " + ln.strip()).strip()
+                elif ln.strip():
+                    folding = False
+        return step_if
+
+    @pytest.fixture(scope="class")
+    def workflows_dir(self):
+        if _SCRIPT_PATH is None:
+            pytest.skip("Could not resolve script path")
+        assert _SCRIPT_PATH is not None
+        return _SCRIPT_PATH.parent.parent.parent / ".github" / "workflows"
+
+    def test_guards_filter_unrelated_label_churn(self, workflows_dir):
+        for wf_name, expected_jobs in self.EXPECTED_JOBS.items():
+            wf = workflows_dir / wf_name
+            assert wf.exists(), (
+                f"{wf_name} is missing (guarded workflow deleted/renamed?) — the "
+                f"lock test must fail loudly rather than skip."
+            )
+            text = wf.read_text()
+            # Every top-level job must be in EXPECTED_JOBS, so a NEW job added to
+            # a guarded workflow fails here instead of slipping in without a guard.
+            assert self._job_names(text) == set(expected_jobs), (
+                f"{wf_name}: top-level jobs {sorted(self._job_names(text))} != "
+                f"EXPECTED_JOBS {sorted(expected_jobs)}. Add the new job to "
+                f"EXPECTED_JOBS and give it the ready-for-ci guard."
+            )
+            guards = self._job_if_guards(text)
+            for job in expected_jobs:
+                assert job in guards, (
+                    f"{wf_name}: gated job {job!r} not found (renamed or "
+                    f"removed?). Update EXPECTED_JOBS or restore the job guard."
+                )
+                assert self._norm(guards[job]) == self._norm(self.EXPECTED_GUARD), (
+                    f"{wf_name} job {job!r} `if:` guard must be EXACTLY the "
+                    f"ready-for-ci-transition guard (whitespace-insensitive), so a "
+                    f"malformed predicate cannot pass by merely mentioning the right "
+                    f"tokens.\n  expected: {self.EXPECTED_GUARD}\n  "
+                    f"parsed:   {guards[job]}\nSee PR #269."
+                )
+
+    def test_ci_gate_locks_presence_based_contract(self, workflows_dir):
+        """ci-gate.yml is the cheap one-step REQUIRED check: it must keep
+        re-evaluating on every label event (so the gate flips red/green when
+        ready-for-ci is added/removed) and stay presence-based. It must NOT
+        adopt the matrices' label-name refinement, or removing an unrelated
+        label could leave the required check stale."""
+        wf = workflows_dir / "ci-gate.yml"
+        assert wf.exists(), (
+            "ci-gate.yml is missing (required-check workflow deleted/renamed?) — "
+            "the lock test must fail loudly rather than skip."
+        )
+        text = wf.read_text()
+        types = self._pull_request_types(text)
+        step_if = self._named_step_if(text, "Require ready-for-ci label on PRs")
+        assert {"labeled", "unlabeled"} <= types, (
+            f"ci-gate.yml `pull_request.types` must include labeled+unlabeled so "
+            f"the required check re-fires when ready-for-ci is added/removed; "
+            f"parsed types = {sorted(types)}."
+        )
+        # Exact-match the step guard: presence-based AND label-name-agnostic (the
+        # matrices' `github.event.label.name` refinement must NOT leak in here).
+        assert self._norm(step_if) == self._norm(
+            "github.event_name == 'pull_request' "
+            "&& !contains(github.event.pull_request.labels.*.name, 'ready-for-ci')"
+        ), (
+            f"ci-gate.yml step `if:` must stay the presence-based gate "
+            f"(label-name-agnostic).\n  parsed: {step_if!r}"
+        )
+
+    def test_guarded_workflows_keep_label_event_types(self, workflows_dir):
+        """The matrices are gated by ADDING `ready-for-ci`, which only triggers
+        them if they listen for `labeled`/`unlabeled`. The exact-guard test above
+        pins the `if:` predicate but not the trigger `types:`; without these
+        events a ready-for-ci add would never start CI, yet the guard would still
+        match. Lock the trigger surface too."""
+        for wf_name in self.EXPECTED_JOBS:
+            wf = workflows_dir / wf_name
+            assert wf.exists(), (
+                f"{wf_name} is missing (guarded workflow deleted/renamed?) — the "
+                f"lock test must fail loudly rather than skip."
+            )
+            types = self._pull_request_types(wf.read_text())
+            assert {"labeled", "unlabeled"} <= types, (
+                f"{wf_name} `pull_request.types` must include labeled+unlabeled so "
+                f"adding `ready-for-ci` actually triggers the matrix; parsed "
+                f"types = {sorted(types)}."
+            )
+
 
 class TestWorkflowCommentPosting:
     """The workflow has TWO rerun-detection gates that must agree:
