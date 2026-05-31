@@ -8,6 +8,7 @@ This module contains the core DiD estimators:
 Additional estimators are in separate modules:
 - TwoWayFixedEffects: See diff_diff.twfe
 - SyntheticDiD: See diff_diff.synthetic_did
+- SyntheticControl: See diff_diff.synthetic_control
 
 For backward compatibility, all estimators are re-exported from this module.
 """
@@ -2042,6 +2043,8 @@ class MultiPeriodDiD(DifferenceInDifferences):
 # These can also be imported directly from their respective modules:
 # - from diff_diff.twfe import TwoWayFixedEffects
 # - from diff_diff.synthetic_did import SyntheticDiD
+# - from diff_diff.synthetic_control import SyntheticControl
+from diff_diff.synthetic_control import SyntheticControl  # noqa: E402
 from diff_diff.synthetic_did import SyntheticDiD  # noqa: E402
 from diff_diff.twfe import TwoWayFixedEffects  # noqa: E402
 
@@ -2050,4 +2053,5 @@ __all__ = [
     "MultiPeriodDiD",
     "TwoWayFixedEffects",
     "SyntheticDiD",
+    "SyntheticControl",
 ]

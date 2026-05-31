@@ -596,6 +596,40 @@ sources:
       - path: docs/performance-plan.md
         type: performance
 
+  # ── SyntheticControl ────────────────────────────────────────────────
+
+  diff_diff/synthetic_control.py:
+    drift_risk: medium
+    docs:
+      - path: docs/methodology/REGISTRY.md
+        section: "SyntheticControl"
+        type: methodology
+      - path: docs/api/synthetic_control.rst
+        type: api_reference
+      - path: README.md
+        section: "Estimators (one-line catalog entry)"
+        type: user_guide
+      - path: docs/references.rst
+        type: user_guide
+      - path: diff_diff/guides/llms-full.txt
+        section: "SyntheticControl"
+        type: user_guide
+      - path: diff_diff/guides/llms.txt
+        section: "Estimators"
+        type: user_guide
+
+  diff_diff/synthetic_control_results.py:
+    drift_risk: low
+    docs:
+      - path: docs/methodology/REGISTRY.md
+        section: "SyntheticControl"
+        type: methodology
+      - path: docs/api/synthetic_control.rst
+        type: api_reference
+      - path: diff_diff/guides/llms-full.txt
+        section: "SyntheticControlResults"
+        type: user_guide
+
   # ── HonestDiD ───────��──────────────────────────────────────────────
 
   diff_diff/honest_did.py:

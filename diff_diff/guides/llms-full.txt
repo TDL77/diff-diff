@@ -572,6 +572,65 @@ results.print_summary()
 weights_df = results.get_unit_weights_df()
 ```
 
+### SyntheticControl
+
+Classic Synthetic Control Method (Abadie, Diamond & Hainmueller 2010; Abadie & Gardeazabal 2003). Builds a single treated unit's counterfactual as a convex combination of never-treated "donor" units. **Donor weights only** (no time weights, no ridge) — distinct from `SyntheticDiD`.
+
+```python
+SyntheticControl(
+    v_method: str = "nested",               # "nested" (data-driven V) or "custom"
+    custom_v=None,                          # diagonal V (len = #predictors); required iff v_method="custom"
+    optimizer_options: dict | None = None,  # merged into scipy.optimize.minimize (outer V search)
+    n_starts: int = 4,                      # multistart count for the outer V search
+    inner_max_iter: int = 10000,            # Frank-Wolfe inner-solve cap
+    inner_min_decrease: float = 1e-5,       # inner-solve convergence scale (scale-aware)
+    standardize: str = "std",               # "std" (per-row SD, ddof=1) or "none" (deviation from R)
+    alpha: float = 0.05,
+    seed: int | None = None,                # seeds the multistart Dirichlet draws
+)
+```
+
+**fit() parameters:**
+
+```python
+scm.fit(
+    data: pd.DataFrame,
+    outcome: str,
+    treatment: str,                         # ABSORBING 0/1 indicator (treated unit, post periods)
+    unit: str,
+    time: str,
+    *,
+    post_periods: list | None = None,       # inferred from D==1 periods if None
+    treated_unit=None,                      # inferred as the single ever-treated unit if None
+    predictors: list[str] | None = None,    # columns averaged over predictor_window
+    predictors_op: str = "mean",            # "mean" | "sum" (linear combinations only, ADH 2010 §2.3)
+    predictor_window: list | None = None,   # pre-periods to average over (default: all pre)
+    special_predictors=None,                # list of (var, periods, op) triples
+    pre_period_outcomes=None,               # "all" or list; per-period outcome lags
+    donor_pool: list | None = None,         # explicit never-treated donors (default: all)
+) -> SyntheticControlResults
+```
+
+**Inference:** NONE analytical — `se`/`t_stat`/`p_value`/`conf_int` are NaN. `att` is the mean post-period gap; use placebo/permutation inference for significance (planned follow-up). Predictor periods must lie within the pre window; `post_periods` must be a contiguous suffix cross-checked against `D` (no anticipation).
+
+**Usage:**
+
+```python
+from diff_diff import SyntheticControl
+
+scm = SyntheticControl(v_method='nested', seed=0)
+# Set predictor_window explicitly when a covariate is observed on only a subset of
+# the pre periods — the default averages over ALL pre periods and fails closed on
+# non-finite cells.
+results = scm.fit(data, outcome='gdpcap', treatment='treated', unit='region', time='year',
+                  predictors=['invest', 'school.high'],
+                  predictor_window=[1964, 1965, 1966, 1967, 1968, 1969],
+                  special_predictors=[('gdpcap', [1960, 1965, 1969], 'mean')])
+results.print_summary()
+gap_df = results.get_gap_df()       # period, gap, phase
+weights_df = results.get_weights_df()  # unit, weight (descending)
+```
+
 ### TripleDifference
 
 Triple Difference (DDD) estimator following Ortiz-Villavicencio & Sant'Anna (2025).
@@ -1201,6 +1260,29 @@ Returned by `SyntheticDiD.fit()`.
 - `get_loo_effects_df()` - per-unit leave-one-out influence from the jackknife pass (DataFrame includes both control and treated rows). Requires `variance_method="jackknife"` with unit-level LOO granularity: available on non-survey and pweight-only jackknife fits; raises `NotImplementedError` on full-design survey jackknife (PSU-level LOO, see `result.placebo_effects` for raw PSU-level replicates) and `ValueError` when LOO is unavailable (single treated unit, only one control with nonzero effective weight, etc.)
 - `in_time_placebo()` - re-estimate on shifted fake treatment dates in the pre-period; near-zero placebo ATTs indicate a credible design
 - `sensitivity_to_zeta_omega()` - re-estimate across a grid of unit-weight regularization values; checks ATT robustness to the auto-selected zeta_omega
+
+### SyntheticControlResults
+
+Returned by `SyntheticControl.fit()`.
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `att` | `float` | Mean post-period gap (reported point estimate) |
+| `se`, `t_stat`, `p_value`, `conf_int` | `float` / tuple | Always NaN — no analytical SE (permutation inference planned) |
+| `n_obs` | `int` | Treated + donor rows over all periods |
+| `n_donors` | `int` | Donor units in the (post-filter) pool |
+| `n_pre_periods`, `n_post_periods` | `int` | Period counts |
+| `donor_weights` | `dict` | `{donor_id: weight}` on the simplex (near-zeros dropped) |
+| `v_weights` | `dict` | `{predictor_label: v}`, trace-normalized |
+| `predictor_balance` | `pd.DataFrame` | treated vs synthetic vs donor-mean per predictor |
+| `gap_path` | `dict` | `{period: gap}` for all periods |
+| `pre_rmspe` | `float` | Pre-treatment fit diagnostic |
+| `mspe_v` | `float \| None` | Outer-objective MSPE (nested) |
+| `treated_unit` | `Any` | Treated unit identifier |
+| `pre_periods`, `post_periods` | `list` | Calendar-sorted periods |
+| `v_method`, `standardize` | `str` | Echoed configuration |
+
+**Methods:** `summary()`, `print_summary()`, `to_dict()`, `to_dataframe()`, `get_gap_df()`, `get_weights_df()`
 
 ### TripleDifferenceResults
 

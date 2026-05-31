@@ -222,6 +222,11 @@ from diff_diff.trop import (
     TROPResults,
     trop,
 )
+from diff_diff.synthetic_control import (
+    SyntheticControl,
+    synthetic_control,
+)
+from diff_diff.synthetic_control_results import SyntheticControlResults
 from diff_diff.wooldridge import WooldridgeDiD
 from diff_diff.wooldridge_results import WooldridgeDiDResults
 from diff_diff.utils import (
@@ -309,6 +314,7 @@ __all__ = [
     "SpilloverDiD",
     "TripleDifference",
     "TROP",
+    "SyntheticControl",
     "StackedDiD",
     # Estimator aliases (short names)
     "DiD",
@@ -355,6 +361,8 @@ __all__ = [
     "StaggeredTripleDiffResults",
     "TROPResults",
     "trop",
+    "SyntheticControlResults",
+    "synthetic_control",
     "StackedDiDResults",
     "stacked_did",
     # EfficientDiD
