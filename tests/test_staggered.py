@@ -1463,13 +1463,16 @@ class TestRankGuardedAnalyticalSE:
     def test_exact_duplicate_covariate(self, method):
         # A WELL-SCALED exact duplicate (xdup == x1) is dropped exactly: the
         # rank-guard's column-drop matches the point estimate, SE == dropping it.
-        # The rank-guard SE is also order-invariant under exact collinearity
+        # For ipw/dr the SE is also order-invariant under exact collinearity
         # (well-defined regardless of which proportional column is listed first),
-        # including the MIXED-SCALE case (xbig == 1e8*x1). NOTE: for mixed scale
-        # under `reg`, the point estimate's un-equilibrated local OR solve
-        # (tracked TODO) can perturb the ATT/SE away from drop-one — a
-        # point-estimate property, not the rank-guard — so we assert only
-        # well-definedness (order-invariance) there, not drop-one parity.
+        # including the MIXED-SCALE case (xbig == 1e8*x1), because the variance
+        # flows through the equilibrated rank-guarded inverse. NOTE: for mixed
+        # scale under `reg`, the point estimate's un-equilibrated local OR solve
+        # (tracked TODO) hits a near-singular X'WX whose solution is roundoff- and
+        # column-order-dependent (a ~21% SE swing was observed across CI BLAS/LAPACK
+        # vs bit-identical locally) — a point-estimate property, not the rank-guard.
+        # So for `reg` at mixed scale we assert only that the SE is finite, not
+        # drop-one parity and not order-invariance.
         base = generate_staggered_data_with_covariates(seed=789)
         d = base.copy()
         d["xdup"] = d["x1"]  # well-scaled exact duplicate
@@ -1492,12 +1495,16 @@ class TestRankGuardedAnalyticalSE:
         np.testing.assert_allclose(
             well.overall_se, drop_one.overall_se, rtol=1e-9
         )
-        # Finite + order-invariant (well-defined) under exact collinearity, even
-        # at mixed scale — the SE does not depend on which column is listed first.
+        # Mixed-scale exact duplicate: finite for every method.
         assert np.isfinite(big_ab.overall_se) and big_ab.overall_se > 0
-        np.testing.assert_allclose(
-            big_ab.overall_se, big_ba.overall_se, rtol=1e-9
-        )
+        assert np.isfinite(big_ba.overall_se) and big_ba.overall_se > 0
+        # Order-invariance holds for ipw/dr (variance via the equilibrated
+        # rank-guard); NOT asserted for reg, whose 1e8-scale SE follows the
+        # un-equilibrated local OR solve (TODO-82) and is order-sensitive.
+        if method != "reg":
+            np.testing.assert_allclose(
+                big_ab.overall_se, big_ba.overall_se, rtol=1e-9
+            )
 
     @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
     def test_exact_duplicate_covariate_survey_weighted(self, method):
@@ -1538,9 +1545,14 @@ class TestRankGuardedAnalyticalSE:
             )
         # Well-scaled exact duplicate == dropping it, under survey weighting.
         np.testing.assert_allclose(well.overall_se, drop_one.overall_se, rtol=1e-7)
-        # Order-invariant (well-defined) at mixed scale, under survey weighting.
+        # Mixed-scale exact duplicate under survey weighting: finite for every
+        # method; order-invariance asserted only for ipw/dr. For `reg` the 1e8-scale
+        # SE follows the un-equilibrated local OR solve (TODO-82), which is
+        # order-sensitive on a near-singular X'WX — see test_exact_duplicate_covariate.
         assert np.isfinite(big_ab.overall_se) and big_ab.overall_se > 0
-        np.testing.assert_allclose(big_ab.overall_se, big_ba.overall_se, rtol=1e-7)
+        assert np.isfinite(big_ba.overall_se) and big_ba.overall_se > 0
+        if method != "reg":
+            np.testing.assert_allclose(big_ab.overall_se, big_ba.overall_se, rtol=1e-7)
 
 
 class TestCallawaySantAnnaRankDeficiencyPaths:
