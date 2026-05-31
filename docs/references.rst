@@ -245,7 +245,7 @@ Power Analysis
 
 - **Burlig, F., Preonas, L., & Woerman, M. (2020).** "Panel Data and Experimental Design." *Journal of Development Economics*, 144, 102458. https://doi.org/10.1016/j.jdeveco.2020.102458
 
-  Essential reference for power analysis in panel DiD designs. Discusses how serial correlation (ICC) affects power and provides formulas for panel data settings.
+  Essential reference for power analysis in panel DiD designs. Discusses how serial correlation affects power and derives serial-correlation-robust (SCR) variance formulas for panel data. (Note: the library's analytical panel-power path currently uses an equicorrelated/Moulton approximation, **not** Burlig et al.'s SCR formula; this attribution is under methodology review — see ``docs/methodology/REGISTRY.md`` ``## PowerAnalysis``.)
 
 - **Djimeu, E. W., & Houndolo, D.-G. (2016).** "Power Calculation for Causal Inference in Social Science: Sample Size and Minimum Detectable Effect Determination." *Journal of Development Effectiveness*, 8(4), 508-527. https://doi.org/10.1080/19439342.2016.1244555
 

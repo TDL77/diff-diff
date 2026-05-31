@@ -3211,6 +3211,21 @@ Violation types:
 
 *Estimator equation (as implemented):*
 
+- **Note:** The formulas in this "Estimator equation" block are under active methodology review
+  (2026-05; source audits at `docs/methodology/papers/bloom-1995-review.md` and
+  `docs/methodology/papers/burlig-preonas-woerman-2020-review.md`, against Bloom (1995) and Burlig,
+  Preonas & Woerman (2020)). The audits identified discrepancies with `diff_diff/power.py` to be
+  reconciled in a follow-up PR (tracked in `TODO.md`): (1) the MDE multiplier is written with the
+  t-distribution, but the analytical path uses the normal (z) approximation following Bloom — Burlig
+  Eq. 1 uses t; (2) the SE expression's `1/sqrt(1-R^2)` and cluster-size `m` terms are not what the
+  code implements (its `basic_did` variance is `2*sigma^2*(1/n_T+1/n_C)`, with no R^2 term); (3) the
+  sample-size formula below omits the `T(1-T)` allocation factor that the code applies (via
+  `treat_frac*(1-treat_frac)`); and (4) the panel `(1+(T-1)*rho)/T` factor is an
+  equicorrelated/Moulton design effect, **not** Burlig's serial-correlation-robust (SCR) variance
+  (their Eq. 2), so the Burlig attribution for the analytical panel path is an overclaim pending
+  re-attribution or implementation. These notes document the known state; this block is not yet a
+  corrected contract.
+
 Minimum detectable effect (MDE):
 ```
 MDE = (t_{α/2} + t_{1-κ}) × SE(τ̂)
@@ -3353,7 +3368,7 @@ should be a deliberate user choice.
 | BaconDecomposition | bacondecomp | `bacon()` |
 | HonestDiD | HonestDiD | `createSensitivityResults()` |
 | PreTrendsPower | pretrends | `pretrends()` |
-| PowerAnalysis | pwr / DeclareDesign | `pwr.t.test()` / simulation |
+| PowerAnalysis | pwr / DeclareDesign / pcpanel | `pwr.t.test()` / simulation — **under review** (see `## PowerAnalysis` Note: the analytical path is normal-based, so `pwr.t.test` is not the faithful parity target; the panel parity reference is Stata `pcpanel`) |
 
 ---
 
