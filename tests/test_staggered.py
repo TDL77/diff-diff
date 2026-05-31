@@ -1200,6 +1200,302 @@ class TestCallawaySantAnnaCovariates:
                 assert np.isfinite(se), f"e={e}: bootstrap SE should be finite"
 
 
+class TestRankGuardedAnalyticalSE:
+    """Rank-guarded influence-function SE (constant/collinear covariate).
+
+    A constant or collinear covariate makes the per-(g,t) propensity-score
+    Hessian / outcome-regression bread near-singular. The old ``_safe_inv``
+    only caught *exactly* singular matrices (``LinAlgError``), so a near-singular
+    Gram returned a garbage inverse that produced ``overall_se`` ~1e13. The
+    rank-guarded inverse drops the redundant direction -> finite SE on the
+    identified subset (equal to dropping the covariate), NaN only on true rank-0.
+    """
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_constant_covariate_finite_se_matches_drop_one(self, method):
+        data = generate_staggered_data_with_covariates(seed=789)
+        data_const = data.copy()
+        data_const["xc"] = 5.0  # constant -> collinear with the intercept
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = CallawaySantAnna(estimation_method=method).fit(
+                data, "outcome", "unit", "time", "first_treat", covariates=["x1"]
+            )
+            with_const = CallawaySantAnna(estimation_method=method).fit(
+                data_const,
+                "outcome",
+                "unit",
+                "time",
+                "first_treat",
+                covariates=["x1", "xc"],
+            )
+
+        # Regression guard: previously ~1e13, now finite and modest.
+        assert np.isfinite(with_const.overall_se)
+        assert with_const.overall_se < 1.0
+        # Dropping the redundant covariate is equivalent to never adding it.
+        np.testing.assert_allclose(
+            with_const.overall_se, drop_one.overall_se, rtol=1e-9
+        )
+        np.testing.assert_allclose(
+            with_const.overall_att, drop_one.overall_att, rtol=1e-9
+        )
+
+    def test_constant_covariate_emits_single_rank_guard_warning(self):
+        data = generate_staggered_data_with_covariates(seed=789)
+        data["xc"] = 5.0
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            CallawaySantAnna(estimation_method="dr").fit(
+                data, "outcome", "unit", "time", "first_treat", covariates=["x1", "xc"]
+            )
+        rank_guard = [
+            w for w in caught if "rank-guarded inverse" in str(w.message)
+        ]
+        # The per-fit aggregate warning fires exactly once, not per cell.
+        assert len(rank_guard) == 1
+
+    def test_well_conditioned_covariates_take_fast_path(self):
+        # Well-conditioned covariates must NOT trigger the rank-guard (the fast
+        # path returns the exact solve, so R-parity goldens are unchanged).
+        data = generate_staggered_data_with_covariates(seed=789)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = CallawaySantAnna(estimation_method="dr").fit(
+                data, "outcome", "unit", "time", "first_treat", covariates=["x1", "x2"]
+            )
+        assert not any("rank-guarded inverse" in str(w.message) for w in caught)
+        assert np.isfinite(res.overall_se)
+
+    def test_clustered_constant_covariate_finite_se(self):
+        # The clustered SE path reuses the same per-cell influence functions, so
+        # fixing the bread fixes it too.
+        data = generate_staggered_data_with_covariates(seed=789)
+        data["xc"] = 5.0
+        data["cl"] = data["unit"] % 20
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = CallawaySantAnna(estimation_method="dr", cluster="cl").fit(
+                data, "outcome", "unit", "time", "first_treat", covariates=["x1", "xc"]
+            )
+        assert np.isfinite(res.overall_se)
+        assert res.overall_se < 1.0
+
+    def test_rank0_bread_propagates_nan_not_zero(self, monkeypatch):
+        # rank-0 is unreachable through covariates alone (the always-present
+        # intercept guarantees rank >= 1), so simulate an all-NaN bread to
+        # exercise the NaN-masking fix: var_psi becomes NaN and must yield a NaN
+        # SE, NOT 0.0 via the old ``var_psi > 0 else 0.0`` guard.
+        from tests.conftest import assert_nan_inference
+        import diff_diff.staggered as staggered_mod
+
+        def _all_nan_inv(A, tracker=None):
+            k = A.shape[0]
+            return np.full((k, k), np.nan)
+
+        monkeypatch.setattr(staggered_mod, "_safe_inv", _all_nan_inv)
+        data = generate_staggered_data_with_covariates(seed=7)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = CallawaySantAnna(estimation_method="dr").fit(
+                data, "outcome", "unit", "time", "first_treat", covariates=["x1", "x2"]
+            )
+        for cell in res.group_time_effects.values():
+            assert np.isnan(cell["se"]), "rank-0 bread must give NaN SE, not 0.0"
+            assert_nan_inference(cell)
+        assert np.isnan(res.overall_se)
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_rcs_panel_false_constant_covariate_finite_se(self, method):
+        # The repeated-cross-section (panel=False) analytical SE branches use
+        # the same _safe_inv -> _rank_guarded_inv path (the *_rc methods). Build
+        # RCS data (one row per unit) and confirm a constant covariate gives a
+        # finite SE equal to dropping it.
+        rng = np.random.default_rng(7)
+        rows = []
+        unit = 0
+        for t in range(1, 7):
+            for _ in range(120):
+                s = int(rng.integers(0, 5))
+                ft = int(rng.choice([0, 3, 5], p=[0.4, 0.3, 0.3]))
+                x1 = rng.normal()
+                y = (
+                    s
+                    + 0.3 * (t - 1)
+                    + 1.0 * x1
+                    + (1.5 if (ft > 0 and t >= ft) else 0.0)
+                    + rng.normal(0, 0.5)
+                )
+                rows.append(
+                    {"unit": unit, "time": t, "first_treat": ft, "outcome": y, "x1": x1}
+                )
+                unit += 1
+        data = pd.DataFrame(rows)
+        data_const = data.copy()
+        data_const["xc"] = 5.0
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = CallawaySantAnna(estimation_method=method, panel=False).fit(
+                data, "outcome", "unit", "time", "first_treat", covariates=["x1"]
+            )
+            with_const = CallawaySantAnna(estimation_method=method, panel=False).fit(
+                data_const, "outcome", "unit", "time", "first_treat",
+                covariates=["x1", "xc"],
+            )
+        assert np.isfinite(with_const.overall_se)
+        assert with_const.overall_se < 1.0
+        np.testing.assert_allclose(
+            with_const.overall_se, drop_one.overall_se, rtol=1e-9
+        )
+
+
+    @pytest.mark.parametrize("method", ["reg", "dr"])
+    def test_control_cell_aliasing_close_to_drop_one(self, method):
+        # Column-drop rank-guard: a covariate collinear ONLY within the control
+        # cell (x2 == 2*x1 for never-treated, varying in treated) is dropped from
+        # the central control OR regression (column-drop, matching the point
+        # estimate / R), so the SE is FINITE (not the old 1e13 garbage) and ≈
+        # dropping the covariate. The small residual (< a few %) is the
+        # covariate's genuine effect in the treated-side / propensity terms,
+        # where it is full-rank — not a rank-guard artifact.
+        base = generate_staggered_data_with_covariates(seed=789)
+        rng = np.random.default_rng(0)
+        d = base.copy()
+        nt = d["first_treat"] == 0
+        d["x2_deg"] = np.where(nt, 2.0 * d["x1"], rng.normal(size=len(d)))
+        d["x2_deg"] = d.groupby("unit")["x2_deg"].transform("first")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = CallawaySantAnna(estimation_method=method).fit(
+                d, "outcome", "unit", "time", "first_treat", covariates=["x1"]
+            )
+            with_deg = CallawaySantAnna(estimation_method=method).fit(
+                d, "outcome", "unit", "time", "first_treat",
+                covariates=["x1", "x2_deg"],
+            )
+        assert np.isfinite(with_deg.overall_se) and with_deg.overall_se > 0
+        np.testing.assert_allclose(
+            with_deg.overall_se, drop_one.overall_se, rtol=5e-2
+        )
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_survey_weighted_constant_covariate_finite_se(self, method):
+        # Exercises the *survey-weighted* CS bread / PS-Hessian branches
+        # (W includes survey weights), mirroring the TD/SDDD weighted tests.
+        # Panel estimator -> weights constant within unit.
+        from diff_diff.survey import SurveyDesign
+
+        data = generate_staggered_data_with_covariates(seed=789)
+        rng = np.random.default_rng(3)
+        units = data["unit"].unique()
+        unit_w = dict(zip(units, rng.uniform(0.5, 2.0, len(units))))
+        data["weight"] = data["unit"].map(unit_w)
+        data_const = data.copy()
+        data_const["xc"] = 5.0
+        sd = SurveyDesign(weights="weight")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = CallawaySantAnna(estimation_method=method).fit(
+                data, "outcome", "unit", "time", "first_treat",
+                covariates=["x1"], survey_design=sd,
+            )
+            with_const = CallawaySantAnna(estimation_method=method).fit(
+                data_const, "outcome", "unit", "time", "first_treat",
+                covariates=["x1", "xc"], survey_design=sd,
+            )
+        assert np.isfinite(with_const.overall_se)
+        assert with_const.overall_se < 1.0
+        np.testing.assert_allclose(
+            with_const.overall_se, drop_one.overall_se, rtol=1e-9
+        )
+
+    def test_aggregated_se_wif_contract(self, monkeypatch):
+        # Locks the _compute_aggregated_se_with_wif arity + fail-closed contract
+        # that motivated the staggered_aggregation fix: a non-finite influence
+        # function must propagate a NaN SE (not crash the unpacking caller), and
+        # the return arity is a 2-tuple (return_psi=False) / 3-tuple (True).
+        cs = CallawaySantAnna()
+        base_args = ([], np.array([]), np.array([]), np.array([]), {}, None, None)
+
+        def patch_psi(psi):
+            monkeypatch.setattr(
+                cs,
+                "_compute_combined_influence_function",
+                lambda *a, **k: (psi, None),
+            )
+
+        # Empty influence function -> se 0.0, documented arity.
+        patch_psi(np.array([]))
+        se, df = cs._compute_aggregated_se_with_wif(*base_args, return_psi=False)
+        assert se == 0.0 and df is None
+        triple = cs._compute_aggregated_se_with_wif(*base_args, return_psi=True)
+        assert len(triple) == 3 and triple[0] == 0.0
+
+        # Non-finite influence function -> NaN SE (fail-closed), not a crash.
+        patch_psi(np.array([1.0, np.nan, 2.0]))
+        se, df = cs._compute_aggregated_se_with_wif(*base_args, return_psi=False)
+        assert np.isnan(se) and df is None
+        triple = cs._compute_aggregated_se_with_wif(*base_args, return_psi=True)
+        assert len(triple) == 3 and np.isnan(triple[0])
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_error_mode_raises_before_rank_guard(self, method):
+        # rank_deficient_action="error" is enforced upstream at the
+        # point-estimate solve, which raises before the IF rank-guard is
+        # reached; so the IF guard (truncate + warn/silent) only governs the
+        # non-error modes.
+        data = generate_staggered_data_with_covariates(seed=789)
+        data["x2c"] = 2.0 * data["x1"]  # exactly collinear with x1
+        with pytest.raises(ValueError, match="(?i)rank-deficient"):
+            CallawaySantAnna(
+                estimation_method=method, rank_deficient_action="error"
+            ).fit(
+                data, "outcome", "unit", "time", "first_treat",
+                covariates=["x1", "x2c"],
+            )
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_exact_duplicate_covariate(self, method):
+        # A WELL-SCALED exact duplicate (xdup == x1) is dropped exactly: the
+        # rank-guard's column-drop matches the point estimate, SE == dropping it.
+        # The rank-guard SE is also order-invariant under exact collinearity
+        # (well-defined regardless of which proportional column is listed first),
+        # including the MIXED-SCALE case (xbig == 1e8*x1). NOTE: for mixed scale
+        # under `reg`, the point estimate's un-equilibrated local OR solve
+        # (tracked TODO) can perturb the ATT/SE away from drop-one — a
+        # point-estimate property, not the rank-guard — so we assert only
+        # well-definedness (order-invariance) there, not drop-one parity.
+        base = generate_staggered_data_with_covariates(seed=789)
+        d = base.copy()
+        d["xdup"] = d["x1"]  # well-scaled exact duplicate
+        d["xbig"] = 1e8 * d["x1"]  # mixed-scale exact duplicate
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = CallawaySantAnna(estimation_method=method).fit(
+                d, "outcome", "unit", "time", "first_treat", covariates=["x1"]
+            )
+            well = CallawaySantAnna(estimation_method=method).fit(
+                d, "outcome", "unit", "time", "first_treat", covariates=["x1", "xdup"]
+            )
+            big_ab = CallawaySantAnna(estimation_method=method).fit(
+                d, "outcome", "unit", "time", "first_treat", covariates=["x1", "xbig"]
+            )
+            big_ba = CallawaySantAnna(estimation_method=method).fit(
+                d, "outcome", "unit", "time", "first_treat", covariates=["xbig", "x1"]
+            )
+        # Well-scaled exact duplicate == dropping it (clean column-drop).
+        np.testing.assert_allclose(
+            well.overall_se, drop_one.overall_se, rtol=1e-9
+        )
+        # Finite + order-invariant (well-defined) under exact collinearity, even
+        # at mixed scale — the SE does not depend on which column is listed first.
+        assert np.isfinite(big_ab.overall_se) and big_ab.overall_se > 0
+        np.testing.assert_allclose(
+            big_ab.overall_se, big_ba.overall_se, rtol=1e-9
+        )
+
+
 class TestCallawaySantAnnaRankDeficiencyPaths:
     """Tests for rank-deficiency handling in DR and reg not_yet_treated paths."""
 
@@ -4171,7 +4467,8 @@ class TestSilentWarningAudit:
 class TestCallawaySantAnnaSafeInvFallback:
     def test_collinear_covariates_emit_safe_inv_warning(self):
         """Perfectly collinear covariates should trigger the aggregate
-        `_safe_inv` lstsq-fallback warning across analytical SE paths."""
+        `_safe_inv` rank-guard warning across analytical SE paths (default
+        rank_deficient_action='warn'; suppressed under 'silent')."""
         data = generate_staggered_data(n_units=150, n_periods=6, n_cohorts=3, seed=55)
         rng = np.random.default_rng(0)
         # Add a covariate and a redundant (collinear) copy — forces rank-
@@ -4179,10 +4476,7 @@ class TestCallawaySantAnnaSafeInvFallback:
         # least one (g, t) cell.
         data["x1"] = rng.normal(0, 1, len(data))
         data["x2"] = 2.0 * data["x1"]
-        cs = CallawaySantAnna(
-            estimation_method="dr",
-            rank_deficient_action="silent",  # suppress upstream solve_ols noise
-        )
+        cs = CallawaySantAnna(estimation_method="dr")  # default action="warn"
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             cs.fit(
@@ -4196,11 +4490,11 @@ class TestCallawaySantAnnaSafeInvFallback:
         fallback_warnings = [
             w
             for w in caught
-            if "Rank-deficient matrix encountered" in str(w.message)
-            and "analytical SE paths" in str(w.message)
+            if "analytical SE paths" in str(w.message)
+            and "rank-guarded inverse" in str(w.message)
         ]
         assert len(fallback_warnings) == 1, (
-            f"Expected exactly one aggregate _safe_inv fallback warning; "
+            f"Expected exactly one aggregate _safe_inv rank-guard warning; "
             f"got {len(fallback_warnings)}: "
             f"{[str(w.message) for w in fallback_warnings]}"
         )

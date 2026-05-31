@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from diff_diff.linalg import solve_logit, solve_ols
+from diff_diff.linalg import _rank_guarded_inv, solve_logit, solve_ols
 from diff_diff.results import _format_survey_block, _get_significance_stars
 from diff_diff.utils import safe_inference
 
@@ -1093,6 +1093,10 @@ class TripleDifference:
         all_pscores = {}  # Collect pscores for diagnostics
         overlap_issues = []  # Collect overlap diagnostics across comparisons
         any_nonfinite_if = False
+        # Tracker for rank-guarded inverse truncations in the OR bread / PS
+        # Hessian across the three DiD comparisons. Reset per fit; surfaced as
+        # ONE aggregate warning below rather than fanning out per comparison.
+        self._lstsq_fallback_tracker: list = []
         epv_all = {}  # Collect EPV diagnostics per subgroup comparison
 
         with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
@@ -1174,11 +1178,15 @@ class TripleDifference:
                         W_ps = pscore_sub * (1 - pscore_sub)
                         if w_sub is not None:
                             W_ps = W_ps * w_sub
-                        try:
-                            XWX = covX_sub.T @ (W_ps[:, None] * covX_sub)
-                            hessian = np.linalg.inv(XWX) * n_sub
-                        except np.linalg.LinAlgError:
-                            hessian = np.linalg.pinv(XWX) * n_sub
+                        XWX = covX_sub.T @ (W_ps[:, None] * covX_sub)
+                        # Rank-guarded inverse: a near-singular X'WX does not
+                        # raise, so np.linalg.inv would return a garbage Hessian
+                        # that inflates the IPW/DR influence function.
+                        XWX_inv, _, _ = _rank_guarded_inv(
+                            XWX,
+                            tracker=getattr(self, "_lstsq_fallback_tracker", None),
+                        )
+                        hessian = XWX_inv * n_sub
                     else:
                         hessian = None
                 else:
@@ -1365,6 +1373,27 @@ class TripleDifference:
                 stacklevel=3,
             )
             se = np.nan
+
+        # Consolidated rank-guard warning: a near-singular OR bread / PS Hessian
+        # (constant/collinear covariate) had a redundant direction truncated by
+        # the rank-guarded inverse. Surfaced once per fit rather than per cell;
+        # suppressed under rank_deficient_action="silent".
+        if self._lstsq_fallback_tracker and self.rank_deficient_action != "silent":
+            n_cells = len(self._lstsq_fallback_tracker)
+            finite_conds = [
+                c for c in self._lstsq_fallback_tracker if np.isfinite(c)
+            ]
+            max_cond = max(finite_conds) if finite_conds else float("inf")
+            warnings.warn(
+                f"Rank-deficient covariate design encountered {n_cells} time(s) "
+                f"in the influence-function SE (outcome-regression bread or "
+                f"propensity-score Hessian); dropped redundant direction(s) via "
+                f"a rank-guarded inverse. Max condition number of affected "
+                f"matrix: {max_cond:.2e}. Standard errors use the identified "
+                f"covariate subset; consider dropping collinear covariates.",
+                UserWarning,
+                stacklevel=3,
+            )
 
         # Propensity score stats (for IPW/DR with covariates)
         if has_covariates and est_method != "reg" and all_pscores:
@@ -1658,10 +1687,9 @@ class TripleDifference:
             wols_x_pre = weights_ols_pre[:, None] * covX
             wols_eX_pre = (weights_ols_pre * (y - or_ctrl_pre))[:, None] * covX
             XpX_pre = wols_x_pre.T @ covX / n
-        try:
-            XpX_inv_pre = np.linalg.inv(XpX_pre)
-        except np.linalg.LinAlgError:
-            XpX_inv_pre = np.linalg.pinv(XpX_pre)
+        XpX_inv_pre, _, _ = _rank_guarded_inv(
+            XpX_pre, tracker=getattr(self, "_lstsq_fallback_tracker", None)
+        )
         asy_lin_rep_ols_pre = wols_eX_pre @ XpX_inv_pre
 
         weights_ols_post = PAa * post
@@ -1673,10 +1701,9 @@ class TripleDifference:
             wols_x_post = weights_ols_post[:, None] * covX
             wols_eX_post = (weights_ols_post * (y - or_ctrl_post))[:, None] * covX
             XpX_post = wols_x_post.T @ covX / n
-        try:
-            XpX_inv_post = np.linalg.inv(XpX_post)
-        except np.linalg.LinAlgError:
-            XpX_inv_post = np.linalg.pinv(XpX_post)
+        XpX_inv_post, _, _ = _rank_guarded_inv(
+            XpX_post, tracker=getattr(self, "_lstsq_fallback_tracker", None)
+        )
         asy_lin_rep_ols_post = wols_eX_post @ XpX_inv_post
 
         inf_treat_pre = (reg_att_treat_pre - riesz_treat_pre * eta_treat_pre) / _wmean(
@@ -1787,10 +1814,9 @@ class TripleDifference:
             wols_x_pre = weights_ols_pre[:, None] * covX
             wols_eX_pre = (weights_ols_pre * (y - or_ctrl_pre))[:, None] * covX
             XpX_pre = wols_x_pre.T @ covX / n
-        try:
-            XpX_inv_pre = np.linalg.inv(XpX_pre)
-        except np.linalg.LinAlgError:
-            XpX_inv_pre = np.linalg.pinv(XpX_pre)
+        XpX_inv_pre, _, _ = _rank_guarded_inv(
+            XpX_pre, tracker=getattr(self, "_lstsq_fallback_tracker", None)
+        )
         asy_lin_rep_ols_pre = wols_eX_pre @ XpX_inv_pre
 
         weights_ols_post = PAa * post
@@ -1802,10 +1828,9 @@ class TripleDifference:
             wols_x_post = weights_ols_post[:, None] * covX
             wols_eX_post = (weights_ols_post * (y - or_ctrl_post))[:, None] * covX
             XpX_post = wols_x_post.T @ covX / n
-        try:
-            XpX_inv_post = np.linalg.inv(XpX_post)
-        except np.linalg.LinAlgError:
-            XpX_inv_post = np.linalg.pinv(XpX_post)
+        XpX_inv_post, _, _ = _rank_guarded_inv(
+            XpX_post, tracker=getattr(self, "_lstsq_fallback_tracker", None)
+        )
         asy_lin_rep_ols_post = wols_eX_post @ XpX_inv_post
 
         # OLS representations (treated subgroup)
@@ -1818,10 +1843,9 @@ class TripleDifference:
             wols_x_pre_treat = weights_ols_pre_treat[:, None] * covX
             wols_eX_pre_treat = (weights_ols_pre_treat * (y - or_trt_pre))[:, None] * covX
             XpX_pre_treat = wols_x_pre_treat.T @ covX / n
-        try:
-            XpX_inv_pre_treat = np.linalg.inv(XpX_pre_treat)
-        except np.linalg.LinAlgError:
-            XpX_inv_pre_treat = np.linalg.pinv(XpX_pre_treat)
+        XpX_inv_pre_treat, _, _ = _rank_guarded_inv(
+            XpX_pre_treat, tracker=getattr(self, "_lstsq_fallback_tracker", None)
+        )
         asy_lin_rep_ols_pre_treat = wols_eX_pre_treat @ XpX_inv_pre_treat
 
         weights_ols_post_treat = PA4 * post
@@ -1835,10 +1859,9 @@ class TripleDifference:
             wols_x_post_treat = weights_ols_post_treat[:, None] * covX
             wols_eX_post_treat = (weights_ols_post_treat * (y - or_trt_post))[:, None] * covX
             XpX_post_treat = wols_x_post_treat.T @ covX / n
-        try:
-            XpX_inv_post_treat = np.linalg.inv(XpX_post_treat)
-        except np.linalg.LinAlgError:
-            XpX_inv_post_treat = np.linalg.pinv(XpX_post_treat)
+        XpX_inv_post_treat, _, _ = _rank_guarded_inv(
+            XpX_post_treat, tracker=getattr(self, "_lstsq_fallback_tracker", None)
+        )
         asy_lin_rep_ols_post_treat = wols_eX_post_treat @ XpX_inv_post_treat
 
         # Propensity score linear representation

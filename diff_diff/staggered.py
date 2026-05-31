@@ -16,6 +16,7 @@ from diff_diff.linalg import (
     _check_propensity_diagnostics,
     _detect_rank_deficiency,
     _format_dropped_columns,
+    _rank_guarded_inv,
     solve_logit,
     solve_ols,
 )
@@ -194,26 +195,31 @@ def _safe_inv(
     A: np.ndarray,
     tracker: Optional[list] = None,
 ) -> np.ndarray:
-    """Invert a square matrix with lstsq fallback for near-singular cases.
+    """Rank-guarded generalized inverse of a Gram matrix for analytical SE paths.
 
     Parameters
     ----------
     A : np.ndarray
         Square matrix to invert.
     tracker : list, optional
-        When provided, one condition-number sample of ``A`` is appended on
-        every LinAlgError fallback. ``CallawaySantAnna.fit()`` initializes
-        a list and emits a single aggregate `UserWarning` after the fit
-        finishes, rather than surfacing a separate warning per fallback.
+        When provided, one condition-number sample of ``A`` is appended each
+        time ``A`` is rank-deficient (near-singular). ``CallawaySantAnna.fit()``
+        initializes a list and emits a single aggregate `UserWarning` after the
+        fit finishes, rather than surfacing a separate warning per fallback.
         Sibling of finding #17 in the Phase 2 silent-failures audit.
+
+    Notes
+    -----
+    Delegates to :func:`~diff_diff.linalg._rank_guarded_inv`, which is the sole
+    owner of the ``tracker`` append. The old ``except LinAlgError: lstsq``
+    fallback only caught *exactly* singular matrices; a *near*-singular Gram
+    (e.g. a constant/collinear covariate) returned a garbage inverse (~1e13)
+    that flowed into the SE. The rank-guarded inverse truncates redundant
+    directions (finite SE on the identified subset) and returns an all-NaN
+    matrix only on true rank-0.
     """
-    try:
-        return np.linalg.solve(A, np.eye(A.shape[0]))
-    except np.linalg.LinAlgError:
-        if tracker is not None:
-            with np.errstate(invalid="ignore", over="ignore"):
-                tracker.append(float(np.linalg.cond(A)))
-        return np.linalg.lstsq(A, np.eye(A.shape[0]), rcond=None)[0]
+    inv, _, _ = _rank_guarded_inv(A, tracker=tracker)
+    return inv
 
 
 class CallawaySantAnna(
@@ -2329,22 +2335,25 @@ class CallawaySantAnna(
                         eff_data["effect"] + cband_crit_value * se_val,
                     )
 
-        # Consolidated _safe_inv lstsq-fallback warning (sibling of PR #9
+        # Consolidated _safe_inv rank-guard warning (sibling of PR #9
         # finding #17). Rank-deficient PS Hessian / OR bread matrices in the
-        # analytical SE paths previously fell back to np.linalg.lstsq
-        # silently per cell. Now aggregated here into ONE UserWarning so
-        # a bad design surface doesn't quietly degrade analytical SEs.
-        if self._safe_inv_tracker:
+        # analytical SE paths are near-singular under a constant/collinear
+        # covariate. They are now inverted by a rank-guarded generalized inverse
+        # that truncates the redundant direction(s) (finite SE on the identified
+        # subset). Aggregated here into ONE UserWarning so a bad design surface
+        # is surfaced once rather than per cell.
+        if self._safe_inv_tracker and self.rank_deficient_action != "silent":
             n_fallbacks = len(self._safe_inv_tracker)
             finite_conds = [c for c in self._safe_inv_tracker if np.isfinite(c)]
             max_cond = max(finite_conds) if finite_conds else float("inf")
             warnings.warn(
                 f"Rank-deficient matrix encountered {n_fallbacks} time(s) "
                 f"in analytical SE paths (propensity-score Hessian or "
-                f"outcome-regression bread); fell back to np.linalg.lstsq. "
-                f"Max condition number of affected matrix: {max_cond:.2e}. "
-                f"Analytical SEs may be numerically unstable; consider "
-                f"dropping collinear covariates or using n_bootstrap > 0.",
+                f"outcome-regression bread); dropped redundant direction(s) "
+                f"via a rank-guarded inverse. Max condition number of affected "
+                f"matrix: {max_cond:.2e}. Standard errors use the identified "
+                f"covariate subset; consider dropping collinear covariates or "
+                f"using n_bootstrap > 0.",
                 UserWarning,
                 stacklevel=2,
             )
@@ -2715,7 +2724,15 @@ class CallawaySantAnna(
 
                 # SE from influence function variance
                 var_psi = np.sum(inf_func**2)
-                se = float(np.sqrt(var_psi)) if var_psi > 0 else 0.0
+                # A rank-0 cell yields an all-NaN bread (and thus NaN inf_func);
+                # propagate NaN rather than masking it as 0.0 via ``var_psi > 0``
+                # (NaN > 0 is False). Partial deficiency keeps var_psi finite.
+                if not np.isfinite(var_psi):
+                    se = float("nan")
+                elif var_psi > 0:
+                    se = float(np.sqrt(var_psi))
+                else:
+                    se = 0.0
             else:
                 # IPW weights for control units: p(X) / (1 - p(X))
                 # This reweights controls to have same covariate distribution as treated
@@ -3015,7 +3032,15 @@ class CallawaySantAnna(
 
                 # Recompute SE from corrected IF
                 var_psi = np.sum(inf_func**2)
-                se = float(np.sqrt(var_psi)) if var_psi > 0 else 0.0
+                # A rank-0 cell yields an all-NaN bread (and thus NaN inf_func);
+                # propagate NaN rather than masking it as 0.0 via ``var_psi > 0``
+                # (NaN > 0 is False). Partial deficiency keeps var_psi finite.
+                if not np.isfinite(var_psi):
+                    se = float("nan")
+                elif var_psi > 0:
+                    se = float(np.sqrt(var_psi))
+                else:
+                    se = 0.0
             else:
                 # IPW weights for control: p(X) / (1 - p(X))
                 weights_control = pscore_control / (1 - pscore_control)
@@ -3073,7 +3098,15 @@ class CallawaySantAnna(
 
                 # Recompute SE from corrected IF
                 var_psi = np.sum(inf_func**2)
-                se = float(np.sqrt(var_psi)) if var_psi > 0 else 0.0
+                # A rank-0 cell yields an all-NaN bread (and thus NaN inf_func);
+                # propagate NaN rather than masking it as 0.0 via ``var_psi > 0``
+                # (NaN > 0 is False). Partial deficiency keeps var_psi finite.
+                if not np.isfinite(var_psi):
+                    se = float("nan")
+                elif var_psi > 0:
+                    se = float(np.sqrt(var_psi))
+                else:
+                    se = 0.0
         else:
             # Without covariates, DR simplifies to difference in means
             if sw_treated is not None:

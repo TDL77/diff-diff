@@ -312,6 +312,123 @@ def _equilibrated_lstsq(X: np.ndarray, y: np.ndarray) -> np.ndarray:
     return coef_scaled / safe_norms
 
 
+def _rank_guarded_inv(
+    A: np.ndarray,
+    *,
+    rcond: float = 1e-10,
+    tracker: Optional[list] = None,
+) -> Tuple[np.ndarray, int, int]:
+    """Rank-guarded (generalized) inverse of a symmetric PSD Gram matrix.
+
+    Influence-function standard errors invert a covariate Gram matrix
+    ``A = X'WX`` (or a propensity-score Hessian). A constant or collinear
+    covariate makes ``A`` *near*-singular, but ``np.linalg.solve`` / ``inv``
+    only raise ``LinAlgError`` on an *exactly* singular matrix, so they return a
+    garbage inverse (entries ~1e13) that flows straight into the SE. This helper
+    detects near-singularity in a scale-invariant way and returns a finite
+    generalized inverse on the identified subspace, truncating redundant
+    directions. It returns an all-NaN matrix only when the design collapses to
+    rank 0.
+
+    Parameters
+    ----------
+    A : np.ndarray
+        Square, symmetric, positive-semidefinite Gram matrix (k x k).
+    rcond : float, default 1e-10
+        Relative eigenvalue threshold applied to the *symmetrically
+        equilibrated* matrix ``D^{-1/2} A D^{-1/2}`` (``D = diag(A)``): a
+        direction is truncated when its equilibrated eigenvalue is
+        ``<= rcond * max_eigenvalue``. ``1e-10`` (not the design-side ``1e-7``
+        of :func:`_detect_rank_deficiency`) because a Gram matrix squares the
+        condition number of ``X``; matches EfficientDiD's ``tol / max_eigval``
+        relative threshold.
+    tracker : list, optional
+        When provided and at least one direction is truncated, ONE
+        condition-number sample of ``A`` is appended (under ``np.errstate``).
+        Callers pass the per-fit fallback tracker and must NOT append
+        themselves: this helper is the sole owner, so the aggregate fallback
+        warning counts each deficient inversion exactly once.
+
+    Returns
+    -------
+    (A_ginv, n_dropped, rank) : Tuple[np.ndarray, int, int]
+        ``A_ginv`` is the generalized inverse (all-NaN when ``rank == 0``).
+        ``n_dropped`` is the number of truncated directions, ``rank`` is
+        ``k - n_dropped``.
+
+    Notes
+    -----
+    Column-drop (not minimum-norm) generalized inverse: when ``A`` is
+    rank-deficient the guarded path keeps the ``rank`` most-independent columns
+    (pivoted QR on the equilibrated Gram) and inverts that principal submatrix,
+    zero-filling the dropped rows/cols. This is the SAME generalized-inverse
+    convention the point estimate uses (``_detect_rank_deficiency`` / R's
+    ``lm()`` column drop), so the influence-function SE equals the
+    well-conditioned (near-collinear) limit: replacing the exactly-collinear
+    covariate with a near-collinear (full-rank) one yields the same SE to working
+    precision. A minimum-norm pseudo-inverse would instead diverge from
+    column-drop whenever the IF multiplier leaves ``range(A)`` — e.g. an
+    outcome-regression bread fit on the *control* (or a treated sub-cell) sample
+    multiplied by a mean from a cell where the covariate is NOT collinear — so it
+    is rejected here. With column-drop there is no such divergence; a covariate
+    that is rank-deficient only within one cell still legitimately enters the
+    other cells' full-rank fits, so the ATT and SE reflect that (poor) covariate
+    specification, consistently with the point estimate.
+
+    The fast (well-conditioned) path returns ``np.linalg.solve(A, I)``
+    unchanged, so well-conditioned fits are numerically unaffected.
+    """
+    k = A.shape[0]
+    if k == 0:
+        return np.zeros((0, 0), dtype=float), 0, 0
+
+    # Symmetric equilibration: scale row/col i by sqrt(A[i, i]) so the
+    # eigenvalue threshold is scale-invariant. Zero/negative diagonal -> 1.0
+    # (such a direction has no information and pivots into the truncated tail).
+    diag = np.diag(A).astype(float)
+    scales = np.sqrt(np.where(diag > 0.0, diag, 1.0))
+    inv_scales = 1.0 / scales
+    A_eq = A * inv_scales[:, None] * inv_scales[None, :]
+
+    # eigvalsh reads one triangle, so asymmetric round-off in A_eq is ignored.
+    # Eigenvalues give the scale-invariant rank; pivoted QR (below) selects which
+    # columns to keep when the design is deficient.
+    eigvals = np.linalg.eigvalsh(A_eq)
+    max_eig = float(eigvals[-1]) if eigvals.size else 0.0
+    thresh = rcond * max_eig if max_eig > 0.0 else 0.0
+    keep = eigvals > thresh
+    n_keep = int(np.count_nonzero(keep))
+
+    # Fast path: full rank -> exact solve (bit-identical to the prior code).
+    if max_eig > 0.0 and n_keep == k:
+        return np.linalg.solve(A, np.eye(k)), 0, k
+
+    # Rank-deficient: record one condition-number sample for the aggregate
+    # fallback warning (the helper is the sole owner of this append).
+    if tracker is not None:
+        with np.errstate(invalid="ignore", over="ignore", divide="ignore"):
+            tracker.append(float(np.linalg.cond(A)))
+
+    if n_keep == 0:
+        return np.full((k, k), np.nan), k, 0
+
+    # Column-drop generalized inverse: keep the n_keep most-independent columns
+    # (pivoted QR on the equilibrated Gram), invert that principal submatrix, and
+    # zero-fill the dropped rows/cols before un-scaling. This is the same
+    # generalized-inverse family the point estimate uses (drop redundant columns,
+    # not a minimum-norm pseudo-inverse, which diverges from column-drop when the
+    # IF multiplier leaves range(A) — e.g. a treated-cell mean). Equilibrating the
+    # selection (rather than a raw pivot) keeps the cell-only-aliasing SE equal to
+    # the well-conditioned near-collinear limit (se_ratio ~ 1).
+    _Q, _R, piv = qr(A_eq, mode="economic", pivoting=True)
+    kept = np.sort(piv[:n_keep])
+    A_eq_ginv = np.zeros((k, k), dtype=float)
+    A_eq_ginv[np.ix_(kept, kept)] = np.linalg.inv(A_eq[np.ix_(kept, kept)])
+    A_ginv = A_eq_ginv * inv_scales[:, None] * inv_scales[None, :]
+    n_dropped = k - n_keep
+    return A_ginv, n_dropped, n_keep
+
+
 def _solve_ols_rust(
     X: np.ndarray,
     y: np.ndarray,

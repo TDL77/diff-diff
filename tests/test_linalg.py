@@ -7,6 +7,7 @@ import pytest
 from diff_diff.linalg import (
     InferenceResult,
     LinearRegression,
+    _rank_guarded_inv,
     compute_r_squared,
     compute_robust_vcov,
     solve_ols,
@@ -2075,3 +2076,114 @@ class TestSolvePoisson:
             warnings.simplefilter("ignore")
             with pytest.raises(ValueError, match="rank 0"):
                 solve_poisson(X, y, weights=weights)
+
+
+class TestRankGuardedInv:
+    """Contract tests for _rank_guarded_inv (rank-guarded generalized inverse).
+
+    Used by the influence-function SE path of CallawaySantAnna /
+    TripleDifference / StaggeredTripleDifference. A near-singular covariate Gram
+    matrix must yield a finite generalized inverse on the identified subspace
+    (NaN only on true rank-0), and well-conditioned matrices must be unchanged.
+    """
+
+    @staticmethod
+    def _gram(X):
+        return X.T @ X
+
+    def test_well_conditioned_matches_solve_exactly(self):
+        # Fast path must be bit-identical to np.linalg.solve(A, I) so that
+        # well-conditioned R-parity goldens are numerically unchanged.
+        rng = np.random.RandomState(0)
+        X = rng.standard_normal((60, 4))
+        A = self._gram(X)
+        ginv, n_dropped, rank = _rank_guarded_inv(A)
+        assert n_dropped == 0
+        assert rank == 4
+        np.testing.assert_array_equal(ginv, np.linalg.solve(A, np.eye(4)))
+
+    def test_scale_invariance_no_false_drop(self):
+        # One column on a vastly larger scale makes A's raw condition ~1e16, so
+        # a bare pinv(A, rcond=1e-10) would truncate a genuine direction. The
+        # symmetric equilibration must keep full rank.
+        rng = np.random.RandomState(1)
+        X = rng.standard_normal((80, 3))
+        X[:, 0] *= 1e8
+        A = self._gram(X)
+        _, n_dropped, rank = _rank_guarded_inv(A)
+        assert n_dropped == 0
+        assert rank == 3
+
+    def test_constant_column_truncates_one_finite(self):
+        # X = [intercept, constant covariate, x2]: the constant covariate is
+        # collinear with the intercept -> exactly one redundant direction.
+        rng = np.random.RandomState(2)
+        n = 100
+        X = np.column_stack([np.ones(n), np.full(n, 5.0), rng.standard_normal(n)])
+        A = self._gram(X)
+        ginv, n_dropped, rank = _rank_guarded_inv(A)
+        assert n_dropped == 1
+        assert rank == 2
+        assert np.all(np.isfinite(ginv))
+        # Garbage-inverse guard: the prior np.linalg.solve would have entries
+        # ~1e13+; the guarded inverse must be modest.
+        assert np.max(np.abs(ginv)) < 1e3
+
+    def test_rank_zero_returns_all_nan(self):
+        A = np.zeros((3, 3))
+        ginv, n_dropped, rank = _rank_guarded_inv(A)
+        assert rank == 0
+        assert n_dropped == 3
+        assert np.all(np.isnan(ginv))
+
+    def test_tracker_appended_once_on_truncation_only(self):
+        rng = np.random.RandomState(3)
+        n = 50
+        # Deficient: constant column collinear with intercept.
+        A_def = self._gram(
+            np.column_stack([np.ones(n), np.full(n, 2.0), rng.standard_normal(n)])
+        )
+        tracker = []
+        _rank_guarded_inv(A_def, tracker=tracker)
+        assert len(tracker) == 1  # exactly one condition-number sample
+
+        # Well-conditioned: no append.
+        A_ok = self._gram(rng.standard_normal((n, 3)))
+        tracker2 = []
+        _rank_guarded_inv(A_ok, tracker=tracker2)
+        assert tracker2 == []
+
+    def test_generalized_inverse_identity(self):
+        # A G A == A holds for any generalized inverse (the property that makes
+        # the IF bilinear form invariant to the choice of inverse).
+        rng = np.random.RandomState(4)
+        n = 100
+        X = np.column_stack([np.ones(n), np.full(n, 3.0), rng.standard_normal(n)])
+        A = self._gram(X)
+        ginv, n_dropped, _ = _rank_guarded_inv(A)
+        assert n_dropped == 1
+        np.testing.assert_allclose(A @ ginv @ A, A, rtol=1e-8, atol=1e-6)
+
+    def test_boundary_kept_vs_truncated_gram_condition(self):
+        # Threshold is rcond=1e-10 on the equilibrated Gram. cond ~1e8 stays
+        # full rank; cond ~1e12 truncates the small direction. (Numbers are the
+        # equilibrated Gram condition, not X's.)
+        rng = np.random.RandomState(5)
+        Q, _ = np.linalg.qr(rng.standard_normal((2, 2)))
+        kept = Q @ np.diag([1.0, 1e-8]) @ Q.T
+        kept = 0.5 * (kept + kept.T)
+        _, n_dropped_kept, rank_kept = _rank_guarded_inv(kept)
+        assert n_dropped_kept == 0
+        assert rank_kept == 2
+
+        truncated = Q @ np.diag([1.0, 1e-12]) @ Q.T
+        truncated = 0.5 * (truncated + truncated.T)
+        _, n_dropped_tr, rank_tr = _rank_guarded_inv(truncated)
+        assert n_dropped_tr == 1
+        assert rank_tr == 1
+
+    def test_empty_matrix(self):
+        ginv, n_dropped, rank = _rank_guarded_inv(np.zeros((0, 0)))
+        assert ginv.shape == (0, 0)
+        assert n_dropped == 0
+        assert rank == 0
