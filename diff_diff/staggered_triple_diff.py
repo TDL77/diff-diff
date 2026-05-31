@@ -649,11 +649,20 @@ class StaggeredTripleDifference(
         overall_t_stat_es = None
         overall_p_value_es = None
         overall_conf_int_es = None
+        # Whether the ANALYTICAL Eq. 4.14 SE was non-finite while its point estimate
+        # was finite (i.e. a contributing horizon's influence function was non-finite).
+        # Captured before any bootstrap override so the terminal warning below does not
+        # misdiagnose a bootstrap-side NaN SE (e.g. cluster-unidentified) as an
+        # analytical-IF failure (the bootstrap path emits its own warning).
+        analytical_overall_es_se_nonfinite = False
         if aggregate in ("event_study", "all"):
             es_overall = getattr(self, "_event_study_overall", None)
             if es_overall is not None:
                 overall_att_es = es_overall["att"]
                 overall_se_es = es_overall["se"]
+                analytical_overall_es_se_nonfinite = bool(
+                    np.isfinite(overall_att_es) and not np.isfinite(overall_se_es)
+                )
                 es_eff_df = es_overall.get("effective_df")
                 # Fall back to the ORIGINAL survey df, not the simple-overall's mutated
                 # per-statistic df (P1 fix): overall_att_es has its own replicate df.
@@ -800,22 +809,25 @@ class StaggeredTripleDifference(
                         )
                         group_effects[g_key]["t_stat"] = t_val
 
-        # Eq. 4.14 overall: a defined point estimate with an undefined SE in the final
-        # state (after any bootstrap override) means a contributing post-treatment
-        # event-study horizon has a non-finite influence function. Surface it — never
-        # NaN the SE silently. Checked here so a bootstrap that supplies a finite SE
-        # does not trigger a spurious warning.
+        # Eq. 4.14 overall: an ANALYTICAL non-finite SE under a finite point estimate
+        # (a contributing horizon's influence function is non-finite, or the variance is
+        # unidentified — e.g. a single-PSU/cluster design). Surface it — never NaN the SE
+        # silently. Gated on the analytical-origin flag (captured before the bootstrap
+        # override) and the final state still being non-finite: a bootstrap that supplies a
+        # finite SE rescues it (no warning), and a bootstrap that NaNs the SE for unrelated
+        # reasons (e.g. cluster-unidentified) is reported by the bootstrap's own warning,
+        # not misdiagnosed here as an analytical-IF failure.
         if (
-            overall_att_es is not None
-            and np.isfinite(overall_att_es)
+            analytical_overall_es_se_nonfinite
             and overall_se_es is not None
             and not np.isfinite(overall_se_es)
         ):
             warnings.warn(
                 "Eq. 4.14 overall (overall_att_es) point estimate is defined but its "
-                "standard error is undefined: a contributing post-treatment event-study "
-                "horizon has a non-finite influence function. overall_se_es and its "
-                "inference fields are NaN.",
+                "standard error is undefined (NaN): either a contributing post-treatment "
+                "event-study horizon has a non-finite influence function, or the variance "
+                "is unidentified (e.g. a single-PSU/cluster survey design). overall_se_es "
+                "and its inference fields are NaN.",
                 UserWarning,
                 stacklevel=2,
             )

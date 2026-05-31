@@ -5,6 +5,8 @@ uniform weight equivalence, scale invariance, nontrivial weight effects,
 full design (strata/PSU/FPC), replicate weights, and bootstrap + survey.
 """
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -1018,3 +1020,46 @@ class TestSurveyOverallAttEs:
         assert res.overall_se_es > 0
         # default overall_att (simple) also computed under the replicate design
         assert np.isfinite(res.overall_att) and np.isfinite(res.overall_se)
+
+    def test_single_psu_bootstrap_cluster_unidentified(self):
+        """Under a single-PSU survey design with n_bootstrap>0, the Eq. 4.14 overall
+        keeps its (analytical) point estimate but its SE is unidentified -> NaN, and
+        the inference fields are NaN-consistent.
+
+        Regression for the P2 warning-misdiagnosis fix: when overall_se_es is NaN the
+        terminal warning must not attribute it *solely* to a non-finite influence
+        function -- a single-PSU/cluster design is the actual cause here, and the
+        authoritative "variance unidentified" warning is raised by the bootstrap. The
+        Eq. 4.14 warning, when emitted, must name the unidentified-variance cause.
+        """
+        data = _make_staggered_ddd_data(n_units=120, seed=42).copy()
+        data["psu"] = 0  # collapse to a single PSU -> variance/cluster unidentified
+        data["fpc_col"] = 10**6  # design-based variance so the PSU is retained
+        sd = SurveyDesign(weights="weight", psu="psu", fpc="fpc_col")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = StaggeredTripleDifference(estimation_method="reg", n_bootstrap=50, seed=7).fit(
+                data,
+                "outcome",
+                "unit",
+                "period",
+                "first_treat",
+                "eligibility",
+                aggregate="event_study",
+                survey_design=sd,
+            )
+        # Point estimate survives; SE + inference are NaN-consistent (never a stale value).
+        assert res.overall_att_es is not None and np.isfinite(res.overall_att_es)
+        assert res.overall_se_es is not None and np.isnan(res.overall_se_es)
+        assert res.overall_t_stat_es is not None and np.isnan(res.overall_t_stat_es)
+        assert res.overall_p_value_es is not None and np.isnan(res.overall_p_value_es)
+        assert res.overall_conf_int_es is not None
+        assert np.isnan(res.overall_conf_int_es[0]) and np.isnan(res.overall_conf_int_es[1])
+        msgs = [str(w.message) for w in caught]
+        # The bootstrap raises the authoritative "variance unidentified" warning.
+        assert any("unidentified" in m for m in msgs)
+        # The Eq. 4.14 overall warning is cause-accurate (would fail on the old wording
+        # that attributed the NaN solely to a non-finite influence function).
+        es_warns = [m for m in msgs if "overall_att_es)" in m]
+        assert es_warns, "expected the Eq. 4.14 overall warning under single-PSU bootstrap"
+        assert all("unidentified" in m for m in es_warns)

@@ -177,6 +177,40 @@ class TestStaggeredTripleDiffBasic:
         assert res_default.overall_att_es is None
         assert "overall_att_es" not in res_default.to_dict()
 
+    def test_overall_att_es_aggregate_all_matches_event_study(self, simple_data):
+        """Eq. 4.14 overall (overall_att_es) is populated under aggregate='all' (not only
+        'event_study') and matches the 'event_study' path bit-for-bit on the same data.
+
+        Regression guard for the documented public contract that BOTH surfaces expose
+        overall_att_es: aggregate='all' additionally computes the per-cohort group
+        aggregation, and must neither drop nor perturb the event-study-average overall.
+        """
+        res_all = StaggeredTripleDifference().fit(
+            simple_data, "outcome", "unit", "period", "first_treat", "eligibility", aggregate="all"
+        )
+        res_es = StaggeredTripleDifference().fit(
+            simple_data,
+            "outcome",
+            "unit",
+            "period",
+            "first_treat",
+            "eligibility",
+            aggregate="event_study",
+        )
+        # Populated (not None / finite) on the 'all' surface.
+        assert res_all.overall_att_es is not None and np.isfinite(res_all.overall_att_es)
+        assert res_all.overall_se_es is not None and np.isfinite(res_all.overall_se_es)
+        # Identical point estimate AND inference vs the event_study path: same data, same
+        # analytical influence-function SE (no bootstrap), so bit-for-bit close.
+        assert res_all.overall_att_es == pytest.approx(res_es.overall_att_es, abs=1e-10)
+        assert res_all.overall_se_es == pytest.approx(res_es.overall_se_es, abs=1e-10)
+        assert res_all.overall_t_stat_es == pytest.approx(res_es.overall_t_stat_es, abs=1e-10)
+        assert res_all.overall_p_value_es == pytest.approx(res_es.overall_p_value_es, abs=1e-10)
+        ci_all, ci_es = res_all.overall_conf_int_es, res_es.overall_conf_int_es
+        assert ci_all is not None and ci_es is not None
+        assert ci_all[0] == pytest.approx(ci_es[0], abs=1e-10)
+        assert ci_all[1] == pytest.approx(ci_es[1], abs=1e-10)
+
     def test_to_dataframe_group_time(self, simple_data):
         est = StaggeredTripleDifference()
         res = est.fit(simple_data, "outcome", "unit", "period", "first_treat", "eligibility")
