@@ -157,6 +157,21 @@ _APPLICABILITY: Dict[str, FrozenSet[str]] = {
             "estimator_native",
         }
     ),
+    "SyntheticControlResults": frozenset(
+        # Classic SCM expresses its identifying assumption as design-enforced
+        # pre-treatment fit (the donor weights match the treated unit's
+        # pre-period trajectory), so — like SDiD — ``parallel_trends`` routes to
+        # the fit-based ``_pt_scm_fit`` (verdict ``design_enforced_pt``, NOT a PT
+        # hypothesis test; see prose). It also exposes ``estimator_native`` (the
+        # in-space placebo permutation inference + weight concentration).
+        # ``sensitivity`` is omitted (no HonestDiD analogue — significance testing
+        # is the native placebo); ``heterogeneity`` is omitted (one treated unit).
+        {
+            "parallel_trends",
+            "design_effect",
+            "estimator_native",
+        }
+    ),
     "EfficientDiDResults": frozenset(
         {
             "parallel_trends",
@@ -195,6 +210,7 @@ _APPLICABILITY: Dict[str, FrozenSet[str]] = {
 #   "hausman"        — EfficientDiD.hausman_pretest (native PT-All vs PT-Post)
 #   "synthetic_fit"  — SDiD weighted pre-treatment fit (surfaces pre_treatment_fit)
 #   "factor"         — TROP factor-model identification (no PT; renders "N/A" prose)
+#   "scm_fit"        — classic SCM donor-weighted pre-treatment fit (surfaces pre_rmspe)
 _PT_METHOD: Dict[str, str] = {
     "DiDResults": "two_x_two",
     "MultiPeriodDiDResults": "event_study",
@@ -210,6 +226,7 @@ _PT_METHOD: Dict[str, str] = {
     "ChaisemartinDHaultfoeuilleResults": "event_study",
     "SyntheticDiDResults": "synthetic_fit",
     "TROPResults": "factor",
+    "SyntheticControlResults": "scm_fit",
 }
 
 
@@ -257,11 +274,14 @@ class DiagnosticReport:
     pre_periods, post_periods : list, optional
         Explicit pre- and post-treatment period labels.
     run_parallel_trends, run_sensitivity, run_placebo, run_bacon, run_design_effect, run_heterogeneity, run_epv, run_pretrends_power : bool
-        Per-check opt-in flags. ``run_placebo`` defaults to ``False`` (opt-in,
-        expensive, currently not implemented - placebo key remains reserved
-        as ``skipped`` in the schema). All other checks default to ``True``
-        and are further gated by estimator-type and instance-level
-        applicability (see ``docs/methodology/REPORTING.md``).
+        Per-check opt-in flags. ``run_placebo`` defaults to ``False`` — the generic
+        placebo battery is not implemented in MVP, so the ``placebo`` key remains
+        reserved as ``skipped`` in the schema. (Exception: ``SyntheticControl``'s
+        in-space placebo permutation test IS implemented — run it via
+        ``results.in_space_placebo()``; its result is surfaced under
+        ``estimator_native_diagnostics.in_space_placebo``, not this generic section.)
+        All other checks default to ``True`` and are further gated by estimator-type
+        and instance-level applicability (see ``docs/methodology/REPORTING.md``).
     sensitivity_M_grid : tuple of float, default (0.5, 1.0, 1.5, 2.0)
         Grid of M values passed to ``HonestDiD.sensitivity``. Yields a
         ``SensitivityResults`` object with ``breakdown_M`` populated.
@@ -298,7 +318,9 @@ class DiagnosticReport:
         Other sections (``design_effect``, ``heterogeneity``, ``epv``) are
         read directly from the fitted result object and do not currently
         accept precomputed values — there is no expensive call to bypass.
-        ``placebo`` is reserved in the schema but opt-in / deferred in MVP.
+        ``placebo`` is reserved in the schema but opt-in / deferred in MVP for the
+        generic battery; ``SyntheticControl`` surfaces its in-space placebo under
+        ``estimator_native_diagnostics`` (run ``results.in_space_placebo()``).
     outcome_label, treatment_label : str, optional
         Plain-English labels used in prose rendering.
     """
@@ -390,11 +412,18 @@ class DiagnosticReport:
         # native-routing contract documented in REPORTING.md.
         # Round-21 P1 CI review on PR #318 flagged this bypass.
         _result_name = type(self._results).__name__
-        _native_routed_names = {"SyntheticDiDResults", "TROPResults"}
+        _native_routed_names = {"SyntheticDiDResults", "TROPResults", "SyntheticControlResults"}
         if _result_name in _native_routed_names:
             _incompatible_keys = []
             if "sensitivity" in self._precomputed:
                 _incompatible_keys.append("sensitivity")
+            # All native-routed estimators reject a precomputed ``parallel_trends``
+            # payload — their PT verdict is computed INTERNALLY (SDiD/SCM:
+            # design-enforced pre-treatment fit; TROP: factor-model identification),
+            # not supplied as a user p-value. SyntheticControl is no exception: its
+            # ``scm_fit`` route reads ``pre_rmspe`` from the fit, and the generic
+            # precomputed-PT adapter only understands p-value-style payloads, which
+            # are methodology-incompatible with SCM (it has no PT p-value test).
             if "parallel_trends" in self._precomputed:
                 _incompatible_keys.append("parallel_trends")
             # Round-32 P1 CI review on PR #318: ``pretrends_power`` is a
@@ -420,7 +449,9 @@ class DiagnosticReport:
                     "Use the native diagnostics on the result object "
                     "(SDiD: ``in_time_placebo``, ``sensitivity_to_zeta_omega``, "
                     "``pre_treatment_fit``; TROP: ``effective_rank``, "
-                    "``loocv_score``) — DR surfaces these automatically."
+                    "``loocv_score``; SyntheticControl: ``in_space_placebo()``, "
+                    "``pre_rmspe``, ``get_placebo_df()``) — DR surfaces these "
+                    "automatically under ``estimator_native_diagnostics``."
                 )
 
         # Round-44 P1 CI review on PR #318: mirror the SDiD/TROP
@@ -572,6 +603,19 @@ class DiagnosticReport:
         # shape is stable: ``schema["placebo"]["status"] == "skipped"``
         # always holds regardless of estimator. The opt-in execution path
         # is deferred to a follow-up; ``REPORTING.md`` documents this.
+        # SyntheticControl is the exception — its in-space placebo permutation test
+        # IS implemented (run via results.in_space_placebo()) and surfaced under
+        # estimator_native_diagnostics, so its generic-section reason points there
+        # rather than claiming placebo is unimplemented (``setdefault`` wins over
+        # the generic message below).
+        if type(self._results).__name__ == "SyntheticControlResults":
+            skipped.setdefault(
+                "placebo",
+                "SyntheticControl's placebo battery is the in-space placebo "
+                "permutation test — run results.in_space_placebo(); the result is "
+                "surfaced under estimator_native_diagnostics.in_space_placebo, not "
+                "this generic section.",
+            )
         skipped.setdefault(
             "placebo",
             "Placebo battery runs on opt-in only; not yet implemented in MVP. "
@@ -877,7 +921,7 @@ class DiagnosticReport:
                     continue
             return "No group/event-study effects available to compute heterogeneity."
         if check == "estimator_native":
-            if name not in {"SyntheticDiDResults", "TROPResults"}:
+            if name not in {"SyntheticDiDResults", "TROPResults", "SyntheticControlResults"}:
                 return f"{name} does not expose native validation methods."
             return None
         return None
@@ -1073,11 +1117,29 @@ class DiagnosticReport:
             # has effectively been performed; treating the sensitivity
             # section as not-run would have ``next_steps`` redundantly
             # recommend a check the report already executed (round-19
-            # CI review on PR #318).
+            # CI review on PR #318). SyntheticControl is deliberately NOT
+            # in this set: its significance procedure is the OPT-IN in-space
+            # placebo (``in_space_placebo()``), which ``_scm_native`` reports
+            # but does not run, so the work is not complete merely because the
+            # native block ran — the practitioner ``placebo`` step must persist.
             result_name = type(self._results).__name__
-            if result_name in {"SyntheticDiDResults", "TROPResults"} and _ran("estimator_native"):
+            if result_name in {
+                "SyntheticDiDResults",
+                "TROPResults",
+            } and _ran("estimator_native"):
                 if "sensitivity" not in completed:
                     completed.append("sensitivity")
+            # SCM's significance step is the opt-in in-space placebo. Mark it
+            # complete only when the caller has run it AND it produced a VALID
+            # reference set (>=1 placebo + a finite p-value) — an attempted-but-
+            # infeasible run (J<2, treated-fit failure, or all donors failed) leaves
+            # placebo_p_value NaN and is NOT complete, so the recommendation persists.
+            if (
+                result_name == "SyntheticControlResults"
+                and int(getattr(self._results, "n_placebos", 0) or 0) > 0
+                and np.isfinite(getattr(self._results, "placebo_p_value", np.nan))
+            ):
+                completed.append("placebo")
             if _ran("heterogeneity"):
                 completed.append("heterogeneity")
             ns = practitioner_next_steps(
@@ -1114,6 +1176,8 @@ class DiagnosticReport:
             return self._pt_hausman()
         if method == "synthetic_fit":
             return self._pt_synthetic_fit()
+        if method == "scm_fit":
+            return self._pt_scm_fit()
         if method == "factor":
             return self._pt_factor()
         return {
@@ -2086,6 +2150,10 @@ class DiagnosticReport:
 
         TROP: factor-model fit metrics (``effective_rank``, ``loocv_score``,
         selected ``lambda_*``).
+
+        SyntheticControl: pre-treatment fit (``pre_rmspe``), donor-weight
+        concentration, and — when already computed — the in-space placebo
+        permutation p-value (``in_space_placebo``).
         """
         r = self._results
         name = type(r).__name__
@@ -2093,6 +2161,8 @@ class DiagnosticReport:
             return self._sdid_native(r)
         if name == "TROPResults":
             return self._trop_native(r)
+        if name == "SyntheticControlResults":
+            return self._scm_native(r)
         return {
             "status": "not_applicable",
             "reason": f"{name} does not expose native validation methods.",
@@ -2171,6 +2241,93 @@ class DiagnosticReport:
                 "n_post_periods": _to_python_scalar(getattr(r, "n_post_periods", None)),
             },
         }
+
+    def _scm_native(self, r: Any) -> Dict[str, Any]:
+        """Populate classic-SCM-native diagnostics section.
+
+        Always surfaces the pre-treatment fit (``pre_rmspe``) and donor-weight
+        concentration. The in-space placebo permutation inference (ADH 2010 §2.4)
+        is reported only when the user has ALREADY run ``in_space_placebo()`` —
+        DR never triggers it implicitly, because it refits one synthetic control
+        per donor (potentially many nested V searches) and the placebo layer is
+        opt-in by design. (This differs from SDiD's cheaper in-time-placebo sweep,
+        which ``_sdid_native`` runs inline.) Only the in-space placebo is exposed;
+        in-time placebo and leave-one-out are ADH 2015 (not implemented).
+        """
+        out: Dict[str, Any] = {"status": "ran", "estimator": "SyntheticControl"}
+        out["pre_rmspe"] = _to_python_float(getattr(r, "pre_rmspe", None))
+        out["n_donors"] = _to_python_scalar(getattr(r, "n_donors", None))
+        out["v_method"] = getattr(r, "v_method", None)
+        # Donor-weight concentration (Herfindahl + top weight): SCM places all mass
+        # on the donor simplex, so concentration is the natural "how few donors
+        # drive the synthetic" diagnostic.
+        try:
+            weights = [float(w) for w in r.donor_weights.values()]
+            out["weight_concentration"] = {
+                "herfindahl": _to_python_float(sum(w * w for w in weights)),
+                "top_weight": _to_python_float(max(weights) if weights else None),
+                "n_donors_with_weight": len(weights),
+            }
+        except Exception as exc:  # noqa: BLE001
+            out["weight_concentration"] = {
+                "status": "error",
+                "reason": f"donor_weights unavailable: {type(exc).__name__}: {exc}",
+            }
+        # In-space placebo: surface only if already computed (opt-in; see docstring).
+        if getattr(r, "_placebo_df", None) is not None:
+            n_placebos = int(getattr(r, "n_placebos", 0) or 0)
+            placebo_p = getattr(r, "placebo_p_value", np.nan)
+            block = {
+                "placebo_p_value": _to_python_float(placebo_p),
+                "rmspe_ratio": _to_python_float(getattr(r, "rmspe_ratio", None)),
+                "n_placebos": _to_python_scalar(n_placebos),
+                "n_failed": _to_python_scalar(getattr(r, "n_failed", None)),
+            }
+            # Distinguish a valid run from an attempted-but-infeasible one so BR/DR
+            # consumers see an explicit status/reason rather than a bare NaN p-value.
+            # The SPECIFIC cause comes from the results' recorded ``_placebo_status``
+            # (n_placebos/n_failed alone cannot tell a non-converged treated fit
+            # apart from too-few-donors).
+            if n_placebos > 0 and np.isfinite(placebo_p):
+                block["status"] = "ran"
+            else:
+                placebo_status = getattr(r, "_placebo_status", None)
+                _reasons = {
+                    "treated_fit_nonconverged": (
+                        "in_space_placebo() was run but the treated unit's own SCM "
+                        "fit did not converge at fit time, so its RMSPE ratio is not "
+                        "a valid optimum to rank against placebos; placebo_p_value "
+                        "is NaN."
+                    ),
+                    "too_few_donors": (
+                        "in_space_placebo() was run but fewer than 2 donors are "
+                        "available (each placebo is fit against the other donors); "
+                        "placebo_p_value is NaN."
+                    ),
+                    "all_placebos_failed": (
+                        "in_space_placebo() was run but every donor refit failed to "
+                        "converge, so no placebo entered the reference set; "
+                        "placebo_p_value is NaN."
+                    ),
+                }
+                block["status"] = "infeasible"
+                block["reason"] = _reasons.get(
+                    placebo_status,
+                    "in_space_placebo() was run but produced no valid reference set "
+                    "(fewer than 2 donors, a non-converged treated fit, or all donor "
+                    "refits failed); placebo_p_value is NaN.",
+                )
+            out["in_space_placebo"] = block
+        else:
+            out["in_space_placebo"] = {
+                "status": "not_run",
+                "reason": (
+                    "Call results.in_space_placebo() to run in-space placebo "
+                    "permutation inference (opt-in; refits one synthetic control "
+                    "per donor)."
+                ),
+            }
+        return out
 
     # -- Heterogeneity helpers --------------------------------------------
 
@@ -2500,6 +2657,31 @@ class DiagnosticReport:
         return {
             "status": "ran",
             "method": "synthetic_fit",
+            "pre_treatment_fit_rmse": fit,
+            "verdict": "design_enforced_pt",
+        }
+
+    def _pt_scm_fit(self) -> Dict[str, Any]:
+        """Classic SCM donor-weighted pre-treatment-fit PT analogue.
+
+        Classic synthetic control (Abadie-Diamond-Hainmueller 2010) is not
+        parallel-trends-based: the donor weights are chosen to match the treated
+        unit's pre-period trajectory, so a small ``pre_rmspe`` is the
+        design-enforced substitute for a PT test. Unlike SDiD this reads
+        ``pre_rmspe`` (always populated on a successful fit). The in-space placebo
+        permutation inference lives in ``estimator_native_diagnostics``.
+        """
+        r = self._results
+        fit = _to_python_float(getattr(r, "pre_rmspe", None))
+        if fit is None:
+            return {
+                "status": "skipped",
+                "method": "scm_fit",
+                "reason": "SyntheticControlResults.pre_rmspe is not populated on this fit.",
+            }
+        return {
+            "status": "ran",
+            "method": "scm_fit",
             "pre_treatment_fit_rmse": fit,
             "verdict": "design_enforced_pt",
         }
@@ -3077,7 +3259,10 @@ def _check_headline(check: str, section: Dict[str, Any]) -> Optional[Any]:
     if check == "epv":
         return section.get("min_epv")
     if check == "estimator_native":
-        return section.get("pre_treatment_fit")
+        # SDiD reports ``pre_treatment_fit``; classic SCM reports ``pre_rmspe`` (its
+        # design-enforced pre-fit) — fall back so SCM's tabular headline is not None.
+        fit = section.get("pre_treatment_fit")
+        return fit if fit is not None else section.get("pre_rmspe")
     return None
 
 
@@ -3112,6 +3297,8 @@ def _pt_subject_phrase(method: Optional[str]) -> str:
         return "Pre-treatment event-study coefficients"
     if method == "synthetic_fit":
         return "The synthetic-control pre-treatment fit"
+    if method == "scm_fit":
+        return "The synthetic-control donor-weighted pre-treatment fit"
     if method == "factor":
         return "The factor-model pre-treatment fit"
     return "Pre-treatment data"
@@ -3139,7 +3326,7 @@ def _pt_stat_label(method: Optional[str]) -> Optional[str]:
         return "joint p"
     if method in {"slope_difference", "hausman"}:
         return "p"
-    if method in {"synthetic_fit", "factor"}:
+    if method in {"synthetic_fit", "scm_fit", "factor"}:
         return None
     return "joint p"
 
@@ -3299,15 +3486,30 @@ def _render_overall_interpretation(schema: Dict[str, Any], labels: Dict[str, str
                 )
         elif verdict == "design_enforced_pt":
             rmse = pt.get("pre_treatment_fit_rmse")
-            sentences.append(
-                f"The synthetic control matches the treated group's "
-                f"pre-period trajectory with RMSE = "
-                f"{rmse:.3g} (SDiD's design-enforced analogue of parallel "
-                f"trends)."
-                if isinstance(rmse, (int, float))
-                else "SDiD's synthetic control is designed to satisfy the "
-                "weighted parallel-trends analogue."
-            )
+            if pt.get("method") == "scm_fit":
+                # Classic SCM: a single treated UNIT, donor-weighted level match;
+                # significance is the in-space placebo, not SDiD's weighted PT.
+                sentences.append(
+                    f"The synthetic control reproduces the treated unit's "
+                    f"pre-period trajectory with pre-RMSPE = {rmse:.3g} (classic "
+                    f"SCM's donor-weighted, design-enforced analogue of parallel "
+                    f"trends; significance is assessed via in-space placebo "
+                    f"permutation, not a parallel-trends test)."
+                    if isinstance(rmse, (int, float))
+                    else "Classic SCM's donor-weighted synthetic control is designed "
+                    "to match the treated unit's pre-period trajectory; significance "
+                    "comes from in-space placebo permutation inference."
+                )
+            else:
+                sentences.append(
+                    f"The synthetic control matches the treated group's "
+                    f"pre-period trajectory with RMSE = "
+                    f"{rmse:.3g} (SDiD's design-enforced analogue of parallel "
+                    f"trends)."
+                    if isinstance(rmse, (int, float))
+                    else "SDiD's synthetic control is designed to satisfy the "
+                    "weighted parallel-trends analogue."
+                )
         elif verdict == "inconclusive":
             # Round-35 P1 CI review on PR #318: DR summary / overall
             # interpretation must surface the inconclusive state

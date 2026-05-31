@@ -5,12 +5,15 @@ This module contains the ``SyntheticControlResults`` dataclass, extracted from
 ``synthetic_control.py`` to mirror the TROP estimator/results split.
 
 The classic synthetic control of Abadie, Diamond & Hainmueller (2010) produces a
-gap path and donor/predictor weights but **no analytical standard error** — the
-paper proposes permutation/placebo inference instead (a later PR). Accordingly
-``se``/``t_stat``/``p_value``/``conf_int`` are always NaN on this object; the
-point estimate ``att`` (average post-period gap) is the reported quantity.
+gap path and donor/predictor weights but **no analytical standard error**.
+Accordingly ``se``/``t_stat``/``p_value``/``conf_int`` are always NaN on this
+object; the point estimate ``att`` (average post-period gap) is the reported
+quantity. Significance comes from in-space placebo permutation inference via
+:meth:`SyntheticControlResults.in_space_placebo` (a separate ``placebo_p_value``
+field, not the NaN ``p_value``).
 """
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -20,6 +23,40 @@ import pandas as pd
 from diff_diff.results import _format_survey_block, _get_significance_stars
 
 __all__ = ["SyntheticControlResults"]
+
+
+@dataclass
+class _SyntheticControlFitSnapshot:
+    """Panel state retained for post-hoc in-space placebo refits.
+
+    Holds everything ``SyntheticControlResults.in_space_placebo()`` needs to
+    refit ANY donor as the pseudo-treated unit without re-reading the original
+    DataFrame. Built in ``SyntheticControl.fit()`` and excluded from pickling by
+    ``SyntheticControlResults.__getstate__`` (it retains the full treated+donor
+    outcome/predictor panel — a privacy/size hazard if serialized).
+
+    ``specs`` is annotated ``List[Any]`` rather than ``List[_PredictorSpec]`` to
+    avoid an import cycle (``_PredictorSpec`` lives in ``synthetic_control.py``,
+    which imports this module). ``donor_ids`` is an ORDERED list so the placebo
+    iteration order — and therefore the rank / p-value — is deterministic.
+    """
+
+    pivots: Dict[str, pd.DataFrame]
+    specs: List[Any]
+    outcome: str
+    all_periods: List[Any]
+    pre_periods: List[Any]
+    post_periods: List[Any]
+    donor_ids: List[Any]
+    treated_id: Any
+    standardize: str
+    v_method: str
+    custom_v: Optional[Any]
+    n_starts: int
+    seed: Optional[int]
+    optimizer_options: Optional[Dict[str, Any]]
+    inner_max_iter: int
+    inner_min_decrease: float
 
 
 @dataclass
@@ -82,8 +119,22 @@ class SyntheticControlResults:
         ``"std"`` (per-row SD scaling) or ``"none"``.
     alpha : float
         Significance level recorded for downstream (placebo) inference.
+    rmspe_ratio : float
+        The treated unit's post/pre RMSPE ratio = ``sqrt(MSPE_post / MSPE_pre)`` —
+        the in-space placebo test statistic (ADH 2010 §2.4), computed at fit time.
+    placebo_p_value : float
+        In-space placebo permutation p-value (``rank / (n_placebos + 1)``), NaN
+        until :meth:`in_space_placebo` is run. SEPARATE from the (always-NaN)
+        analytical ``p_value``; ``is_significant`` stays bound to ``p_value``.
+    n_placebos, n_failed : int
+        Donor placebos that entered the permutation reference set / were excluded
+        for non-convergence. Both 0 until :meth:`in_space_placebo` is run.
     survey_metadata : Any, optional
         Reserved; always None in this release.
+
+    Significance for classic SCM comes from :meth:`in_space_placebo` (opt-in
+    in-space placebo permutation inference); :meth:`get_placebo_df` returns the
+    per-unit RMSPE-ratio table used for the rank.
     """
 
     att: float
@@ -108,13 +159,57 @@ class SyntheticControlResults:
     alpha: float = 0.05
     mspe_v: Optional[float] = None
     survey_metadata: Optional[Any] = field(default=None)
+    # In-space placebo permutation inference (Abadie-Diamond-Hainmueller 2010
+    # Section 2.4), populated by ``in_space_placebo()``. ``rmspe_ratio`` (the
+    # treated unit's post/pre RMSPE ratio) is computed at fit time; the rest stay
+    # at their no-inference defaults until a placebo run. NOTE: the permutation
+    # ``placebo_p_value`` is deliberately SEPARATE from ``p_value`` (which stays
+    # NaN) — it is not an analytical p-value, has no SE / t-stat, and does not
+    # flow through ``safe_inference``. ``is_significant`` likewise stays bound to
+    # the (NaN) ``p_value``, NOT ``placebo_p_value``.
+    placebo_p_value: float = np.nan
+    rmspe_ratio: float = np.nan
+    n_placebos: int = 0
+    n_failed: int = 0
 
-    # Reserved for PR-2 (placebo inference) / PR-3 (conformal). These are plain
-    # (un-annotated) class attributes, NOT dataclass fields, so dataclasses.fields()
-    # and dataclasses.asdict() cannot reach them; fit() sets them per instance.
-    _placebo_gaps = None
-    _rmspe_ratio = None
-    _fit_snapshot = None
+    def __post_init__(self) -> None:
+        # Internal state set per instance by ``fit()`` / ``in_space_placebo()``.
+        # Declared here (not as dataclass fields) so ``dataclasses.fields()`` /
+        # ``dataclasses.asdict()`` cannot reach the retained panel state.
+        # ``_fit_snapshot`` (full panel) and ``_placebo_gaps`` (per-unit gap paths)
+        # are panel-derived and nulled on pickle by ``__getstate__``; ``_placebo_df``
+        # holds the small per-unit aggregate table returned by ``get_placebo_df()``.
+        self._fit_snapshot: Optional[_SyntheticControlFitSnapshot] = None
+        self._placebo_gaps: Optional[Dict[Any, Dict[Any, float]]] = None
+        self._placebo_df: Optional[pd.DataFrame] = None
+        # Whether the treated unit's own inner Frank-Wolfe weight solve converged.
+        # in_space_placebo() fails closed when this is False: a truncated treated
+        # fit makes the ranked statistic (rmspe_ratio) not a valid SCM optimum.
+        self._fit_converged: bool = True
+        # Explicit reason an in-space placebo run was infeasible/absent, set by
+        # in_space_placebo(). summary() / _scm_native render THIS instead of
+        # reconstructing the cause from counts — n_placebos/n_failed alone cannot
+        # tell a non-converged treated fit ("treated_fit_nonconverged", n_failed=0)
+        # apart from too few donors ("too_few_donors", also n_failed=0). Values:
+        # None (not run), "ran", "treated_fit_nonconverged", "too_few_donors",
+        # "all_placebos_failed". A small string, so it survives pickling.
+        self._placebo_status: Optional[str] = None
+
+    def __getstate__(self) -> Dict[str, Any]:
+        """Exclude panel-derived internal state from pickling.
+
+        ``_fit_snapshot`` retains the full treated+donor panel and ``_placebo_gaps``
+        the per-unit gap paths — both panel-derived, a privacy/size hazard if the
+        pickle is sent elsewhere. The scalar placebo fields (``placebo_p_value``,
+        ``rmspe_ratio``, ``n_placebos``, ``n_failed``) and the small ``_placebo_df``
+        aggregate table survive. An unpickled result keeps all public fields; a
+        diagnostic call that needs the snapshot (``in_space_placebo``) then raises a
+        ValueError directing the user to re-fit. Mirrors ``SyntheticDiDResults``.
+        """
+        state = self.__dict__.copy()
+        state["_fit_snapshot"] = None
+        state["_placebo_gaps"] = None
+        return state
 
     def __repr__(self) -> str:
         """Concise string representation."""
@@ -209,12 +304,70 @@ class SyntheticControlResults:
                 f"{'ATT (avg gap)':<15} {self.att:>12.4f} {'n/a':>12} " f"{'n/a':>10} {'n/a':>10}",
                 "-" * 75,
                 "",
-                "Inference: classic SCM has no analytical standard error.",
-                "Use permutation / placebo inference for significance testing",
-                "(Abadie-Diamond-Hainmueller 2010, Section 2.4).",
-                "=" * 75,
             ]
         )
+        # Three states: (1) placebo never run -> point to in_space_placebo();
+        # (2) run with a valid reference set -> show the permutation p-value;
+        # (3) run but infeasible (no placebo entered the rank, e.g. J<2 or all
+        # donors failed) -> say so explicitly rather than implying it was not run.
+        # ``_placebo_df is not None`` is the "attempted" signal (survives pickling).
+        placebo_attempted = self._placebo_df is not None
+        if placebo_attempted and np.isfinite(self.placebo_p_value):
+            # The classic analytical fields above stay n/a (no SE); this is the
+            # permutation p-value of the post/pre RMSPE ratio, p = rank/(n_placebos+1).
+            lines.extend(
+                [
+                    "In-space placebo permutation inference "
+                    "(Abadie-Diamond-Hainmueller 2010, Section 2.4):",
+                    f"{'  RMSPE ratio (post/pre):':<34} {self.rmspe_ratio:>10.4f}",
+                    f"{'  Permutation p-value:':<34} {self.placebo_p_value:>10.4f}",
+                    f"{'  Placebos in reference set:':<34} {self.n_placebos:>10d}"
+                    + (f"  ({self.n_failed} excluded)" if self.n_failed else ""),
+                    "",
+                    "(Analytical SE is still undefined for classic SCM; the "
+                    "p-value above is permutation-based.)",
+                    "=" * 75,
+                ]
+            )
+        elif placebo_attempted:
+            # Render the SPECIFIC reason recorded by in_space_placebo(); the count
+            # fields (n_placebos=0, n_failed=0) cannot tell a non-converged treated
+            # fit apart from too-few-donors, so do not reconstruct it from counts.
+            status = getattr(self, "_placebo_status", None)
+            if status == "treated_fit_nonconverged":
+                reason = [
+                    "In-space placebo was skipped: the treated unit's own SCM fit "
+                    "did not converge at fit time (inner Frank-Wolfe weight solve",
+                    "and/or outer V search), so its RMSPE ratio is not a valid "
+                    "optimum to rank against placebos. placebo_p_value is undefined",
+                    "— re-fit with a larger inner_max_iter / looser "
+                    "inner_min_decrease and/or a larger optimizer_options['maxiter']",
+                    "/ more n_starts.",
+                ]
+            elif status == "too_few_donors":
+                reason = [
+                    "In-space placebo inference requires at least 2 donors (each "
+                    "placebo is fit against the other donors); too few were",
+                    "available. placebo_p_value is undefined. Inspect " "get_placebo_df().",
+                ]
+            else:  # "all_placebos_failed" (or a legacy unpickle without the status)
+                reason = [
+                    "In-space placebo permutation inference was attempted but "
+                    "produced no valid reference set",
+                    f"(0 placebos entered the rank; {self.n_failed} failed to "
+                    "converge). placebo_p_value is undefined — all donor refits",
+                    "failed. Inspect get_placebo_df().",
+                ]
+            lines.extend([*reason, "=" * 75])
+        else:
+            lines.extend(
+                [
+                    "Inference: classic SCM has no analytical standard error.",
+                    "Run in_space_placebo() for in-space permutation inference",
+                    "(Abadie-Diamond-Hainmueller 2010, Section 2.4).",
+                    "=" * 75,
+                ]
+            )
 
         return "\n".join(lines)
 
@@ -248,6 +401,13 @@ class SyntheticControlResults:
             "treated_unit": self.treated_unit,
             "v_method": self.v_method,
             "standardize": self.standardize,
+            # In-space placebo permutation inference. rmspe_ratio is set at fit;
+            # placebo_p_value / n_placebos / n_failed stay at their no-inference
+            # defaults (NaN / 0) until in_space_placebo() runs.
+            "rmspe_ratio": self.rmspe_ratio,
+            "placebo_p_value": self.placebo_p_value,
+            "n_placebos": self.n_placebos,
+            "n_failed": self.n_failed,
         }
         if self.survey_metadata is not None:
             sm = self.survey_metadata
@@ -293,3 +453,277 @@ class SyntheticControlResults:
             [{"unit": unit, "weight": w} for unit, w in items],
             columns=["unit", "weight"],
         )
+
+    _PLACEBO_COLS = ["unit", "pre_mspe", "post_mspe", "rmspe_ratio", "is_treated", "status"]
+
+    def get_placebo_df(self) -> pd.DataFrame:
+        """
+        Get the in-space placebo distribution as a DataFrame (one row per unit).
+
+        This is a per-unit SUMMARY table (one row per unit), enough to reproduce
+        the permutation rank and a ratio-distribution plot — NOT the per-period
+        placebo gap paths needed for the classic "spaghetti" plot (those are
+        retained internally on ``_placebo_gaps`` for the successful placebos).
+        Columns: ``unit``, ``pre_mspe``, ``post_mspe``, ``rmspe_ratio``,
+        ``is_treated``, ``status`` (``"treated"`` / ``"placebo"`` / ``"failed"``).
+        The treated unit is always present as a single ``is_treated=True,
+        status="treated"`` row (its ratio is the original J-donor fit). After a
+        placebo run **that produced a reference set** (``>= 2`` donors AND a
+        converged treated fit), the table has ``n_donors + 1`` rows — every donor
+        appears, including those whose refit did not converge (``status="failed"``
+        with NaN metrics, excluded from the rank). In the degenerate / fail-closed
+        cases (fewer than 2 donors, or a treated fit that did not converge) the
+        placebo loop does not run, so only the treated row is returned.
+
+        Populated by :meth:`in_space_placebo`; the summary table is retained on
+        pickling, so it is still returned after a round-trip. Before any placebo
+        run — including on an unpickled result that never ran one — only the
+        treated row is returned.
+
+        Returns
+        -------
+        pandas.DataFrame
+        """
+        if self._placebo_df is not None:
+            return self._placebo_df.copy()
+        from diff_diff.synthetic_control import _mspe
+
+        pre = _mspe(self.gap_path, self.pre_periods)
+        post = _mspe(self.gap_path, self.post_periods)
+        return pd.DataFrame(
+            [
+                {
+                    "unit": self.treated_unit,
+                    "pre_mspe": pre,
+                    "post_mspe": post,
+                    "rmspe_ratio": self.rmspe_ratio,
+                    "is_treated": True,
+                    "status": "treated",
+                }
+            ],
+            columns=self._PLACEBO_COLS,
+        )
+
+    def in_space_placebo(
+        self,
+        n_starts: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        In-space placebo permutation inference (Abadie-Diamond-Hainmueller 2010,
+        Section 2.4).
+
+        Reassigns the treatment to each donor in turn, re-estimates a synthetic
+        control for that pseudo-treated donor against the OTHER donors, and ranks
+        the real treated unit's post/pre RMSPE ratio among all units. Populates
+        ``placebo_p_value``, ``n_placebos`` and ``n_failed`` on this object
+        (``rmspe_ratio`` — the treated unit's own ratio — is set at fit time) and
+        returns the placebo distribution via :meth:`get_placebo_df`.
+
+        The real treated unit is **excluded from every placebo's donor pool**: its
+        post-period outcome is treatment-contaminated, so allowing a placebo to
+        load weight on it would bias the placebo gap. The ranking set is therefore
+        the ``J+1`` units ``{treated} ∪ {J placebos}``, with each placebo fit
+        against the other ``J-1`` donors (this matches the standard
+        ``SCtools::generate.placebos`` construction). The post/pre RMSPE ratio
+        normalizes by pre-treatment fit, which obviates the pre-fit-cutoff
+        filtering of ADH Figures 5-7 (journal p. 502), so no pre-fit filter is
+        offered — every converged placebo enters the rank.
+
+        The permutation ``placebo_p_value`` is intentionally distinct from
+        ``p_value`` (which stays NaN — classic SCM has no analytical SE) and from
+        ``is_significant`` (which also stays bound to the NaN ``p_value``).
+
+        A placebo is **excluded** from the reference set (counted in ``n_failed``)
+        when its fit is not a valid optimum — EITHER its inner Frank-Wolfe weight
+        solve did not converge (a truncated ``W`` is unusable) OR its outer ``V``
+        search did not converge (an under-optimized ``V`` fits the pre-period worse,
+        shrinking its RMSPE ratio and biasing the permutation p-value
+        anti-conservatively). Each placebo refit **inherits the original fit's
+        ``optimizer_options`` / ``n_starts``**, so valid inference requires settings
+        adequate for the outer ``V`` search to converge: production defaults do;
+        with cheap settings, raise ``n_starts`` here or re-fit with a larger
+        ``optimizer_options['maxiter']`` (otherwise placebos are dropped as failed).
+        The treated unit's own fit is held to the same standard — if its inner OR
+        outer search did not converge, the whole run fails closed (see below).
+
+        Parameters
+        ----------
+        n_starts : int, optional
+            Override the multistart count for each placebo's nested V search.
+            Default None inherits the original fit's ``n_starts``. The placebo
+            loop is the cost driver (one outer V search per donor); lower it for a
+            faster, coarser scan.
+
+        Returns
+        -------
+        pandas.DataFrame
+            The placebo distribution (see :meth:`get_placebo_df`).
+
+        Raises
+        ------
+        ValueError
+            If the fit snapshot is unavailable (e.g. this result was unpickled).
+        """
+        if self._fit_snapshot is None:
+            raise ValueError(
+                "in_space_placebo() requires the fit snapshot on the results "
+                "object. This result appears to have been loaded from "
+                "serialization (which excludes the snapshot) or produced by an "
+                "older estimator version. Re-fit to enable in-space placebo "
+                "inference."
+            )
+        from diff_diff.synthetic_control import _mspe, _placebo_fit_unit
+
+        snap = self._fit_snapshot
+        donors = list(snap.donor_ids)
+        n_donors = len(donors)
+        if n_starts is None:
+            n_starts_eff = snap.n_starts
+        else:
+            # Mirror the estimator constructor's validation (synthetic_control.py)
+            # so a bad override fails fast instead of silently coercing (e.g. via
+            # int(0)/int(-1)) into a degenerate or invalid permutation procedure.
+            if not isinstance(n_starts, (int, np.integer)) or n_starts < 1:
+                raise ValueError(f"n_starts override must be a positive integer, got {n_starts!r}")
+            n_starts_eff = int(n_starts)
+
+        treated_pre = _mspe(self.gap_path, snap.pre_periods)
+        treated_post = _mspe(self.gap_path, snap.post_periods)
+        treated_ratio = self.rmspe_ratio
+
+        rows: List[Dict[str, Any]] = [
+            {
+                "unit": snap.treated_id,
+                "pre_mspe": treated_pre,
+                "post_mspe": treated_post,
+                "rmspe_ratio": treated_ratio,
+                "is_treated": True,
+                "status": "treated",
+            }
+        ]
+
+        # Fail closed when the treated unit's OWN fit did not converge at fit time
+        # (inner Frank-Wolfe weight solve OR outer V search): ranking a statistic
+        # from a truncated / under-optimized treated fit would not be a valid ADH
+        # 2010 §2.4 permutation (placebos already fail-closed on non-convergence, so
+        # the treated unit must too). ``_fit_converged`` folds both failure modes, so
+        # the remediation names the knobs for each.
+        if not self._fit_converged:
+            warnings.warn(
+                "In-space placebo skipped: the treated unit's own SCM fit did not "
+                "converge at fit time (inner Frank-Wolfe weight solve and/or outer V "
+                "search), so its RMSPE ratio is not a valid optimum to rank against "
+                "placebos. placebo_p_value is NaN — re-fit with a larger "
+                "inner_max_iter / looser inner_min_decrease (inner) and/or a larger "
+                "optimizer_options['maxiter'] / more n_starts (outer V search).",
+                UserWarning,
+                stacklevel=2,
+            )
+            self.placebo_p_value = np.nan
+            self.n_placebos = 0
+            self.n_failed = 0
+            self._placebo_gaps = {}
+            self._placebo_status = "treated_fit_nonconverged"
+            self._placebo_df = pd.DataFrame(rows, columns=self._PLACEBO_COLS)
+            return self._placebo_df.copy()
+
+        if n_donors < 2:
+            warnings.warn(
+                "In-space placebo inference requires at least 2 donors (each "
+                f"placebo is fit against the other donors); only {n_donors} "
+                "available. placebo_p_value is NaN.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self.placebo_p_value = np.nan
+            self.n_placebos = 0
+            self.n_failed = 0
+            self._placebo_gaps = {}
+            self._placebo_status = "too_few_donors"
+            self._placebo_df = pd.DataFrame(rows, columns=self._PLACEBO_COLS)
+            return self._placebo_df.copy()
+
+        if n_donors == 2:
+            warnings.warn(
+                "In-space placebo with 2 donors: each placebo is fit against a "
+                "single donor (degenerate weight w=[1]) with no V search, so the "
+                "permutation p-value is coarse (only 2 placebos enter the "
+                "reference set; the smallest attainable p-value is 1/3).",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        placebo_gaps: Dict[Any, Dict[Any, float]] = {}
+        ranked_ratios: List[float] = []
+        n_failed = 0
+
+        for j in donors:
+            pool = [d for d in donors if d != j]
+            fitted = _placebo_fit_unit(snap, j, pool, n_starts_eff)
+            if fitted is None:
+                # Non-converged inner Frank-Wolfe weight solve (a truncated W is
+                # unusable for ranking): exclude from BOTH the numerator and the
+                # denominator (never penalize a truncated solve into the rank).
+                # Still record the donor with NaN metrics so get_placebo_df()
+                # returns the full treated + every-donor unit set.
+                n_failed += 1
+                rows.append(
+                    {
+                        "unit": j,
+                        "pre_mspe": np.nan,
+                        "post_mspe": np.nan,
+                        "rmspe_ratio": np.nan,
+                        "is_treated": False,
+                        "status": "failed",
+                    }
+                )
+                continue
+            gap_path_j, ratio_j = fitted
+            placebo_gaps[j] = gap_path_j
+            pre_j = _mspe(gap_path_j, snap.pre_periods)
+            post_j = _mspe(gap_path_j, snap.post_periods)
+            ranked_ratios.append(ratio_j)
+            rows.append(
+                {
+                    "unit": j,
+                    "pre_mspe": pre_j,
+                    "post_mspe": post_j,
+                    "rmspe_ratio": ratio_j,
+                    "is_treated": False,
+                    "status": "placebo",
+                }
+            )
+
+        n_placebos = len(ranked_ratios)
+        if n_placebos == 0:
+            warnings.warn(
+                "No in-space placebo entered the reference set (all donors "
+                f"failed to converge or were filtered out of {n_donors}); "
+                "placebo_p_value is NaN.",
+                UserWarning,
+                stacklevel=2,
+            )
+            p_value = np.nan
+        else:
+            # Upper-tail rank on the (unsigned) RMSPE ratio, treated unit included
+            # as the "+1". Ties counted via ``>=`` so the p-value is conservative.
+            # (The ratio squares the gaps -> direction-agnostic, NOT a signed test.)
+            rank = 1 + sum(1 for r in ranked_ratios if r >= treated_ratio)
+            p_value = rank / (n_placebos + 1)
+
+        if n_failed > 0:
+            warnings.warn(
+                f"{n_failed} of {n_donors} in-space placebos failed to converge "
+                "and were excluded from the permutation distribution; "
+                f"placebo_p_value uses the remaining {n_placebos}.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        self.placebo_p_value = float(p_value)
+        self.n_placebos = int(n_placebos)
+        self.n_failed = int(n_failed)
+        self._placebo_gaps = placebo_gaps
+        self._placebo_status = "ran" if n_placebos > 0 else "all_placebos_failed"
+        self._placebo_df = pd.DataFrame(rows, columns=self._PLACEBO_COLS)
+        return self._placebo_df.copy()

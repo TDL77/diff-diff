@@ -24,6 +24,8 @@ deterministic Tier-1 test runs in isolated-install CI without R; regenerate via
 from __future__ import annotations
 
 import json
+import pickle
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -742,8 +744,13 @@ def test_result_accessors_render():
     assert set(gdf.columns) == {"period", "gap", "phase"}
     wdf = res.get_weights_df()
     assert list(wdf.columns) == ["unit", "weight"]
-    # Reserved PR-2/3 attributes present and None.
-    assert res._placebo_gaps is None and res._rmspe_ratio is None and res._fit_snapshot is None
+    # PR-2: fit() populates the placebo refit snapshot and the treated unit's
+    # RMSPE ratio; the placebo reference distribution is not computed until
+    # in_space_placebo() runs (placebo_p_value stays NaN, gaps/df unset).
+    assert res._fit_snapshot is not None
+    assert res._placebo_gaps is None and res._placebo_df is None
+    assert np.isfinite(res.rmspe_ratio)
+    assert np.isnan(res.placebo_p_value) and res.n_placebos == 0
 
 
 def test_inferred_post_matches_explicit():
@@ -836,3 +843,489 @@ def test_basque_tier2_nested_band():
     top2 = [u for u, _ in sorted(res.donor_weights.items(), key=lambda kv: -kv[1])[:2]]
     assert set(top2) == {10, 14}
     assert res.donor_weights.get(10, 0) + res.donor_weights.get(14, 0) > 0.7
+
+
+# ---------------------------------------------------------------------------
+# In-space placebo permutation inference (Abadie-Diamond-Hainmueller 2010 §2.4)
+# ---------------------------------------------------------------------------
+
+
+def _fit_for_placebo(n_donors=4, effect=3.0, **kw):
+    """Fit with cheap settings on a panel carrying a strong post-treatment effect."""
+    df, _, _ = _make_panel(n_donors=n_donors, effect=effect)
+    opts = dict(_FAST)
+    opts.update(kw)
+    with warnings.catch_warnings():  # single-donor / poor-fit fit warnings are not under test
+        warnings.simplefilter("ignore")
+        return synthetic_control(df, "y", "treated", "unit", "year", seed=0, **opts)
+
+
+def test_in_space_placebo_strong_effect_ranks_treated_first():
+    # A 3.0-unit post effect on a treated unit that is a clean convex mix of two
+    # donors -> treated RMSPE ratio is the most extreme -> rank 1 -> p = 1/(J+1).
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pdf = res.in_space_placebo()
+    assert res.n_placebos == 4 and res.n_failed == 0
+    treated_ratio = pdf.loc[pdf["is_treated"], "rmspe_ratio"].iloc[0]
+    placebo_ratios = pdf.loc[~pdf["is_treated"], "rmspe_ratio"]
+    assert (treated_ratio > placebo_ratios).all()  # treated is the most extreme unit
+    assert res.placebo_p_value == pytest.approx(1 / (res.n_placebos + 1))
+    # Exactly one treated row; the placebo rows are exactly the donor units.
+    assert int(pdf["is_treated"].sum()) == 1
+    assert pdf.loc[pdf["is_treated"], "unit"].iloc[0] == "treated"
+    assert set(pdf.loc[~pdf["is_treated"], "unit"]) == {"d0", "d1", "d2", "d3"}
+
+
+def test_in_space_placebo_excludes_real_treated_from_donor_pools():
+    # The real treated unit is never in the donor universe, so it cannot serve as
+    # a donor for any placebo (ADH 2010 contamination guard; SCtools convention).
+    res = _fit_for_placebo(n_donors=4)
+    snap = res._fit_snapshot
+    assert snap.treated_id == "treated" and "treated" not in snap.donor_ids
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_space_placebo()
+    # Each donor became a placebo exactly once; the treated unit is not a placebo.
+    assert "treated" not in res._placebo_gaps
+    assert set(res._placebo_gaps) == set(snap.donor_ids)
+
+
+def test_in_space_placebo_p_in_valid_discrete_set():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_space_placebo()
+    valid = {(k + 1) / (res.n_placebos + 1) for k in range(res.n_placebos + 1)}
+    assert any(res.placebo_p_value == pytest.approx(v) for v in valid)
+
+
+def test_in_space_placebo_does_not_touch_analytical_inference():
+    # The permutation p-value is SEPARATE from the analytical fields, which stay
+    # NaN; is_significant stays bound to the (NaN) p_value, not placebo_p_value.
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_space_placebo()
+    assert np.isfinite(res.placebo_p_value)
+    assert_nan_inference(
+        {"se": res.se, "t_stat": res.t_stat, "p_value": res.p_value, "conf_int": res.conf_int}
+    )
+    assert res.is_significant is False
+
+
+def test_in_space_placebo_deterministic():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        p1 = res.in_space_placebo()
+        first_p = res.placebo_p_value
+        p2 = res.in_space_placebo()
+    assert res.placebo_p_value == first_p  # bit-equal p-value across runs
+    pd.testing.assert_frame_equal(p1, p2)  # identical rows AND row order
+
+
+def test_in_space_placebo_requires_two_donors():
+    res = _fit_for_placebo(n_donors=1)
+    with pytest.warns(UserWarning, match="at least 2 donors"):
+        pdf = res.in_space_placebo()
+    assert np.isnan(res.placebo_p_value) and res.n_placebos == 0
+    assert len(pdf) == 1 and bool(pdf["is_treated"].iloc[0])
+
+
+def test_in_space_placebo_two_donors_warns_coarse():
+    res = _fit_for_placebo(n_donors=2)
+    with pytest.warns(UserWarning, match="coarse"):
+        res.in_space_placebo()
+    # 2 placebos -> reference set of 3 -> p in {1/3, 2/3, 1}.
+    assert res.n_placebos == 2
+    assert any(res.placebo_p_value == pytest.approx(v) for v in (1 / 3, 2 / 3, 1.0))
+
+
+def test_in_space_placebo_fails_closed_on_nonconverged_treated_fit():
+    # inner_max_iter=1 truncates the treated unit's own Frank-Wolfe solve, so its
+    # RMSPE ratio is not a valid optimum. in_space_placebo() must fail closed
+    # (NaN p-value + warning), NOT rank a truncated treated statistic.
+    df, _, _ = _make_panel(n_donors=4, effect=3.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            seed=0,
+            n_starts=1,
+            inner_max_iter=1,
+            optimizer_options={"maxiter": 5},
+        )
+    assert res._fit_converged is False  # treated fit was truncated
+    with pytest.warns(UserWarning, match="did not converge at fit time"):
+        pdf = res.in_space_placebo()
+    assert np.isnan(res.placebo_p_value)
+    assert res.n_placebos == 0 and res.n_failed == 0  # the placebo loop never ran
+    assert len(pdf) == 1 and bool(pdf["is_treated"].iloc[0])  # treated row only
+
+
+def test_in_space_placebo_pickle_drops_snapshot_keeps_scalars():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_space_placebo()
+    restored = pickle.loads(pickle.dumps(res))
+    # Scalars survive; panel-derived state is dropped.
+    assert restored.placebo_p_value == res.placebo_p_value
+    assert restored.rmspe_ratio == res.rmspe_ratio
+    assert restored.n_placebos == res.n_placebos and restored.n_failed == res.n_failed
+    assert restored._fit_snapshot is None and restored._placebo_gaps is None
+    # The small aggregate table survives, so get_placebo_df still works...
+    assert len(restored.get_placebo_df()) == len(res.get_placebo_df())
+    # ...but a re-run of the refit raises (the snapshot is gone).
+    with pytest.raises(ValueError, match="requires the fit snapshot"):
+        restored.in_space_placebo()
+
+
+def test_in_space_placebo_custom_v_path():
+    df, _, _ = _make_panel(n_donors=4)
+    # Default predictors = all pre-period outcomes -> k = number of pre periods (T0).
+    k = 6
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=np.ones(k),
+            inner_min_decrease=1e-3,
+        )
+        pdf = res.in_space_placebo()
+    assert res.n_placebos == 4 and np.isfinite(res.placebo_p_value)
+    assert len(pdf) == 5
+
+
+def test_get_placebo_df_before_run_returns_treated_row_only():
+    res = _fit_for_placebo(n_donors=4)
+    pdf = res.get_placebo_df()
+    assert len(pdf) == 1
+    assert bool(pdf["is_treated"].iloc[0]) and pdf["status"].iloc[0] == "treated"
+    assert set(pdf.columns) == {
+        "unit",
+        "pre_mspe",
+        "post_mspe",
+        "rmspe_ratio",
+        "is_treated",
+        "status",
+    }
+
+
+def test_rmspe_ratio_floors_zero_pre_mspe():
+    # Perfect pre-fit (pre-MSPE == 0) must yield a large-but-finite ratio, not
+    # inf/nan (which would corrupt the permutation rank).
+    from diff_diff.synthetic_control import _rmspe_ratio
+
+    pre = np.zeros(5)
+    assert np.isfinite(_rmspe_ratio(pre, np.array([1.0, 2.0, 3.0]), scale=10.0))
+    # A zero-effect (post all zero) placebo has ratio 0 — the least extreme.
+    assert _rmspe_ratio(pre, np.zeros(3), scale=10.0) == 0.0
+
+
+def test_in_space_placebo_perfect_treated_fit_finite_ratio():
+    # 2-donor panel where the treated unit EQUALS d0 in the pre-period -> the inner
+    # FW solve lands on w=[1, 0], so the treated pre-MSPE is (bit-)exactly 0. The
+    # RMSPE ratio must stay FINITE (scale-aware floor), never inf/nan.
+    rng = np.random.default_rng(2)
+    T, T0 = 8, 6
+    years = list(range(2000, 2000 + T))
+    d0 = rng.normal(10, 2, T)
+    d1 = rng.normal(5, 2, T)
+    treated = d0.copy()
+    treated[T0:] += 5.0  # identical to d0 in the pre-period, clean post effect
+    rows = []
+    for name, series in (("d0", d0), ("d1", d1)):
+        for t in range(T):
+            rows.append({"unit": name, "year": years[t], "y": series[t], "treated": 0})
+    for t in range(T):
+        rows.append({"unit": "treated", "year": years[t], "y": treated[t], "treated": int(t >= T0)})
+    df = pd.DataFrame(rows)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=np.ones(T0),
+            inner_min_decrease=1e-3,
+        )
+    assert res.pre_rmspe == pytest.approx(0.0, abs=1e-9)
+    assert np.isfinite(res.rmspe_ratio) and res.rmspe_ratio > 0
+
+
+def test_in_space_placebo_immune_to_post_fit_mutation():
+    # The fit snapshot must COPY caller-owned mutable inputs (custom_v,
+    # optimizer_options), so mutating them after fit() cannot silently change
+    # in_space_placebo() output on an already-returned results object.
+    df, _, _ = _make_panel(n_donors=4)
+    cv = np.ones(6)  # k = 6 default pre-period-outcome predictors
+    opts = {"maxiter": 50}
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=cv,
+            optimizer_options=opts,
+            inner_min_decrease=1e-3,
+        )
+        p1 = res.in_space_placebo().copy()
+        pval1 = res.placebo_p_value
+    snap = res._fit_snapshot
+    assert snap.custom_v is not cv and snap.optimizer_options is not opts
+    # Mutate the caller-owned originals AFTER fit -> placebo output must not change.
+    cv[:] = [1e6, 1.0, 1.0, 1.0, 1.0, 1.0]
+    opts["maxiter"] = 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        p2 = res.in_space_placebo().copy()
+    assert res.placebo_p_value == pval1
+    pd.testing.assert_frame_equal(p1, p2)
+
+
+def test_get_placebo_df_includes_failed_donors(monkeypatch):
+    # When the treated fit IS valid but some per-donor placebo refits fail to
+    # converge, get_placebo_df() must still list EVERY unit (treated + each donor)
+    # so callers can tell which donors failed -> exactly n_donors + 1 rows.
+    # (A truncated treated fit instead fails the whole placebo run closed, tested
+    # separately; here we simulate isolated donor failures with a converged treated
+    # fit by monkeypatching the per-donor refit to fail for the first two donors.)
+    import importlib
+
+    # diff_diff.synthetic_control the SUBMODULE is shadowed by the re-exported
+    # synthetic_control FUNCTION on the package, so import the module explicitly.
+    sc = importlib.import_module("diff_diff.synthetic_control")
+
+    res = _fit_for_placebo(n_donors=4)  # treated fit converges (normal settings)
+    real_fit_unit = sc._placebo_fit_unit
+    calls = {"n": 0}
+
+    def flaky_fit_unit(snap, unit, donor_pool, n_starts):
+        calls["n"] += 1
+        if calls["n"] <= 2:  # first two donor refits "fail"
+            return None
+        return real_fit_unit(snap, unit, donor_pool, n_starts)
+
+    monkeypatch.setattr(sc, "_placebo_fit_unit", flaky_fit_unit)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pdf = res.in_space_placebo()
+    assert len(pdf) == res.n_donors + 1  # treated + every donor, regardless of failures
+    assert res.n_failed == 2 and res.n_placebos == res.n_donors - 2
+    failed = pdf[pdf["status"] == "failed"]
+    assert len(failed) == 2 and failed["rmspe_ratio"].isna().all()  # NaN metrics
+
+
+def test_in_space_placebo_fails_closed_on_underoptimized_outer_v():
+    # An under-optimized OUTER V search (optimizer maxiter=1) leaves the treated
+    # fit's V non-optimal even though the inner solve converges. Its RMSPE ratio is
+    # therefore not a valid optimum, so in_space_placebo() must FAIL CLOSED rather
+    # than silently rank an anti-conservatively under-optimized statistic.
+    df, _, _ = _make_panel(n_donors=4, effect=3.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            seed=0,
+            n_starts=1,
+            optimizer_options={"maxiter": 1},  # outer V search cannot converge
+            inner_min_decrease=1e-3,  # inner still converges -> isolates the outer path
+        )
+    assert res._fit_converged is False  # outer V non-convergence -> invalid fit
+    with pytest.warns(UserWarning, match="did not converge at fit time"):
+        res.in_space_placebo()
+    assert np.isnan(res.placebo_p_value)
+    assert res.n_placebos == 0 and res.n_failed == 0  # placebo loop never ran
+
+
+def test_outer_v_convergence_tracks_selected_incumbent(monkeypatch):
+    # _outer_solve_V must report convergence of the SELECTED (lowest-objective)
+    # incumbent, NOT "any start converged". Here the first multistart succeeds with a
+    # HIGH objective while the winning (lowest-objective) start reports success=False;
+    # the fit must be flagged non-converged so in_space_placebo() fails closed.
+    import importlib
+
+    from scipy.optimize import OptimizeResult
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    calls = {"n": 0}
+
+    def fake_minimize(fun, x0, **kwargs):
+        calls["n"] += 1
+        x0 = np.asarray(x0, dtype=float)
+        if kwargs.get("method") == "Nelder-Mead":
+            # 1st start: high objective but converged; later: low objective (wins) but NOT.
+            if calls["n"] == 1:
+                return OptimizeResult(x=x0, fun=10.0, success=True)
+            return OptimizeResult(x=x0, fun=1.0, success=False)
+        # Powell polish: neither improves on nor converges at the incumbent.
+        return OptimizeResult(x=x0, fun=5.0, success=False)
+
+    monkeypatch.setattr(sc, "minimize", fake_minimize)
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df, "y", "treated", "unit", "year", seed=0, n_starts=2, inner_min_decrease=1e-3
+        )
+    # The winning incumbent came from a success=False run -> selected V is not a
+    # validated optimum, so the fit must not be marked converged.
+    assert res._fit_converged is False
+    with pytest.warns(UserWarning, match="did not converge at fit time"):
+        res.in_space_placebo()
+    assert np.isnan(res.placebo_p_value)
+
+
+def test_outer_v_powell_success_at_worse_point_does_not_validate(monkeypatch):
+    # The Powell polish must validate the SELECTED incumbent only when it converges
+    # back AT the incumbent's objective level. Here the winning (lowest-objective)
+    # Nelder-Mead start reports success=False, and Powell "succeeds" but at a STRICTLY
+    # WORSE objective (it ended elsewhere). Powell's success says nothing about the
+    # selected incumbent, so the fit must stay non-converged and fail closed -- a flag
+    # of "converged" here would silently admit an under-optimized V into the placebo
+    # ranking and produce wrong permutation inference.
+    import importlib
+
+    from scipy.optimize import OptimizeResult
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    calls = {"n": 0}
+
+    def fake_minimize(fun, x0, **kwargs):
+        calls["n"] += 1
+        x0 = np.asarray(x0, dtype=float)
+        if kwargs.get("method") == "Nelder-Mead":
+            # Single start: lowest objective wins but reports success=False.
+            return OptimizeResult(x=x0, fun=1.0, success=False)
+        # Powell polish: SUCCEEDS, but at a strictly worse objective than the incumbent.
+        return OptimizeResult(x=x0, fun=5.0, success=True)
+
+    monkeypatch.setattr(sc, "minimize", fake_minimize)
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df, "y", "treated", "unit", "year", seed=0, n_starts=1, inner_min_decrease=1e-3
+        )
+    # Powell's success at a worse point must NOT flip the selected incumbent to converged.
+    assert res._fit_converged is False
+    with pytest.warns(UserWarning, match="did not converge at fit time"):
+        res.in_space_placebo()
+    assert np.isnan(res.placebo_p_value)
+
+
+def test_to_dict_includes_placebo_scalars():
+    res = _fit_for_placebo(n_donors=4)
+    d = res.to_dict()
+    for key in ("placebo_p_value", "rmspe_ratio", "n_placebos", "n_failed"):
+        assert key in d
+    # Before the placebo run: rmspe_ratio is finite (fit-time), placebo_p_value NaN.
+    assert np.isfinite(d["rmspe_ratio"]) and np.isnan(d["placebo_p_value"])
+    assert d["n_placebos"] == 0 and d["n_failed"] == 0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_space_placebo()
+    d2 = res.to_dict()
+    assert np.isfinite(d2["placebo_p_value"]) and d2["n_placebos"] == 4
+
+
+def test_summary_distinguishes_infeasible_placebo_from_not_run():
+    # summary() must tell "placebo never run" apart from "placebo run but produced
+    # no valid reference set" (J<2 here -> placebo_p_value NaN but it WAS attempted),
+    # and name the SPECIFIC infeasibility reason (too few donors).
+    df, _, _ = _make_panel(n_donors=1)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(df, "y", "treated", "unit", "year", seed=0, **_FAST)
+        before = res.summary()
+        res.in_space_placebo()  # infeasible: single donor -> no placebo distribution
+        after = res.summary()
+    assert "Run in_space_placebo()" in before  # never run
+    assert np.isnan(res.placebo_p_value) and res._placebo_df is not None  # attempted
+    assert res._placebo_status == "too_few_donors"
+    assert "requires at least 2 donors" in after  # specific reason, not "not run"
+    assert "Run in_space_placebo()" not in after  # not mislabeled as "not run"
+
+
+def test_summary_treated_fit_failure_names_specific_reason():
+    # When the treated unit's OWN fit fails to converge, in_space_placebo() fails
+    # closed with n_placebos=0, n_failed=0 -- the SAME counts as the J<2 case. The
+    # CI codex P2: summary() must not reconstruct the reason from those counts and
+    # narrate "too few donors or all donor refits failed" (false here); it must name
+    # the treated-fit non-convergence recorded in _placebo_status.
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            seed=0,
+            n_starts=1,
+            optimizer_options={"maxiter": 1},  # outer V cannot converge -> fail closed
+            inner_min_decrease=1e-3,
+        )
+        assert res._fit_converged is False
+        with pytest.warns(UserWarning, match="did not converge at fit time"):
+            res.in_space_placebo()
+        after = res.summary()
+    assert res._placebo_status == "treated_fit_nonconverged"
+    assert res.n_placebos == 0 and res.n_failed == 0  # same counts as J<2
+    assert "treated unit's own SCM fit" in after and "did not converge" in after
+    # Must NOT misdiagnose as the donor-side reason.
+    assert "too few" not in after.lower()
+    assert "all donor refits" not in after.lower()
+
+
+def test_in_space_placebo_rejects_invalid_n_starts():
+    # CI codex P2: the n_starts override must fail fast on non-positive / non-integer
+    # values (mirroring the estimator constructor) rather than silently coercing via
+    # int(...) into a degenerate one-start (or invalid) permutation procedure.
+    res = _fit_for_placebo(n_donors=4)
+    for bad in (0, -1, -5):
+        with pytest.raises(ValueError, match="n_starts override must be a positive integer"):
+            res.in_space_placebo(n_starts=bad)
+    for bad in (2.5, "3"):
+        with pytest.raises(ValueError, match="n_starts override must be a positive integer"):
+            res.in_space_placebo(n_starts=bad)  # type: ignore[arg-type]
+    # The placebo state must be untouched by a rejected override.
+    assert res._placebo_status is None and res._placebo_df is None
+
+
+def test_rmspe_ratio_is_root_scale():
+    # The reported statistic is the ROOT-scale ratio RMSPE_post/RMSPE_pre =
+    # sqrt(MSPE_post/MSPE_pre), NOT the MSPE ratio. Hand-worked: pre-MSPE = 4,
+    # post-MSPE = 9 -> sqrt(9/4) = 1.5 (the MSPE ratio would be 9/4 = 2.25).
+    from diff_diff.synthetic_control import _rmspe_ratio
+
+    pre = np.array([2.0, 2.0])  # MSPE = 4
+    post = np.array([3.0, 3.0])  # MSPE = 9
+    assert _rmspe_ratio(pre, post, scale=10.0) == pytest.approx(1.5)
+    # Zero post-effect -> ratio 0; perfect pre-fit -> finite (floored), not inf.
+    assert _rmspe_ratio(pre, np.zeros(2), scale=10.0) == pytest.approx(0.0)
+    assert np.isfinite(_rmspe_ratio(np.zeros(2), post, scale=10.0))

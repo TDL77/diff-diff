@@ -203,6 +203,7 @@ class BusinessReport:
         if honest_did_results is not None and type(results).__name__ in {
             "SyntheticDiDResults",
             "TROPResults",
+            "SyntheticControlResults",
         }:
             raise ValueError(
                 f"{type(results).__name__} routes robustness to "
@@ -213,8 +214,9 @@ class BusinessReport:
                 "object's native diagnostics "
                 "(SDiD: ``in_time_placebo()``, ``sensitivity_to_zeta_omega()``, "
                 "``pre_treatment_fit``; TROP: ``effective_rank``, "
-                "``loocv_score``) — BusinessReport surfaces these "
-                "automatically under ``estimator_native_diagnostics``."
+                "``loocv_score``; SyntheticControl: ``in_space_placebo()``, "
+                "``pre_rmspe``, ``get_placebo_df()``) — BusinessReport surfaces "
+                "these automatically under ``estimator_native_diagnostics``."
             )
 
         # Round-44 P1 CI review on PR #318: mirror the SDiD/TROP
@@ -646,10 +648,13 @@ class BusinessReport:
         if att is None or not np.isfinite(att):
             sign = "undefined"
         ci_level = int(round((1.0 - display_alpha) * 100))
-        is_significant = (
+        # bool(...) coerces away numpy bool_ — when ``p`` is a numpy NaN (e.g.
+        # SyntheticControl, whose analytical p_value is always NaN), ``np.isfinite``
+        # yields a numpy bool that is NOT JSON-serializable in the schema.
+        is_significant = bool(
             p is not None and np.isfinite(p) and p < phrasing_alpha if p is not None else False
         )
-        near_threshold = (
+        near_threshold = bool(
             p is not None
             and np.isfinite(p)
             and (phrasing_alpha - 0.01) < p < (phrasing_alpha + 0.001)
@@ -1002,16 +1007,25 @@ def _lift_robustness(dr: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         return {"status": "skipped", "reason": "auto_diagnostics=False"}
     bacon = dr.get("bacon") or {}
     native = dr.get("estimator_native_diagnostics") or {}
+    native_block = {
+        "status": native.get("status"),
+        "estimator": native.get("estimator"),
+        "pre_treatment_fit": native.get("pre_treatment_fit"),
+    }
+    # Classic SCM exposes pre_rmspe + donor-weight concentration + the (opt-in)
+    # in-space placebo rather than SDiD's pre_treatment_fit; surface those so the
+    # top-level robustness block is not empty for SyntheticControl.
+    if native.get("estimator") == "SyntheticControl":
+        native_block["pre_rmspe"] = native.get("pre_rmspe")
+        native_block["weight_concentration"] = native.get("weight_concentration")
+        native_block["in_space_placebo"] = native.get("in_space_placebo")
     return {
         "bacon": {
             "status": bacon.get("status"),
             "forbidden_weight": bacon.get("forbidden_weight"),
             "verdict": bacon.get("verdict"),
         },
-        "estimator_native": {
-            "status": native.get("status"),
-            "pre_treatment_fit": native.get("pre_treatment_fit"),
-        },
+        "estimator_native": native_block,
     }
 
 
@@ -1151,6 +1165,20 @@ def _describe_assumption(estimator_name: str, results: Any = None) -> Dict[str, 
                 "TROP uses low-rank factor-model identification rather than a "
                 "parallel-trends assumption; unobserved heterogeneity is "
                 "captured through latent factor loadings."
+            ),
+        }
+    if estimator_name in {"SyntheticControlResults"}:
+        return {
+            # Distinct from SDiD's "synthetic_fit" weighted-PT analogue: classic
+            # SCM is a donor-weighted level match (matches the DR "scm_fit" method).
+            "parallel_trends_variant": "scm_fit",
+            "no_anticipation": True,
+            "description": (
+                "Classic synthetic control identifies the single treated unit's "
+                "counterfactual via a donor-weighted match to its pre-treatment "
+                "trajectory (a design-enforced fit, not a parallel-trends test); "
+                "significance comes from in-space placebo permutation inference "
+                "rather than an analytical standard error."
             ),
         }
     if estimator_name == "ContinuousDiDResults":
@@ -1780,6 +1808,8 @@ def _pt_method_subject(method: Optional[str]) -> str:
         return "Pre-treatment event-study coefficients"
     if method == "synthetic_fit":
         return "The synthetic-control pre-treatment fit"
+    if method == "scm_fit":
+        return "The synthetic-control donor-weighted pre-treatment fit"
     if method == "factor":
         return "The factor-model pre-treatment fit"
     return "Pre-treatment data"
@@ -1806,7 +1836,9 @@ def _pt_method_stat_label(method: Optional[str]) -> Optional[str]:
         return "joint p"
     if method in {"slope_difference", "hausman"}:
         return "p"
-    if method in {"synthetic_fit", "factor"}:
+    if method in {"synthetic_fit", "scm_fit", "factor"}:
+        # Design-enforced fit-based paths have no p-value label (SCM's significance
+        # is the in-space placebo, not a PT joint test).
         return None
     return "joint p"
 
@@ -1844,6 +1876,13 @@ def _references_for(estimator_name: str) -> List[Dict[str, str]]:
             "citation": (
                 "Arkhangelsky, D., Athey, S., Hirshberg, D. A., Imbens, G. W., "
                 "& Wager, S. (2021). Synthetic Difference in Differences."
+            ),
+        },
+        "SyntheticControlResults": {
+            "role": "estimator",
+            "citation": (
+                "Abadie, A., Diamond, A., & Hainmueller, J. (2010). Synthetic "
+                "Control Methods for Comparative Case Studies. JASA, 105(490)."
             ),
         },
         "SunAbrahamResults": {
@@ -2181,11 +2220,20 @@ def _render_summary(schema: Dict[str, Any]) -> str:
                     "assumption." + sens_tail_see_reliable
                 )
         elif verdict == "design_enforced_pt":
-            sentences.append(
-                "The synthetic control is designed to match the treated "
-                "group's pre-period trajectory (SDiD's weighted-parallel-"
-                "trends analogue)."
-            )
+            if method == "scm_fit":
+                sentences.append(
+                    "The synthetic control is designed to reproduce the treated "
+                    "unit's pre-period trajectory via donor weights (classic SCM's "
+                    "design-enforced analogue of parallel trends); significance "
+                    "comes from in-space placebo permutation inference, not a "
+                    "parallel-trends test."
+                )
+            else:
+                sentences.append(
+                    "The synthetic control is designed to match the treated "
+                    "group's pre-period trajectory (SDiD's weighted-parallel-"
+                    "trends analogue)."
+                )
         elif verdict == "inconclusive":
             # Round-35 P1 CI review on PR #318: a ``verdict=="inconclusive"``
             # state means one or more pre-period coefficients had

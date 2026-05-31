@@ -616,7 +616,7 @@ scm.fit(
 ) -> SyntheticControlResults
 ```
 
-**Inference:** NONE analytical — `se`/`t_stat`/`p_value`/`conf_int` are NaN. `att` is the mean post-period gap; use placebo/permutation inference for significance (planned follow-up). Predictor periods must lie within the pre window; `post_periods` must be a contiguous suffix cross-checked against `D` (no anticipation).
+**Inference:** NONE analytical — `se`/`t_stat`/`p_value`/`conf_int` are always NaN. `att` is the mean post-period gap. Significance via in-space placebo permutation inference: `results.in_space_placebo()` reassigns treatment to each donor, refits against the other J-1 donors (the real treated unit is excluded from every placebo pool), and sets `placebo_p_value = rank/(n_placebos+1)` from the post/pre RMSPE-ratio. The permutation `placebo_p_value` is a SEPARATE field from the (NaN) `p_value`; `is_significant` stays bound to `p_value`. Predictor periods must lie within the pre window; `post_periods` must be a contiguous suffix cross-checked against `D` (no anticipation).
 
 **Usage:**
 
@@ -1278,7 +1278,10 @@ Returned by `SyntheticControl.fit()`.
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `att` | `float` | Mean post-period gap (reported point estimate) |
-| `se`, `t_stat`, `p_value`, `conf_int` | `float` / tuple | Always NaN — no analytical SE (permutation inference planned) |
+| `se`, `t_stat`, `p_value`, `conf_int` | `float` / tuple | Always NaN — no analytical SE (use `in_space_placebo()`) |
+| `placebo_p_value` | `float` | In-space placebo permutation p-value, `rank/(n_placebos+1)` (NaN until `in_space_placebo()` runs) |
+| `rmspe_ratio` | `float` | Treated unit's post/pre RMSPE ratio = sqrt(post-MSPE/pre-MSPE) (the placebo test statistic; set at fit) |
+| `n_placebos`, `n_failed` | `int` | Placebos in the reference set / excluded for non-convergence |
 | `n_obs` | `int` | Treated + donor rows over all periods |
 | `n_donors` | `int` | Donor units in the (post-filter) pool |
 | `n_pre_periods`, `n_post_periods` | `int` | Period counts |
@@ -1292,7 +1295,7 @@ Returned by `SyntheticControl.fit()`.
 | `pre_periods`, `post_periods` | `list` | Calendar-sorted periods |
 | `v_method`, `standardize` | `str` | Echoed configuration |
 
-**Methods:** `summary()`, `print_summary()`, `to_dict()`, `to_dataframe()`, `get_gap_df()`, `get_weights_df()`
+**Methods:** `in_space_placebo()` (opt-in permutation inference; refits one synthetic control per donor), `get_placebo_df()` (per-unit RMSPE-ratio table incl. the treated row), `summary()`, `print_summary()`, `to_dict()`, `to_dataframe()`, `get_gap_df()`, `get_weights_df()`
 
 ### TripleDifferenceResults
 

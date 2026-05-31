@@ -618,6 +618,23 @@ def describe_target_parameter(results: Any) -> Dict[str, Any]:
             "reference": "REGISTRY.md Sec. TROP",
         }
 
+    if name == "SyntheticControlResults":
+        return {
+            "name": "SCM ATT (mean post-treatment gap for the single treated unit)",
+            "definition": (
+                "The average over the post-treatment periods of the gap "
+                "``alpha_hat_{1t} = Y_{1t} - sum_j w_j Y_{jt}`` between the single "
+                "treated unit and its donor-weighted synthetic control (Abadie, "
+                "Diamond & Hainmueller 2010). There is no population-averaging or "
+                "sampling estimand — it is the effect on the one treated unit; "
+                "significance is assessed by in-space placebo permutation inference "
+                "(no analytical standard error)."
+            ),
+            "aggregation": "single_unit_gap",
+            "headline_attribute": "att",
+            "reference": "REGISTRY.md Sec. SyntheticControl",
+        }
+
     # Default: unrecognized result class. Fall through with a neutral
     # block — agents / downstream consumers can still dispatch on
     # ``aggregation="unknown"`` and fall back to generic ATT narration.
