@@ -1254,7 +1254,8 @@ def test_to_dict_includes_placebo_scalars():
 
 def test_summary_distinguishes_infeasible_placebo_from_not_run():
     # summary() must tell "placebo never run" apart from "placebo run but produced
-    # no valid reference set" (J<2 here -> placebo_p_value NaN but it WAS attempted).
+    # no valid reference set" (J<2 here -> placebo_p_value NaN but it WAS attempted),
+    # and name the SPECIFIC infeasibility reason (too few donors).
     df, _, _ = _make_panel(n_donors=1)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -1264,8 +1265,56 @@ def test_summary_distinguishes_infeasible_placebo_from_not_run():
         after = res.summary()
     assert "Run in_space_placebo()" in before  # never run
     assert np.isnan(res.placebo_p_value) and res._placebo_df is not None  # attempted
-    assert "attempted but" in after and "no valid reference set" in after
+    assert res._placebo_status == "too_few_donors"
+    assert "requires at least 2 donors" in after  # specific reason, not "not run"
     assert "Run in_space_placebo()" not in after  # not mislabeled as "not run"
+
+
+def test_summary_treated_fit_failure_names_specific_reason():
+    # When the treated unit's OWN fit fails to converge, in_space_placebo() fails
+    # closed with n_placebos=0, n_failed=0 -- the SAME counts as the J<2 case. The
+    # CI codex P2: summary() must not reconstruct the reason from those counts and
+    # narrate "too few donors or all donor refits failed" (false here); it must name
+    # the treated-fit non-convergence recorded in _placebo_status.
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            seed=0,
+            n_starts=1,
+            optimizer_options={"maxiter": 1},  # outer V cannot converge -> fail closed
+            inner_min_decrease=1e-3,
+        )
+        assert res._fit_converged is False
+        with pytest.warns(UserWarning, match="did not converge at fit time"):
+            res.in_space_placebo()
+        after = res.summary()
+    assert res._placebo_status == "treated_fit_nonconverged"
+    assert res.n_placebos == 0 and res.n_failed == 0  # same counts as J<2
+    assert "treated unit's own SCM fit" in after and "did not converge" in after
+    # Must NOT misdiagnose as the donor-side reason.
+    assert "too few" not in after.lower()
+    assert "all donor refits" not in after.lower()
+
+
+def test_in_space_placebo_rejects_invalid_n_starts():
+    # CI codex P2: the n_starts override must fail fast on non-positive / non-integer
+    # values (mirroring the estimator constructor) rather than silently coercing via
+    # int(...) into a degenerate one-start (or invalid) permutation procedure.
+    res = _fit_for_placebo(n_donors=4)
+    for bad in (0, -1, -5):
+        with pytest.raises(ValueError, match="n_starts override must be a positive integer"):
+            res.in_space_placebo(n_starts=bad)
+    for bad in (2.5, "3"):
+        with pytest.raises(ValueError, match="n_starts override must be a positive integer"):
+            res.in_space_placebo(n_starts=bad)  # type: ignore[arg-type]
+    # The placebo state must be untouched by a rejected override.
+    assert res._placebo_status is None and res._placebo_df is None
 
 
 def test_rmspe_ratio_is_root_scale():

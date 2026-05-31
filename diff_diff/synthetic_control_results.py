@@ -186,6 +186,14 @@ class SyntheticControlResults:
         # in_space_placebo() fails closed when this is False: a truncated treated
         # fit makes the ranked statistic (rmspe_ratio) not a valid SCM optimum.
         self._fit_converged: bool = True
+        # Explicit reason an in-space placebo run was infeasible/absent, set by
+        # in_space_placebo(). summary() / _scm_native render THIS instead of
+        # reconstructing the cause from counts — n_placebos/n_failed alone cannot
+        # tell a non-converged treated fit ("treated_fit_nonconverged", n_failed=0)
+        # apart from too few donors ("too_few_donors", also n_failed=0). Values:
+        # None (not run), "ran", "treated_fit_nonconverged", "too_few_donors",
+        # "all_placebos_failed". A small string, so it survives pickling.
+        self._placebo_status: Optional[str] = None
 
     def __getstate__(self) -> Dict[str, Any]:
         """Exclude panel-derived internal state from pickling.
@@ -322,16 +330,35 @@ class SyntheticControlResults:
                 ]
             )
         elif placebo_attempted:
-            lines.extend(
-                [
+            # Render the SPECIFIC reason recorded by in_space_placebo(); the count
+            # fields (n_placebos=0, n_failed=0) cannot tell a non-converged treated
+            # fit apart from too-few-donors, so do not reconstruct it from counts.
+            status = getattr(self, "_placebo_status", None)
+            if status == "treated_fit_nonconverged":
+                reason = [
+                    "In-space placebo was skipped: the treated unit's own SCM fit "
+                    "did not converge at fit time (inner Frank-Wolfe weight solve",
+                    "and/or outer V search), so its RMSPE ratio is not a valid "
+                    "optimum to rank against placebos. placebo_p_value is undefined",
+                    "— re-fit with a larger inner_max_iter / looser "
+                    "inner_min_decrease and/or a larger optimizer_options['maxiter']",
+                    "/ more n_starts.",
+                ]
+            elif status == "too_few_donors":
+                reason = [
+                    "In-space placebo inference requires at least 2 donors (each "
+                    "placebo is fit against the other donors); too few were",
+                    "available. placebo_p_value is undefined. Inspect " "get_placebo_df().",
+                ]
+            else:  # "all_placebos_failed" (or a legacy unpickle without the status)
+                reason = [
                     "In-space placebo permutation inference was attempted but "
                     "produced no valid reference set",
                     f"(0 placebos entered the rank; {self.n_failed} failed to "
-                    "converge). placebo_p_value is undefined — too few donors or "
-                    "all donor refits failed. Inspect get_placebo_df().",
-                    "=" * 75,
+                    "converge). placebo_p_value is undefined — all donor refits",
+                    "failed. Inspect get_placebo_df().",
                 ]
-            )
+            lines.extend([*reason, "=" * 75])
         else:
             lines.extend(
                 [
@@ -550,7 +577,15 @@ class SyntheticControlResults:
         snap = self._fit_snapshot
         donors = list(snap.donor_ids)
         n_donors = len(donors)
-        n_starts_eff = snap.n_starts if n_starts is None else int(n_starts)
+        if n_starts is None:
+            n_starts_eff = snap.n_starts
+        else:
+            # Mirror the estimator constructor's validation (synthetic_control.py)
+            # so a bad override fails fast instead of silently coercing (e.g. via
+            # int(0)/int(-1)) into a degenerate or invalid permutation procedure.
+            if not isinstance(n_starts, (int, np.integer)) or n_starts < 1:
+                raise ValueError(f"n_starts override must be a positive integer, got {n_starts!r}")
+            n_starts_eff = int(n_starts)
 
         treated_pre = _mspe(self.gap_path, snap.pre_periods)
         treated_post = _mspe(self.gap_path, snap.post_periods)
@@ -588,6 +623,7 @@ class SyntheticControlResults:
             self.n_placebos = 0
             self.n_failed = 0
             self._placebo_gaps = {}
+            self._placebo_status = "treated_fit_nonconverged"
             self._placebo_df = pd.DataFrame(rows, columns=self._PLACEBO_COLS)
             return self._placebo_df.copy()
 
@@ -603,6 +639,7 @@ class SyntheticControlResults:
             self.n_placebos = 0
             self.n_failed = 0
             self._placebo_gaps = {}
+            self._placebo_status = "too_few_donors"
             self._placebo_df = pd.DataFrame(rows, columns=self._PLACEBO_COLS)
             return self._placebo_df.copy()
 
@@ -668,8 +705,9 @@ class SyntheticControlResults:
             )
             p_value = np.nan
         else:
-            # One-sided rank, treated unit included as the "+1". Ties counted via
-            # ``>=`` so the p-value is conservative.
+            # Upper-tail rank on the (unsigned) RMSPE ratio, treated unit included
+            # as the "+1". Ties counted via ``>=`` so the p-value is conservative.
+            # (The ratio squares the gaps -> direction-agnostic, NOT a signed test.)
             rank = 1 + sum(1 for r in ranked_ratios if r >= treated_ratio)
             p_value = rank / (n_placebos + 1)
 
@@ -686,5 +724,6 @@ class SyntheticControlResults:
         self.n_placebos = int(n_placebos)
         self.n_failed = int(n_failed)
         self._placebo_gaps = placebo_gaps
+        self._placebo_status = "ran" if n_placebos > 0 else "all_placebos_failed"
         self._placebo_df = pd.DataFrame(rows, columns=self._PLACEBO_COLS)
         return self._placebo_df.copy()

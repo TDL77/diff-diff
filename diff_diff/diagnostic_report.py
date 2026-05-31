@@ -2283,17 +2283,39 @@ class DiagnosticReport:
                 "n_placebos": _to_python_scalar(n_placebos),
                 "n_failed": _to_python_scalar(getattr(r, "n_failed", None)),
             }
-            # Distinguish a valid run from an attempted-but-infeasible one (J<2,
-            # treated-fit non-convergence, or zero successful donor refits) so BR/DR
+            # Distinguish a valid run from an attempted-but-infeasible one so BR/DR
             # consumers see an explicit status/reason rather than a bare NaN p-value.
+            # The SPECIFIC cause comes from the results' recorded ``_placebo_status``
+            # (n_placebos/n_failed alone cannot tell a non-converged treated fit
+            # apart from too-few-donors).
             if n_placebos > 0 and np.isfinite(placebo_p):
                 block["status"] = "ran"
             else:
+                placebo_status = getattr(r, "_placebo_status", None)
+                _reasons = {
+                    "treated_fit_nonconverged": (
+                        "in_space_placebo() was run but the treated unit's own SCM "
+                        "fit did not converge at fit time, so its RMSPE ratio is not "
+                        "a valid optimum to rank against placebos; placebo_p_value "
+                        "is NaN."
+                    ),
+                    "too_few_donors": (
+                        "in_space_placebo() was run but fewer than 2 donors are "
+                        "available (each placebo is fit against the other donors); "
+                        "placebo_p_value is NaN."
+                    ),
+                    "all_placebos_failed": (
+                        "in_space_placebo() was run but every donor refit failed to "
+                        "converge, so no placebo entered the reference set; "
+                        "placebo_p_value is NaN."
+                    ),
+                }
                 block["status"] = "infeasible"
-                block["reason"] = (
+                block["reason"] = _reasons.get(
+                    placebo_status,
                     "in_space_placebo() was run but produced no valid reference set "
                     "(fewer than 2 donors, a non-converged treated fit, or all donor "
-                    "refits failed); placebo_p_value is NaN."
+                    "refits failed); placebo_p_value is NaN.",
                 )
             out["in_space_placebo"] = block
         else:
