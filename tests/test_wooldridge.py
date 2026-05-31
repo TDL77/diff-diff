@@ -1752,9 +1752,14 @@ class TestWooldridgeVcovType:
         assert res.cluster_name is None
         assert res.n_clusters is None
 
-    def test_conley_rejected_at_init_with_deferral(self):
-        with pytest.raises(ValueError, match="conley"):
-            WooldridgeDiD(vcov_type="conley")
+    def test_conley_accepted_at_init(self):
+        """conley is a valid constructor value as of the conley-threading PR
+        (coords/cutoff/unit/lag validation is deferred to fit()). The OLS-only
+        restriction still rejects conley on the logit/poisson paths."""
+        est = WooldridgeDiD(vcov_type="conley")
+        assert est.vcov_type == "conley"
+        with pytest.raises(NotImplementedError):
+            WooldridgeDiD(method="logit", vcov_type="conley")
 
     def test_invalid_vcov_type_rejected(self):
         with pytest.raises(ValueError, match="hc4"):

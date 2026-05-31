@@ -301,7 +301,7 @@ class WooldridgeDiD:
         Random seed for reproducibility.
     rank_deficient_action : {"warn", "error", "silent"}
         How to handle rank-deficient design matrices.
-    vcov_type : {"classical", "hc1", "hc2", "hc2_bm"}, default "hc1"
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, default "hc1"
         Variance-covariance family for the analytical sandwich, OLS path only.
         ``hc1`` (default) preserves the prior bit-equal CR1 Liang-Zeger
         cluster-robust behavior via the within-transform path. ``hc2_bm``
@@ -313,10 +313,18 @@ class WooldridgeDiD:
         ``classical`` / ``hc2`` are supported via the same full-dummy route AND
         an auto-drop of the unit auto-cluster (one-way families don't compose
         with cluster_ids per the linalg validator). Explicit ``cluster="X"`` +
-        one-way ``vcov_type`` raises at the validator.
+        one-way ``vcov_type`` raises at the validator. ``"conley"`` (Conley 1999
+        spatial-HAC) threads the ``conley_*`` params through ``solve_ols`` on the
+        within-transform design (``conley_lag_cutoff=0`` = within-period spatial only;
+        ``>0`` adds within-unit Bartlett serial — the panel-aware path, not pooled
+        cross-sectional, since ``conley_time`` / ``conley_unit`` are always supplied); the
+        unit auto-cluster is dropped (an explicit ``cluster=`` enables the
+        spatial+cluster product kernel) and ``survey_design=`` / ``weights`` /
+        ``n_bootstrap>0`` are rejected. Conley is OLS-path-only; it routes
+        through the full-dummy design when ``cohort_trends=True`` (same as the
+        other full-dummy families), and its vcov flows through
+        ``aggregate("group"|"calendar"|"event")``.
 
-        ``conley`` is REJECTED at ``__init__`` (would require threading
-        ``conley_*`` params through ``solve_ols``; tracked in TODO.md).
         ``method`` in ``{"logit","poisson"}`` + ``vcov_type != "hc1"`` is
         REJECTED at ``__init__``: the GLM QMLE sandwich path uses pseudo-
         residuals, and CR2-BM composition with QMLE on canonical-link pseudo-
@@ -364,6 +372,11 @@ class WooldridgeDiD:
         rank_deficient_action: str = "warn",
         vcov_type: str = "hc1",
         cohort_trends: bool = False,
+        conley_coords: Optional[Tuple[str, str]] = None,
+        conley_cutoff_km: Optional[float] = None,
+        conley_metric: str = "haversine",
+        conley_kernel: str = "bartlett",
+        conley_lag_cutoff: Optional[int] = None,
     ) -> None:
         self._validate_constructor_args(
             method=method,
@@ -386,6 +399,11 @@ class WooldridgeDiD:
         self.rank_deficient_action = rank_deficient_action
         self.vcov_type = vcov_type
         self.cohort_trends = cohort_trends
+        self.conley_coords = conley_coords
+        self.conley_cutoff_km = conley_cutoff_km
+        self.conley_metric = conley_metric
+        self.conley_kernel = conley_kernel
+        self.conley_lag_cutoff = conley_lag_cutoff
         # Track whether the user explicitly opted out of the "hc1" default.
         # The auto-cluster-at-unit default in `_fit_ols` is suppressed only
         # when the user explicitly opts into a one-way family (``hc2``,
@@ -426,18 +444,10 @@ class WooldridgeDiD:
                 f"bootstrap_weights must be one of {_VALID_BOOTSTRAP_WEIGHTS}, "
                 f"got {bootstrap_weights!r}"
             )
-        if vcov_type not in ("classical", "hc1", "hc2", "hc2_bm"):
-            if vcov_type == "conley":
-                raise ValueError(
-                    "vcov_type='conley' is not yet wired up for WooldridgeDiD: "
-                    "would require threading conley_coords / conley_cutoff_km / "
-                    "conley_metric / conley_kernel / conley_time / conley_unit / "
-                    "conley_lag_cutoff through the solve_ols call. "
-                    "Tracked in TODO.md (WooldridgeDiD Conley follow-up row)."
-                )
+        if vcov_type not in ("classical", "hc1", "hc2", "hc2_bm", "conley"):
             raise ValueError(
                 f"vcov_type must be one of "
-                f"{{'classical','hc1','hc2','hc2_bm'}}; got '{vcov_type}'"
+                f"{{'classical','hc1','hc2','hc2_bm','conley'}}; got '{vcov_type}'"
             )
         if method != "ols" and vcov_type != "hc1":
             raise NotImplementedError(
@@ -482,6 +492,11 @@ class WooldridgeDiD:
             "rank_deficient_action": self.rank_deficient_action,
             "vcov_type": self.vcov_type,
             "cohort_trends": self.cohort_trends,
+            "conley_coords": self.conley_coords,
+            "conley_cutoff_km": self.conley_cutoff_km,
+            "conley_metric": self.conley_metric,
+            "conley_kernel": self.conley_kernel,
+            "conley_lag_cutoff": self.conley_lag_cutoff,
         }
 
     def set_params(self, **params: Any) -> "WooldridgeDiD":
@@ -631,8 +646,10 @@ class WooldridgeDiD:
         # analytical sandwich, so the requested HC2/HC2-BM/classical family
         # would be silently discarded. Mirrors the SunAbraham PR #472 pattern
         # at ``sun_abraham.py:688-705``. Use vcov_type='hc1' (default) for
-        # survey designs.
-        if survey_design is not None and self.vcov_type != "hc1":
+        # survey designs. ``conley`` is excluded here so it routes to the
+        # dedicated conley validator at 0f below, which raises the
+        # conley-specific survey-deferral message (consistent with SunAbraham).
+        if survey_design is not None and self.vcov_type not in ("hc1", "conley"):
             raise NotImplementedError(
                 f"WooldridgeDiD(vcov_type={self.vcov_type!r}) with "
                 "survey_design is not yet supported: the survey-design TSL "
@@ -664,6 +681,34 @@ class WooldridgeDiD:
                 "fit (when cluster=X). Use vcov_type='hc1' / 'hc2_bm' for "
                 "the analytical sandwich, or set n_bootstrap=0."
             )
+
+        # 0f. Conley spatial-HAC front-door validation + bootstrap incompatibility.
+        # The shared validator gates coords/cutoff/unit/lag/cluster columns and
+        # rejects conley + survey_design (deferred). WooldridgeDiD has no
+        # `inference=` param, so pass the literal "analytical"; the OLS-only
+        # restriction is already enforced by the method != "ols" guard in
+        # _validate_constructor_args.
+        if self.vcov_type == "conley":
+            from diff_diff.conley import _validate_conley_estimator_inputs
+
+            _validate_conley_estimator_inputs(
+                estimator_name="WooldridgeDiD",
+                data=data,
+                unit=unit,
+                conley_coords=self.conley_coords,
+                conley_cutoff_km=self.conley_cutoff_km,
+                conley_lag_cutoff=self.conley_lag_cutoff,
+                survey_design=survey_design,
+                inference="analytical",
+                cluster=self.cluster,
+            )
+            if self.n_bootstrap > 0:
+                raise ValueError(
+                    "WooldridgeDiD(vcov_type='conley') is incompatible with "
+                    "n_bootstrap > 0: the multiplier bootstrap overrides the "
+                    "analytical Conley sandwich. Use n_bootstrap=0 for the "
+                    "analytical Conley SE, or vcov_type='hc1' with the bootstrap."
+                )
 
         # 1. Filter to analysis sample
         sample = _filter_sample(df, unit, time, cohort, self.control_group, self.anticipation)
@@ -900,12 +945,15 @@ class WooldridgeDiD:
     ) -> WooldridgeDiDResults:
         """OLS path: within-transform FE, solve_ols, cluster SE.
 
-        Branches on ``self.vcov_type``: ``hc1`` (default) preserves the prior
-        within-transform path bit-equally; ``hc2``/``hc2_bm``/``classical``
-        auto-route to a full-dummy saturated design because FWL preserves
-        cohort coefficients but NOT the hat matrix (HC2 leverage and
-        Bell-McCaffrey Satterthwaite DOF require the full FE projection).
-        Mirrors the SunAbraham PR #472 pattern at ``sun_abraham.py:1364``.
+        Branches on ``self.vcov_type``: ``hc1`` (default) and ``conley``
+        (spatial-HAC) use the within-transform path bit-equally;
+        ``hc2``/``hc2_bm``/``classical`` — and any vcov_type when
+        ``cohort_trends=True`` — auto-route to a full-dummy saturated design
+        because FWL preserves cohort coefficients but NOT the hat matrix (HC2
+        leverage and Bell-McCaffrey Satterthwaite DOF require the full FE
+        projection; conley works on either design, with row-aligned coord/time/
+        unit arrays threaded into ``solve_ols``). Mirrors the SunAbraham PR #472
+        pattern at ``sun_abraham.py:1364``.
         """
         # Reset index so numpy positional indexing matches pandas groupby
         sample = sample.reset_index(drop=True)
@@ -917,6 +965,12 @@ class WooldridgeDiD:
         if self.cluster is not None:
             cluster_col: Optional[str] = self.cluster
             cluster_ids: Optional[np.ndarray] = sample[cluster_col].values
+        elif self.vcov_type == "conley":
+            # Conley: never auto-cluster at unit (a unit-cluster product kernel
+            # would zero every between-unit spatial pair). Explicit cluster=
+            # enables the combined spatial+cluster product kernel (above).
+            cluster_col = None
+            cluster_ids = None
         elif self.vcov_type in ("hc2", "classical") and self._vcov_type_explicit:
             cluster_col = None
             cluster_ids = None
@@ -1073,6 +1127,23 @@ class WooldridgeDiD:
         # names aren't in ``col_names``, and ``solve_ols`` only uses names for
         # rank-deficiency error messages (cosmetic). Omitting under full-dummy
         # keeps rank-deficiency reporting consistent with the column count.
+        # Conley spatial-HAC arrays, row-aligned to X. Both the within-transform
+        # and full-dummy designs are built from `sample` without dropping rows
+        # (conley rejects survey/weights, so there is no weight-based drop), so
+        # coordinates/time/unit read from the post-reset `sample` align to X.
+        if self.vcov_type == "conley":
+            assert self.conley_coords is not None  # guaranteed by _validate_conley_estimator_inputs
+            _cl_coords = np.column_stack(
+                [
+                    sample[self.conley_coords[0]].values.astype(np.float64),
+                    sample[self.conley_coords[1]].values.astype(np.float64),
+                ]
+            )
+            _cl_time = np.asarray(sample[time].values)
+            _cl_unit = sample[unit].values
+        else:
+            _cl_coords = _cl_time = _cl_unit = None
+
         coefs, resids, vcov = solve_ols(
             X,
             y,
@@ -1083,6 +1154,13 @@ class WooldridgeDiD:
             weights=survey_weights,
             weight_type=survey_weight_type,
             vcov_type=self.vcov_type,
+            conley_coords=_cl_coords,
+            conley_cutoff_km=self.conley_cutoff_km,
+            conley_metric=self.conley_metric,
+            conley_kernel=self.conley_kernel,
+            conley_time=_cl_time,
+            conley_unit=_cl_unit,
+            conley_lag_cutoff=self.conley_lag_cutoff,
         )
 
         # Extract cohort-trend coefficients (paper W2025 Eq. 8.1 ``δ_g``).
@@ -1423,6 +1501,7 @@ class WooldridgeDiD:
                 if resolved is not None
                 else (int(np.unique(cluster_ids).size) if cluster_ids is not None else None)
             ),
+            conley_lag_cutoff=(self.conley_lag_cutoff if self.vcov_type == "conley" else None),
             _gt_weights=gt_weights,
             _n_g_per_cohort=n_g_per_cohort,
             _gt_vcov=gt_vcov,

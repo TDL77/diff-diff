@@ -340,7 +340,12 @@ SunAbraham(
     n_bootstrap: int = 0,                        # 0 = analytical cluster-robust SEs
     seed: int | None = None,
     rank_deficient_action: str = "warn",
-    vcov_type: str = "hc1",                       # {"classical","hc1","hc2","hc2_bm"}; classical/hc2/hc2_bm route through full-dummy saturated design. survey_design=... is rejected for classical/hc2/hc2_bm (use hc1 default for surveys)
+    vcov_type: str = "hc1",                       # {"classical","hc1","hc2","hc2_bm","conley"}; classical/hc2/hc2_bm via full-dummy saturated design; conley (Conley-1999 spatial-HAC) via within-transform — also pass conley_coords=(lat_col,lon_col), conley_cutoff_km, conley_lag_cutoff (unit auto-cluster dropped; explicit cluster= -> spatial+cluster product kernel). survey_design=/weights/n_bootstrap rejected for non-hc1 (use hc1 default for surveys)
+    conley_coords: tuple[str, str] | None = None, # (lat_col, lon_col); required for vcov_type="conley"
+    conley_cutoff_km: float | None = None,        # km bandwidth; required for vcov_type="conley"
+    conley_metric: str = "haversine",             # "haversine" | "euclidean"
+    conley_kernel: str = "bartlett",              # "bartlett" | "uniform"
+    conley_lag_cutoff: int | None = None,         # within-unit Bartlett max lag (0 = spatial-only)
 )
 ```
 
@@ -1033,13 +1038,18 @@ WooldridgeDiD(
     bootstrap_weights: str = "rademacher",
     seed: int | None = None,
     rank_deficient_action: str = "warn",
-    vcov_type: str = "hc1",                 # {"classical","hc1","hc2","hc2_bm"}; OLS path only.
+    vcov_type: str = "hc1",                 # {"classical","hc1","hc2","hc2_bm","conley"}; OLS path only.
                                             # hc1 (default) preserves prior bit-equal within-transform CR1.
                                             # hc2_bm auto-routes to full-dummy + clubSandwich WLS-CR2 algebra.
                                             # classical/hc2 auto-drop the unit auto-cluster (one-way only);
                                             # explicit cluster="X" + one-way raises at the linalg validator.
-                                            # conley deferred. method != "ols" requires hc1 (QMLE CR2-BM TBD).
+                                            # conley (Conley-1999 spatial-HAC, OLS only): within-transform via solve_ols — pass conley_coords=(lat,lon), conley_cutoff_km, conley_lag_cutoff; survey/weights/n_bootstrap rejected. method != "ols" requires hc1 (QMLE CR2-BM TBD).
                                             # survey_design= requires hc1 (survey TSL overrides analytical).
+    conley_coords: tuple[str, str] | None = None,  # (lat_col, lon_col); required for vcov_type="conley"
+    conley_cutoff_km: float | None = None,         # km bandwidth; required for vcov_type="conley"
+    conley_metric: str = "haversine",              # "haversine" | "euclidean"
+    conley_kernel: str = "bartlett",               # "bartlett" | "uniform"
+    conley_lag_cutoff: int | None = None,          # within-unit Bartlett max lag (0 = spatial-only)
 )
 ```
 

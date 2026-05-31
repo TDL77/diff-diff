@@ -65,7 +65,9 @@ class SunAbrahamResults:
         Type of control group used.
     vcov_type : str
         Variance-covariance family from the fit-time configuration
-        (``classical``, ``hc1``, ``hc2``, or ``hc2_bm``). Note: when a
+        (``classical``, ``hc1``, ``hc2``, ``hc2_bm``, or ``conley``). On the
+        ``"conley"`` (spatial-HAC) path, ``conley_lag_cutoff`` and
+        ``cluster_name`` are populated. Note: when a
         ``survey_design=`` is supplied, the survey-design Taylor Series
         Linearization (or replicate-weight refit) variance overrides
         this analytical family — the field still records the
@@ -114,6 +116,12 @@ class SunAbrahamResults:
     # in ``event_study_vcov_index``.
     event_study_vcov: Optional["np.ndarray"] = field(default=None, repr=False)
     event_study_vcov_index: Optional[list] = field(default=None, repr=False)
+    # Conley spatial-HAC metadata (populated only when vcov_type == "conley").
+    # ``conley_lag_cutoff`` carries the within-unit Bartlett max lag; ``cluster_name``
+    # records an explicit cluster= column (enables the spatial+cluster product-kernel
+    # summary label). Both None on non-conley fits.
+    conley_lag_cutoff: Optional[int] = None
+    cluster_name: Optional[str] = None
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property
@@ -191,6 +199,21 @@ class SunAbrahamResults:
         if self.survey_metadata is not None:
             sm = self.survey_metadata
             lines.extend(_format_survey_block(sm, 85))
+
+        # Conley spatial-HAC variance label (rendered only on the conley path;
+        # a full vcov-family label for all families is a separate follow-up).
+        if self.vcov_type == "conley":
+            from diff_diff.results import _format_vcov_label
+
+            _vlabel = _format_vcov_label(
+                self.vcov_type,
+                cluster_name=self.cluster_name,
+                n_clusters=None,
+                n_obs=self.n_obs,
+                conley_lag_cutoff=self.conley_lag_cutoff,
+            )
+            if _vlabel:
+                lines.extend([f"Std. errors: {_vlabel}", ""])
 
         # Overall ATT
         lines.extend(
@@ -401,10 +424,17 @@ class SunAbraham:
         - "warn": Issue warning and drop linearly dependent columns (default)
         - "error": Raise ValueError
         - "silent": Drop columns silently without warning
-    vcov_type : {"classical", "hc1", "hc2", "hc2_bm"}, default "hc1"
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, default "hc1"
         Variance-covariance family for analytical inference. Defaults to
         ``"hc1"`` (preserves prior behavior bit-equally; SA historically
-        hard-coded HC1).
+        hard-coded HC1). ``"conley"`` (Conley 1999 spatial-HAC) threads the
+        ``conley_*`` params through the within-transform saturated regression
+        (``conley_lag_cutoff=0`` = within-period spatial only; ``conley_lag_cutoff>0``
+        adds the within-unit Bartlett serial term — note ``conley_time`` / ``conley_unit``
+        are always supplied, so this is the panel-aware path, not pooled cross-sectional);
+        the unit auto-cluster is dropped (an explicit
+        ``cluster=`` enables the spatial+cluster product kernel) and
+        ``survey_design=`` / ``weights`` / ``n_bootstrap>0`` are rejected.
 
         - ``"classical"``: homoskedastic OLS standard errors. One-way
           only (linalg validator rejects ``classical + cluster_ids``);
@@ -447,8 +477,11 @@ class SunAbraham:
         downgrade unit-level PSUs to per-observation PSUs. Use
         ``vcov_type="hc1"`` (default) for survey designs.
 
-        ``conley`` spatial-HAC is not yet wired up for SunAbraham; see
-        TODO.md.
+        ``conley`` (Conley-1999 spatial-HAC) is threaded through the
+        within-transform saturated regression (pass ``conley_coords`` /
+        ``conley_cutoff_km`` / ``conley_lag_cutoff``); ``survey_design=`` /
+        ``weights`` / ``n_bootstrap>0`` are rejected. See the ``vcov_type``
+        parameter docs above.
 
     Attributes
     ----------
@@ -527,6 +560,11 @@ class SunAbraham:
         seed: Optional[int] = None,
         rank_deficient_action: str = "warn",
         vcov_type: str = "hc1",
+        conley_coords: Optional[Tuple[str, str]] = None,
+        conley_cutoff_km: Optional[float] = None,
+        conley_metric: str = "haversine",
+        conley_kernel: str = "bartlett",
+        conley_lag_cutoff: Optional[int] = None,
     ):
         if control_group not in ["never_treated", "not_yet_treated"]:
             raise ValueError(
@@ -540,18 +578,10 @@ class SunAbraham:
                 f"got '{rank_deficient_action}'"
             )
 
-        if vcov_type not in ("classical", "hc1", "hc2", "hc2_bm"):
-            if vcov_type == "conley":
-                raise ValueError(
-                    "vcov_type='conley' is not yet wired up for SunAbraham: "
-                    "would require threading conley_coords / conley_cutoff_km / "
-                    "conley_metric / conley_kernel / conley_time / conley_unit / "
-                    "conley_lag_cutoff through the saturated regression call. "
-                    "Tracked in TODO.md (SA Conley follow-up row)."
-                )
+        if vcov_type not in ("classical", "hc1", "hc2", "hc2_bm", "conley"):
             raise ValueError(
                 f"vcov_type must be one of "
-                f"{{'classical','hc1','hc2','hc2_bm'}}; got '{vcov_type}'"
+                f"{{'classical','hc1','hc2','hc2_bm','conley'}}; got '{vcov_type}'"
             )
 
         self.control_group = control_group
@@ -562,6 +592,11 @@ class SunAbraham:
         self.seed = seed
         self.rank_deficient_action = rank_deficient_action
         self.vcov_type = vcov_type
+        self.conley_coords = conley_coords
+        self.conley_cutoff_km = conley_cutoff_km
+        self.conley_metric = conley_metric
+        self.conley_kernel = conley_kernel
+        self.conley_lag_cutoff = conley_lag_cutoff
         # Track whether the user explicitly opted out of the "hc1" default.
         # The auto-cluster-at-unit default in `fit` is suppressed only when
         # the user explicitly opts into a one-way family — currently
@@ -650,6 +685,33 @@ class SunAbraham:
                     "NA/NaN values. Cluster labels must be non-missing for "
                     "all observations to produce well-formed cluster-robust "
                     "standard errors. Drop or impute the NA rows before fit."
+                )
+
+        # Conley spatial-HAC front-door validation + bootstrap incompatibility.
+        # The shared validator gates coords/cutoff/unit/lag/cluster columns and
+        # rejects conley + survey_design (deferred). SA has no `inference=` param,
+        # so pass the literal "analytical"; the n_bootstrap override is gated
+        # separately below (the validator only knows about wild_bootstrap).
+        if self.vcov_type == "conley":
+            from diff_diff.conley import _validate_conley_estimator_inputs
+
+            _validate_conley_estimator_inputs(
+                estimator_name="SunAbraham",
+                data=data,
+                unit=unit,
+                conley_coords=self.conley_coords,
+                conley_cutoff_km=self.conley_cutoff_km,
+                conley_lag_cutoff=self.conley_lag_cutoff,
+                survey_design=survey_design,
+                inference="analytical",
+                cluster=self.cluster,
+            )
+            if self.n_bootstrap > 0:
+                raise ValueError(
+                    "SunAbraham(vcov_type='conley') is incompatible with "
+                    "n_bootstrap > 0: the pairs bootstrap overrides the "
+                    "analytical Conley sandwich. Use n_bootstrap=0 for the "
+                    "analytical Conley SE, or vcov_type='hc1' with the bootstrap."
                 )
 
         # Resolve survey design if provided
@@ -791,6 +853,12 @@ class SunAbraham:
         # subguard.
         if self.cluster is not None:
             cluster_var: Optional[str] = self.cluster
+        elif self.vcov_type == "conley":
+            # Conley: never auto-cluster at unit. A unit-cluster product kernel
+            # would zero every between-unit spatial pair, collapsing the spatial
+            # pooling. Only an explicit cluster= enables the combined
+            # spatial+cluster product kernel (handled by the branch above).
+            cluster_var = None
         elif self.vcov_type in ("hc2", "classical") and self._vcov_type_explicit:
             cluster_var = None
         else:
@@ -1249,6 +1317,8 @@ class SunAbraham:
             survey_metadata=survey_metadata,
             event_study_vcov=es_vcov,
             event_study_vcov_index=es_vcov_index,
+            conley_lag_cutoff=(self.conley_lag_cutoff if self.vcov_type == "conley" else None),
+            cluster_name=(self.cluster if self.vcov_type == "conley" else None),
         )
 
         self.is_fitted_ = True
@@ -1282,8 +1352,9 @@ class SunAbraham:
         Y_it = α_i + λ_t + Σ_g Σ_e [δ_{g,e} × D_{g,e,it}] + X'γ + ε
 
         Uses within-transformation for unit + time fixed effects when
-        ``vcov_type == "hc1"`` (cluster-robust HC1 does not depend on
-        the hat matrix; matches ``fixest::sunab()`` convention). Routes
+        ``vcov_type in {"hc1", "conley"}`` (neither the cluster-robust HC1
+        sandwich nor the Conley spatial-HAC sandwich depends on the hat
+        matrix; matches ``fixest::sunab()`` convention). Routes
         to a full-dummy saturated design when
         ``vcov_type ∈ {"classical","hc2","hc2_bm"}``. For ``hc2`` /
         ``hc2_bm``, FWL preserves coefficients/residuals but NOT the
@@ -1413,7 +1484,8 @@ class SunAbraham:
             # Interactions occupy columns 1..n_interactions (intercept at 0)
             coef_offset = 1
         else:
-            # Within-transform path (existing) — used for hc1 only.
+            # Within-transform path (existing) — used for hc1 and conley
+            # (both robust sandwiches that don't need the full FE hat matrix).
             # classical now routes through the full-dummy branch above so its
             # (n-k) finite-sample correction matches R's lm() interpretation.
             variables_to_demean = [outcome] + interaction_cols
@@ -1438,6 +1510,23 @@ class SunAbraham:
             # Interactions occupy columns 0..n_interactions-1 (no intercept)
             coef_offset = 0
 
+        # Conley spatial-HAC arrays, row-aligned to the design X. SA routes
+        # conley through the within-transform path (use_full_dummy excludes it),
+        # and within_transform preserves row order/count, so coordinates read
+        # from `df` (== df_reg, the post-filter frame) align to X's rows.
+        if vcov_type == "conley":
+            assert self.conley_coords is not None  # guaranteed by _validate_conley_estimator_inputs
+            _cl_coords = np.column_stack(
+                [
+                    df[self.conley_coords[0]].values.astype(np.float64),
+                    df[self.conley_coords[1]].values.astype(np.float64),
+                ]
+            )
+            _cl_time = np.asarray(df[time].values)
+            _cl_unit = df[unit].values
+        else:
+            _cl_coords = _cl_time = _cl_unit = None
+
         reg = LinearRegression(
             include_intercept=False,  # Full design already built (with or without intercept)
             robust=True,  # legacy alias; vcov_type below overrides
@@ -1447,6 +1536,13 @@ class SunAbraham:
             weight_type=survey_weight_type,
             survey_design=resolved_survey,
             vcov_type=vcov_type,
+            conley_coords=_cl_coords,
+            conley_cutoff_km=self.conley_cutoff_km,
+            conley_metric=self.conley_metric,
+            conley_kernel=self.conley_kernel,
+            conley_time=_cl_time,
+            conley_unit=_cl_unit,
+            conley_lag_cutoff=self.conley_lag_cutoff,
         ).fit(X, y, df_adjustment=df_adj)
 
         vcov = reg.vcov_
@@ -2145,6 +2241,11 @@ class SunAbraham:
             "seed": self.seed,
             "rank_deficient_action": self.rank_deficient_action,
             "vcov_type": self.vcov_type,
+            "conley_coords": self.conley_coords,
+            "conley_cutoff_km": self.conley_cutoff_km,
+            "conley_metric": self.conley_metric,
+            "conley_kernel": self.conley_kernel,
+            "conley_lag_cutoff": self.conley_lag_cutoff,
         }
 
     def set_params(self, **params) -> "SunAbraham":

@@ -3131,3 +3131,529 @@ class TestConleyCluster:
                 post_periods=[1, 2],
                 reference_period=0,
             )
+
+
+# =====================================================================
+# Conley spatial-HAC threading for SunAbraham + WooldridgeDiD (one PR).
+# Both route conley through the within-transform (FWL) path, reusing the
+# already-conleyreg-validated solve_ols/conley machinery. The
+# FWL-composability tests are the primary correctness anchor: on a
+# 2-period / 2-group panel both estimators reduce to a single DiD cell,
+# so the estimator's within-transform conley SE must equal a manually
+# built full-dummy [intercept, treated*post, C(unit), C(time)] design run
+# through solve_ols(vcov_type="conley") on the same coords/time/unit
+# (validates that the FWL-demeaned conley sandwich equals the full-dummy
+# conley SE — the property asserted by comment at twfe.py:163-168 and
+# relied on by the SA / WooldridgeDiD threading). This is NOT a fresh
+# conleyreg parity claim: the conleyreg goldens use raw OLS designs with
+# no demeaning, so they do not transitively certify the demeaned estimand.
+# =====================================================================
+
+
+def _two_group_panel(seed=21, n_units=40, treat_period=2):
+    """2-period (t=1,2) panel: first half treated at ``treat_period``, rest
+    never-treated. ``cohort`` = treat_period for treated / 0 for never
+    (SA first_treat + Wooldridge cohort convention); ``treated`` is the 0/1
+    DiD indicator. Each unit has a fixed (lat, lon)."""
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    rows = []
+    for u in range(n_units):
+        lat = rng.uniform(-30, 30)
+        lon = rng.uniform(-100, 100)
+        treated = int(u < n_units // 2)
+        cohort = treat_period if treated else 0
+        for t in (1, 2):
+            post = 1 if (treated and t == treat_period) else 0
+            y = 1.0 + 0.4 * t + 0.3 * (u / n_units) + 1.5 * post + rng.normal(0, 0.5)
+            rows.append(
+                {
+                    "unit": u,
+                    "time": t,
+                    "y": y,
+                    "treated": treated,
+                    "cohort": cohort,
+                    "lat": lat,
+                    "lon": lon,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _full_dummy_conley_treatment(df, cutoff_km, lag_cutoff):
+    """Full-dummy FWL-composability reference. Builds
+    [intercept, treated*post, C(unit) drop-first, C(time) drop-first], runs
+    solve_ols(vcov_type='conley') on the same coords/time/unit, and returns
+    ``(coef_treated_post, se_treated_post)``. On a 2-period/2-group panel the
+    single DiD cell equals the treated*post coefficient, so SunAbraham /
+    WooldridgeDiD-conley (within-transform) must match this."""
+    from diff_diff.linalg import solve_ols
+
+    last_t = df["time"].max()
+    treated_post = (df["treated"].values * (df["time"].values == last_t)).astype(float)
+    units = np.unique(df["unit"].values)
+    times = np.unique(df["time"].values)
+    unit_d = np.column_stack([(df["unit"].values == u).astype(float) for u in units[1:]])
+    time_d = np.column_stack([(df["time"].values == t).astype(float) for t in times[1:]])
+    X = np.column_stack([np.ones(len(df)), treated_post, unit_d, time_d])
+    y = df["y"].values.astype(float)
+    coords = np.column_stack([df["lat"].values, df["lon"].values]).astype(float)
+    out = solve_ols(
+        X,
+        y,
+        vcov_type="conley",
+        conley_coords=coords,
+        conley_cutoff_km=cutoff_km,
+        conley_kernel="bartlett",
+        conley_metric="haversine",
+        conley_time=df["time"].values,
+        conley_unit=df["unit"].values,
+        conley_lag_cutoff=lag_cutoff,
+        return_vcov=True,
+    )
+    coef, vcov = out[0], out[-1]
+    return float(coef[1]), float(np.sqrt(vcov[1, 1]))
+
+
+class TestConleySunAbraham:
+    """vcov_type='conley' threading for SunAbraham (within-transform / FWL path)."""
+
+    def test_panel_finite_se_and_metadata(self):
+        from diff_diff import SunAbraham
+
+        df = _two_group_panel(seed=21)
+        res = SunAbraham(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, outcome="y", unit="unit", time="time", first_treat="cohort")
+        assert np.isfinite(res.overall_att)
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+        assert res.vcov_type == "conley"
+        assert res.conley_lag_cutoff == 1
+        assert "Conley" in res.summary()
+
+    def test_cross_sectional_finite_se(self):
+        from diff_diff import SunAbraham
+
+        df = _two_group_panel(seed=22)
+        res = SunAbraham(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=0,
+        ).fit(df, outcome="y", unit="unit", time="time", first_treat="cohort")
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+        assert res.conley_lag_cutoff == 0
+
+    def test_fwl_composability_vs_full_dummy(self):
+        """SA within-transform conley SE == full-dummy conley SE (atol 1e-7)."""
+        from diff_diff import SunAbraham
+
+        df = _two_group_panel(seed=23)
+        res = SunAbraham(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2500.0,
+            conley_lag_cutoff=1,
+        ).fit(df, outcome="y", unit="unit", time="time", first_treat="cohort")
+        ref_coef, ref_se = _full_dummy_conley_treatment(df, 2500.0, 1)
+        assert res.overall_att == pytest.approx(ref_coef, abs=1e-8)
+        assert res.overall_se == pytest.approx(ref_se, abs=1e-7)
+
+    def test_att_bit_identical_across_vcov(self):
+        """conley is additive: ATT must be bit-identical to the hc1 fit."""
+        from diff_diff import SunAbraham
+
+        df = _two_group_panel(seed=24)
+        kw = dict(outcome="y", unit="unit", time="time", first_treat="cohort")
+        r_conley = SunAbraham(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, **kw)
+        r_hc1 = SunAbraham(vcov_type="hc1").fit(df, **kw)
+        assert r_conley.overall_att == pytest.approx(r_hc1.overall_att, abs=1e-12)
+
+    def test_conley_plus_cluster_product_kernel(self):
+        from diff_diff import SunAbraham
+
+        df = _two_group_panel(seed=25)
+        kw = dict(outcome="y", unit="unit", time="time", first_treat="cohort")
+        plain = SunAbraham(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, **kw)
+        clustered = SunAbraham(
+            vcov_type="conley",
+            cluster="unit",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, **kw)
+        assert np.isfinite(clustered.overall_se) and clustered.overall_se > 0
+        assert clustered.overall_se != plain.overall_se
+        assert "cluster" in clustered.summary().lower()
+
+    def test_reject_survey_design(self):
+        from diff_diff import SunAbraham
+        from diff_diff.survey import SurveyDesign
+
+        df = _two_group_panel(seed=26)
+        df["w"] = 1.0
+        with pytest.raises(NotImplementedError):
+            SunAbraham(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                df,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="cohort",
+                survey_design=SurveyDesign(weights="w"),
+            )
+
+    def test_reject_n_bootstrap(self):
+        from diff_diff import SunAbraham
+
+        df = _two_group_panel(seed=27)
+        with pytest.raises(ValueError, match="n_bootstrap"):
+            SunAbraham(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+                n_bootstrap=20,
+                seed=0,
+            ).fit(df, outcome="y", unit="unit", time="time", first_treat="cohort")
+
+    def test_reject_missing_cutoff(self):
+        from diff_diff import SunAbraham
+
+        df = _two_group_panel(seed=28)
+        with pytest.raises(ValueError):
+            SunAbraham(vcov_type="conley", conley_coords=("lat", "lon"), conley_lag_cutoff=1).fit(
+                df, outcome="y", unit="unit", time="time", first_treat="cohort"
+            )
+
+    def test_unbalanced_panel_alignment(self):
+        """Dropping a few control-unit rows must not misalign coords (the within
+        transform preserves order; arrays come from the post-filter frame)."""
+        from diff_diff import SunAbraham
+
+        df = _two_group_panel(seed=29)
+        # Drop a few never-treated (cohort==0) rows to unbalance without breaking
+        # identification of the treated cells.
+        drop_idx = df.index[df["cohort"] == 0][:3]
+        df = df.drop(index=drop_idx).reset_index(drop=True)
+        res = SunAbraham(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, outcome="y", unit="unit", time="time", first_treat="cohort")
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+
+    def test_get_set_params_carry_conley(self):
+        from diff_diff import SunAbraham
+
+        est = SunAbraham(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_kernel="uniform",
+            conley_lag_cutoff=2,
+        )
+        p = est.get_params()
+        assert p["conley_coords"] == ("lat", "lon")
+        assert p["conley_cutoff_km"] == 2000.0
+        assert p["conley_kernel"] == "uniform"
+        assert p["conley_lag_cutoff"] == 2
+        est2 = SunAbraham()
+        est2.set_params(**p)
+        assert est2.get_params() == p
+
+    def test_conley_multi_cohort_event_study(self):
+        """conley on a multi-cohort staggered panel: the interaction-weighted
+        cohort aggregation + delta-method event-study SEs (W @ vcov_conley @ W.T)
+        all stay finite (the single-cell FWL test cannot exercise this)."""
+        from diff_diff import SunAbraham
+
+        df = _staggered_panel(seed=61)
+        res = SunAbraham(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=3000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, outcome="y", unit="unit", time="time", first_treat="cohort")
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+        assert len(res.event_study_effects) >= 2  # genuinely multi-period
+        for e, eff in res.event_study_effects.items():
+            assert np.isfinite(eff["se"]), (e, eff)
+
+
+class TestConleyWooldridge:
+    """vcov_type='conley' threading for WooldridgeDiD-OLS (within-transform / FWL path)."""
+
+    def test_panel_finite_se_and_metadata(self):
+        from diff_diff import WooldridgeDiD
+
+        df = _two_group_panel(seed=31)
+        res = WooldridgeDiD(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        assert np.isfinite(res.overall_att)
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+        assert res.vcov_type == "conley"
+        assert res.conley_lag_cutoff == 1
+        assert "Conley" in res.summary()
+
+    def test_cross_sectional_finite_se(self):
+        from diff_diff import WooldridgeDiD
+
+        df = _two_group_panel(seed=32)
+        res = WooldridgeDiD(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=0,
+        ).fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+        assert res.conley_lag_cutoff == 0
+
+    def test_fwl_composability_vs_full_dummy(self):
+        """WDID within-transform conley SE == full-dummy conley SE (atol 1e-7)."""
+        from diff_diff import WooldridgeDiD
+
+        df = _two_group_panel(seed=33)
+        res = WooldridgeDiD(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2500.0,
+            conley_lag_cutoff=1,
+        ).fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        ref_coef, ref_se = _full_dummy_conley_treatment(df, 2500.0, 1)
+        assert res.overall_att == pytest.approx(ref_coef, abs=1e-8)
+        assert res.overall_se == pytest.approx(ref_se, abs=1e-7)
+
+    def test_att_bit_identical_across_vcov(self):
+        from diff_diff import WooldridgeDiD
+
+        df = _two_group_panel(seed=34)
+        kw = dict(outcome="y", unit="unit", time="time", cohort="cohort")
+        r_conley = WooldridgeDiD(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, **kw)
+        r_hc1 = WooldridgeDiD(vcov_type="hc1").fit(df, **kw)
+        assert r_conley.overall_att == pytest.approx(r_hc1.overall_att, abs=1e-12)
+
+    def test_conley_plus_cluster_product_kernel(self):
+        from diff_diff import WooldridgeDiD
+
+        df = _two_group_panel(seed=35)
+        kw = dict(outcome="y", unit="unit", time="time", cohort="cohort")
+        plain = WooldridgeDiD(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, **kw)
+        clustered = WooldridgeDiD(
+            vcov_type="conley",
+            cluster="unit",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, **kw)
+        assert np.isfinite(clustered.overall_se) and clustered.overall_se > 0
+        assert clustered.overall_se != plain.overall_se
+        assert "cluster" in clustered.summary().lower()
+
+    def test_reject_survey_design(self):
+        from diff_diff import WooldridgeDiD
+        from diff_diff.survey import SurveyDesign
+
+        df = _two_group_panel(seed=36)
+        df["w"] = 1.0
+        with pytest.raises(NotImplementedError):
+            WooldridgeDiD(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+            ).fit(
+                df,
+                outcome="y",
+                unit="unit",
+                time="time",
+                cohort="cohort",
+                survey_design=SurveyDesign(weights="w"),
+            )
+
+    def test_reject_n_bootstrap(self):
+        from diff_diff import WooldridgeDiD
+
+        df = _two_group_panel(seed=37)
+        with pytest.raises(ValueError, match="n_bootstrap"):
+            WooldridgeDiD(
+                vcov_type="conley",
+                conley_coords=("lat", "lon"),
+                conley_cutoff_km=2000.0,
+                conley_lag_cutoff=1,
+                n_bootstrap=20,
+            ).fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+
+    def test_reject_logit_plus_conley_at_init(self):
+        from diff_diff import WooldridgeDiD
+
+        with pytest.raises(NotImplementedError):
+            WooldridgeDiD(method="logit", vcov_type="conley")
+
+    def test_reject_missing_cutoff(self):
+        from diff_diff import WooldridgeDiD
+
+        df = _two_group_panel(seed=38)
+        with pytest.raises(ValueError):
+            WooldridgeDiD(
+                vcov_type="conley", conley_coords=("lat", "lon"), conley_lag_cutoff=1
+            ).fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+
+    def test_unbalanced_panel_alignment(self):
+        from diff_diff import WooldridgeDiD
+
+        df = _two_group_panel(seed=39)
+        drop_idx = df.index[df["cohort"] == 0][:3]
+        df = df.drop(index=drop_idx).reset_index(drop=True)
+        res = WooldridgeDiD(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_lag_cutoff=1,
+        ).fit(df, outcome="y", unit="unit", time="time", cohort="cohort")
+        assert np.isfinite(res.overall_se) and res.overall_se > 0
+
+    def test_atomic_set_params_round_trip(self):
+        from diff_diff import WooldridgeDiD
+
+        est = WooldridgeDiD(
+            vcov_type="conley",
+            conley_coords=("lat", "lon"),
+            conley_cutoff_km=2000.0,
+            conley_kernel="uniform",
+            conley_lag_cutoff=2,
+        )
+        p = est.get_params()
+        assert p["conley_coords"] == ("lat", "lon")
+        assert p["conley_lag_cutoff"] == 2
+        est2 = WooldridgeDiD()
+        est2.set_params(**p)
+        assert est2.get_params() == p
+
+    def test_conley_cohort_trends_full_dummy(self):
+        """conley + cohort_trends=True routes through the full-dummy design.
+        Conley must actually engage (SE differs from hc1) and stay finite; the
+        ATT stays bit-identical (conley is additive)."""
+        from diff_diff import WooldridgeDiD
+
+        df = _staggered_panel(seed=51)
+        kw = dict(outcome="y", unit="unit", time="time", cohort="cohort")
+        ck = dict(conley_coords=("lat", "lon"), conley_cutoff_km=3000.0, conley_lag_cutoff=1)
+        r_conley = WooldridgeDiD(vcov_type="conley", cohort_trends=True, **ck).fit(df, **kw)
+        r_hc1 = WooldridgeDiD(vcov_type="hc1", cohort_trends=True).fit(df, **kw)
+        assert np.isfinite(r_conley.overall_se) and r_conley.overall_se > 0
+        assert r_conley.vcov_type == "conley"
+        # conley actually engaged on the full-dummy path (SE differs from hc1)
+        assert r_conley.overall_se != r_hc1.overall_se
+        assert r_conley.overall_att == pytest.approx(r_hc1.overall_att, abs=1e-9)
+
+    def test_conley_aggregations_finite(self):
+        """conley vcov flows through aggregate('group'|'calendar'|'event') —
+        finite overall + per-key SEs (no NaN/crash on the conley path)."""
+        from diff_diff import WooldridgeDiD
+
+        kw = dict(outcome="y", unit="unit", time="time", cohort="cohort")
+        ck = dict(conley_coords=("lat", "lon"), conley_cutoff_km=3000.0, conley_lag_cutoff=1)
+        for agg, field in (
+            ("group", "group_effects"),
+            ("calendar", "calendar_effects"),
+            ("event", "event_study_effects"),
+        ):
+            # aggregate() mutates in place, so re-fit per aggregation type.
+            res = WooldridgeDiD(vcov_type="conley", **ck).fit(_staggered_panel(seed=52), **kw)
+            res.aggregate(agg)
+            assert np.isfinite(res.overall_se) and res.overall_se > 0, agg
+            effects = getattr(res, field)
+            assert effects, (agg, "no effects populated")
+            for key, eff in effects.items():
+                assert np.isfinite(eff["se"]), (agg, key, eff)
+
+    def test_conley_cohort_trends_aggregations_finite(self):
+        """The distinct full-dummy Conley aggregation interaction: conley +
+        cohort_trends=True (full-dummy) THEN aggregate each — finite overall +
+        per-key SEs."""
+        from diff_diff import WooldridgeDiD
+
+        kw = dict(outcome="y", unit="unit", time="time", cohort="cohort")
+        ck = dict(conley_coords=("lat", "lon"), conley_cutoff_km=3000.0, conley_lag_cutoff=1)
+        for agg, field in (
+            ("group", "group_effects"),
+            ("calendar", "calendar_effects"),
+            ("event", "event_study_effects"),
+        ):
+            res = WooldridgeDiD(vcov_type="conley", cohort_trends=True, **ck).fit(
+                _staggered_panel(seed=53), **kw
+            )
+            res.aggregate(agg)
+            assert np.isfinite(res.overall_se) and res.overall_se > 0, agg
+            effects = getattr(res, field)
+            assert effects, (agg, "no effects populated")
+            for key, eff in effects.items():
+                assert np.isfinite(eff["se"]), (agg, key, eff)
+
+    def test_conley_control_group_never_treated(self):
+        """conley on the OLS + control_group='never_treated' interaction-matrix
+        branch (distinct cell set from the default not_yet_treated) — finite SE,
+        ATT bit-identical to the hc1 fit (conley is additive)."""
+        from diff_diff import WooldridgeDiD
+
+        df = _staggered_panel(seed=62)
+        kw = dict(outcome="y", unit="unit", time="time", cohort="cohort")
+        ck = dict(conley_coords=("lat", "lon"), conley_cutoff_km=3000.0, conley_lag_cutoff=1)
+        r_conley = WooldridgeDiD(vcov_type="conley", control_group="never_treated", **ck).fit(
+            df, **kw
+        )
+        r_hc1 = WooldridgeDiD(vcov_type="hc1", control_group="never_treated").fit(df, **kw)
+        assert np.isfinite(r_conley.overall_se) and r_conley.overall_se > 0
+        assert r_conley.overall_att == pytest.approx(r_hc1.overall_att, abs=1e-9)
+
+
+def _staggered_panel(seed=51, n_units=36, n_periods=6):
+    """Staggered multi-cohort panel with lat/lon for conley aggregate / cohort_trends
+    tests: cohorts {3, 4, 0(never)}, ``n_periods`` periods, one fixed (lat, lon) per unit."""
+    import pandas as pd
+
+    rng = np.random.default_rng(seed)
+    recs = []
+    for u in range(n_units):
+        lat = rng.uniform(-30, 30)
+        lon = rng.uniform(-100, 100)
+        g = (3, 4, 0)[u % 3]
+        for t in range(1, n_periods + 1):
+            post = 1 if (g > 0 and t >= g) else 0
+            y = 0.3 * (u / n_units) + 0.4 * t + 1.5 * post + rng.normal(0, 0.5)
+            recs.append({"unit": u, "time": t, "y": y, "cohort": g, "lat": lat, "lon": lon})
+    return pd.DataFrame(recs)

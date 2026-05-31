@@ -212,7 +212,7 @@ def _validate_conley_estimator_inputs(
 ) -> None:
     """Shared front-door validation for ``vcov_type='conley'`` on the
     estimator entry points (``DifferenceInDifferences``, ``MultiPeriodDiD``,
-    ``TwoWayFixedEffects``).
+    ``TwoWayFixedEffects``, ``SunAbraham``, and ``WooldridgeDiD``-OLS).
 
     Each estimator's ``fit()`` calls this BEFORE building Conley arrays or
     threading them into the variance computation. The eight checks below
