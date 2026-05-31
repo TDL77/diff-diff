@@ -120,6 +120,12 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     cases = loader.load_cases(args.strata)
     if args.limit:
         cases = cases[: args.limit]
+    if not cases:
+        print(
+            f"no cases selected (strata={args.strata}, limit={args.limit}); nothing to run",
+            file=sys.stderr,
+        )
+        return 1
     configs = _resolve_configs(args.configs)
     if configs is None:
         print(_bad_configs_msg(args.configs), file=sys.stderr)
@@ -151,6 +157,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     repo_root = find_repo_root()
     loader = CorpusLoader(CORPUS_DIR, repo_root)
     cases = loader.load_cases(args.strata)
+    if not cases:
+        print(f"no cases selected (strata={args.strata}); nothing to run", file=sys.stderr)
+        return 1
     configs = _resolve_configs(args.configs)
     if configs is None:
         print(_bad_configs_msg(args.configs), file=sys.stderr)

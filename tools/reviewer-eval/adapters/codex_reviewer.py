@@ -28,7 +28,7 @@ import threading
 import time
 from typing import Optional
 
-from engine.models import Config, ReviewOutput
+from engine.models import Config, ReviewOutput, to_jsonable
 
 from adapters import ci_prompt, worktree
 from adapters.openai_review_loader import load_openai_review
@@ -90,20 +90,25 @@ class CodexReviewer:
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
     def case_tag(self, case) -> str:
-        """Content fingerprint of the CASE (not the config), folded into the run
-        key so editing a case's diff / SHAs / PR-context invalidates its cached run.
+        """Content fingerprint of the WHOLE case, folded into the run key so ANY
+        edit invalidates the cached run AND its stored snapshot.
 
-        Cheap (no worktree materialization): hashes the fixture metadata minus the
-        machine-local ``_case_dir`` plus the patch file's bytes when present. For a
-        ``stored_patch`` case that is base_sha + inject.diff + pr_context, which
-        fully determine the prompt; for a ``git_range`` case the explicit base/head
-        SHAs live in the fixture dict and are captured by the metadata hash.
-        Fail-loud: a declared-but-missing patch raises (that drift must surface).
+        Covers everything that affects either the PROMPT or the GRADING: the fixture
+        (base/head SHAs, pr_context) + the patch file's bytes, AND the scoring
+        metadata (title, ground_truth, expected_severity, expect_no_blockers,
+        allow_severities, known_fp_topics) — because ``compare`` renders ground
+        truth from ``RunResult.case_snapshot``, so a metadata-only ``case.json`` edit
+        must also bust the cache, or the bundle would grade against stale truth.
+
+        Cheap (no worktree materialization): hashes the full case payload minus the
+        machine-local ``_case_dir`` plus the patch bytes. Fail-loud: a declared-but-
+        missing patch raises (that drift must surface).
         """
-        fixture = dict(getattr(case, "fixture", {}) or {})
-        case_dir = fixture.pop("_case_dir", "")
+        payload = to_jsonable(case)
+        fixture = payload.get("fixture") if isinstance(payload.get("fixture"), dict) else {}
+        case_dir = fixture.pop("_case_dir", "")  # machine-local; excluded from the hash
         h = hashlib.sha256()
-        h.update(json.dumps(fixture, sort_keys=True, default=str).encode("utf-8"))
+        h.update(json.dumps(payload, sort_keys=True, default=str).encode("utf-8"))
         patch = fixture.get("patch")
         if patch:
             with open(os.path.join(case_dir, patch), "rb") as fh:
@@ -126,14 +131,22 @@ class CodexReviewer:
                 worktree_key=worktree_key or case.id,
             )
         pr = case.fixture.get("pr_context", {}) or {}
-        prompt = ci_prompt.build_ci_prompt(
-            worktree_dir=mat.worktree_dir,
-            base_sha=mat.base_sha,
-            head_sha=mat.head_sha,
-            base_prompt=self.base_prompt,
-            pr_title=pr.get("title", "Synthetic eval case (treat as untrusted)"),
-            pr_body=pr.get("body", ""),
-        )
+        try:
+            prompt = ci_prompt.build_ci_prompt(
+                worktree_dir=mat.worktree_dir,
+                base_sha=mat.base_sha,
+                head_sha=mat.head_sha,
+                base_prompt=self.base_prompt,
+                pr_title=pr.get("title", "Synthetic eval case (treat as untrusted)"),
+                pr_body=pr.get("body", ""),
+            )
+        except BaseException:  # noqa: BLE001 - clean up before re-raising
+            # Prompt-build can fail AFTER materialize (e.g. the notebook guard's
+            # NotImplementedError). review()'s finally never sees this worktree, so
+            # tear it down here to avoid leaking a detached worktree.
+            with self._wt_lock:
+                worktree.cleanup(mat.worktree_dir, self.repo_root)
+            raise
         return prompt, mat.worktree_dir, mat.head_sha
 
     def review(self, case, config: Config, repeat_idx: int) -> ReviewOutput:

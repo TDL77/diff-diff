@@ -390,3 +390,91 @@ def test_run_rejects_unknown_configs(tmp_path, monkeypatch):
     rc = run_eval.cmd_run(_ns(configs="Z", strata=None, subdir="full", k=1, max_parallel=1))
     assert rc == 1
     assert not (tmp_path / "runs" / "full-manifest.json").exists()
+
+
+def test_case_tag_changes_with_scoring_metadata():
+    """A metadata-only case edit (ground truth, NOT the fixture) must bust the cache.
+
+    Regression for PR #510 P1: case_tag previously hashed only the fixture+patch, so
+    editing ground_truth/severity/negative-control flags left the run key unchanged
+    and `compare` graded against a stale snapshot.
+    """
+    from adapters.codex_reviewer import CodexReviewer
+    from engine.models import STRATUM_HISTORICAL, Case, GroundTruthBug
+
+    r = CodexReviewer(repo_root=str(_REPO), runs_root="/tmp/reviewer-eval-test", prompt_text="X")
+    fx = {"kind": "git_range", "base_sha": "aaa"}  # identical fixture across all three
+    base = Case(
+        id="c",
+        stratum=STRATUM_HISTORICAL,
+        fixture=dict(fx),
+        ground_truth=[
+            GroundTruthBug(
+                id="c:b1", file="f.py", line_window=(1, 5), bug_class="x", expected_severity="P1"
+            )
+        ],
+    )
+    sev = Case(
+        id="c",
+        stratum=STRATUM_HISTORICAL,
+        fixture=dict(fx),
+        ground_truth=[
+            GroundTruthBug(
+                id="c:b1", file="f.py", line_window=(1, 5), bug_class="x", expected_severity="P0"
+            )
+        ],
+    )
+    neg = Case(
+        id="c",
+        stratum=STRATUM_HISTORICAL,
+        fixture=dict(fx),
+        ground_truth=[],
+        expect_no_blockers=True,
+    )
+    assert r.case_tag(base) != r.case_tag(sev), "editing expected_severity must bust the cache"
+    assert r.case_tag(base) != r.case_tag(neg), "editing expect_no_blockers must bust the cache"
+
+
+def test_run_and_smoke_fail_closed_on_empty_corpus(tmp_path, monkeypatch):
+    """run/smoke must NOT report success (or write a manifest) on zero selected cases."""
+    import run_eval
+
+    monkeypatch.setattr(run_eval, "RUNS_DIR", str(tmp_path / "runs"))
+    # A stratum that matches no corpus directory -> zero cases (no codex reached).
+    rc_run = run_eval.cmd_run(
+        _ns(configs="A,B", strata=["no_such_stratum"], subdir="full", k=1, max_parallel=1)
+    )
+    assert rc_run == 1
+    assert not (tmp_path / "runs" / "full-manifest.json").exists(), "no manifest for a no-op run"
+    rc_smoke = run_eval.cmd_smoke(
+        _ns(configs="A", strata=["no_such_stratum"], k=1, limit=0, max_parallel=1)
+    )
+    assert rc_smoke == 1
+
+
+def test_build_prompt_cleans_worktree_on_build_failure(monkeypatch):
+    """A prompt-build failure after materialize (e.g. the notebook guard) must not
+    leak a detached worktree."""
+    from adapters import ci_prompt, worktree
+    from adapters import codex_reviewer as cr
+    from engine.models import STRATUM_SYNTHETIC, Case
+
+    r = cr.CodexReviewer(repo_root=str(_REPO), runs_root="/tmp/reviewer-eval-test", prompt_text="X")
+
+    class _Mat:
+        worktree_dir = "/tmp/reviewer-eval-test/wt-leaktest"
+        base_sha = "b"
+        head_sha = "h"
+
+    def _raise(**_kw):
+        raise NotImplementedError("notebook case unsupported")
+
+    cleaned = []
+    monkeypatch.setattr(worktree, "materialize", lambda *a, **k: _Mat(), raising=True)
+    monkeypatch.setattr(ci_prompt, "build_ci_prompt", _raise, raising=True)
+    monkeypatch.setattr(worktree, "cleanup", lambda wt, root: cleaned.append(wt), raising=True)
+
+    case = Case(id="c", stratum=STRATUM_SYNTHETIC, fixture={"_case_dir": "/x"})
+    with pytest.raises(NotImplementedError):
+        r.build_prompt_for_case(case, worktree_key="c.A.r0")
+    assert cleaned == ["/tmp/reviewer-eval-test/wt-leaktest"], "worktree must be cleaned on failure"
