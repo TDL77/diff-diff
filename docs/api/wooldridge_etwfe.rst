@@ -105,6 +105,22 @@ Basic OLS (follows Stata ``jwdid y, ivar(unit) tvar(time) gvar(cohort)``)::
     print(r.summary('group'))
     print(r.summary('simple'))
 
+.. note::
+
+   When ``method="ols"`` is applied to a binary (``{0, 1}``) or non-negative
+   integer-count outcome, ``fit()`` emits a ``UserWarning`` noting that a
+   matching nonlinear model (``method="logit"`` / ``method="poisson"``) is often
+   the *more appropriate* specification for such outcomes — it imposes parallel
+   trends on the link/index scale rather than in levels (Wooldridge 2023 notes
+   level-PT is only valid for continuous/unbounded outcomes), and in that
+   paper's simulations the linear model is both biased and less precise where
+   the nonlinear mean holds. It rests on a *different identifying assumption*
+   than linear OLS, so treat it as a recommended comparison, not an automatic
+   switch. OLS remains a valid QMLE for *any* response (Wooldridge 2023);
+   suppress the hint via ``warnings.filterwarnings``. The check is heuristic:
+   bounded discrete (binomial-style) outcomes with a known upper bound are not
+   separately detected from unbounded counts.
+
 View cohort×time cell estimates (post-treatment)::
 
     for (g, t), v in sorted(r.group_time_effects.items()):

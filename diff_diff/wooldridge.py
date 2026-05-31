@@ -131,6 +131,45 @@ def _warn_and_fill_nan_cohort(df: pd.DataFrame, cohort: str, stacklevel: int) ->
     return df
 
 
+def _suggest_nonlinear_method(outcome_values) -> Optional[str]:
+    """Outcome-fit hint for ``WooldridgeDiD(method="ols")``.
+
+    Return ``"logit"`` when the outcome support is binary (exactly ``{0, 1}``)
+    or ``"poisson"`` when it is a non-negative integer count (>2 distinct
+    values), else ``None``.
+
+    OLS/Gaussian QMLE is a valid method for any response (Wooldridge 2023
+    Table 1), but for binary / count outcomes a matching nonlinear model
+    (logit / Poisson) is often the *more appropriate* specification: it imposes
+    parallel trends on the link/index scale rather than in levels (level-PT is
+    implausible for such limited outcomes), and where that nonlinear mean holds
+    Wooldridge's (2023) simulations show the linear model is both biased and
+    less precise. It rests on a *different identifying assumption* — which one
+    fits depends on which parallel-trends restriction holds — so this is a
+    recommended comparison, not a free upgrade and not a canonical-link
+    requirement.
+
+    Pure and non-fatal: non-numeric / all-non-finite / empty inputs return
+    ``None`` rather than raising, so a fit that would otherwise succeed is
+    never broken by the hint.
+    """
+    try:
+        y = np.asarray(outcome_values, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    y = y[np.isfinite(y)]
+    if y.size == 0:
+        return None
+    uniq = np.unique(y)
+    # Binary: support is exactly {0, 1} (both present) -> Bernoulli QMLE (logit).
+    if uniq.size == 2 and np.all((uniq == 0) | (uniq == 1)):
+        return "logit"
+    # Count: non-negative integers with >2 distinct values -> Poisson QMLE.
+    if uniq.size > 2 and np.all(y >= 0) and np.all(y == np.floor(y)):
+        return "poisson"
+    return None
+
+
 def _filter_sample(
     data: pd.DataFrame,
     unit: str,
@@ -275,8 +314,18 @@ class WooldridgeDiD:
     Parameters
     ----------
     method : {"ols", "logit", "poisson"}
-        Estimation method. "ols" for continuous outcomes; "logit" for binary
-        or fractional outcomes; "poisson" for count data.
+        Estimation method. ``"ols"`` is the linear baseline — valid for any
+        response (Wooldridge 2023) and the usual choice for continuous outcomes;
+        ``"logit"`` for binary or fractional outcomes; ``"poisson"`` for count
+        data. When ``method="ols"`` is used on a binary (``{0, 1}``) or
+        non-negative integer-count outcome, a ``UserWarning`` notes that a
+        matching nonlinear model (logit / Poisson) is often the *more
+        appropriate* specification — it imposes parallel trends on the link
+        scale rather than in levels, and Wooldridge's (2023) simulations show
+        the linear model both biased and less precise for such outcomes when
+        the nonlinear mean holds. It rests on a different identifying assumption
+        than linear OLS, so it is a recommended comparison, not an automatic
+        switch; suppress via ``warnings.filterwarnings``.
     control_group : {"not_yet_treated", "never_treated"}
         Which units serve as the comparison group.  "not_yet_treated" (jwdid
         default) uses all untreated observations at each time period;
@@ -708,6 +757,45 @@ class WooldridgeDiD:
                     "n_bootstrap > 0: the multiplier bootstrap overrides the "
                     "analytical Conley sandwich. Use n_bootstrap=0 for the "
                     "analytical Conley SE, or vcov_type='hc1' with the bootstrap."
+                )
+
+        # 0g. Outcome-fit hint (non-fatal): method="ols" on a binary or
+        # non-negative-count outcome. For such outcomes a matching nonlinear
+        # model (logit / Poisson) is often the MORE APPROPRIATE specification —
+        # it imposes parallel trends on the link/index scale, not in levels
+        # (Wooldridge 2023: level-PT is implausible for limited outcomes), and
+        # where the nonlinear mean holds its sims show the linear model both
+        # biased and less precise. A DIFFERENT identifying assumption than
+        # linear OLS (which fits depends on which PT holds), so the hint is a
+        # recommended comparison, not a free upgrade (see REGISTRY.md
+        # §WooldridgeDiD "Nonlinear extensions"). Detection reads the FULL
+        # outcome column: outcome *type* is a property of the variable, so the
+        # named column is the right signal. This is also identical to the
+        # estimation sample here — _filter_sample expresses the control-group
+        # choice through the design matrix, NOT by dropping rows, so the column
+        # and the fitted sample share the same outcome support (invariant pinned
+        # by test_filter_sample_preserves_outcome_support); classifying on the
+        # variable stays correct should that ever change.
+        if self.method == "ols":
+            suggested = _suggest_nonlinear_method(df[outcome])
+            if suggested is not None:
+                kind = "binary" if suggested == "logit" else "count"
+                warnings.warn(
+                    f"WooldridgeDiD(method='ols'): outcome {outcome!r} looks "
+                    f"{kind}. For a {kind} outcome a matching nonlinear model "
+                    f"(method={suggested!r}) is often the more appropriate "
+                    f"specification — it imposes parallel trends on the "
+                    f"link/index scale, not in levels (Wooldridge 2023: "
+                    f"level-PT is implausible for limited outcomes), and where "
+                    f"that nonlinear mean holds its simulations show the linear "
+                    f"model both biased and less precise. It is a different "
+                    f"identifying assumption than linear OLS (which fits depends "
+                    f"on which parallel-trends restriction holds), so treat "
+                    f"method={suggested!r} as a recommended comparison, not an "
+                    f"automatic switch; suppress this hint via "
+                    f"warnings.filterwarnings.",
+                    UserWarning,
+                    stacklevel=2,
                 )
 
         # 1. Filter to analysis sample
