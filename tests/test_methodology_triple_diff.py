@@ -25,6 +25,7 @@ import pytest
 import diff_diff
 from diff_diff import TripleDifference
 from diff_diff.prep_dgp import generate_ddd_data
+from diff_diff.survey import SurveyDesign
 from diff_diff.utils import safe_inference
 from tests.conftest import assert_nan_inference
 
@@ -1579,3 +1580,163 @@ class TestParameterFunctionality:
                 time="time",
                 covariates=["age", "age_dup"],
             )
+
+
+class TestRankGuardedAnalyticalSE:
+    """Rank-guarded influence-function SE under a constant/collinear covariate.
+
+    A constant/collinear covariate makes the outcome-regression bread (and the
+    propensity-score Hessian) near-singular. Previously np.linalg.inv returned a
+    garbage inverse (se ~1e17 for reg, ~43 for dr); the rank-guarded inverse
+    drops the redundant direction, giving a finite SE equal to fitting without
+    the redundant covariate.
+    """
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_constant_covariate_finite_se_matches_drop_one(self, method):
+        data = generate_ddd_data(n_per_cell=200, seed=42, add_covariates=True)
+        data_const = data.copy()
+        data_const["xc"] = 5.0  # constant -> collinear with the intercept
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = TripleDifference(estimation_method=method).fit(
+                data, outcome="outcome", group="group", partition="partition",
+                time="time", covariates=["age"],
+            )
+            with_const = TripleDifference(estimation_method=method).fit(
+                data_const, outcome="outcome", group="group", partition="partition",
+                time="time", covariates=["age", "xc"],
+            )
+
+        assert np.isfinite(with_const.se)
+        assert with_const.se < 1.0  # was ~1e17 (reg) / ~43 (dr)
+        np.testing.assert_allclose(with_const.se, drop_one.se, rtol=1e-9)
+        np.testing.assert_allclose(with_const.att, drop_one.att, rtol=1e-9)
+
+    def test_constant_covariate_emits_single_rank_guard_warning(self):
+        data = generate_ddd_data(n_per_cell=200, seed=42, add_covariates=True)
+        data["xc"] = 5.0
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            TripleDifference(estimation_method="reg").fit(
+                data, outcome="outcome", group="group", partition="partition",
+                time="time", covariates=["age", "xc"],
+            )
+        rank_guard = [w for w in caught if "rank-guarded inverse" in str(w.message)]
+        # The per-fit aggregate warning fires exactly once, not per comparison.
+        assert len(rank_guard) == 1
+
+    def test_well_conditioned_covariates_no_rank_guard_warning(self):
+        data = generate_ddd_data(n_per_cell=200, seed=42, add_covariates=True)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = TripleDifference(estimation_method="dr").fit(
+                data, outcome="outcome", group="group", partition="partition",
+                time="time", covariates=["age", "education"],
+            )
+        assert not any("rank-guarded inverse" in str(w.message) for w in caught)
+        assert np.isfinite(res.se)
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_survey_weighted_constant_covariate_finite_se(self, method):
+        # Exercises the *survey-weighted* bread / PS-Hessian branches
+        # (`X'WX` with W including survey weights), distinct from the unweighted
+        # path above.
+        data = generate_ddd_data(n_per_cell=200, seed=42, add_covariates=True)
+        rng = np.random.default_rng(7)
+        data["weight"] = rng.uniform(0.5, 2.0, len(data))
+        data_const = data.copy()
+        data_const["xc"] = 5.0
+        sd = SurveyDesign(weights="weight")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = TripleDifference(estimation_method=method).fit(
+                data, outcome="outcome", group="group", partition="partition",
+                time="time", covariates=["age"], survey_design=sd,
+            )
+            with_const = TripleDifference(estimation_method=method).fit(
+                data_const, outcome="outcome", group="group", partition="partition",
+                time="time", covariates=["age", "xc"], survey_design=sd,
+            )
+        assert np.isfinite(with_const.se)
+        assert with_const.se < 1.0
+        np.testing.assert_allclose(with_const.se, drop_one.se, rtol=1e-9)
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_error_mode_raises_before_rank_guard(self, method):
+        # rank_deficient_action="error" raises upstream at the point-estimate
+        # solve when the covariate DESIGN is rank-deficient at its 1e-7 threshold
+        # (here an EXACT duplicate), before the IF rank-guard. It does not promise
+        # every near-singular IF bread raises: a design-full-rank but near-singular
+        # cell can pass this gate and still be IF-column-dropped (the IF guard's
+        # 1e-10 equilibrated-Gram threshold is stricter than the 1e-7 design check);
+        # see REGISTRY "rank_deficient_action enforcement".
+        data = generate_ddd_data(n_per_cell=200, seed=42, add_covariates=True)
+        data["agec"] = 2.0 * data["age"]  # exactly collinear with age
+        with pytest.raises(ValueError, match="(?i)rank-deficient"):
+            TripleDifference(
+                estimation_method=method, rank_deficient_action="error"
+            ).fit(
+                data, outcome="outcome", group="group", partition="partition",
+                time="time", covariates=["age", "agec"],
+            )
+
+    @pytest.mark.parametrize("method", ["reg", "dr"])
+    @pytest.mark.parametrize("cell", ["control", "treated"])
+    def test_cell_aliasing_rank_guard(self, method, cell):
+        # TD's DR rank-guards BOTH the control-side and the treated-pre/post OR
+        # breads via column-drop. The correct reference differs by cell:
+        #  * control-cell aliasing (collinear within the control subgroups): the
+        #    covariate is dropped from the central control OR regression, so the
+        #    SE is FINITE (not the prior ~1e17 garbage) and ≈ dropping it
+        #    (small residual = its genuine full-rank effect in the treated terms).
+        #  * treated-cell aliasing (collinear within treated-pre only): that bread
+        #    is a minor IF term, so the SE equals the well-conditioned
+        #    near-collinear limit (column-drop == the full-rank fit to working
+        #    precision) — the covariate genuinely varies elsewhere, so both the
+        #    rank-guarded and full-rank fits move the ATT/SE together.
+        # Either way: column-drop (matching the point estimate / R), no
+        # minimum-norm divergence.
+        data = generate_ddd_data(n_per_cell=200, seed=42, add_covariates=True)
+        rng = np.random.default_rng(0)
+        if cell == "control":
+            mask = ~((data["group"] == 1) & (data["partition"] == 1))
+            data["aged"] = np.where(mask, 2.0 * data["age"], rng.normal(size=len(data)))
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                drop_one = TripleDifference(estimation_method=method).fit(
+                    data, outcome="outcome", group="group", partition="partition",
+                    time="time", covariates=["age"],
+                )
+                with_deg = TripleDifference(estimation_method=method).fit(
+                    data, outcome="outcome", group="group", partition="partition",
+                    time="time", covariates=["age", "aged"],
+                )
+            assert np.isfinite(with_deg.se) and with_deg.se > 0
+            np.testing.assert_allclose(with_deg.se, drop_one.se, rtol=5e-2)
+        else:  # treated-pre cell: compare to the near-collinear (full-rank) limit
+            mask = (
+                (data["group"] == 1) & (data["partition"] == 1) & (data["time"] == 0)
+            )
+            base = np.where(mask, 2.0 * data["age"], rng.normal(size=len(data)))
+            data["aged_exact"] = base
+            near = base.copy()
+            near[mask.to_numpy()] = (
+                2.0 * data.loc[mask, "age"].to_numpy()
+                + 1e-6 * rng.standard_normal(int(mask.sum()))
+            )
+            data["aged_near"] = near
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                r_guard = TripleDifference(estimation_method=method).fit(
+                    data, outcome="outcome", group="group", partition="partition",
+                    time="time", covariates=["age", "aged_exact"],
+                )
+                r_full = TripleDifference(estimation_method=method).fit(
+                    data, outcome="outcome", group="group", partition="partition",
+                    time="time", covariates=["age", "aged_near"],
+                )
+            assert np.isfinite(r_guard.se) and r_guard.se > 0  # not 1e17 garbage
+            np.testing.assert_allclose(r_guard.se, r_full.se, rtol=1e-3)
+            np.testing.assert_allclose(r_guard.att, r_full.att, rtol=1e-6)

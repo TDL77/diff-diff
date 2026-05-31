@@ -9,6 +9,7 @@ CSV fixtures are generated on-the-fly via R if available, or tests skip.
 import json
 import os
 import subprocess
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ import pandas as pd
 import pytest
 
 from diff_diff import StaggeredTripleDifference, generate_staggered_ddd_data
+from diff_diff.survey import SurveyDesign
 
 BENCHMARK_DIR = Path(__file__).parent.parent / "benchmarks" / "data" / "synthetic"
 RESULTS_FILE = BENCHMARK_DIR / "staggered_ddd_r_results.json"
@@ -637,3 +639,185 @@ class TestAggregationReturnContract:
         assert (
             isinstance(r2, tuple) and len(r2) == 2
         ), f"return_psi=False must be 2-tuple, got {r2!r}"
+
+
+class TestRankGuardedAnalyticalSE:
+    """Rank-guarded influence-function SE under a constant/collinear covariate.
+
+    The per-pair outcome-regression bread and propensity-score Hessian are
+    near-singular when a covariate is constant/collinear. Previously
+    np.linalg.solve / np.linalg.inv returned a garbage inverse (overall_se
+    inflated 30-100x); the rank-guarded inverse drops the redundant direction,
+    giving a finite SE equal to fitting without the redundant covariate.
+    """
+
+    def _data(self):
+        return generate_staggered_ddd_data(seed=42, add_covariates=True)
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_constant_covariate_finite_se_matches_drop_one(self, method):
+        data = self._data()
+        data_const = data.copy()
+        data_const["xc"] = 5.0  # constant -> collinear with the intercept
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = StaggeredTripleDifference(
+                estimation_method=method, control_group="nevertreated"
+            ).fit(
+                data, "outcome", "unit", "period", "first_treat", "eligibility",
+                covariates=["x1"],
+            )
+            with_const = StaggeredTripleDifference(
+                estimation_method=method, control_group="nevertreated"
+            ).fit(
+                data_const, "outcome", "unit", "period", "first_treat", "eligibility",
+                covariates=["x1", "xc"],
+            )
+
+        assert np.isfinite(with_const.overall_se)
+        assert with_const.overall_se < 1.0  # was 30-100x inflated
+        np.testing.assert_allclose(
+            with_const.overall_se, drop_one.overall_se, rtol=1e-9
+        )
+
+    def test_constant_covariate_emits_rank_guard_warning(self):
+        # reg uses the OR bread only -> exactly one OR-path rank-guard warning.
+        data = self._data()
+        data["xc"] = 5.0
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            StaggeredTripleDifference(
+                estimation_method="reg", control_group="nevertreated"
+            ).fit(
+                data, "outcome", "unit", "period", "first_treat", "eligibility",
+                covariates=["x1", "xc"],
+            )
+        rank_guard = [w for w in caught if "rank-guarded inverse" in str(w.message)]
+        assert len(rank_guard) == 1
+
+    def test_well_conditioned_no_rank_guard_warning(self):
+        data = self._data()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = StaggeredTripleDifference(
+                estimation_method="dr", control_group="nevertreated"
+            ).fit(
+                data, "outcome", "unit", "period", "first_treat", "eligibility",
+                covariates=["x1", "x2"],
+            )
+        assert not any("rank-guarded inverse" in str(w.message) for w in caught)
+        assert np.isfinite(res.overall_se)
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_survey_weighted_constant_covariate_finite_se(self, method):
+        # Exercises the *survey-weighted* OR bread / PS Hessian branches
+        # (`or_x = PAa*survey_weights*covX`, `W *= survey_weights`), distinct
+        # from the unweighted path above. Panel estimator -> weights must be
+        # constant within unit.
+        data = self._data()
+        rng = np.random.default_rng(7)
+        units = data["unit"].unique()
+        unit_w = dict(zip(units, rng.uniform(0.5, 2.0, len(units))))
+        data["weight"] = data["unit"].map(unit_w)
+        data_const = data.copy()
+        data_const["xc"] = 5.0
+        sd = SurveyDesign(weights="weight")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = StaggeredTripleDifference(
+                estimation_method=method, control_group="nevertreated"
+            ).fit(
+                data, "outcome", "unit", "period", "first_treat", "eligibility",
+                covariates=["x1"], survey_design=sd,
+            )
+            with_const = StaggeredTripleDifference(
+                estimation_method=method, control_group="nevertreated"
+            ).fit(
+                data_const, "outcome", "unit", "period", "first_treat", "eligibility",
+                covariates=["x1", "xc"], survey_design=sd,
+            )
+        assert np.isfinite(with_const.overall_se)
+        assert with_const.overall_se < 1.0
+        np.testing.assert_allclose(
+            with_const.overall_se, drop_one.overall_se, rtol=1e-9
+        )
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_notyettreated_silent_constant_covariate(self, method):
+        # The not-yet-treated control group exercises the GMM-combination path
+        # (multiple comparison cohorts). Confirm a constant covariate still
+        # yields a finite SE and that rank_deficient_action="silent" suppresses
+        # the rank-guard warning on this control group too.
+        data = self._data()
+        data["xc"] = 5.0
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = StaggeredTripleDifference(
+                estimation_method=method,
+                control_group="notyettreated",
+                rank_deficient_action="silent",
+            ).fit(
+                data, "outcome", "unit", "period", "first_treat", "eligibility",
+                covariates=["x1", "xc"],
+            )
+        assert np.isfinite(res.overall_se)
+        assert res.overall_se < 1.0
+        assert not any("rank-guarded inverse" in str(w.message) for w in caught)
+
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_error_mode_raises_before_rank_guard(self, method):
+        # rank_deficient_action="error" raises upstream at the point-estimate
+        # solve when the covariate DESIGN is rank-deficient at its 1e-7 threshold
+        # (here an EXACT duplicate), before the IF rank-guard. It does not promise
+        # every near-singular IF bread raises: a design-full-rank but near-singular
+        # cell can pass this gate and still be IF-column-dropped (the IF guard's
+        # 1e-10 equilibrated-Gram threshold is stricter than the 1e-7 design check);
+        # see REGISTRY "rank_deficient_action enforcement".
+        data = self._data()
+        data["x1c"] = 2.0 * data["x1"]  # exactly collinear with x1
+        with pytest.raises(ValueError, match="(?i)rank-deficient"):
+            StaggeredTripleDifference(
+                estimation_method=method,
+                control_group="nevertreated",
+                rank_deficient_action="error",
+            ).fit(
+                data, "outcome", "unit", "period", "first_treat", "eligibility",
+                covariates=["x1", "x1c"],
+            )
+
+    @pytest.mark.parametrize("method", ["reg", "dr"])
+    def test_control_cell_aliasing_close_to_drop_one(self, method):
+        # Column-drop rank-guard: a covariate collinear ONLY within the
+        # never-treated control cell (x2d == 2*x1 there, varying in treated) is
+        # dropped from the central control OR regression (column-drop, matching
+        # the point estimate / R), so the SE is FINITE (not the prior 1e13
+        # garbage) and ≈ dropping the covariate. The small residual (< a few %)
+        # is the covariate's genuine effect in the treated-side / propensity
+        # terms, where it is full-rank. See the CallawaySantAnna "rank-guarded
+        # IF standard errors" Note.
+        data = self._data()
+        rng = np.random.default_rng(0)
+        nt = (data["first_treat"] == 0).to_numpy()
+        x2d = np.where(nt, 2.0 * data["x1"].to_numpy(), rng.normal(size=len(data)))
+        data["x2d"] = pd.Series(x2d, index=data.index).groupby(
+            data["unit"]
+        ).transform("first")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = StaggeredTripleDifference(
+                estimation_method=method, control_group="nevertreated"
+            ).fit(
+                data, "outcome", "unit", "period", "first_treat", "eligibility",
+                covariates=["x1"],
+            )
+            with_deg = StaggeredTripleDifference(
+                estimation_method=method, control_group="nevertreated"
+            ).fit(
+                data, "outcome", "unit", "period", "first_treat", "eligibility",
+                covariates=["x1", "x2d"],
+            )
+        assert np.isfinite(with_deg.overall_se) and with_deg.overall_se > 0
+        np.testing.assert_allclose(
+            with_deg.overall_se, drop_one.overall_se, rtol=5e-2
+        )
