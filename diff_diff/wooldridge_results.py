@@ -68,7 +68,8 @@ class WooldridgeDiDResults:
     survey_metadata: Optional[Any] = field(default=None, repr=False)
 
     # Variance-family metadata. ``vcov_type`` records the configured analytical
-    # family ("classical", "hc1", "hc2", or "hc2_bm"); when ``survey_design=``
+    # family ("classical", "hc1", "hc2", "hc2_bm", or "conley" — the conley
+    # spatial-HAC path also populates ``conley_lag_cutoff``); when ``survey_design=``
     # is supplied the survey TSL (or replicate-weight refit) variance overrides
     # this — the field still records the configured value and
     # ``survey_metadata`` indicates the survey path was active. On bootstrap
@@ -81,6 +82,10 @@ class WooldridgeDiDResults:
     vcov_type: str = "hc1"
     cluster_name: Optional[str] = None
     n_clusters: Optional[int] = None
+    # Conley spatial-HAC within-unit Bartlett max lag (populated only when
+    # ``vcov_type == "conley"``; ``None`` otherwise). Carries the configured
+    # ``conley_lag_cutoff`` for the summary variance label.
+    conley_lag_cutoff: Optional[int] = None
 
     # Heterogeneous cohort-specific linear trends (paper W2025 Section 8 /
     # Eq. 8.1). Keyed by treated cohort ``g`` → estimated slope ``δ_g``.
@@ -606,6 +611,22 @@ class WooldridgeDiDResults:
 
             lines.extend(_format_survey_block(self.survey_metadata, 70))
             lines.append("-" * 70)
+
+        # Conley spatial-HAC variance label (rendered only on the conley path;
+        # a full vcov-family label for all families is a separate follow-up).
+        if self.vcov_type == "conley":
+            from diff_diff.results import _format_vcov_label
+
+            _vlabel = _format_vcov_label(
+                self.vcov_type,
+                cluster_name=self.cluster_name,
+                n_clusters=self.n_clusters,
+                n_obs=self.n_obs,
+                conley_lag_cutoff=self.conley_lag_cutoff,
+            )
+            if _vlabel:
+                lines.append(f"Std. errors:     {_vlabel}")
+                lines.append("-" * 70)
 
         def _fmt_row(label: str, att: float, se: float, t: float, p: float, ci: Tuple) -> str:
             from diff_diff.results import _get_significance_stars  # type: ignore

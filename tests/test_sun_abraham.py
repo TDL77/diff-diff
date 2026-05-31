@@ -1477,7 +1477,8 @@ class TestSunAbrahamVcovType:
     `vcov_type="hc1"` is the default and preserves prior behavior bit-equally.
     `hc2`/`hc2_bm` route through a full-dummy saturated design (FWL preserves
     coefficients but not the hat matrix). `classical` also uses full-dummy to
-    match R's `lm()` interpretation. `conley` is rejected at __init__ (deferred).
+    match R's `lm()` interpretation. `conley` (spatial-HAC) threads through the
+    within-transform path; its coverage lives in test_conley_vcov.py.
     """
 
     @staticmethod
@@ -1654,11 +1655,16 @@ class TestSunAbrahamVcovType:
         assert sa2._vcov_type_explicit is True
 
     def test_invalid_vcov_type_value_rejects(self):
-        """Unknown vcov_type raises ValueError; conley emits a deferral message."""
+        """Unknown vcov_type raises ValueError; conley is accepted at __init__.
+
+        As of the conley-threading PR, ``vcov_type="conley"`` is a valid
+        constructor value (coords/cutoff/unit/lag validation is deferred to
+        ``fit()`` via ``_validate_conley_estimator_inputs``).
+        """
         with pytest.raises(ValueError, match="vcov_type must be one of"):
             SunAbraham(vcov_type="foo")
-        with pytest.raises(ValueError, match="conley.*not yet wired up"):
-            SunAbraham(vcov_type="conley")
+        est = SunAbraham(vcov_type="conley")
+        assert est.vcov_type == "conley"
 
     def test_survey_design_rejects_non_hc1_vcov_type(self):
         """SA(vcov_type ∈ {classical, hc2, hc2_bm}) + survey_design= raises.

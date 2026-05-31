@@ -104,9 +104,10 @@ class StackedDiD:
           cluster-incompatibility ``ValueError``: StackedDiD requires a cluster
           structure, so one-way families don't compose with the linalg validator.
           Use ``"hc1"`` or ``"hc2_bm"``.
-        - ``"conley"`` is REJECTED at ``__init__`` (deferred; would require
-          threading the six ``conley_*`` params through ``solve_ols`` — tracked
-          in TODO.md).
+        - ``"conley"`` is REJECTED at ``__init__`` for a **methodology** reason
+          (NOT plumbing): the stacked design replicates units across
+          sub-experiments, so Conley would see same-unit copies at distance 0;
+          no ``conleyreg`` anchor; paper-gated. Tracked in TODO.md.
 
         Survey-design precedence: when ``survey_design=`` is supplied to
         ``fit()`` with ``vcov_type != "hc1"``, a ``NotImplementedError`` is
@@ -207,12 +208,18 @@ class StackedDiD:
         with a different message."""
         if vcov_type == "conley":
             raise ValueError(
-                "vcov_type='conley' is not yet supported on StackedDiD. "
-                "Threading conley_coords / conley_cutoff_km / conley_metric / "
-                "conley_kernel / conley_time / conley_unit / conley_lag_cutoff "
-                "through solve_ols requires a follow-up PR (tracked in TODO.md "
-                "alongside the SunAbraham conley follow-up). Use vcov_type='hc1' "
-                "(default, CR1) or 'hc2_bm' (CR2 Bell-McCaffrey)."
+                "vcov_type='conley' is not supported on StackedDiD and is "
+                "deferred for a methodology reason (NOT plumbing, unlike the "
+                "SunAbraham / WooldridgeDiD-OLS conley threading): the stacked "
+                "design replicates each control unit across every sub-experiment "
+                "it qualifies for, so one geographic unit occupies many stacked "
+                "rows. Conley's pairwise distance matrix would see those same-unit "
+                "copies at distance 0 (K(0)=1, perfectly correlated), conflating "
+                "the stacking-replication device with real spatial correlation, "
+                "and there is no `conleyreg` analogue for stacked DiD to anchor "
+                "parity. A correct treatment needs a per-stack spatial identifier "
+                "and is paper-gated (see TODO.md). Use vcov_type='hc1' (default, "
+                "CR1) or 'hc2_bm' (CR2 Bell-McCaffrey)."
             )
         if vcov_type not in ("classical", "hc1", "hc2", "hc2_bm"):
             raise ValueError(
