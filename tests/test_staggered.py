@@ -1495,6 +1495,49 @@ class TestRankGuardedAnalyticalSE:
             big_ab.overall_se, big_ba.overall_se, rtol=1e-9
         )
 
+    @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
+    def test_exact_duplicate_covariate_survey_weighted(self, method):
+        # Weighted branch of the exact-duplicate contract (reviewer-requested):
+        # the survey-weighted bread / PS-Hessian must give the same finite SE for
+        # a WELL-SCALED exact duplicate as dropping it, and the rank-guard's
+        # equilibrated column selection must be order-invariant under MIXED-SCALE
+        # exact collinearity (xbig == 1e8*x1) for BOTH column orders even with
+        # non-uniform survey weights in W.
+        from diff_diff.survey import SurveyDesign
+
+        base = generate_staggered_data_with_covariates(seed=789)
+        rng = np.random.default_rng(3)
+        units = base["unit"].unique()
+        unit_w = dict(zip(units, rng.uniform(0.5, 2.0, len(units))))
+        d = base.copy()
+        d["weight"] = d["unit"].map(unit_w)
+        d["xdup"] = d["x1"]  # well-scaled exact duplicate
+        d["xbig"] = 1e8 * d["x1"]  # mixed-scale exact duplicate
+        sd = SurveyDesign(weights="weight")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            drop_one = CallawaySantAnna(estimation_method=method).fit(
+                d, "outcome", "unit", "time", "first_treat",
+                covariates=["x1"], survey_design=sd,
+            )
+            well = CallawaySantAnna(estimation_method=method).fit(
+                d, "outcome", "unit", "time", "first_treat",
+                covariates=["x1", "xdup"], survey_design=sd,
+            )
+            big_ab = CallawaySantAnna(estimation_method=method).fit(
+                d, "outcome", "unit", "time", "first_treat",
+                covariates=["x1", "xbig"], survey_design=sd,
+            )
+            big_ba = CallawaySantAnna(estimation_method=method).fit(
+                d, "outcome", "unit", "time", "first_treat",
+                covariates=["xbig", "x1"], survey_design=sd,
+            )
+        # Well-scaled exact duplicate == dropping it, under survey weighting.
+        np.testing.assert_allclose(well.overall_se, drop_one.overall_se, rtol=1e-7)
+        # Order-invariant (well-defined) at mixed scale, under survey weighting.
+        assert np.isfinite(big_ab.overall_se) and big_ab.overall_se > 0
+        np.testing.assert_allclose(big_ab.overall_se, big_ba.overall_se, rtol=1e-7)
+
 
 class TestCallawaySantAnnaRankDeficiencyPaths:
     """Tests for rank-deficiency handling in DR and reg not_yet_treated paths."""
