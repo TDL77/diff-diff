@@ -48,6 +48,29 @@ PREDICTORS = [
 
 
 # ---------------------------------------------------------------------------
+# Cheap optimizer settings for behavior tests (pure-Python CI speed)
+# ---------------------------------------------------------------------------
+# Behavior tests only need a VALID, cleanly-converged fit, not data-driven V quality.
+# The production nested defaults (n_starts=4, inner_max_iter=10000, inner_min_decrease=1e-5)
+# cost 30-150s per *pure-Python* fit because the inner Frank-Wolfe solve grinds its slow
+# sublinear tail to hit the tight tolerance on every objective evaluation. Loosening the
+# inner tolerance + a single start + a small outer cap gives a clean ~0.1s fit without
+# changing what these tests assert. The full production defaults are still exercised by the
+# @slow Tier-2 Basque test (which runs in the Rust matrix under `-m ''`), and the
+# Rust<->numpy Frank-Wolfe kernel equivalence is locked by
+# tests/test_rust_backend.py::test_sc_weight_fw_matches_numpy.
+#
+# NB: inner_max_iter is deliberately LEFT AT DEFAULT here — the speedup comes from the
+# looser tolerance letting FW terminate on *convergence* (not on an iteration cap), so the
+# solve stays clean (no non-convergence warning). Do NOT fold inner_max_iter into _FAST or
+# the inner-non-convergence warning starts firing spuriously.
+_FAST = dict(n_starts=1, optimizer_options={"maxiter": 50}, inner_min_decrease=1e-3)
+# Churn tests deliberately force inner non-convergence (inner_max_iter=1); KEEP that and only
+# cap the outer optimizer so it does not iterate to maxiter on the flat penalty landscape.
+_FAST_CHURN = dict(n_starts=1, optimizer_options={"maxiter": 5})
+
+
+# ---------------------------------------------------------------------------
 # Synthetic panel builders (fast; no R needed)
 # ---------------------------------------------------------------------------
 
@@ -197,8 +220,12 @@ def test_post_periods_canonicalized_and_gap_order_independent():
     df, years, T0 = _make_panel()
     ordered = years[T0:]
     scrambled = list(reversed(ordered)) + [ordered[-1]]  # unsorted + duplicate
-    r1 = synthetic_control(df, "y", "treated", "unit", "year", post_periods=ordered, seed=0)
-    r2 = synthetic_control(df, "y", "treated", "unit", "year", post_periods=scrambled, seed=0)
+    r1 = synthetic_control(
+        df, "y", "treated", "unit", "year", post_periods=ordered, seed=0, **_FAST
+    )
+    r2 = synthetic_control(
+        df, "y", "treated", "unit", "year", post_periods=scrambled, seed=0, **_FAST
+    )
     assert r1.post_periods == r2.post_periods == ordered
     assert abs(r1.att - r2.att) < 1e-12
     gdf = r2.get_gap_df()
@@ -214,7 +241,9 @@ def test_post_periods_canonicalized_and_gap_order_independent():
 
 def test_donor_pool_restricts_donors():
     df, years, T0 = _make_panel(n_donors=4)
-    res = synthetic_control(df, "y", "treated", "unit", "year", donor_pool=["d0", "d1"], seed=0)
+    res = synthetic_control(
+        df, "y", "treated", "unit", "year", donor_pool=["d0", "d1"], seed=0, **_FAST
+    )
     assert res.n_donors == 2
     assert set(res.get_weights_df()["unit"]) <= {"d0", "d1"}
 
@@ -309,8 +338,19 @@ def test_outer_v_nonconvergence_warning():
     # Outer V-search non-convergence must not be silent (optimizer capped at 1 iter).
     df, _, _ = _make_panel()
     with pytest.warns(UserWarning, match="Outer V-search"):
+        # maxiter=1 forces the OUTER non-convergence; n_starts=1 + a loose inner tolerance
+        # keep the (still-real) inner solves cheap. Loosening inner_min_decrease does not
+        # affect whether the outer optimizer hits its 1-iteration cap.
         synthetic_control(
-            df, "y", "treated", "unit", "year", seed=0, optimizer_options={"maxiter": 1}
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            seed=0,
+            n_starts=1,
+            optimizer_options={"maxiter": 1},
+            inner_min_decrease=1e-3,
         )
 
 
@@ -319,7 +359,9 @@ def test_inner_v_search_nonconvergence_warning():
     # inner_max_iter=1 makes them truncate, and the estimator emits an aggregated warning.
     df, _, _ = _make_panel()
     with pytest.warns(UserWarning, match="during nested V selection"):
-        synthetic_control(df, "y", "treated", "unit", "year", seed=0, inner_max_iter=1)
+        synthetic_control(
+            df, "y", "treated", "unit", "year", seed=0, inner_max_iter=1, **_FAST_CHURN
+        )
 
 
 def test_single_inner_nonconvergence_excluded_from_v_ranking(monkeypatch):
@@ -348,7 +390,7 @@ def test_single_inner_nonconvergence_excluded_from_v_ranking(monkeypatch):
 
     monkeypatch.setattr(sc, "_inner_solve_W", patched)
     with pytest.warns(UserWarning, match="during nested V selection"):
-        res = synthetic_control(df, "y", "treated", "unit", "year", seed=0)
+        res = synthetic_control(df, "y", "treated", "unit", "year", seed=0, **_FAST)
 
     assert state["failed"]  # the patch actually fired on an objective evaluation
     assert np.isfinite(res.att)
@@ -361,7 +403,17 @@ def test_n_starts_one_runs():
     # n_starts=1 uses only the uniform start (short-circuits the heuristic candidates)
     # and still produces a valid nested fit.
     df, _, _ = _make_panel()
-    res = synthetic_control(df, "y", "treated", "unit", "year", seed=0, n_starts=1)
+    res = synthetic_control(
+        df,
+        "y",
+        "treated",
+        "unit",
+        "year",
+        seed=0,
+        n_starts=1,
+        optimizer_options={"maxiter": 50},
+        inner_min_decrease=1e-3,
+    )
     assert np.isfinite(res.att)
     assert abs(sum(res.donor_weights.values()) - 1.0) < 1e-6
 
@@ -378,7 +430,7 @@ def test_distinct_special_period_sets_not_duplicate():
     # Same var/op, same endpoints + length, different intermediate period -> distinct
     # predictors, must NOT be rejected as duplicates.
     df, years, T0 = _make_panel(T=8, T0=6)
-    res = SyntheticControl(seed=0).fit(
+    res = SyntheticControl(seed=0, **_FAST).fit(
         df,
         "y",
         "treated",
@@ -423,6 +475,7 @@ def test_duplicate_predictor_window_periods_deduped():
         predictors=["y"],
         predictor_window=[years[0], years[0], years[1]],
         seed=0,
+        **_FAST,
     )
     r_uniq = synthetic_control(
         df,
@@ -433,6 +486,7 @@ def test_duplicate_predictor_window_periods_deduped():
         predictors=["y"],
         predictor_window=[years[0], years[1]],
         seed=0,
+        **_FAST,
     )
     assert abs(r_dup.att - r_uniq.att) < 1e-9
 
@@ -465,7 +519,7 @@ def test_poor_fit_warning():
         rows.append({"unit": "treated", "year": yr, "y": 50 + 2.0 * t, "treated": int(t >= T0)})
     df = pd.DataFrame(rows)
     with pytest.warns(UserWarning, match="Pre-treatment fit is poor"):
-        synthetic_control(df, "y", "treated", "unit", "year", seed=0)
+        synthetic_control(df, "y", "treated", "unit", "year", seed=0, **_FAST)
 
 
 def test_poor_fit_warning_flat_treated_pre_path():
@@ -484,7 +538,7 @@ def test_poor_fit_warning_flat_treated_pre_path():
         )
     df = pd.DataFrame(rows)
     with pytest.warns(UserWarning, match="Pre-treatment fit is poor"):
-        synthetic_control(df, "y", "treated", "unit", "year", seed=0)
+        synthetic_control(df, "y", "treated", "unit", "year", seed=0, **_FAST)
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +574,7 @@ def test_duplicate_regular_predictor_rejected():
 def test_inner_nonconvergence_warning():
     df, _, _ = _make_panel(n_donors=4)
     with pytest.warns(UserWarning, match="did not converge"):
-        SyntheticControl(seed=0, v_method="nested", inner_max_iter=1).fit(
+        SyntheticControl(seed=0, v_method="nested", inner_max_iter=1, **_FAST_CHURN).fit(
             df, "y", "treated", "unit", "year"
         )
 
@@ -532,7 +586,7 @@ def test_inner_nonconvergence_warning():
 
 def test_standardize_none_runs():
     df, _, _ = _make_panel()
-    res = synthetic_control(df, "y", "treated", "unit", "year", standardize="none", seed=0)
+    res = synthetic_control(df, "y", "treated", "unit", "year", standardize="none", seed=0, **_FAST)
     assert res.standardize == "none"
     assert np.isfinite(res.att)
 
@@ -652,7 +706,7 @@ def test_set_params_rolls_back_on_invalid():
 
 def test_nan_inference_contract():
     df, _, _ = _make_panel()
-    res = synthetic_control(df, "y", "treated", "unit", "year", seed=0)
+    res = synthetic_control(df, "y", "treated", "unit", "year", seed=0, **_FAST)
     assert_nan_inference(
         {"se": res.se, "t_stat": res.t_stat, "p_value": res.p_value, "conf_int": res.conf_int}
     )
@@ -661,7 +715,7 @@ def test_nan_inference_contract():
 
 def test_result_accessors_render():
     df, _, _ = _make_panel()
-    res = synthetic_control(df, "y", "treated", "unit", "year", seed=0)
+    res = synthetic_control(df, "y", "treated", "unit", "year", seed=0, **_FAST)
     assert isinstance(res, SyntheticControlResults)
     assert isinstance(res.summary(), str) and "Synthetic Control" in res.summary()
     assert "att" in res.to_dict()
@@ -676,8 +730,10 @@ def test_result_accessors_render():
 
 def test_inferred_post_matches_explicit():
     df, years, T0 = _make_panel()
-    r_inf = synthetic_control(df, "y", "treated", "unit", "year", seed=0)
-    r_exp = synthetic_control(df, "y", "treated", "unit", "year", post_periods=years[T0:], seed=0)
+    r_inf = synthetic_control(df, "y", "treated", "unit", "year", seed=0, **_FAST)
+    r_exp = synthetic_control(
+        df, "y", "treated", "unit", "year", post_periods=years[T0:], seed=0, **_FAST
+    )
     assert r_inf.post_periods == r_exp.post_periods == years[T0:]
     assert abs(r_inf.att - r_exp.att) < 1e-12
 
