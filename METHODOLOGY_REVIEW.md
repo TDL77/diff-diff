@@ -24,7 +24,7 @@ A **Complete** entry has a documented review pass against the primary academic s
 
 The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
 
-**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures; others have only the REGISTRY entry and unit tests (e.g., PowerAnalysis). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
+**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures; others have only the REGISTRY entry and unit tests (e.g., PlaceboTests). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
 
 **Not Started** entries have neither a tracker walk-through nor an REGISTRY.md section. This tracker no longer carries any Not Started rows; new estimators are expected to enter as In Progress when their REGISTRY entry lands.
 
@@ -81,7 +81,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | BaconDecomposition | `bacon.py` | `bacondecomp::bacon()` | **Complete** | 2026-05-16 |
 | HonestDiD | `honest_did.py` | `HonestDiD` package | **Complete** | 2026-04-01 |
 | PreTrendsPower | `pretrends.py` | `pretrends` package | **Complete** | 2026-05-19 |
-| PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | **In Progress** | — |
+| PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | **Complete** | 2026-05-31 |
 | PlaceboTests | `diagnostics.py` | (no canonical reference) | **In Progress** | — |
 
 ### Cross-Cutting Inference Features
@@ -1236,20 +1236,25 @@ CI and extending covariate-adjusted R parity are tracked follow-ups in `TODO.md`
 | Field | Value |
 |-------|-------|
 | Module | `power.py` |
-| Primary References | Bloom (1995); Burlig, Preonas & Woerman (2020) — clustered DiD power (both listed in REGISTRY) |
-| R Reference | `pwr` (basic) / `DeclareDesign` (design-based simulation) |
-| Status | **In Progress** |
-| Last Review | — |
+| Primary References | Bloom (1995) — normal MDE multiplier; Burlig, Preonas & Woerman (2020) — panel-DiD variance (equicorrelated special case of Eq. 2) |
+| R Reference | `pwr::pwr.norm.test` (analytical, normal-based — **not** `pwr.t.test`); Stata `pcpanel` (Burlig panel); `DeclareDesign` (simulation) |
+| Status | **Complete** |
+| Last Review | 2026-05-31 |
 
-**Documentation in place:**
-- REGISTRY.md section: `## PowerAnalysis` (MDE / power / sample size / simulation-based power / cluster adjustment); primary sources Bloom (1995) and Burlig et al. (2020) listed
-- Implementation: `tests/test_power.py` (MDE / power / sample-size / simulation paths plus cluster adjustment)
+**Verified components:**
+- MDE multiplier `M = z_{1-α/2 (or 1-α)} + z_{1-κ}` is the normal (Bloom 1995) multiplier; reproduces Bloom Table 1 (2.49 @ one-sided .05/.80, 2.93, 2.17).
+- The unified equicorrelated SE `√(σ²(1/n_T+1/n_C)(1/m+1/r)(1−ρ))` (Burlig Eq. 2 equicorrelated special case): the panel path (T>2) and the 2×2 path — the m=r=1 case `√(2σ²(1/n_T+1/n_C)(1−ρ))`, reducing to Bloom Eq. 1's DiD analog at ρ=0 — validated by closed-form assertions, a literal-equicorrelated Monte-Carlo check, and base-R `qnorm` parity (incl. a 2×2 ρ>0 fixture).
+- Allocation factor `f(1−f)` (50/50-optimal) and the exact two-tailed normal power function confirmed.
 
-**Outstanding for promotion:**
-- Paper review under `docs/methodology/papers/` (likely a combined review covering Bloom 1995 + Burlig et al. 2020)
-- Dedicated `tests/test_methodology_power.py` with closed-form walk-through against `pwr::pwr.t.test()` and Burlig et al.'s clustered-DiD power formula
-- Documented reference-validation harness against `pwr` / `DeclareDesign`
-- Verify the REGISTRY Implementation Checklist (all five items currently unchecked)
+**Corrections made (PR-B):**
+- Panel variance switched from the Moulton `(1+(T−1)ρ)/T` factor (wrong period-scaling — ~4× too small at ρ=0, m=r=5 — and wrong ρ-sign) to the Burlig Eq. 2 equicorrelated `(1/m+1/r)(1−ρ)` form, in which within-unit correlation *lowers* the MDE. The two existing direction tests (`test_icc_effect`, `test_extreme_icc`) were inverted; tutorial `06_power_analysis.ipynb` was corrected. Input guards added for **all** designs (validated before the 2×2-vs-panel router): `n_pre≥1`, `n_post≥1`, `ρ ∈ [−1/(T−1), 1)`; the `(1−ρ)` factor also applies at T=2 (the m=r=1 case, Burlig footnote 11), so ρ is not silently ignored there.
+- REGISTRY equation block rewritten (z not t; corrected SE / sample-size; removed the cluster-`m` and inverted-`R²` terms that matched neither code nor source).
+
+**Deviations (documented in REGISTRY `## PowerAnalysis`):**
+- Critical values use the **normal (z)** distribution (Bloom 1995) — a large-sample approximation to Burlig Eq. 1's t — labelled `**Deviation from R:**`.
+- Only the **equicorrelated** special case of Burlig Eq. 2 is implemented (single ρ); the fully general SCR form (independent ψ^B/ψ^A/ψ^X) is not.
+
+**Tests:** `tests/test_methodology_power.py` (Bloom Table 1; 2×2 + panel closed forms; Monte-Carlo; round-trip; validation guards; R parity) + `tests/test_power.py`. R goldens at `benchmarks/data/r_power_golden.json` (generator `benchmarks/R/generate_power_golden.R`).
 
 ---
 
@@ -1407,14 +1412,13 @@ Promotion priority for the **In Progress** entries, ordered by what's blocked on
 
 **Substantive-review-blocked (no methodology test file, no paper review, no R parity):**
 
-1. **PowerAnalysis** — larger surface (MDE / power / sample size / simulation paths); REGISTRY already lists Bloom (1995) and Burlig et al. (2020) as primary sources; least urgent if the library's power-analysis utilities are not heavily used.
-2. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
-3. **EfficientDiD** — no paper review on file; substantial implementation work (`tests/test_efficient_did.py` + validation tests) needs paper-vs-code audit against Chen, Sant'Anna & Xie (2025).
-4. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
+1. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
+2. **EfficientDiD** — no paper review on file; substantial implementation work (`tests/test_efficient_did.py` + validation tests) needs paper-vs-code audit against Chen, Sant'Anna & Xie (2025).
+3. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
-5. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
+4. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
 
 ---
 

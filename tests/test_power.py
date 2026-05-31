@@ -168,14 +168,21 @@ class TestPowerAnalysis:
         assert result_6period.design == "panel"
 
     def test_icc_effect(self):
-        """Test that intra-cluster correlation affects power."""
+        """Within-unit (serial) equicorrelation lowers the panel-DiD MDE.
+
+        Burlig, Preonas & Woerman (2020), Eq. 2 (equicorrelated case) gives a
+        panel variance with a ``(1 - rho)`` factor, so higher within-unit
+        correlation makes the DiD *easier* to detect (differencing cancels the
+        shared within-unit component) -- the opposite of a cross-sectional ICC
+        penalty.
+        """
         pa = PowerAnalysis(power=0.80)
 
         result_no_icc = pa.mde(n_treated=50, n_control=50, sigma=1.0, n_pre=3, n_post=3, rho=0.0)
         result_with_icc = pa.mde(n_treated=50, n_control=50, sigma=1.0, n_pre=3, n_post=3, rho=0.5)
 
-        # Higher ICC should increase MDE (less independent information)
-        assert result_with_icc.mde > result_no_icc.mde
+        # Higher rho LOWERS the MDE (Burlig 2020 Eq. 2 equicorrelated (1 - rho) factor)
+        assert result_with_icc.mde < result_no_icc.mde
 
     def test_power_curve(self):
         """Test power curve generation."""
@@ -287,17 +294,23 @@ class TestPowerAnalysis:
         assert abs(result_pos.power - result_neg.power) < 0.01
 
     def test_extreme_icc(self):
-        """Test power calculation with extreme intra-cluster correlation."""
+        """Extreme within-unit equicorrelation drives the panel MDE toward zero.
+
+        Per Burlig (2020) Eq. 2 (equicorrelated), the panel variance carries a
+        ``(1 - rho)`` factor; as ``rho -> 1`` the shared within-unit component is
+        almost fully differenced out, so the MDE *shrinks* (not grows) while
+        staying finite and strictly positive.
+        """
         pa = PowerAnalysis(power=0.80)
 
-        # Test with very high ICC (0.99)
+        # Test with very high within-unit correlation (0.99)
         result_extreme = pa.mde(n_treated=50, n_control=50, sigma=1.0, n_pre=5, n_post=5, rho=0.99)
 
         result_moderate = pa.mde(n_treated=50, n_control=50, sigma=1.0, n_pre=5, n_post=5, rho=0.5)
 
-        # Extreme ICC should have higher MDE (less independent info)
-        assert result_extreme.mde > result_moderate.mde
-        # MDE should still be finite and reasonable
+        # Higher rho LOWERS the MDE (Burlig 2020 Eq. 2); rho=0.99 -> smaller than rho=0.5
+        assert result_extreme.mde < result_moderate.mde
+        # MDE should still be finite and strictly positive
         assert result_extreme.mde < float("inf")
         assert result_extreme.mde > 0
 

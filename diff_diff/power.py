@@ -863,7 +863,7 @@ class PowerResults:
     sigma : float
         Residual standard deviation.
     rho : float
-        Intra-cluster correlation (for panel data).
+        Within-unit (serial) equicorrelation (Burlig 2020 Eq. 2 equicorrelated case).
     deff : float
         Survey design effect (variance inflation factor).
     design : str
@@ -923,7 +923,7 @@ class PowerResults:
             "Variance Parameters".center(60),
             "-" * 60,
             f"{'Residual SD (sigma):':<30} {self.sigma:>10.4f}",
-            f"{'Intra-cluster correlation:':<30} {self.rho:>10.4f}",
+            f"{'Within-unit equicorrelation:':<30} {self.rho:>10.4f}",
             *([f"{'Design effect (DEFF):':<30} {self.deff:>10.4f}"] if self.deff != 1.0 else []),
             "",
             "-" * 60,
@@ -1217,22 +1217,30 @@ class PowerAnalysis:
 
     Notes
     -----
-    The power calculations are based on the variance of the DiD estimator:
+    The power calculations are based on the variance of the DiD estimator.
 
-    For basic 2x2 DiD:
-        Var(ATT) = sigma^2 * (1/n_treated_post + 1/n_treated_pre
-                            + 1/n_control_post + 1/n_control_pre)
+    Critical values use the **normal (z)** distribution following Bloom (1995):
+    ``MDE = (z_{1-alpha/2} + z_{1-kappa}) * SE``. This is a large-sample
+    approximation to Burlig et al.'s t-based multiplier (their Eq. 1) and is
+    mildly anti-conservative for very small numbers of units.
 
-    For panel DiD with T periods:
-        Var(ATT) = sigma^2 * (1/N_treated + 1/N_control)
-                 * (1 + (T-1)*rho) / T
+    The variance is the **within-unit equicorrelated special case of Burlig,
+    Preonas & Woerman (2020), Eq. 2** (psi^B = psi^A = psi^X = rho * sigma^2), for
+    m = n_pre pre-periods and r = n_post post-periods::
 
-    Where rho is the intra-cluster correlation coefficient.
+        Var(ATT) = sigma^2 * (1/N_treated + 1/N_control) * (1/m + 1/r) * (1 - rho)
 
-    These analytical formulas are under methodology review (2026-05): the panel variance uses an
-    equicorrelated/Moulton ``(1 + (T-1)*rho)/T`` design effect, which is **not** Burlig et al.'s
-    serial-correlation-robust (SCR) variance, and the critical values use the normal (z)
-    approximation (Bloom) rather than Burlig's t-distribution. See ``docs/methodology/REGISTRY.md``
+    where rho is the within-unit (serial) equicorrelation. Cross-period
+    correlation **lowers** the DiD variance (differencing cancels the shared
+    within-unit component), so the MDE *decreases* as rho increases -- the
+    opposite of a Moulton mean-inflation factor.
+
+    The basic 2x2 design (n_pre = n_post = 1) is the m = r = 1 special case
+    (Burlig footnote 11), Var(ATT) = 2 * sigma^2 * (1/N_treated + 1/N_control) *
+    (1 - rho), reducing to Bloom (1995) Eq. 1's DiD analog at rho = 0.
+
+    The fully general serial-correlation-robust form (independent psi^B, psi^A,
+    psi^X) is not implemented; see ``docs/methodology/REGISTRY.md``
     ``## PowerAnalysis`` and the source audits under ``docs/methodology/papers/``.
 
     References
@@ -1270,8 +1278,38 @@ class PowerAnalysis:
                 stacklevel=3,
             )
 
+    @staticmethod
+    def _validate_design_params(n_pre: int, n_post: int, rho: float) -> None:
+        """Validate analytical-power inputs for the Burlig (2020) Eq. 2 variance.
+
+        Applies to BOTH the 2x2 (n_pre = n_post = 1) and multi-period panel paths
+        -- the 2x2 case is the m = r = 1 special case of the same equicorrelated
+        variance. Requires at least one pre- and one post-period, and a within-unit
+        equicorrelation ``rho`` in ``[-1/(T-1), 1)`` (T = n_pre + n_post):
+        ``rho >= 1`` yields a non-positive residual variance, and
+        ``rho < -1/(T-1)`` is not a valid equicorrelation structure.
+        """
+        if n_pre < 1 or n_post < 1:
+            raise ValueError(
+                "Power analysis requires n_pre >= 1 and n_post >= 1 (a DiD design "
+                f"needs both pre- and post-periods), got n_pre={n_pre}, n_post={n_post}."
+            )
+        T = n_pre + n_post
+        rho_min = -1.0 / (T - 1)
+        if not rho_min <= rho < 1.0:
+            raise ValueError(
+                f"rho must lie in [{rho_min:.4g}, 1) (valid within-unit "
+                f"equicorrelation over T={T} periods; rho >= 1 implies zero "
+                f"residual variance), got rho={rho}."
+            )
+
     def _get_critical_values(self) -> Tuple[float, float]:
-        """Get z critical values for alpha and power."""
+        """Get normal (z) critical values for alpha and power.
+
+        Uses standard-normal quantiles (the Bloom 1995 multiplier) -- a
+        large-sample approximation to Burlig et al. (2020) Eq. 1's t-based
+        multiplier.
+        """
         if self.alternative == "two-sided":
             z_alpha = stats.norm.ppf(1 - self.alpha / 2)
         else:
@@ -1306,11 +1344,13 @@ class PowerAnalysis:
         sigma : float
             Residual standard deviation.
         rho : float
-            Intra-cluster correlation (for panel data).
+            Within-unit (serial) equicorrelation for the panel design (Burlig
+            2020 Eq. 2, equicorrelated case); higher rho lowers the variance.
         deff : float
             Survey design effect (variance inflation factor). Not redundant
-            with ``rho``: ``rho`` models within-unit serial correlation
-            (Moulton factor), ``deff`` models survey clustering/weighting.
+            with ``rho``: ``rho`` models within-unit (serial) equicorrelation
+            (Burlig 2020 Eq. 2 ``(1/m+1/r)(1-rho)`` factor), ``deff`` models
+            survey clustering/weighting.
         design : str
             Study design type.
 
@@ -1319,28 +1359,40 @@ class PowerAnalysis:
         float
             Variance of the DiD estimator.
         """
+        # Validate inputs before routing so invalid two-period shapes (e.g.
+        # n_pre=0) and out-of-range rho cannot fall through to basic_did silently.
+        self._validate_design_params(n_pre, n_post, rho)
+        if not np.isfinite(sigma) or sigma < 0:
+            raise ValueError(f"sigma (residual SD) must be finite and >= 0, got {sigma}")
+        if n_treated <= 0 or n_control <= 0:
+            raise ValueError(
+                "n_treated and n_control must be > 0, got "
+                f"n_treated={n_treated}, n_control={n_control}"
+            )
         if design == "basic_did":
-            # For basic 2x2 DiD, each cell has n_treated/2 or n_control/2 obs
-            # assuming balanced design
+            # 2x2 DiD (n_pre = n_post = 1): the m = r = 1 special case of the
+            # equicorrelated Burlig (2020) Eq. 2 variance (footnote 11 drops the
+            # within-pre / within-post covariance terms, leaving the cross-period
+            # term). Reduces to Bloom (1995) Eq. 1's DiD analog
+            # 2 * sigma^2 * (1/n_T + 1/n_C) at rho = 0; the (1 - rho) factor
+            # applies the correlation between the single pre and post observation.
             n_t_pre = n_treated  # treated units in pre-period
             n_t_post = n_treated  # treated units in post-period
             n_c_pre = n_control
             n_c_post = n_control
 
-            variance = sigma**2 * (1 / n_t_post + 1 / n_t_pre + 1 / n_c_post + 1 / n_c_pre)
+            cell_factor = 1 / n_t_post + 1 / n_t_pre + 1 / n_c_post + 1 / n_c_pre
+            variance = sigma**2 * cell_factor * (1 - rho)
         elif design == "panel":
-            # Panel DiD with multiple periods
-            # Account for serial correlation via ICC
-            T = n_pre + n_post
-
-            # Design effect for clustering
-            design_effect = 1 + (T - 1) * rho
-
-            # Base variance (as if independent)
+            # Burlig, Preonas & Woerman (2020), Eq. 2, specialized to within-unit
+            # equicorrelation (psi^B = psi^A = psi^X = rho * sigma^2):
+            #     Var(ATT) = sigma^2 (1/n_T + 1/n_C) (1/m + 1/r) (1 - rho)
+            # with m = n_pre, r = n_post. Cross-period correlation (rho) LOWERS the
+            # DiD variance because differencing cancels the shared within-unit
+            # component -- the opposite sign of a Moulton mean-inflation factor.
+            period_factor = 1 / n_pre + 1 / n_post  # = (m + r) / (m * r)
             base_var = sigma**2 * (1 / n_treated + 1 / n_control)
-
-            # Adjust for clustering (Moulton factor)
-            variance = base_var * design_effect / T
+            variance = base_var * period_factor * (1 - rho)
         else:
             raise ValueError(f"Unknown design: {design}")
 
@@ -1378,7 +1430,9 @@ class PowerAnalysis:
         n_post : int, default=1
             Number of post-treatment periods.
         rho : float, default=0.0
-            Intra-cluster correlation for panel data.
+            Within-unit (serial) equicorrelation for panel designs. Higher rho
+            LOWERS the MDE (Burlig et al. 2020, Eq. 2, equicorrelated case);
+            valid range [-1/(T-1), 1).
         deff : float, default=1.0
             Survey design effect (variance inflation factor). Not redundant
             with ``rho``: ``rho`` models within-unit serial correlation,
@@ -1484,7 +1538,9 @@ class PowerAnalysis:
         n_post : int, default=1
             Number of post-treatment periods.
         rho : float, default=0.0
-            Intra-cluster correlation for panel data.
+            Within-unit (serial) equicorrelation for panel designs. Higher rho
+            LOWERS the MDE (Burlig et al. 2020, Eq. 2, equicorrelated case);
+            valid range [-1/(T-1), 1).
         deff : float, default=1.0
             Survey design effect (variance inflation factor).
 
@@ -1543,30 +1599,41 @@ class PowerAnalysis:
         Note: this method has its own formula independent of _compute_variance,
         so deff must be applied here separately (not double-counting).
         """
+        # Validate inputs before routing (mirrors _compute_variance).
+        self._validate_design_params(n_pre, n_post, rho)
+        if not np.isfinite(sigma) or sigma < 0:
+            raise ValueError(f"sigma (residual SD) must be finite and >= 0, got {sigma}")
+        if not 0 < treat_frac < 1:
+            raise ValueError(f"treat_frac must be in (0, 1), got {treat_frac}")
+
         # Handle edge case of zero effect size
         if effect_size == 0:
             return MAX_SAMPLE_SIZE  # Can't detect zero effect
 
         z_alpha, z_beta = self._get_critical_values()
 
-        T = n_pre + n_post
-
         if design == "basic_did":
+            # 2x2 DiD = the m = r = 1 equicorrelated case (period factor
+            # 1/1 + 1/1 = 2); the (1 - rho) factor mirrors _compute_variance and
+            # reduces to Bloom's 2 * sigma^2 * (z..)^2 / (delta^2 f(1-f)) at rho = 0.
             n_total = (
                 2
                 * sigma**2
                 * (z_alpha + z_beta) ** 2
+                * (1 - rho)
                 / (effect_size**2 * treat_frac * (1 - treat_frac))
             )
         else:  # panel
-            design_effect = 1 + (T - 1) * rho
-
+            # Burlig (2020) Eq. 2 (equicorrelated), inverted for required N.
+            # period_factor = 1/n_pre + 1/n_post equals 2 at n_pre=n_post=1, so this
+            # is continuous with the basic_did branch.
+            period_factor = 1 / n_pre + 1 / n_post
             n_total = (
-                2
-                * sigma**2
+                sigma**2
                 * (z_alpha + z_beta) ** 2
-                * design_effect
-                / (effect_size**2 * treat_frac * (1 - treat_frac) * T)
+                * period_factor
+                * (1 - rho)
+                / (effect_size**2 * treat_frac * (1 - treat_frac))
             )
 
         # Survey design effect (multiplicative sample size inflation)
@@ -1602,7 +1669,9 @@ class PowerAnalysis:
         n_post : int, default=1
             Number of post-treatment periods.
         rho : float, default=0.0
-            Intra-cluster correlation for panel data.
+            Within-unit (serial) equicorrelation for panel designs. Higher rho
+            LOWERS the MDE (Burlig et al. 2020, Eq. 2, equicorrelated case);
+            valid range [-1/(T-1), 1).
         treat_frac : float, default=0.5
             Fraction of units assigned to treatment.
         deff : float, default=1.0
@@ -1684,7 +1753,9 @@ class PowerAnalysis:
         n_post : int, default=1
             Number of post-treatment periods.
         rho : float, default=0.0
-            Intra-cluster correlation.
+            Within-unit (serial) equicorrelation for panel designs. Higher rho
+            LOWERS the MDE (Burlig et al. 2020, Eq. 2, equicorrelated case);
+            valid range [-1/(T-1), 1).
         deff : float, default=1.0
             Survey design effect (variance inflation factor).
 
@@ -1749,7 +1820,9 @@ class PowerAnalysis:
         n_post : int, default=1
             Number of post-treatment periods.
         rho : float, default=0.0
-            Intra-cluster correlation.
+            Within-unit (serial) equicorrelation for panel designs. Higher rho
+            LOWERS the MDE (Burlig et al. 2020, Eq. 2, equicorrelated case);
+            valid range [-1/(T-1), 1).
         treat_frac : float, default=0.5
             Fraction assigned to treatment.
         deff : float, default=1.0
@@ -1907,8 +1980,9 @@ def simulate_power(
     3. Repeat n_simulations times
     4. Power = fraction of simulations where p-value < alpha
 
-    The analytical reference formulas this Monte Carlo path complements are under methodology
-    review; see ``docs/methodology/REGISTRY.md`` ``## PowerAnalysis``.
+    The analytical reference formulas this Monte Carlo path complements (the Bloom 1995 normal
+    multiplier and the Burlig et al. 2020 Eq. 2 equicorrelated panel variance) are documented in
+    ``docs/methodology/REGISTRY.md`` ``## PowerAnalysis``.
 
     References
     ----------
@@ -3086,7 +3160,9 @@ def compute_mde(
     n_post : int, default=1
         Number of post-treatment periods.
     rho : float, default=0.0
-        Intra-cluster correlation.
+        Within-unit (serial) equicorrelation for panel designs. Higher rho
+        LOWERS the MDE (Burlig et al. 2020, Eq. 2, equicorrelated case);
+        valid range [-1/(T-1), 1).
     deff : float, default=1.0
         Survey design effect (variance inflation factor).
 
@@ -3136,7 +3212,9 @@ def compute_power(
     n_post : int, default=1
         Number of post-treatment periods.
     rho : float, default=0.0
-        Intra-cluster correlation.
+        Within-unit (serial) equicorrelation for panel designs. Higher rho
+        LOWERS the MDE (Burlig et al. 2020, Eq. 2, equicorrelated case);
+        valid range [-1/(T-1), 1).
     deff : float, default=1.0
         Survey design effect (variance inflation factor).
 
@@ -3184,7 +3262,9 @@ def compute_sample_size(
     n_post : int, default=1
         Number of post-treatment periods.
     rho : float, default=0.0
-        Intra-cluster correlation.
+        Within-unit (serial) equicorrelation for panel designs. Higher rho
+        LOWERS the MDE (Burlig et al. 2020, Eq. 2, equicorrelated case);
+        valid range [-1/(T-1), 1).
     treat_frac : float, default=0.5
         Fraction assigned to treatment.
     deff : float, default=1.0
