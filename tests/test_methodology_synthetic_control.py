@@ -55,10 +55,12 @@ PREDICTORS = [
 # cost 30-150s per *pure-Python* fit because the inner Frank-Wolfe solve grinds its slow
 # sublinear tail to hit the tight tolerance on every objective evaluation. Loosening the
 # inner tolerance + a single start + a small outer cap gives a clean ~0.1s fit without
-# changing what these tests assert. The full production defaults are still exercised by the
-# @slow Tier-2 Basque test (which runs in the Rust matrix under `-m ''`), and the
-# Rust<->numpy Frank-Wolfe kernel equivalence is locked by
-# tests/test_rust_backend.py::test_sc_weight_fw_matches_numpy.
+# changing what these tests assert. Pure-Python coverage of the production-default nested
+# path (n_starts=4 with the _v_starts heuristic candidates + the tight inner_min_decrease=1e-5)
+# is kept by the dedicated non-slow ``test_nested_production_defaults_smoke`` (a 2-donor panel
+# whose inner FW simplex is ~1-D, so defaults stay <0.1s). The @slow Tier-2 Basque test
+# additionally covers the defaults in the Rust matrix, and the Rust<->numpy Frank-Wolfe kernel
+# equivalence is locked by tests/test_rust_backend.py::test_sc_weight_fw_matches_numpy.
 #
 # NB: inner_max_iter is deliberately LEFT AT DEFAULT here — the speedup comes from the
 # looser tolerance letting FW terminate on *convergence* (not on an iteration cap), so the
@@ -416,6 +418,22 @@ def test_n_starts_one_runs():
     )
     assert np.isfinite(res.att)
     assert abs(sum(res.donor_weights.values()) - 1.0) < 1e-6
+
+
+def test_nested_production_defaults_smoke():
+    # Coverage anchor: exercise the FULL production-default nested path end-to-end in
+    # pure-Python — n_starts=4 (so the _v_starts heuristic candidates: inverse-variance,
+    # univariate-fit and Dirichlet starts are generated, which the n_starts=1 _FAST tests
+    # skip) and the tight inner_min_decrease=1e-5. A 2-donor panel keeps the inner
+    # Frank-Wolfe simplex effectively 1-D, so the default settings still run in <0.1s and
+    # this stays non-slow. The @slow Tier-2 Basque test covers the defaults only in the Rust
+    # matrix; this is the pure-Python complement.
+    df, _, _ = _make_panel(n_donors=2)
+    res = synthetic_control(df, "y", "treated", "unit", "year", seed=0)  # production defaults
+    assert np.isfinite(res.att)
+    assert abs(sum(res.donor_weights.values()) - 1.0) < 1e-6
+    assert res.n_donors == 2
+    assert res.mspe_v is not None  # nested V was selected by minimizing pre-period MSPE
 
 
 def test_non_finite_outcome_rejected():
