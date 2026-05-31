@@ -1,0 +1,191 @@
+"""Run-matrix executor: case × config × repeat, with resume + bounded parallelism.
+
+Stdlib-only (``concurrent.futures`` thread pool; reviewer calls are
+subprocess/IO-bound so threads give real parallelism). The runner never spawns
+codex itself — it calls the injected ``reviewer`` (duck-typed: must provide
+``review(case, config, repeat) -> ReviewOutput``, ``cli_version() -> str``, and
+``experiment_tag(config) -> str``). A reviewer exception becomes an INFRA_ERROR
+RunResult (never a missed bug). Completed runs are skipped on resume via the
+content-hash key in ``engine.store``.
+
+The runner ASSERTS the Codex CLI version is identical across arms: the model is
+the only intended variable, so a CLI drift between A and B would confound the
+comparison and must abort the run.
+"""
+
+from __future__ import annotations
+
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, Optional
+
+from engine.models import INFRA_ERROR, Case, Config, RunResult, to_jsonable
+from engine.store import RunStore, run_key
+
+
+class CLIVersionMismatch(RuntimeError):
+    """Raised when arms would run under different reviewer CLI versions."""
+
+
+def _plan_runs(
+    cases: list[Case],
+    configs: list[Config],
+    k: int,
+) -> list[tuple[Case, Config, int]]:
+    """Enumerate (case, config, repeat) triples — uniform ``k`` per case."""
+    jobs: list[tuple[Case, Config, int]] = []
+    for case in cases:
+        for config in configs:
+            for r in range(max(1, k)):
+                jobs.append((case, config, r))
+    return jobs
+
+
+def _case_snapshot(case: Case) -> dict:
+    """Capture the case AS REVIEWED for the comparison bundle (stdlib dict).
+
+    Stored on every RunResult so ``compare`` renders ground truth from what the
+    run actually saw, not from the (possibly later-edited) live corpus.
+    """
+    return {
+        "title": case.title,
+        "stratum": case.stratum,
+        "ground_truth": [to_jsonable(b) for b in case.ground_truth],
+        "expect_no_blockers": case.expect_no_blockers,
+        "allow_severities": case.allow_severities,
+        "known_fp_topics": case.known_fp_topics,
+    }
+
+
+def run_matrix(
+    cases: list[Case],
+    configs: list[Config],
+    reviewer,
+    store: RunStore,
+    k: int = 1,
+    max_parallel: int = 5,
+    progress: Optional[Callable[[str], None]] = None,
+    assert_cli_equal: bool = True,
+) -> list[RunResult]:
+    """Execute the full matrix, resuming completed runs, returning all results.
+
+    ``progress`` (if given) is called with a short status string per completed
+    run. Reviewer errors are captured as INFRA_ERROR results, not raised.
+    """
+
+    def log(msg: str) -> None:
+        if progress:
+            progress(msg)
+
+    # Pin/assert the reviewer CLI version up front so a drift aborts before we
+    # spend any compute (the model must be the only difference between arms).
+    cli_version = ""
+    try:
+        cli_version = reviewer.cli_version()
+    except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+        log(f"WARNING: could not read reviewer CLI version: {exc}")
+    if assert_cli_equal:
+        for config in configs:
+            if config.cli_version and cli_version and config.cli_version != cli_version:
+                raise CLIVersionMismatch(
+                    f"config {config.id} pins cli_version={config.cli_version!r} "
+                    f"but reviewer reports {cli_version!r}; aborting to avoid a "
+                    f"confounded A/B comparison."
+                )
+
+    # Experiment identity per config: folds in model/effort/prompt/cli so a
+    # rerun with a changed model (under the same config id) gets a distinct key
+    # and never resumes a stale run for a different experiment.
+    def _tag(config: Config) -> str:
+        try:
+            return reviewer.experiment_tag(config)
+        except Exception as exc:  # noqa: BLE001 - degrade, don't crash the matrix
+            log(f"WARNING: experiment_tag failed for {config.id}: {exc}")
+            return ""
+
+    config_tags = {config.id: _tag(config) for config in configs}
+
+    # Per-case content identity (mirrors _tag): editing a case under the same id
+    # must invalidate its cache. Degrade to "" only if the reviewer lacks a
+    # case_tag method (a minimal stub) — a real error (e.g. a vanished pinned
+    # patch) propagates rather than silently weakening the key.
+    def _case_tag(case: Case) -> str:
+        try:
+            return reviewer.case_tag(case)
+        except AttributeError:
+            return ""
+
+    case_tags = {case.id: _case_tag(case) for case in cases}
+
+    jobs = _plan_runs(cases, configs, k)
+    results: list[RunResult] = []
+    pending: list[tuple[Case, Config, int]] = []
+
+    # Resume: load any already-completed runs, keyed on the experiment identity.
+    for case, config, r in jobs:
+        key = run_key(case.id, config.id, r, config_tags[config.id], case_tags[case.id])
+        cached = store.load(key)
+        if cached is not None and cached.ok:
+            results.append(cached)
+            log(f"resume: {case.id} {config.id} r{r} (cached)")
+        else:
+            pending.append((case, config, r))
+
+    log(
+        f"{len(results)} cached, {len(pending)} to run "
+        f"({len(cases)} cases × {len(configs)} configs)"
+    )
+
+    def _execute(job: tuple[Case, Config, int]) -> RunResult:
+        case, config, r = job
+        key = run_key(case.id, config.id, r, config_tags[config.id], case_tags[case.id])
+        snap = _case_snapshot(case)
+        t0 = time.monotonic()
+        try:
+            out = reviewer.review(case, config, r)
+            rr = RunResult(
+                case_id=case.id,
+                config_id=config.id,
+                repeat_idx=r,
+                review_markdown=out.review_markdown,
+                cli_version=out.cli_version or cli_version,
+                model=config.model,
+                latency_s=out.latency_s or (time.monotonic() - t0),
+                usage=out.usage,
+                prompt_sha=str((out.usage or {}).get("prompt_sha", "")),
+                run_id=key,
+                case_snapshot=snap,
+            )
+        except Exception as exc:  # noqa: BLE001 - infra failures are data
+            rr = RunResult(
+                case_id=case.id,
+                config_id=config.id,
+                repeat_idx=r,
+                cli_version=cli_version,
+                model=config.model,
+                latency_s=time.monotonic() - t0,
+                run_id=key,
+                case_snapshot=snap,
+                infra_error=f"{type(exc).__name__}: {exc}",
+            )
+        return rr
+
+    if pending:
+        with ThreadPoolExecutor(max_workers=max(1, max_parallel)) as pool:
+            futures = {pool.submit(_execute, job): job for job in pending}
+            for fut in as_completed(futures):
+                case, config, r = futures[fut]
+                rr = fut.result()
+                key = run_key(case.id, config.id, r, config_tags[config.id], case_tags[case.id])
+                # Persist successes and infra-errors alike (infra-errors are
+                # surfaced but excluded from the bundle; persisting avoids
+                # re-run churn while still being visibly non-ok).
+                store.save(key, rr)
+                results.append(rr)
+                status = INFRA_ERROR if not rr.ok else f"{rr.latency_s:.0f}s"
+                log(f"done: {case.id} {config.id} r{r} [{status}]")
+
+    return results
+
+
+__all__ = ["run_matrix", "CLIVersionMismatch"]
