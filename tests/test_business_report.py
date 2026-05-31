@@ -24,6 +24,7 @@ import warnings
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import diff_diff as dd
@@ -39,6 +40,7 @@ from diff_diff import (
     generate_did_data,
     generate_factor_data,
     generate_staggered_data,
+    synthetic_control,
 )
 from diff_diff.business_report import BUSINESS_REPORT_SCHEMA_VERSION
 
@@ -109,6 +111,38 @@ def sdid_fit():
     fdf = generate_factor_data(n_units=25, n_pre=8, n_post=4, n_treated=4, seed=11)
     sdid = SyntheticDiD().fit(fdf, outcome="outcome", unit="unit", time="period", treatment="treat")
     return sdid, fdf
+
+
+@pytest.fixture  # function-scoped: some tests run in_space_placebo(), which mutates the result
+def scm_fit():
+    rng = np.random.default_rng(0)
+    T, T0, n = 8, 6, 4
+    years = list(range(2000, 2000 + T))
+    donors = {
+        j: rng.normal(10, 2) + rng.normal(0, 0.3) * np.arange(T) + rng.normal(0, 0.15, T)
+        for j in range(n)
+    }
+    treated = 0.6 * donors[0] + 0.4 * donors[1] + rng.normal(0, 0.08, T)
+    treated[T0:] += 3.0
+    rows = []
+    for j in range(n):
+        for t in range(T):
+            rows.append({"unit": f"d{j}", "year": years[t], "y": donors[j][t], "treated": 0})
+    for t in range(T):
+        rows.append({"unit": "treated", "year": years[t], "y": treated[t], "treated": int(t >= T0)})
+    df = pd.DataFrame(rows)
+    res = synthetic_control(
+        df,
+        "y",
+        "treated",
+        "unit",
+        "year",
+        seed=0,
+        n_starts=1,
+        optimizer_options={"maxiter": 50},
+        inner_min_decrease=1e-3,
+    )
+    return res, df
 
 
 @pytest.fixture(scope="module")
@@ -725,6 +759,71 @@ class TestAssumptionBlockSourceFaithful:
         desc = assumption["description"]
         assert "DDD" in desc
         assert "Ortiz-Villavicencio" in desc or "2025" in desc
+
+
+class TestSCMBusinessReport:
+    """Classic SCM routes through BusinessReport with the fit-based assumption
+    block, native-diagnostics robustness, and an ADH 2010 attribution."""
+
+    def test_scm_assumption_block_is_fit_based(self, scm_fit):
+        res, _ = scm_fit
+        assumption = BusinessReport(res, auto_diagnostics=False).to_dict()["assumption"]
+        # Distinct from SDiD's "synthetic_fit" — classic SCM is a donor-weighted match.
+        assert assumption["parallel_trends_variant"] == "scm_fit"
+        desc = assumption["description"].lower()
+        assert "placebo" in desc  # significance is placebo-based, not analytical SE
+        assert "donor-weighted" in desc or "donor" in desc
+
+    def test_scm_report_is_json_serializable(self, scm_fit):
+        # SCM's analytical p_value is NaN; the headline is_significant must be a
+        # plain bool (not numpy bool_) so the AI-legible schema serializes.
+        res, _ = scm_fit
+        schema = BusinessReport(res, auto_diagnostics=True).to_dict()
+        json.dumps(schema)  # must not raise
+        assert isinstance(schema["headline"]["is_significant"], bool)
+
+    def test_scm_robustness_uses_native_diagnostics(self, scm_fit):
+        # SCM omits HonestDiD "sensitivity", so robustness must come from the
+        # estimator-native diagnostics block, which must be populated and ran.
+        res, _ = scm_fit
+        diag = BusinessReport(res, auto_diagnostics=True).to_dict()["diagnostics"]
+        assert diag["status"] == "ran"
+        native = diag["schema"]["estimator_native_diagnostics"]
+        assert native["estimator"] == "SyntheticControl"
+        assert isinstance(native["pre_rmspe"], float)
+
+    def test_scm_appendix_attributes_adh_2010(self, scm_fit):
+        res, _ = scm_fit
+        blob = json.dumps(BusinessReport(res, auto_diagnostics=False).to_dict()).lower()
+        assert "abadie" in blob and "2010" in blob
+
+    def test_scm_rejects_honest_did_passthrough(self, scm_fit):
+        res, _ = scm_fit
+        with pytest.raises(ValueError, match="estimator_native_diagnostics"):
+            BusinessReport(res, honest_did_results=object(), auto_diagnostics=False)
+
+    def test_scm_target_parameter_is_named(self, scm_fit):
+        # BR must name SCM's headline estimand (single-unit mean post-treatment gap),
+        # not fall back to "ATT (unrecognized result class)".
+        res, _ = scm_fit
+        tp = BusinessReport(res, auto_diagnostics=False).to_dict()["target_parameter"]
+        assert "unrecognized" not in tp["name"].lower()
+        assert "scm" in tp["name"].lower() or "synthetic control" in tp["name"].lower()
+
+    def test_scm_robustness_block_surfaces_native_fields(self, scm_fit):
+        # The top-level robustness block must surface SCM-native content (pre_rmspe,
+        # weight concentration, the placebo result) rather than the SDiD-shaped
+        # pre_treatment_fit=None left over from the generic lift.
+        res, _ = scm_fit
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res.in_space_placebo()
+            rob = BusinessReport(res, auto_diagnostics=True).to_dict()["robustness"]
+        native = rob["estimator_native"]
+        assert native["estimator"] == "SyntheticControl"
+        assert isinstance(native["pre_rmspe"], float)
+        assert "weight_concentration" in native
+        assert native["in_space_placebo"]["n_placebos"] == res.n_placebos
 
     def test_staggered_triple_diff_assumption_uses_ddd_not_generic_pt(self):
         class StaggeredTripleDiffResults:

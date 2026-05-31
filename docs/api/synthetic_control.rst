@@ -19,9 +19,11 @@ over the post periods.
 - Aggregate / few-unit comparative case studies (states, regions, countries).
 
 **Inference:** classic SCM has **no analytical standard error**. ``se``, ``t_stat``,
-``p_value`` and ``conf_int`` are NaN; ``att`` (the mean post-period gap) is the reported
-estimate. The paper's in-space placebo permutation inference (post/pre RMSPE-ratio,
-``rank/(J+1)`` p-value) is planned for a follow-up release.
+``p_value`` and ``conf_int`` are always NaN; ``att`` (the mean post-period gap) is the
+reported estimate. Significance comes from **in-space placebo permutation inference** via
+:meth:`~diff_diff.SyntheticControlResults.in_space_placebo` (post/pre RMSPE-ratio statistic,
+``placebo_p_value = rank/(n_placebos+1)``). This permutation p-value is a separate field
+from the (NaN) ``p_value``; ``is_significant`` stays bound to ``p_value``.
 
 **Distinct from** :class:`~diff_diff.SyntheticDiD` (Arkhangelsky et al. 2021), which adds
 time weights and ridge regularization; classic SCM uses **donor weights only** plus the
@@ -67,6 +69,8 @@ Results container for synthetic control estimation.
 
    .. autosummary::
 
+      ~SyntheticControlResults.in_space_placebo
+      ~SyntheticControlResults.get_placebo_df
       ~SyntheticControlResults.summary
       ~SyntheticControlResults.print_summary
       ~SyntheticControlResults.to_dict
@@ -154,6 +158,13 @@ Quick estimation with the convenience function::
         unit="region", time="year",
     )
     print(f"ATT: {results.att:.3f}, pre-RMSPE: {results.pre_rmspe:.3f}")
+
+In-space placebo permutation inference (opt-in; refits one synthetic control per donor)::
+
+    placebo_df = results.in_space_placebo()       # reassigns treatment to each donor
+    print(f"placebo p-value: {results.placebo_p_value:.3f} "
+          f"(n_placebos={results.n_placebos})")    # p = rank/(n_placebos+1)
+    print(placebo_df)   # per-unit RMSPE-ratio table used for the permutation rank
 
 Supplying a fixed predictor-importance matrix (skips the outer V search)::
 

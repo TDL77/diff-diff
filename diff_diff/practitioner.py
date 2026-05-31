@@ -20,6 +20,7 @@ STEPS: Set[str] = {
     "estimator_selection",
     "estimation",
     "sensitivity",
+    "placebo",
     "heterogeneity",
     "robustness",
 }
@@ -37,6 +38,7 @@ _ESTIMATOR_NAMES: Dict[str, str] = {
     "StackedDiDResults": "StackedDiD",
     "SyntheticDiDResults": "SyntheticDiD",
     "TROPResults": "TROP",
+    "SyntheticControlResults": "SyntheticControl",
     "EfficientDiDResults": "EfficientDiD",
     "ContinuousDiDResults": "ContinuousDiD",
     "TripleDifferenceResults": "TripleDifference (DDD)",
@@ -71,7 +73,7 @@ def practitioner_next_steps(
         Steps the caller has already completed. Valid names:
         ``"target_parameter"``, ``"assumptions"``, ``"parallel_trends"``,
         ``"estimator_selection"``, ``"estimation"``, ``"sensitivity"``,
-        ``"heterogeneity"``, ``"robustness"``.
+        ``"placebo"``, ``"heterogeneity"``, ``"robustness"``.
     verbose : bool, default True
         If True, print a human-readable summary to stdout.
 
@@ -649,6 +651,72 @@ def _handle_trop(results: Any):
             # recommendation persists after DR marks the TROP native
             # battery complete.
             step_name="placebo",
+        ),
+        _robustness_compare_step("SyntheticDiD or CS"),
+    ]
+    warnings = _check_nan_att(results)
+    return steps, warnings
+
+
+def _handle_synthetic_control(results: Any):
+    steps = [
+        _step(
+            baker_step=6,
+            label="In-space placebo permutation inference",
+            why=(
+                "Classic SCM has no analytical standard error. Significance "
+                "comes from the in-space placebo test (Abadie-Diamond-Hainmueller "
+                "2010, Section 2.4): reassign treatment to each donor, refit, and "
+                "rank the treated unit's post/pre RMSPE ratio "
+                "(p = rank/(n_placebos+1), excluding non-converged placebos)."
+            ),
+            code=(
+                "placebo_df = results.in_space_placebo()\n"
+                "print(f'placebo p-value: {results.placebo_p_value:.3f} "
+                "(n={results.n_placebos})')\n"
+                "print(placebo_df)  # per-unit RMSPE-ratio table used for the rank"
+            ),
+            priority="high",
+            # SCM's significance test IS the placebo; tag it "placebo" (not
+            # "sensitivity") so it survives once the native diagnostics block runs,
+            # mirroring _handle_trop.
+            step_name="placebo",
+        ),
+        _step(
+            baker_step=3,
+            label="Demonstrate pre-treatment fit (SCM identification)",
+            why=(
+                "SCM's identifying assumption is design-enforced fit, not a "
+                "parallel-trends test: it is only credible when the synthetic "
+                "control reproduces the treated unit's pre-period path. Report "
+                "the pre-RMSPE and predictor-balance table; a poor fit means do "
+                "not use SCM (ADH 2010 p. 495)."
+            ),
+            code=(
+                "print(f'pre-treatment RMSPE: {results.pre_rmspe:.4f}')\n"
+                "print(results.predictor_balance)\n"
+                "print(results.get_weights_df())  # donor weight concentration"
+            ),
+            priority="high",
+            # Design-enforced fit IS SCM's parallel-trends analogue (mirrors the
+            # DiagnosticReport ``scm_fit`` PT routing); tagging it "parallel_trends"
+            # keeps it from being auto-suppressed as the completed estimation step.
+            step_name="parallel_trends",
+        ),
+        _step(
+            baker_step=4,
+            label="Curate the donor pool",
+            why=(
+                "Donors exposed to the same/similar intervention or to large "
+                "confounding shocks contaminate the comparison (ADH 2010 "
+                "pp. 498-499). Restrict the donor pool to clean, comparable units."
+            ),
+            code=(
+                "# Exclude contaminated donors explicitly:\n"
+                "# synthetic_control(..., donor_pool=[clean, comparable, units])"
+            ),
+            priority="medium",
+            step_name="estimator_selection",
         ),
         _robustness_compare_step("SyntheticDiD or CS"),
     ]
@@ -1301,6 +1369,7 @@ _HANDLERS = {
     "StackedDiDResults": _handle_stacked,
     "SyntheticDiDResults": _handle_synthetic,
     "TROPResults": _handle_trop,
+    "SyntheticControlResults": _handle_synthetic_control,
     "EfficientDiDResults": _handle_efficient,
     "ContinuousDiDResults": _handle_continuous,
     "TripleDifferenceResults": _handle_triple,

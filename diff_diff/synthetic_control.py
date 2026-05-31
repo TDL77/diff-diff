@@ -17,9 +17,11 @@ Distinct from :class:`~diff_diff.SyntheticDiD` (Arkhangelsky et al. 2021), which
 time weights and ridge regularization: classic SCM uses **donor weights only** and a
 level-matching estimator, plus the outer ``V`` search SyntheticDiD has no analog for.
 
-Inference: classic SCM has **no analytical standard error** — the paper proposes
-permutation/placebo inference (a later PR). ``se``/``t_stat``/``p_value``/``conf_int``
-are always NaN here; ``att`` (mean post-period gap) is the reported estimate.
+Inference: classic SCM has **no analytical standard error**, so
+``se``/``t_stat``/``p_value``/``conf_int`` are always NaN; ``att`` (mean post-period
+gap) is the reported estimate. Significance comes from in-space placebo permutation
+inference (ADH 2010 §2.4) via ``SyntheticControlResults.in_space_placebo()`` — a
+separate ``placebo_p_value`` field, distinct from the NaN analytical ``p_value``.
 
 Numerics provenance: the standardization divisor and the inner/outer optimization
 scheme are NOT specified in ADH (2010) — they are pinned from the R ``Synth`` package
@@ -35,7 +37,10 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from diff_diff.synthetic_control_results import SyntheticControlResults
+from diff_diff.synthetic_control_results import (
+    SyntheticControlResults,
+    _SyntheticControlFitSnapshot,
+)
 from diff_diff.utils import _sc_weight_fw, safe_inference, warn_if_not_converged
 
 __all__ = ["SyntheticControl", "synthetic_control"]
@@ -389,6 +394,9 @@ class SyntheticControl:
         # mspe_v is the OUTER-objective value; it is populated only when a nested V
         # search actually ran (None on the custom and single-donor paths).
         mspe_v: Optional[float] = None
+        # ``outer_converged`` tracks whether the nested V search reached an optimum
+        # (trivially True when there is no outer search: custom V or a single donor).
+        outer_converged = True
         if self.v_method == "custom":
             v = self._prepare_custom_v(k)
             w, converged = _inner_solve_W(X1s, X0s, v, self.inner_max_iter, self.inner_min_decrease)
@@ -405,7 +413,7 @@ class SyntheticControl:
             w = np.array([1.0])
             converged = True
         else:
-            v, w, converged, mspe_v = _outer_solve_V(
+            v, w, converged, mspe_v, outer_converged = _outer_solve_V(
                 X1,
                 X0,
                 X1s,
@@ -425,6 +433,12 @@ class SyntheticControl:
         post_gaps = np.array([gap_path[p] for p in post_periods], dtype=float)
         pre_rmspe = float(np.sqrt(np.mean(pre_gaps**2)))
         att = float(np.mean(post_gaps))
+
+        # Treated unit's post/pre RMSPE ratio — the in-space placebo test statistic
+        # (ADH 2010 §2.4). Cheap to compute now; the placebo reference distribution
+        # is built on demand by SyntheticControlResults.in_space_placebo().
+        treated_scale = float(np.max(np.abs(Z1))) if Z1.size else 0.0
+        rmspe_ratio = _rmspe_ratio(pre_gaps, post_gaps, treated_scale)
 
         # Poor-fit warning (REGISTRY contract: warn when pre-RMSPE exceeds the SD of
         # the treated unit's pre-period outcomes). This includes a FLAT treated pre-path
@@ -490,12 +504,45 @@ class SyntheticControl:
             standardize=self.standardize,
             alpha=self.alpha,
             mspe_v=mspe_v,
+            rmspe_ratio=rmspe_ratio,
         )
-        # Reserved for PR-2 (placebo inference) / PR-3 (conformal). Set as plain
-        # attributes so dataclasses.asdict/fields cannot reach them.
-        results._placebo_gaps = None
-        results._rmspe_ratio = None
-        results._fit_snapshot = None
+        # Retain the panel state needed to refit each donor as a pseudo-treated
+        # unit for in-space placebo inference (ADH 2010 §2.4). Stored as a plain
+        # attribute (not a dataclass field) and excluded from pickling via
+        # SyntheticControlResults.__getstate__ (it holds the full panel).
+        # COPY all caller-owned mutable inputs (the custom_v array, the
+        # optimizer_options dict, the specs list) so post-fit mutation of the
+        # estimator's inputs cannot silently change in_space_placebo() output on an
+        # already-returned results object. (pivots are freshly pivoted here, and the
+        # period/id lists are re-listed below, so those are not caller-aliased.)
+        results._fit_snapshot = _SyntheticControlFitSnapshot(
+            pivots=pivots,
+            specs=list(specs),
+            outcome=outcome,
+            all_periods=list(all_periods),
+            pre_periods=list(pre_periods),
+            post_periods=list(post_periods),
+            donor_ids=list(donor_ids),
+            treated_id=treated_id,
+            standardize=self.standardize,
+            v_method=self.v_method,
+            custom_v=(
+                None if self.custom_v is None else np.array(self.custom_v, dtype=float, copy=True)
+            ),
+            n_starts=self.n_starts,
+            seed=self.seed,
+            optimizer_options=(
+                None if self.optimizer_options is None else dict(self.optimizer_options)
+            ),
+            inner_max_iter=self.inner_max_iter,
+            inner_min_decrease=self.inner_min_decrease,
+        )
+        # Persist whether the treated unit's own fit reached a valid optimum — both
+        # the inner Frank-Wolfe weight solve AND (on the nested path) the outer V
+        # search. in_space_placebo() fails closed otherwise: ranking a statistic from
+        # a truncated / under-optimized treated fit would not be a valid ADH 2010
+        # §2.4 permutation (and an under-optimized V is anti-conservative).
+        results._fit_converged = bool(converged and outer_converged)
 
         self.results_ = results
         self.is_fitted_ = True
@@ -1022,17 +1069,20 @@ def _outer_solve_V(
     optimizer_options: Optional[Dict[str, Any]],
     inner_max_iter: int,
     inner_min_decrease: float,
-) -> Tuple[np.ndarray, np.ndarray, bool, float]:
+) -> Tuple[np.ndarray, np.ndarray, bool, float, bool]:
     """Data-driven V selection: minimize pre-period outcome MSPE of W*(V).
 
     Multistart Nelder-Mead over ``theta`` (V = softmax(theta)) plus a derivative-free
-    Powell polish from the best point. Returns ``(v_star, w_star, converged, mspe)``.
+    Powell polish from the best point. Returns
+    ``(v_star, w_star, inner_converged, mspe, outer_converged)``.
     """
     k = X1s.shape[0]
     if k == 1:
+        # Single predictor: V is fixed (no outer search), so outer convergence is
+        # trivially satisfied.
         v = np.array([1.0])
         w, converged = _inner_solve_W(X1s, X0s, v, inner_max_iter, inner_min_decrease)
-        return v, w, converged, float(np.mean((Z1 - Z0 @ w) ** 2))
+        return v, w, converged, float(np.mean((Z1 - Z0 @ w) ** 2)), True
 
     # Track inner Frank-Wolfe non-convergence across ALL intermediate evaluations so
     # the outer search cannot silently rank truncated W*(V) solves (codex). `_inner_solve_W`
@@ -1077,26 +1127,41 @@ def _outer_solve_V(
     _st["total"] += start_total
     _st["nonconv"] += start_nonconv
 
+    # Track convergence of the SELECTED (lowest-objective) incumbent, NOT "any start
+    # converged" — a non-winning start's success says nothing about whether the V we
+    # actually return is a valid optimum. ``best_success`` follows ``best_x``.
     best_x: np.ndarray = starts[0]
     best_fun = np.inf
-    outer_converged = False
+    best_success = False
     for theta0 in starts:
         res = minimize(objective, theta0, method="Nelder-Mead", options=nm_options)
-        outer_converged = outer_converged or bool(res.success)
         if res.fun < best_fun:
             best_fun = float(res.fun)
             best_x = res.x
+            best_success = bool(res.success)
 
-    # Derivative-free polish from the incumbent (best-of, mirrors R optimx).
+    # Derivative-free polish from the incumbent (best-of, mirrors R optimx). If the
+    # polish improves on the incumbent it becomes the selected solution (carry its
+    # success); if it does not improve but converged AT the incumbent's objective
+    # level, that validates the incumbent as an optimum.
     res_p = minimize(objective, best_x, method="Powell", options=powell_options)
-    outer_converged = outer_converged or bool(res_p.success)
     if res_p.fun < best_fun:
         best_fun = float(res_p.fun)
         best_x = res_p.x
+        best_success = bool(res_p.success)
+    elif bool(res_p.success) and np.isclose(res_p.fun, best_fun, rtol=1e-5, atol=1e-8):
+        # Powell did not improve but converged back AT the incumbent (same objective
+        # within tolerance) -> the incumbent is a validated optimum. A Powell run that
+        # "succeeds" at a STRICTLY WORSE objective ended elsewhere and says nothing
+        # about the selected incumbent's validity, so it must NOT flip best_success
+        # (which would silently admit an under-optimized V from a success=False start).
+        best_success = True
+    outer_converged = best_success
 
-    # Surface a silent under-optimized V: if neither the multistart Nelder-Mead nor
-    # the Powell polish reported success (e.g. optimizer_options={"maxiter": 1}), the
-    # selected V / donor weights / ATT may be sub-optimal.
+    # Surface a silent under-optimized V: if the SELECTED outer solution did not
+    # converge (e.g. optimizer_options={"maxiter": 1}, or the lowest-objective
+    # incumbent came from a truncated run), the selected V / donor weights / ATT may
+    # be sub-optimal.
     if not outer_converged:
         warnings.warn(
             "Outer V-search (Nelder-Mead / Powell) did not converge; the selected "
@@ -1125,7 +1190,7 @@ def _outer_solve_V(
     v_star = _softmax(best_x)
     w_star, converged = _inner_solve_W(X1s, X0s, v_star, inner_max_iter, inner_min_decrease)
     mspe = float(np.mean((Z1 - Z0 @ w_star) ** 2))
-    return v_star, w_star, converged, mspe
+    return v_star, w_star, converged, mspe, outer_converged
 
 
 def _compute_gap_path(
@@ -1141,3 +1206,107 @@ def _compute_gap_path(
     synthetic = donor_block @ w
     gaps = treated_series - synthetic
     return {period: float(g) for period, g in zip(all_periods, gaps)}
+
+
+# =============================================================================
+# in-space placebo permutation inference (ADH 2010 §2.4) — used by
+# SyntheticControlResults.in_space_placebo() via function-level import
+# =============================================================================
+
+
+def _mspe(gap_path: Dict[Any, float], periods: List[Any]) -> float:
+    """Mean squared prediction error of ``gap_path`` over ``periods``."""
+    if not periods:
+        return float("nan")
+    g = np.array([gap_path[p] for p in periods], dtype=float)
+    return float(np.mean(g**2))
+
+
+def _rmspe_ratio(pre_gaps: np.ndarray, post_gaps: np.ndarray, scale: float) -> float:
+    """Post/pre RMSPE ratio — the in-space placebo test statistic (ADH 2010 §2.4).
+
+    Returns ``RMSPE_post / RMSPE_pre = sqrt(MSPE_post / MSPE_pre)`` (the root-scale
+    ratio, matching the ``rmspe_ratio`` name). ADH 2010 §3.4 reports the *MSPE*
+    ratio (the square of this); the two are monotone-equivalent on nonnegative
+    values, so the permutation rank and p-value are identical either way — only the
+    reported statistic's scale differs.
+
+    The pre-period MSPE denominator is floored at a scale-aware
+    ``1e-8 * max(scale, 1)**2`` (squared-outcome units) BEFORE the square root, so a
+    (near-)perfect pre-treatment fit (pre-MSPE → 0) yields a large-but-FINITE ratio
+    rather than ``inf``/``nan`` (which would corrupt the permutation rank).
+    ``scale`` is the magnitude of the unit's pre-period outcomes. Mirrors the
+    ``_fit_tol`` poor-fit guard in ``fit()``.
+    """
+    pre_mspe = float(np.mean(pre_gaps**2)) if pre_gaps.size else float("nan")
+    post_mspe = float(np.mean(post_gaps**2)) if post_gaps.size else float("nan")
+    floor = 1e-8 * max(float(scale), 1.0) ** 2
+    return float(np.sqrt(post_mspe / max(pre_mspe, floor)))
+
+
+def _placebo_fit_unit(
+    snap: _SyntheticControlFitSnapshot,
+    unit: Any,
+    donor_pool: List[Any],
+    n_starts: int,
+) -> Optional[Tuple[Dict[Any, float], float]]:
+    """Refit a synthetic control for one (pseudo-)treated ``unit`` vs ``donor_pool``.
+
+    Reuses the exact predictor build / standardization / weight solve / gap-path
+    path as ``fit()`` — none of those helpers reads estimator (``self``) state, so
+    the refit is driven entirely by the snapshot. The real treated unit is never in
+    ``donor_pool`` (the caller passes the other ``J−1`` donors). Returns
+    ``(gap_path, rmspe_ratio)``, or ``None`` when the weight solve does not converge
+    (the caller excludes such placebos from the permutation reference set).
+    Per-placebo ``UserWarning``s (poor fit, zero-variance row, non-convergence) are
+    suppressed here; the caller surfaces an aggregate count.
+    """
+    X1, X0, _ = _build_predictor_matrix(snap.pivots, snap.specs, unit, donor_pool)
+    # Belt-and-suspenders: fit() already gated non-finite outcomes over the full
+    # treated+donor panel, so a donor reassigned as pseudo-treated has finite cells.
+    if not (np.all(np.isfinite(X1)) and np.all(np.isfinite(X0))):
+        return None
+    X1s, X0s, _ = _standardize(X1, X0, snap.standardize)
+    Y = snap.pivots[snap.outcome]
+    Z1 = Y.loc[snap.pre_periods, unit].to_numpy(dtype=float)
+    Z0 = Y.loc[snap.pre_periods, donor_pool].to_numpy(dtype=float)
+    # ``outer_converged`` is trivially True when there is no outer V search (custom
+    # V or a single-donor degenerate pool).
+    outer_converged = True
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if snap.v_method == "custom":
+            # custom_v length == k (= len(specs)) is unit-agnostic, so it stays
+            # valid for every placebo; it was finiteness/non-negativity-checked at
+            # construction. Just trace-normalize (matches _prepare_custom_v).
+            v = np.asarray(snap.custom_v, dtype=float).ravel()
+            v = v / v.sum()
+            w, converged = _inner_solve_W(X1s, X0s, v, snap.inner_max_iter, snap.inner_min_decrease)
+        elif len(donor_pool) == 1:
+            # Degenerate: a single donor forces w = [1.0]; V is irrelevant.
+            w, converged = np.array([1.0]), True
+        else:
+            _, w, converged, _, outer_converged = _outer_solve_V(
+                X1,
+                X0,
+                X1s,
+                X0s,
+                Z1,
+                Z0,
+                n_starts,
+                snap.seed,
+                snap.optimizer_options,
+                snap.inner_max_iter,
+                snap.inner_min_decrease,
+            )
+    # Exclude a placebo whose fit is not a valid optimum — a truncated inner W OR an
+    # under-optimized outer V search. An under-optimized placebo V fits the pre-period
+    # worse, shrinking its RMSPE ratio and biasing the permutation p-value
+    # anti-conservatively, so such placebos must not silently enter the rank.
+    if not (converged and outer_converged):
+        return None
+    gap_path = _compute_gap_path(Y, w, unit, donor_pool, snap.all_periods)
+    pre_gaps = np.array([gap_path[p] for p in snap.pre_periods], dtype=float)
+    post_gaps = np.array([gap_path[p] for p in snap.post_periods], dtype=float)
+    scale = float(np.max(np.abs(Z1))) if Z1.size else 0.0
+    return gap_path, _rmspe_ratio(pre_gaps, post_gaps, scale)

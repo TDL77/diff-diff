@@ -20,6 +20,7 @@ from diff_diff.practitioner import STEPS, practitioner_next_steps
 from diff_diff.results import DiDResults, SyntheticDiDResults
 from diff_diff.stacked_did_results import StackedDiDResults
 from diff_diff.sun_abraham import SunAbrahamResults
+from diff_diff.synthetic_control_results import SyntheticControlResults
 from diff_diff.triple_diff import TripleDifferenceResults
 from diff_diff.trop_results import TROPResults
 from diff_diff.two_stage_results import TwoStageDiDResults
@@ -111,6 +112,15 @@ def mock_trop_results():
     r = TROPResults.__new__(TROPResults)
     r.att = 0.8
     r.se = 0.2
+    return r
+
+
+@pytest.fixture
+def mock_scm_results():
+    r = SyntheticControlResults.__new__(SyntheticControlResults)
+    r.att = 1.2
+    r.se = np.nan
+    r.placebo_p_value = np.nan
     return r
 
 
@@ -335,6 +345,21 @@ class TestResultTypeDispatch:
         all_code = " ".join(s.get("code", "") for s in handler_steps)
         assert "control_group" not in all_code
         assert "anticipation" not in all_code
+
+    def test_synthetic_control_results(self, mock_scm_results):
+        output = practitioner_next_steps(mock_scm_results, verbose=False)
+        assert output["estimator"] == "SyntheticControl"
+        assert len(output["next_steps"]) > 0
+        # The in-space placebo step must surface (it is SCM's significance test)
+        # and must not be auto-suppressed as the completed estimation step.
+        all_code = " ".join(s.get("code", "") for s in output["next_steps"])
+        all_labels = " ".join(s.get("label", "") for s in output["next_steps"]).lower()
+        assert "in_space_placebo" in all_code
+        assert "placebo" in all_labels
+        # SCM is not a staggered DiD: no control-group / anticipation knobs.
+        handler_steps = [s for s in output["next_steps"] if s["baker_step"] > 2]
+        handler_code = " ".join(s.get("code", "") for s in handler_steps)
+        assert "control_group" not in handler_code and "anticipation" not in handler_code
 
     def test_efficient_results(self, mock_efficient_results):
         output = practitioner_next_steps(mock_efficient_results, verbose=False)

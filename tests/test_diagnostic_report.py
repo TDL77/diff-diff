@@ -20,6 +20,7 @@ import warnings
 from unittest.mock import patch
 
 import numpy as np
+import pandas as pd
 import pytest
 
 import diff_diff as dd
@@ -34,6 +35,7 @@ from diff_diff import (
     generate_did_data,
     generate_factor_data,
     generate_staggered_data,
+    synthetic_control,
 )
 from diff_diff.diagnostic_report import (
     DIAGNOSTIC_REPORT_SCHEMA_VERSION,
@@ -133,6 +135,45 @@ def sdid_fit():
     fdf = generate_factor_data(n_units=25, n_pre=8, n_post=4, n_treated=4, seed=11)
     sdid = SyntheticDiD().fit(fdf, outcome="outcome", unit="unit", time="period", treatment="treat")
     return sdid, fdf
+
+
+def _scm_panel(n_donors=4, T=8, T0=6, effect=3.0, seed=0):
+    """Small balanced SCM panel: treated = convex mix of two donors + post effect."""
+    rng = np.random.default_rng(seed)
+    years = list(range(2000, 2000 + T))
+    donors = {
+        j: rng.normal(10, 2) + rng.normal(0, 0.3) * np.arange(T) + rng.normal(0, 0.15, T)
+        for j in range(n_donors)
+    }
+    treated = 0.6 * donors[0] + 0.4 * donors[1] + rng.normal(0, 0.08, T)
+    treated[T0:] += effect
+    rows = []
+    for j in range(n_donors):
+        for t in range(T):
+            rows.append({"unit": f"d{j}", "year": years[t], "y": donors[j][t], "treated": 0})
+    for t in range(T):
+        rows.append({"unit": "treated", "year": years[t], "y": treated[t], "treated": int(t >= T0)})
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture  # function-scoped: some tests run in_space_placebo(), which mutates the result
+def scm_fit():
+    warnings.filterwarnings("ignore")
+    df = _scm_panel(n_donors=4)
+    # Cheap optimizer settings keep the pure-Python fixture fast; the report path,
+    # not solver accuracy, is what these tests exercise.
+    res = synthetic_control(
+        df,
+        "y",
+        "treated",
+        "unit",
+        "year",
+        seed=0,
+        n_starts=1,
+        optimizer_options={"maxiter": 50},
+        inner_min_decrease=1e-3,
+    )
+    return res, df
 
 
 # ---------------------------------------------------------------------------
@@ -2003,6 +2044,141 @@ class TestSDiDNative:
         with patch("diff_diff.honest_did.HonestDiD.sensitivity_analysis") as mock:
             DiagnosticReport(fit).to_dict()
             mock.assert_not_called()
+
+
+class TestSCMNative:
+    """Classic SCM routes to the fit-based PT analogue + native diagnostics."""
+
+    def test_scm_applicable_checks(self, scm_fit):
+        res, _ = scm_fit
+        applicable = DiagnosticReport(res).applicable_checks
+        assert "estimator_native" in applicable
+        assert "parallel_trends" in applicable  # design-enforced fit analogue
+        # SCM is not HonestDiD/heterogeneity territory (one treated unit).
+        assert "sensitivity" not in applicable
+        assert "heterogeneity" not in applicable
+
+    def test_scm_pt_uses_scm_fit_method(self, scm_fit):
+        res, _ = scm_fit
+        pt = DiagnosticReport(res).to_dict()["parallel_trends"]
+        assert pt["method"] == "scm_fit"
+        assert pt["verdict"] == "design_enforced_pt"
+        assert isinstance(pt.get("pre_treatment_fit_rmse"), float)
+
+    def test_scm_native_section_populated(self, scm_fit):
+        res, _ = scm_fit
+        native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+        assert native["status"] == "ran"
+        assert native["estimator"] == "SyntheticControl"
+        assert isinstance(native["pre_rmspe"], float)
+        assert "herfindahl" in native["weight_concentration"]
+        # Placebo is opt-in: NOT auto-run inside the report.
+        assert native["in_space_placebo"]["status"] == "not_run"
+        # In-time placebo / leave-one-out are ADH 2015 (not implemented here).
+        assert "in_time_placebo" not in native and "leave_one_out" not in native
+
+    def test_scm_native_surfaces_placebo_after_optin_run(self, scm_fit):
+        res, _ = scm_fit
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res.in_space_placebo()
+            native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+        block = native["in_space_placebo"]
+        assert block["n_placebos"] == res.n_placebos
+        assert block["placebo_p_value"] == pytest.approx(res.placebo_p_value)
+
+    def test_scm_does_not_call_honest_did(self, scm_fit):
+        """HonestDiD sensitivity should NOT run on SCM (fit-based / native path)."""
+        res, _ = scm_fit
+        with patch("diff_diff.honest_did.HonestDiD.sensitivity_analysis") as mock:
+            DiagnosticReport(res).to_dict()
+            mock.assert_not_called()
+
+    def test_scm_significance_not_marked_done_until_placebo_run(self, scm_fit):
+        """SCM significance is the OPT-IN in-space placebo, which DR never runs.
+
+        Unlike SDiD/TROP (whose native block IS the sensitivity work), SCM's
+        native block only reports the placebo as ``not_run``, so the in-space
+        placebo next-step must persist — significance is not complete merely
+        because the native diagnostics ran.
+        """
+        res, _ = scm_fit  # the fixture does NOT run the placebo
+        schema = DiagnosticReport(res).to_dict()
+        labels = " ".join(s.get("label", "") for s in schema.get("next_steps", [])).lower()
+        assert "placebo" in labels  # the significance recommendation still surfaces
+
+    def test_scm_placebo_step_completes_after_run(self, scm_fit):
+        """Once the opt-in placebo has been run, DR stops recommending it."""
+        res, _ = scm_fit
+        before = DiagnosticReport(res).to_dict()["next_steps"]
+        assert any("placebo" in s.get("label", "").lower() for s in before)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res.in_space_placebo()  # opt-in significance procedure now done
+        after = DiagnosticReport(res).to_dict()["next_steps"]
+        assert not any("placebo" in s.get("label", "").lower() for s in after)
+
+    def test_scm_rejects_precomputed_parallel_trends_and_sensitivity(self, scm_fit):
+        # Like SDiD/TROP, SCM computes its PT verdict internally (the scm_fit
+        # design-enforced pre-fit), so a precomputed parallel_trends p-value payload
+        # is methodology-incompatible and rejected — as is sensitivity (no HonestDiD
+        # analogue). SCM's PT still runs natively (scm_fit) without a precomputed input.
+        res, _ = scm_fit
+        with pytest.raises(ValueError, match="estimator_native_diagnostics"):
+            DiagnosticReport(res, precomputed={"parallel_trends": {"joint_p_value": 0.5}})
+        with pytest.raises(ValueError, match="estimator_native_diagnostics"):
+            DiagnosticReport(res, precomputed={"sensitivity": {"breakdown_M": 1.0}})
+        # Without a precomputed input, the native scm_fit PT verdict still renders.
+        assert DiagnosticReport(res).to_dict()["parallel_trends"]["method"] == "scm_fit"
+
+    def test_scm_pt_prose_is_scm_specific_not_sdid(self, scm_fit):
+        # The design_enforced_pt prose must describe SCM's donor-weighted, single-
+        # treated-unit, placebo-based identification — NOT SDiD's weighted-PT analogue.
+        res, _ = scm_fit
+        interp = DiagnosticReport(res).to_dict()["overall_interpretation"].lower()
+        assert "in-space placebo" in interp or "donor-weighted" in interp
+        assert "sdid" not in interp
+
+    def test_scm_target_parameter_is_named(self, scm_fit):
+        res, _ = scm_fit
+        tp = DiagnosticReport(res).to_dict()["target_parameter"]
+        assert "unrecognized" not in tp["name"].lower()
+        assert "scm" in tp["name"].lower() or "synthetic control" in tp["name"].lower()
+
+    def test_scm_generic_placebo_section_points_to_native(self, scm_fit):
+        # The generic ``placebo`` section must not claim placebo is "not yet
+        # implemented" for SCM — its in-space placebo IS implemented and surfaced
+        # under estimator_native_diagnostics (avoids contradictory report state).
+        res, _ = scm_fit
+        reason = (DiagnosticReport(res).to_dict()["placebo"].get("reason") or "").lower()
+        assert "not yet implemented" not in reason
+        assert "in_space_placebo" in reason or "estimator_native" in reason
+
+    def test_scm_native_marks_infeasible_placebo(self):
+        # An attempted-but-infeasible placebo (here J<2) surfaces an explicit
+        # status="infeasible" + reason in _scm_native, not a bare NaN p-value.
+        rng = np.random.default_rng(0)
+        T, T0 = 8, 6
+        years = list(range(2000, 2000 + T))
+        d0 = rng.normal(10, 2, T)
+        treated = d0 + rng.normal(0, 0.1, T)
+        treated[T0:] += 3.0
+        rows = [{"unit": "d0", "year": years[t], "y": d0[t], "treated": 0} for t in range(T)]
+        rows += [
+            {"unit": "treated", "year": years[t], "y": treated[t], "treated": int(t >= T0)}
+            for t in range(T)
+        ]
+        df = pd.DataFrame(rows)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = synthetic_control(
+                df, "y", "treated", "unit", "year", seed=0, n_starts=1, inner_min_decrease=1e-3
+            )
+            res.in_space_placebo()  # only 1 donor -> infeasible
+            native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+        block = native["in_space_placebo"]
+        assert block["status"] == "infeasible"
+        assert np.isnan(block["placebo_p_value"]) and "reason" in block
 
 
 # ---------------------------------------------------------------------------

@@ -263,9 +263,16 @@ a library setting.
   pre-period), and routes sensitivity to `in_time_placebo()` +
   `sensitivity_to_zeta_omega()`. `TROPResults` surfaces factor-model
   diagnostics (`effective_rank`, `loocv_score`, selected `lambda_*`)
-  under `estimator_native_diagnostics`. `EfficientDiDResults` PT runs
-  through `EfficientDiD.hausman_pretest` (the estimator's native
-  PT-All vs PT-Post check).
+  under `estimator_native_diagnostics`. `SyntheticControlResults`
+  routes parallel-trends to the `scm_fit` analogue (`pre_rmspe`,
+  verdict `design_enforced_pt`) and surfaces `pre_rmspe`, donor-weight
+  concentration, and the in-space placebo permutation p-value under
+  `estimator_native_diagnostics` — the placebo block is populated only
+  when the caller has already run `in_space_placebo()` (opt-in; DR never
+  triggers the per-donor refit loop implicitly), and it omits
+  HonestDiD-style `sensitivity` (significance IS the placebo).
+  `EfficientDiDResults` PT runs through `EfficientDiD.hausman_pretest`
+  (the estimator's native PT-All vs PT-Post check).
 
 - **Note:** Pre-trends verdict is a three-bin heuristic, not a field
   convention. DR maps the joint p-value as follows:
