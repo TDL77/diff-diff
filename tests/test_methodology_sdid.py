@@ -3076,13 +3076,17 @@ class TestScaleEquivariance:
         assert len(r.placebo_effects) == n0
 
     @pytest.mark.parametrize("variance_method", ["placebo", "bootstrap", "jackknife"])
-    def test_scale_equivariance(self, variance_method):
+    def test_scale_equivariance(self, variance_method, ci_params):
         """τ/a, SE/|a|, p-value, and n_successful must be invariant under
         (Y → a*Y + b) across ~15 orders of magnitude."""
+        # Pure invariance check (baseline captured at runtime, not vs _BASELINE), so the
+        # absolute n_bootstrap is irrelevant: r0 and the scaled refits all use the same
+        # (ci_params-scaled in pure-Python, 200 under Rust) count, preserving equivariance.
+        nb = ci_params.bootstrap(200)
         data = _make_panel(seed=42)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
-            r0 = self._fit(data, variance_method)
+            r0 = self._fit(data, variance_method, n_bootstrap=nb)
         att0, se0, p0 = r0.att, r0.se, r0.p_value
         n0 = len(r0.placebo_effects)
         noise0 = r0.noise_level
@@ -3092,7 +3096,7 @@ class TestScaleEquivariance:
             scaled = self._rescale(data, a, b)
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", UserWarning)
-                r = self._fit(scaled, variance_method)
+                r = self._fit(scaled, variance_method, n_bootstrap=nb)
             # Variance-method success count must be identical; divergence
             # would shift the empirical p-value floor 1/(n+1).
             assert len(r.placebo_effects) == n0, (
@@ -3172,13 +3176,15 @@ class TestPValueSemantics:
     null draws either and also use the analytical p-value.
     """
 
-    def test_bootstrap_p_value_matches_analytical(self):
+    def test_bootstrap_p_value_matches_analytical(self, ci_params):
         """Bootstrap p-value must equal safe_inference(att, se)[1]."""
+        # Self-consistency check (reported p vs the analytical formula on the reported se) —
+        # independent of the bootstrap draw count, so ci_params scaling is safe.
         df = _make_panel(seed=42)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             r = SyntheticDiD(
-                variance_method="bootstrap", n_bootstrap=200, seed=1
+                variance_method="bootstrap", n_bootstrap=ci_params.bootstrap(200), seed=1
             ).fit(
                 df, outcome="outcome", treatment="treated",
                 unit="unit", time="period",
@@ -3189,13 +3195,15 @@ class TestPValueSemantics:
             f"bootstrap p_value={r.p_value} != analytical {expected_p}"
         )
 
-    def test_placebo_p_value_uses_empirical_formula(self):
+    def test_placebo_p_value_uses_empirical_formula(self, ci_params):
         """Placebo p-value must equal max(mean(|draws| >= |att|), 1/(r+1))."""
+        # Self-consistency check (reported p vs the empirical formula on the reported
+        # placebo_effects) — independent of the draw count, so ci_params scaling is safe.
         df = _make_panel(seed=42)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
             r = SyntheticDiD(
-                variance_method="placebo", n_bootstrap=200, seed=1
+                variance_method="placebo", n_bootstrap=ci_params.bootstrap(200), seed=1
             ).fit(
                 df, outcome="outcome", treatment="treated",
                 unit="unit", time="period",
