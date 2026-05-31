@@ -13,6 +13,13 @@ on:
       - 'tools/**'
       - 'pyproject.toml'
       - '.github/workflows/rust-test.yml'
+      # docs-tests.yml / notebooks.yml / ci-gate.yml carry ready-for-ci label
+      # contracts locked by TestCiWorkflowLabelEventGuard in
+      # tests/test_openai_review.py; include them so a regression there triggers
+      # this suite (enforced by TestRustTestWorkflowPathFilter).
+      - '.github/workflows/docs-tests.yml'
+      - '.github/workflows/notebooks.yml'
+      - '.github/workflows/ci-gate.yml'
       # The AI-review surfaces below are tested by
       # tests/test_openai_review.py (TestWorkflowPromptHardening,
       # TestAdaptReviewCriteria, etc.). Without these path filters, a
@@ -33,6 +40,13 @@ on:
       - 'tools/**'
       - 'pyproject.toml'
       - '.github/workflows/rust-test.yml'
+      # docs-tests.yml / notebooks.yml / ci-gate.yml carry ready-for-ci label
+      # contracts locked by TestCiWorkflowLabelEventGuard in
+      # tests/test_openai_review.py; include them so a regression there triggers
+      # this suite (enforced by TestRustTestWorkflowPathFilter).
+      - '.github/workflows/docs-tests.yml'
+      - '.github/workflows/notebooks.yml'
+      - '.github/workflows/ci-gate.yml'
       - '.github/workflows/ai_pr_review.yml'
       - '.github/codex/prompts/pr_review.md'
       - '.claude/scripts/openai_review.py'
@@ -47,9 +61,12 @@ jobs:
   # Run Rust unit tests on all platforms
   rust-tests:
     name: Rust Unit Tests (${{ matrix.os }})
+    # Skip unrelated label churn: a non-ready-for-ci label add/remove won't run this job.
     if: >-
       github.event_name != 'pull_request'
-      || contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      || (contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      && (github.event.action != 'labeled' && github.event.action != 'unlabeled'
+      || github.event.label.name == 'ready-for-ci'))
     runs-on: ${{ matrix.os }}
     env:
       PYO3_USE_ABI3_FORWARD_COMPATIBILITY: 1
@@ -83,9 +100,12 @@ jobs:
   # Build and test with Python on multiple platforms
   python-tests:
     name: Python Tests (${{ matrix.os }}, py${{ matrix.python-version }})
+    # Skip unrelated label churn: a non-ready-for-ci label add/remove won't run this job.
     if: >-
       github.event_name != 'pull_request'
-      || contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      || (contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      && (github.event.action != 'labeled' && github.event.action != 'unlabeled'
+      || github.event.label.name == 'ready-for-ci'))
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -190,9 +210,12 @@ jobs:
   # Test pure Python fallback (without Rust extension)
   python-fallback:
     name: Pure Python Fallback
+    # Skip unrelated label churn: a non-ready-for-ci label add/remove won't run this job.
     if: >-
       github.event_name != 'pull_request'
-      || contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      || (contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      && (github.event.action != 'labeled' && github.event.action != 'unlabeled'
+      || github.event.label.name == 'ready-for-ci'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

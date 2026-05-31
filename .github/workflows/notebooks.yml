@@ -26,9 +26,12 @@ permissions:
 jobs:
   execute-notebooks:
     name: Execute tutorial notebooks
+    # Skip unrelated label churn: a non-ready-for-ci label add/remove won't run this job.
     if: >-
       github.event_name != 'pull_request'
-      || contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      || (contains(github.event.pull_request.labels.*.name, 'ready-for-ci')
+      && (github.event.action != 'labeled' && github.event.action != 'unlabeled'
+      || github.event.label.name == 'ready-for-ci'))
     runs-on: ubuntu-latest
 
     steps:
