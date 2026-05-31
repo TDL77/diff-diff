@@ -1224,10 +1224,16 @@ class PowerAnalysis:
                             + 1/n_control_post + 1/n_control_pre)
 
     For panel DiD with T periods:
-        Var(ATT) = sigma^2 * (1/(N_treated * T) + 1/(N_control * T))
-                 * (1 + (T-1)*rho) / (1 + (T-1)*rho)
+        Var(ATT) = sigma^2 * (1/N_treated + 1/N_control)
+                 * (1 + (T-1)*rho) / T
 
     Where rho is the intra-cluster correlation coefficient.
+
+    These analytical formulas are under methodology review (2026-05): the panel variance uses an
+    equicorrelated/Moulton ``(1 + (T-1)*rho)/T`` design effect, which is **not** Burlig et al.'s
+    serial-correlation-robust (SCR) variance, and the critical values use the normal (z)
+    approximation (Bloom) rather than Burlig's t-distribution. See ``docs/methodology/REGISTRY.md``
+    ``## PowerAnalysis`` and the source audits under ``docs/methodology/papers/``.
 
     References
     ----------
@@ -1900,6 +1906,9 @@ def simulate_power(
     2. Fit the estimator and record the p-value
     3. Repeat n_simulations times
     4. Power = fraction of simulations where p-value < alpha
+
+    The analytical reference formulas this Monte Carlo path complements are under methodology
+    review; see ``docs/methodology/REGISTRY.md`` ``## PowerAnalysis``.
 
     References
     ----------
