@@ -3684,6 +3684,19 @@ class TestCovariateNameCollision:
         assert any(k.startswith("period_") for k in ck)
         assert len(ck) == r.vcov.shape[0]
 
+    def test_mpd_fixed_effect_dummy_collides_with_period_keys(self):
+        # Backstop: a NON-time fixed effect whose get_dummies names match the
+        # structural period_{p} event-study keys must raise (would otherwise
+        # silently overwrite those coefficients) — the FE dummy is appended to
+        # var_names directly, so the upfront covariate guard cannot catch it.
+        data = self._mpd_data()
+        data["period"] = data["time"]  # FE column 'period' -> 'period_1'... dummies
+        with pytest.raises(ValueError, match="collide"):
+            MultiPeriodDiD().fit(
+                data, "outcome", "treated", "time",
+                covariates=["x1"], fixed_effects=["period"],
+            )
+
     def test_synthetic_did_unaffected_by_guard(self):
         # SyntheticDiD overrides fit() and never reaches the base-class guard;
         # a covariate must still fit (regression lock that the guard didn't leak).

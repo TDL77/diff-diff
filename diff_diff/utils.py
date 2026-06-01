@@ -134,6 +134,54 @@ def validate_covariate_names(
         )
 
 
+def validate_design_term_names(
+    var_names: Iterable[str],
+    *,
+    estimator: str = "estimator",
+) -> None:
+    """
+    Raise if the assembled design term-name list contains duplicates.
+
+    Backstop for :func:`validate_covariate_names`: even after the user
+    covariates are cleared, a fixed-effect dummy name (``{fe}_{value}``) can
+    still collide with a structural term — most notably a ``MultiPeriodDiD``
+    ``period_{p}`` event-study key when a non-time fixed effect produces matching
+    dummy names — or with another dummy. Such a duplicate would silently
+    overwrite a coefficient when ``var_names`` is zipped into the result's
+    ``coefficients`` dict (Python dict last-write-wins). This checks the FINAL
+    name list (structural terms + covariates + fixed-effect dummies) right
+    before the dict is built, catching collisions that depend on the data and so
+    cannot be known up front.
+
+    Parameters
+    ----------
+    var_names : iterable of str
+        The fully assembled design-matrix column-name list.
+    estimator : str
+        Estimator name, used in the error message.
+
+    Raises
+    ------
+    ValueError
+        If any name appears more than once.
+    """
+    seen: set = set()
+    duplicates = []
+    for name in var_names:
+        if name in seen:
+            duplicates.append(name)
+        seen.add(name)
+    if duplicates:
+        raise ValueError(
+            f"{estimator}: the fitted design has duplicate term name(s) "
+            f"{sorted(set(duplicates))} — a covariate or fixed-effect dummy name "
+            f"collides with a structural term (intercept, treatment/time "
+            f"indicators, the interaction, or period dummies) or with another "
+            f"column. This would silently overwrite a coefficient in the result. "
+            f"Rename the offending fixed-effect category or covariate column."
+        )
+
+
 def warn_if_not_converged(
     converged: bool,
     method_name: str,

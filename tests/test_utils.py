@@ -30,6 +30,7 @@ from diff_diff.utils import (
     safe_inference,
     validate_binary,
     validate_covariate_names,
+    validate_design_term_names,
 )
 
 # =============================================================================
@@ -1342,3 +1343,25 @@ class TestValidateCovariateNames:
         # A name that both collides AND is duplicated reports the collision first.
         with pytest.raises(ValueError, match="collide"):
             validate_covariate_names(["const", "const"], {"const"})
+
+
+class TestValidateDesignTermNames:
+    """Tests for validate_design_term_names (final var_names uniqueness backstop)."""
+
+    def test_unique_passes(self):
+        validate_design_term_names(["const", "treated", "post", "treated:post", "x1"])
+
+    def test_duplicate_raises(self):
+        # e.g. a fixed-effect dummy "period_2" colliding with a structural key.
+        with pytest.raises(ValueError, match="collide"):
+            validate_design_term_names(
+                ["const", "treated", "period_2", "period_2"], estimator="MultiPeriodDiD"
+            )
+
+    def test_message_names_duplicate_and_estimator(self):
+        with pytest.raises(ValueError, match="MultiPeriodDiD") as exc:
+            validate_design_term_names(["a", "a"], estimator="MultiPeriodDiD")
+        assert "a" in str(exc.value)
+
+    def test_empty_passes(self):
+        validate_design_term_names([])

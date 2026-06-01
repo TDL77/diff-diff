@@ -16,6 +16,7 @@ from diff_diff.linalg import LinearRegression
 from diff_diff.results import DiDResults
 from diff_diff.utils import (
     validate_covariate_names,
+    validate_design_term_names,
 )
 from diff_diff.utils import (
     within_transform as _within_transform_util,
@@ -367,6 +368,10 @@ class TwoWayFixedEffects(DifferenceInDifferences):
                 + list(unit_dummies_df.columns)
                 + list(time_dummies_df.columns)
             )
+            # Backstop: reject any duplicate in the FINAL term list (e.g. a
+            # unit/time dummy colliding with a structural term or another dummy)
+            # before it silently overwrites a coefficient in the dict below.
+            validate_design_term_names(_twfe_var_names, estimator="TwoWayFixedEffects")
         else:
             # Default within-transform path (HC1 / classical / Conley):
             # demean outcome, covariates, AND interaction in a single pass

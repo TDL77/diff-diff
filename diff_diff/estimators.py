@@ -33,6 +33,7 @@ from diff_diff.utils import (
     safe_inference,
     validate_binary,
     validate_covariate_names,
+    validate_design_term_names,
     wild_bootstrap_se,
 )
 
@@ -685,6 +686,7 @@ class DifferenceInDifferences:
         n_control = n_control_raw
 
         # Create coefficient dictionary
+        validate_design_term_names(var_names, estimator="DifferenceInDifferences")
         coef_dict = {name: coef for name, coef in zip(var_names, coefficients)}
 
         # Determine inference method and bootstrap info
@@ -2036,6 +2038,10 @@ class MultiPeriodDiD(DifferenceInDifferences):
         n_treated = n_treated_raw
         n_control = n_control_raw
 
+        # Backstop: reject any duplicate in the FINAL term list (e.g. a
+        # fixed-effect dummy colliding with a structural `period_{p}` key)
+        # before it silently overwrites a coefficient in the dict below.
+        validate_design_term_names(var_names, estimator="MultiPeriodDiD")
         # Create coefficient dictionary
         coef_dict = {name: coef for name, coef in zip(var_names, coefficients)}
 
