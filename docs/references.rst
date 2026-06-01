@@ -216,7 +216,7 @@ Multi-Period and Staggered Adoption
 
 - **Wing, C., Freedman, S. M., & Hollingsworth, A. (2024).** "Stacked Difference-in-Differences." *NBER Working Paper* 32054. https://www.nber.org/papers/w32054
 
-- **Chen, X., Sant'Anna, P. H. C., & Xie, H. (2025).** "Efficient Difference-in-Differences and Event Study Estimators." *Working Paper*.
+- **Chen, X., Sant'Anna, P. H. C., & Xie, H. (2025).** "Efficient Difference-in-Differences and Event Study Estimators." *arXiv preprint* arXiv:2506.17729v1. https://arxiv.org/abs/2506.17729v1 (also Cowles Foundation Discussion Paper No. 2470).
 
   Primary source for the optimal-weighting / PT-All / PT-Post efficient DiD implemented in our ``EfficientDiD`` class.
 

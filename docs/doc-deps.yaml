@@ -298,6 +298,8 @@ sources:
       - path: docs/methodology/REGISTRY.md
         section: "EfficientDiD"
         type: methodology
+      - path: docs/methodology/papers/chen-santanna-xie-2025-review.md
+        type: methodology
       - path: docs/api/efficient_did.rst
         type: api_reference
       - path: docs/tutorials/15_efficient_did.ipynb

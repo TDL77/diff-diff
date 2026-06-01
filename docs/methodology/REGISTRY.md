@@ -881,7 +881,7 @@ labels.*
 
 ## EfficientDiD
 
-**Primary source:** Chen, X., Sant'Anna, P. H. C., & Xie, H. (2025). Efficient Difference-in-Differences and Event Study Estimators.
+**Primary source:** [Chen, X., Sant'Anna, P. H. C., & Xie, H. (2025). Efficient Difference-in-Differences and Event Study Estimators. arXiv:2506.17729v1.](https://arxiv.org/abs/2506.17729v1) (Cowles Foundation Discussion Paper No. 2470). Paper review on file: `docs/methodology/papers/chen-santanna-xie-2025-review.md` (theorem/equation numbering pinned to arXiv v1, currently the only version).
 
 **Key implementation requirements:**
 
