@@ -1084,7 +1084,10 @@ results.aggregate("event")     # ATT by event time (relative to treatment)
 ```python
 from diff_diff import WooldridgeDiD
 
-# OLS (linear outcomes)
+# OLS (linear outcomes). On a binary/count outcome this emits a UserWarning that
+# logit/poisson is often the more appropriate specification -- link-scale (not
+# level) parallel trends, and less biased/more precise in Wooldridge (2023) sims;
+# a different identifying assumption, so a recommended comparison not a free switch.
 etwfe = WooldridgeDiD(method='ols')
 results = etwfe.fit(data, outcome='y', unit='id', time='t', cohort='first_treat')
 print(results.aggregate("simple"))

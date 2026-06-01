@@ -11,6 +11,7 @@ from diff_diff.wooldridge import (
     _build_interaction_matrix,
     _filter_sample,
     _prepare_covariates,
+    _suggest_nonlinear_method,
 )
 from diff_diff.wooldridge_results import WooldridgeDiDResults
 
@@ -2221,3 +2222,132 @@ class TestWooldridgeVcovType:
             assert np.isnan(eff["p_value"])
             assert np.isnan(eff["conf_int"][0])
             assert np.isnan(eff["conf_int"][1])
+
+
+class TestOutcomeFitHint:
+    """method='ols' outcome-fit hint: binary -> logit, count -> poisson.
+
+    Per Wooldridge (2023), a matching nonlinear model is often the *more
+    appropriate* specification for binary/count outcomes -- link-scale (not
+    level) parallel trends, and less biased / more precise in the paper's
+    Section 5 simulations. A different identifying assumption, so a recommended
+    comparison, never a free efficiency upgrade or a canonical-link / validity
+    requirement. See REGISTRY.md WooldridgeDiD "Nonlinear extensions".
+    """
+
+    # ---- detector unit tests ----
+    @pytest.mark.parametrize(
+        "values, expected",
+        [
+            ([0, 1, 1, 0, 1], "logit"),  # binary {0, 1}
+            ([0.0, 1.0, 0.0], "logit"),  # binary as floats
+            (pd.Series([True, False, True]), "logit"),  # bool dtype
+            ([0, 1, 2, 3, 4], "poisson"),  # count
+            ([1, 2, 3], "poisson"),  # count without zero
+            ([0, 1, 2, 3], "poisson"),  # bounded-support integer routes to poisson too
+            # ^ documented heuristic limit: a known-upper-bound (binomial-style)
+            #   integer outcome is NOT separately distinguished from an unbounded
+            #   count -- both take the poisson branch (Wooldridge 2023 Table 1).
+            ([0.1, 0.5, 1.7, 2.3], None),  # continuous
+            ([0.1, 0.4, 0.9], None),  # fractional in [0, 1]
+            ([-1, 0, 1, 2], None),  # has a negative
+            ([np.nan, np.nan], None),  # all non-finite
+            ([1.0, 1.0, 1.0], None),  # constant / single value
+            (pd.Series(["a", "b", "c"], dtype=object), None),  # non-numeric
+        ],
+    )
+    def test_detector(self, values, expected):
+        assert _suggest_nonlinear_method(values) == expected
+
+    # ---- gate behavior ----
+    def _binary_panel(self):
+        df = _make_panel(seed=1)
+        rng = np.random.default_rng(1)
+        df["y"] = rng.integers(0, 2, len(df)).astype(float)
+        return df
+
+    def _count_panel(self):
+        df = _make_panel(seed=2)
+        rng = np.random.default_rng(2)
+        df["y"] = rng.integers(0, 6, len(df)).astype(float)
+        return df
+
+    @staticmethod
+    def _fit(df, **kwargs):
+        return WooldridgeDiD(**kwargs).fit(df, "y", "unit", "time", "cohort")
+
+    @staticmethod
+    def _hint_msgs(rec):
+        return [str(w.message) for w in rec if "matching nonlinear model" in str(w.message)]
+
+    def test_ols_binary_warns_logit(self):
+        df = self._binary_panel()
+        with pytest.warns(UserWarning, match=r"method='logit'.*more appropriate"):
+            res = self._fit(df, method="ols")
+        assert np.isfinite(res.overall_att)
+
+    def test_ols_count_warns_poisson(self):
+        df = self._count_panel()
+        with pytest.warns(UserWarning, match=r"method='poisson'.*more appropriate"):
+            self._fit(df, method="ols")
+
+    def test_ols_continuous_silent(self):
+        df = _make_panel(seed=3)  # default y is standard-normal continuous
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            self._fit(df, method="ols")
+        assert not self._hint_msgs(rec)
+
+    def test_logit_binary_no_hint(self):
+        # The hint is OLS-only; a logit fit on binary data must not emit it.
+        df = self._binary_panel()
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            self._fit(df, method="logit")
+        assert not self._hint_msgs(rec)
+
+    def test_hint_fires_with_cohort_trends(self):
+        # Param-interaction smoke: hint still fires on the cohort_trends path.
+        df = self._binary_panel()
+        with pytest.warns(UserWarning, match=r"more appropriate"):
+            self._fit(df, method="ols", cohort_trends=True)
+
+    def test_suppression_via_filterwarnings(self):
+        df = self._binary_panel()
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            res = self._fit(df, method="ols")  # must not raise
+        assert np.isfinite(res.overall_att)
+
+    def test_framing_paper_faithful(self):
+        # Lock the paper-faithful framing (Wooldridge 2023: LPT vs IPT + the
+        # Section 5 simulations). The nonlinear model is the *more appropriate*
+        # specification for binary/count outcomes — it reduces bias (not only
+        # variance) and rests on a *different identifying assumption* (link-scale
+        # vs level parallel trends): a recommended comparison, never an
+        # unconditional efficiency upgrade and never a "violation" of OLS.
+        df = self._binary_panel()
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            self._fit(df, method="ols")
+        msgs = self._hint_msgs(rec)
+        assert msgs
+        text = msgs[0].lower()
+        assert "more appropriate" in text  # appropriateness, not only efficiency
+        assert "biased" in text  # the paper's bias finding, not just precision
+        assert "assumption" in text  # a different identifying assumption
+        assert "recommended comparison" in text  # a comparison, not a switch
+        # Never frame OLS as wrong / a link requirement or an automatic upgrade.
+        for forbidden in ("canonical", "violation", "required", "must use"):
+            assert forbidden not in text
+
+    def test_filter_sample_preserves_outcome_support(self):
+        # Invariant behind full-column detection: _filter_sample selects the
+        # control group via the design matrix, NOT by dropping rows, so the
+        # full outcome column and the estimation sample always share the same
+        # support -- the pre/post-filter detection distinction is therefore
+        # moot. A future refactor that drops rows would surface here.
+        df = self._count_panel()
+        for cg in ("not_yet_treated", "never_treated"):
+            sample = _filter_sample(df, "unit", "time", "cohort", cg, 0)
+            assert sorted(sample["y"].unique()) == sorted(df["y"].unique())
