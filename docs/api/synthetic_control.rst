@@ -26,7 +26,7 @@ reported estimate. Significance comes from **in-space placebo permutation infere
 from the (NaN) ``p_value``; ``is_significant`` stays bound to ``p_value``.
 
 **Robustness diagnostics (ADH 2015 §4, opt-in):**
-:meth:`~diff_diff.SyntheticControlResults.leave_one_out` drops each positively-weighted
+:meth:`~diff_diff.SyntheticControlResults.leave_one_out` drops each reportably-weighted (weight > 1e-6)
 donor and re-fits (per-drop ATT / ``delta_att`` table — a large ``delta_att`` flags
 single-donor dependence), and
 :meth:`~diff_diff.SyntheticControlResults.in_time_placebo` reassigns the intervention to an

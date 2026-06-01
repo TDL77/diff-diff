@@ -2152,8 +2152,10 @@ class DiagnosticReport:
         selected ``lambda_*``).
 
         SyntheticControl: pre-treatment fit (``pre_rmspe``), donor-weight
-        concentration, and — when already computed — the in-space placebo
-        permutation p-value (``in_space_placebo``).
+        concentration, and — each surfaced only when already computed — the
+        in-space placebo permutation p-value (``in_space_placebo``), the ADH-2015
+        leave-one-out donor robustness (``leave_one_out``), and the in-time
+        backdating placebo (``in_time_placebo``).
         """
         r = self._results
         name = type(r).__name__
@@ -2398,9 +2400,14 @@ class DiagnosticReport:
                 max_abs_att = float(ran["placebo_att"].abs().max()) if len(ran) else None
                 out["in_time_placebo"] = {
                     "status": "ran",
+                    # Full coverage breakdown so a partially-usable sweep is not
+                    # overstated: n_dates is the requested grid; n_ran are the usable
+                    # placebos; n_failed / n_infeasible are the dropped remainder.
                     "n_dates": _to_python_scalar(int(len(itp))),
-                    "max_abs_placebo_att": _to_python_float(max_abs_att),
+                    "n_ran": _to_python_scalar(int(len(ran))),
                     "n_failed": _to_python_scalar(getattr(r, "_in_time_n_failed", None)),
+                    "n_infeasible": _to_python_scalar(getattr(r, "_in_time_n_infeasible", None)),
+                    "max_abs_placebo_att": _to_python_float(max_abs_att),
                 }
             else:
                 _it_reasons = {

@@ -1791,6 +1791,20 @@ def test_in_time_placebo_dedups_and_canonicalizes_explicit_dates():
     assert list(itp["placebo_period"]) == [2002, 2004]  # unique, canonical pre-period order
 
 
+def test_in_time_placebo_ran_block_reports_partial_coverage():
+    # CI codex P2: a sweep where SOME dates ran and SOME were infeasible must surface
+    # n_ran / n_infeasible on the status="ran" block so coverage is not overstated.
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_time_placebo([2001, 2003])  # 2001 infeasible (1 pre-fake), 2003 runs
+    assert res._in_time_status == "ran"  # at least one date ran
+    block = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]["in_time_placebo"]
+    assert block["status"] == "ran"
+    assert block["n_dates"] == 2 and block["n_ran"] == 1
+    assert block["n_infeasible"] == 1 and block["n_failed"] == 0
+
+
 def test_leave_one_out_immune_to_donor_weights_mutation():
     # Codex R8 P1: the LOO drop-set is FROZEN at fit time (snap.weighted_donor_ids =
     # the >1e-6 reportable support), NOT read from the mutable presentation-level
