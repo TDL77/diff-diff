@@ -583,15 +583,16 @@ Classic Synthetic Control Method (Abadie, Diamond & Hainmueller 2010; Abadie & G
 
 ```python
 SyntheticControl(
-    v_method: str = "nested",               # "nested" (data-driven V) or "custom"
-    custom_v=None,                          # diagonal V (len = #predictors); required iff v_method="custom"
-    optimizer_options: dict | None = None,  # merged into scipy.optimize.minimize (outer V search)
-    n_starts: int = 4,                      # multistart count for the outer V search
+    v_method: str = "nested",               # "nested" (pre-MSPE) | "cv" (out-of-sample, ADH 2015; needs predictors spanning BOTH train/val windows — default single-period lags are REJECTED) | "inverse_variance" (1/Var(X) on RAW predictors, bypasses standardize) | "custom"
+    custom_v=None,                          # diagonal V (len = #predictors); required iff v_method="custom"; forbidden otherwise
+    optimizer_options: dict | None = None,  # merged into scipy.optimize.minimize (outer V search; nested/cv)
+    n_starts: int = 4,                      # multistart count for the outer V search (nested/cv)
     inner_max_iter: int = 10000,            # Frank-Wolfe inner-solve cap
     inner_min_decrease: float = 1e-5,       # inner-solve convergence scale (scale-aware)
     standardize: str = "std",               # "std" (per-row SD, ddof=1) or "none" (deviation from R)
     alpha: float = 0.05,
     seed: int | None = None,                # seeds the multistart Dirichlet draws
+    v_cv_t0: int | None = None,             # cv train/val split index; default len(pre)//2 (Abadie 2021 t0=T0/2); None unless v_method="cv"
 )
 ```
 
@@ -1293,10 +1294,11 @@ Returned by `SyntheticControl.fit()`.
 | `predictor_balance` | `pd.DataFrame` | treated vs synthetic vs donor-mean per predictor |
 | `gap_path` | `dict` | `{period: gap}` for all periods |
 | `pre_rmspe` | `float` | Pre-treatment fit diagnostic |
-| `mspe_v` | `float \| None` | Outer-objective MSPE (nested) |
+| `mspe_v` | `float \| None` | Selected-V objective: pre-period MSPE (nested) or held-out validation MSPE (cv); None for custom / inverse_variance |
 | `treated_unit` | `Any` | Treated unit identifier |
 | `pre_periods`, `post_periods` | `list` | Calendar-sorted periods |
 | `v_method`, `standardize` | `str` | Echoed configuration |
+| `v_cv_t0` | `int \| None` | Resolved cv train/validation split index (None unless v_method="cv") |
 
 **Methods:** `in_space_placebo()` (opt-in permutation inference; refits one synthetic control per donor), `get_placebo_df()` (per-unit RMSPE-ratio table incl. the treated row), `leave_one_out()` (ADH-2015 §4 donor robustness; drops each reportably-weighted donor (weight > 1e-6) → per-drop ATT/`delta_att` table) + `get_leave_one_out_df()`/`get_leave_one_out_gaps()`, `in_time_placebo()` (ADH-2015 §4 backdating placebo; reassigns the intervention earlier, TRUNCATE windowing, placebo ATT ~0 if no real pre-effect) + `get_in_time_placebo_df()`/`get_in_time_placebo_gaps()`, `summary()`, `print_summary()`, `to_dict()`, `to_dataframe()`, `get_gap_df()`, `get_weights_df()`
 

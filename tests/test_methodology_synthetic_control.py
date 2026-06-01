@@ -712,6 +712,7 @@ def test_get_set_params_roundtrip():
         "standardize",
         "alpha",
         "seed",
+        "v_cv_t0",
     }
     est2 = SyntheticControl().set_params(**params)
     assert est2.get_params() == params
@@ -1526,7 +1527,7 @@ def test_leave_one_out_refit_failure_tallied(monkeypatch):
         return real_fit_unit(snap, unit, donor_pool, n_starts)
 
     monkeypatch.setattr(sc, "_placebo_fit_unit", flaky_fit_unit)
-    with pytest.warns(UserWarning, match="failed to converge"):
+    with pytest.warns(UserWarning, match="did not reach a valid optimum"):
         loo = res.leave_one_out()
     assert res._loo_n_failed == 1
     failed = loo[loo["status"] == "failed"]
@@ -2152,7 +2153,7 @@ def test_leave_one_out_all_refits_failed_status(monkeypatch):
     sc = importlib.import_module("diff_diff.synthetic_control")
     res = _fit_for_placebo(n_donors=4)
     monkeypatch.setattr(sc, "_placebo_fit_unit", lambda *a, **k: None)  # every drop fails
-    with pytest.warns(UserWarning, match="failed to converge"):
+    with pytest.warns(UserWarning, match="did not reach a valid optimum"):
         loo = res.leave_one_out()
     # Distinct status (NOT "ran"); att_range is None; baseline + only failed rows.
     assert res._loo_status == "all_refits_failed"
@@ -2204,3 +2205,811 @@ def test_in_time_placebo_mixed_failed_and_infeasible_status(monkeypatch):
     block = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]["in_time_placebo"]
     assert block["reason_code"] == "all_dates_unusable"
     assert block["n_failed"] == 1 and block["n_infeasible"] == 1
+
+
+# ===========================================================================
+# V-selection menu: v_method="inverse_variance" and v_method="cv"
+# (ADH 2015 § / Abadie 2021 Eq. 9; §3.2(a) inverse-variance). The CV per-window
+# re-aggregation reproduces ADH 2015's manual two-dataprep CV re-run for our
+# absolute-period spec aggregates (see REGISTRY §SyntheticControl).
+# ===========================================================================
+
+
+# --- config / validation (cheap; no fit) ----------------------------------
+
+
+def test_inverse_variance_and_cv_methods_accepted():
+    # Both new v_method values construct without error and round-trip v_cv_t0.
+    SyntheticControl(v_method="inverse_variance")
+    est = SyntheticControl(v_method="cv", v_cv_t0=3)
+    assert est.get_params()["v_cv_t0"] == 3
+
+
+def test_v_cv_t0_requires_cv_method():
+    # Fail closed: v_cv_t0 is meaningless unless v_method="cv" (it would be silently
+    # ignored otherwise), mirroring the custom_v cross-field rule.
+    for method in ("nested", "custom", "inverse_variance"):
+        kw = {"custom_v": [1.0, 1.0]} if method == "custom" else {}
+        with pytest.raises(ValueError, match="v_cv_t0 is only valid when v_method='cv'"):
+            SyntheticControl(v_method=method, v_cv_t0=2, **kw)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, "2", True])
+def test_v_cv_t0_type_and_positivity_rejected(bad):
+    with pytest.raises(ValueError, match=r"v_cv_t0 must be"):
+        SyntheticControl(v_method="cv", v_cv_t0=bad)
+
+
+def test_custom_v_forbidden_for_cv_and_inverse_variance():
+    for method in ("cv", "inverse_variance"):
+        with pytest.raises(ValueError, match="custom_v must be None when v_method="):
+            SyntheticControl(v_method=method, custom_v=[1.0, 1.0])
+
+
+def test_set_params_cv_rollback():
+    # A valid cv update sticks; an invalid combo (v_cv_t0 without cv) rolls back fully.
+    est = SyntheticControl(v_method="cv", v_cv_t0=2)
+    est.set_params(v_method="cv", v_cv_t0=3)
+    assert est.v_cv_t0 == 3 and est.v_method == "cv"
+    with pytest.raises(ValueError):
+        est.set_params(v_method="nested")  # v_cv_t0=3 now invalid -> rollback
+    assert est.v_method == "cv" and est.v_cv_t0 == 3  # unchanged
+
+
+# --- inverse_variance behavior + parity ------------------------------------
+
+
+def test_inverse_variance_fit_is_deterministic_and_searchless():
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        r1 = synthetic_control(df, "y", "treated", "unit", "year", v_method="inverse_variance")
+        r2 = synthetic_control(df, "y", "treated", "unit", "year", v_method="inverse_variance")
+    assert r1.mspe_v is None  # no outer search ran
+    assert r1.att == r2.att  # fully deterministic (no rng)
+    assert r1.donor_weights == r2.donor_weights
+
+
+def test_inverse_variance_weights_equal_inverse_row_variance():
+    # Closed-form anchor: the selected V equals trace-normalized 1/Var(X_row) computed
+    # on the UNSTANDARDIZED predictors over donors+treated.
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(df, "y", "treated", "unit", "year", v_method="inverse_variance")
+    snap = res._fit_snapshot
+    X1, X0, labels = sc._build_predictor_matrix(
+        snap.pivots, snap.specs, snap.treated_id, snap.donor_ids
+    )
+    expected = sc._inverse_variance_v(X1, X0)
+    got = np.array([res.v_weights[lab] for lab in labels])
+    assert np.allclose(got, expected, atol=1e-12)
+
+
+def test_inverse_variance_exact_for_tiny_positive_variances():
+    # Regression (local codex R6 P1): the inverse-variance V must be the EXACT 1/Var
+    # selector for EVERY strictly-positive variance — no flooring of tiny-but-positive
+    # variances. With two predictor rows of tiny-but-UNEQUAL variance (ratio 1:4 here), a
+    # 1e-12 floor would clip both to the same value and equalize their V weights; the exact
+    # selector preserves their 1/Var ratio. The oracle is built INLINE from raw row
+    # variances (NOT via the production helper) so it genuinely cross-checks the code.
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    # 3 donors + treated (4 cols). Rows 0,1 have tiny positive variances; row 2 is normal.
+    d0, d1 = 1e-8, 2e-8
+    X0 = np.array(
+        [
+            [5.0 + d0, 5.0 - d0, 5.0 + d0],
+            [2.0 + d1, 2.0 - d1, 2.0 + d1],
+            [1.0, 3.0, 2.5],
+        ]
+    )
+    X1 = np.array([5.0 - d0, 2.0 - d1, 2.0])
+    row_var = np.var(np.column_stack([X0, X1.reshape(-1, 1)]), axis=1, ddof=1)
+    assert np.all((row_var[:2] > 0) & (row_var[:2] < 1e-12))  # tiny-but-positive
+    inv_oracle = 1.0 / row_var  # exact, all rows positive here
+    v_oracle = inv_oracle / inv_oracle.sum()
+    v = sc._inverse_variance_v(X1, X0)
+    assert np.allclose(v, v_oracle, rtol=1e-12, atol=0.0)
+    # Discrimination: the two tiny rows keep their exact 1/Var ratio (~4:1), which a
+    # clipping implementation would collapse to 1:1.
+    assert v[0] / v[1] == pytest.approx(row_var[1] / row_var[0], rel=1e-9)
+    assert not np.isclose(v[0], v[1])  # NOT equalized by a floor
+
+
+def test_inverse_variance_matches_paper_objective():
+    # SOURCE-anchored: inverse_variance must realize Abadie 2021 §3.2(a)'s unit-variance
+    # rescaled objective Σ_h diff_h²/Var_h, NOT the double-rescaled Σ_h diff_h²/Var_h²
+    # that applying 1/Var on already-standardized predictors would produce. Two
+    # independent encodings of the SAME paper objective (both R-anchored via the custom_v
+    # path) must agree with the inverse_variance fit:
+    #   (a) standardize="std" + custom_v = uniform  -> Σ_h (diff_h/SD_h)²·1 = Σ diff²/Var
+    #   (b) standardize="none" + custom_v = 1/Var(X) -> Σ_h diff_h²·(1/Var_h) = Σ diff²/Var
+    # The OLD self-equivalence (custom_v=1/Var at the default standardize="std") would
+    # encode the BUGGY Σ diff²/Var² objective and is deliberately NOT used here.
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(df, "y", "treated", "unit", "year", v_method="inverse_variance")
+        snap = res._fit_snapshot
+        X1, X0, labels = sc._build_predictor_matrix(
+            snap.pivots, snap.specs, snap.treated_id, snap.donor_ids
+        )
+        k = X1.shape[0]
+        v_iv = sc._inverse_variance_v(X1, X0)
+        res_uniform_std = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=np.ones(k),
+            standardize="std",
+        )
+        res_invvar_none = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=v_iv,
+            standardize="none",
+        )
+    for ref in (res_uniform_std, res_invvar_none):
+        assert res.att == pytest.approx(ref.att, abs=1e-9)
+        assert res.donor_weights.keys() == ref.donor_weights.keys()
+        for d in res.donor_weights:
+            assert res.donor_weights[d] == pytest.approx(ref.donor_weights[d], abs=1e-9)
+    # Guard: confirm the BUGGY double-rescale (custom_v=1/Var at standardize="std") gives
+    # a DIFFERENT result, so this test actually discriminates the fix.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res_double = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=v_iv,
+            standardize="std",
+        )
+    assert not np.allclose(
+        [res.donor_weights.get(d, 0.0) for d in snap.donor_ids],
+        [res_double.donor_weights.get(d, 0.0) for d in snap.donor_ids],
+        atol=1e-6,
+    )
+
+
+def _panel_with_constant_lag(constant_years, n_donors=4, T=8, T0=6):
+    """Panel where the outcome in ``constant_years`` is identical across ALL units
+    (treated + donors), so those pre-period lag predictors have zero cross-unit
+    variance. A post effect is added to the treated unit."""
+    rng = np.random.default_rng(0)
+    years = list(range(2000, 2000 + T))
+    rows = []
+    for j in range(n_donors):
+        series = rng.normal(10, 2, T)
+        for t in range(T):
+            y = 7.0 if years[t] in constant_years else float(series[t])
+            rows.append({"unit": f"d{j}", "year": years[t], "y": y, "treated": 0})
+    for t in range(T):
+        y = 7.0 if years[t] in constant_years else 10.0 + rng.normal(0, 1)
+        rows.append(
+            {
+                "unit": "treated",
+                "year": years[t],
+                "y": y + (5.0 if t >= T0 else 0.0),
+                "treated": int(t >= T0),
+            }
+        )
+    return pd.DataFrame(rows), years
+
+
+def test_inverse_variance_zero_variance_row_gets_zero_weight():
+    # A single zero-variance predictor row (one pre-period constant across units) gets
+    # 0 V weight; the others keep positive, trace-normalized weight.
+    df, years = _panel_with_constant_lag(constant_years={2001})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(df, "y", "treated", "unit", "year", v_method="inverse_variance")
+    assert res.v_weights["y_2001"] == pytest.approx(0.0, abs=1e-12)
+    assert sum(res.v_weights.values()) == pytest.approx(1.0, abs=1e-9)
+    assert any(v > 0 for k, v in res.v_weights.items() if k != "y_2001")
+
+
+def test_inverse_variance_all_zero_variance_falls_back_to_uniform():
+    # EVERY pre-period constant across units -> no information to weight predictors ->
+    # uniform V + ONE warning.
+    df, years = _panel_with_constant_lag(constant_years={2000, 2001, 2002, 2003, 2004, 2005})
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        warnings.simplefilter("always", UserWarning)
+        with pytest.warns(UserWarning, match="no usable predictor variance"):
+            res = synthetic_control(df, "y", "treated", "unit", "year", v_method="inverse_variance")
+    vals = list(res.v_weights.values())
+    assert np.allclose(vals, 1.0 / len(vals))
+
+
+def test_inverse_variance_single_donor_returns_uniform_v():
+    # Documented single-donor contract (NOT a skip-bug): with J==1, w=[1] is forced and V is
+    # UNIDENTIFIED (every V yields the same synthetic), so v_weights is uniform and mspe_v is
+    # None for EVERY v_method — inverse_variance included (its closed-form 1/Var would be
+    # inert here). The fit warns rather than silently relabeling.
+    df, _, _ = _make_panel(n_donors=1)
+    with pytest.warns(UserWarning, match="uniform regardless of v_method"):
+        res = synthetic_control(df, "y", "treated", "unit", "year", v_method="inverse_variance")
+    assert res.n_donors == 1
+    assert abs(sum(res.donor_weights.values()) - 1.0) < 1e-9
+    vw = list(res.v_weights.values())
+    assert np.allclose(vw, 1.0 / len(vw))  # uniform V (unidentified), NOT 1/Var
+    assert res.mspe_v is None
+
+
+def test_inverse_variance_leave_one_out_recomputes_per_unit():
+    # LOO under inverse_variance recomputes the closed-form V on each reduced pool and
+    # runs deterministically.
+    res = _fit_for_placebo(n_donors=4, v_method="inverse_variance")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loo = res.leave_one_out()
+    assert res._loo_status == "ran"
+    assert (loo[loo["status"] == "loo"].shape[0]) >= 1
+
+
+def test_inverse_variance_in_space_placebo_recomputes_v_and_enters_reference_set(monkeypatch):
+    # The in-space placebo refits must take the inverse_variance branch (recompute the
+    # closed-form V per pseudo-treated unit, NOT fall through to nested) AND enter the
+    # permutation reference set.
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    res = _fit_for_placebo(n_donors=4, v_method="inverse_variance")
+    real_iv = sc._inverse_variance_v
+    state = {"calls": 0}
+
+    def spy(*a, **k):
+        state["calls"] += 1
+        return real_iv(*a, **k)
+
+    monkeypatch.setattr(sc, "_inverse_variance_v", spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_space_placebo()
+    assert state["calls"] >= res.n_donors  # the iv branch recomputed V for each placebo
+    assert res.n_placebos >= 1 and res._placebo_status == "ran"
+
+
+def test_inverse_variance_in_time_placebo_matches_fresh_backdated_fit():
+    # Self-consistency: the in-time placebo under inverse_variance equals a fresh
+    # inverse_variance fit on the backdated panel. inverse_variance is deterministic (no
+    # search), so the match is exact; this anchors the in-time placebo's inverse_variance
+    # branch to a direct fit on the equivalent sub-problem.
+    df, _, _ = _make_panel(n_donors=4)  # pre = 2000..2005 (default per-period lags)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df, "y", "treated", "unit", "year", v_method="inverse_variance", **_FAST
+        )
+        itp = res.in_time_placebo([2004])  # pre-fake = {2000..2003}
+    placebo_att = itp.loc[itp["placebo_period"] == 2004, "placebo_att"].iloc[0]
+    back = df[df["year"] <= 2005].copy()
+    back["treated"] = ((back["unit"] == "treated") & (back["year"] >= 2004)).astype(int)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fresh = synthetic_control(
+            back, "y", "treated", "unit", "year", v_method="inverse_variance", **_FAST
+        )
+    assert placebo_att == pytest.approx(fresh.att, abs=1e-7)
+
+
+# --- cv behavior + parity + determinism ------------------------------------
+
+
+# CV tests use SPANNING predictors — multi-period special predictors observed in BOTH the
+# training and validation halves of the 6-period pre-window 2000-2005 (split at t0=3, and
+# also at t0=2) — so cv's fully-spanning precondition is satisfied and each predictor can be
+# re-aggregated on each window. The default per-period outcome lags are single-period (each
+# lives in one window only) and rejected (see test_cv_rejects_non_spanning_predictors).
+_CV_SPANNING = [("y", [2000, 2002, 2004], "mean"), ("y", [2001, 2003, 2005], "mean")]
+
+
+def _fit_cv(df, *, specs=_CV_SPANNING, **kw):
+    opts = dict(_FAST)
+    opts.update(kw)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return synthetic_control(
+            df, "y", "treated", "unit", "year", v_method="cv", special_predictors=specs, **opts
+        )
+
+
+def test_cv_rejects_non_spanning_predictors():
+    # Fully-spanning precondition (fail-closed): faithful per-window re-aggregation needs
+    # every predictor measurable on BOTH windows. The default per-period outcome lags are
+    # single-period (each lives in one window only) so they cannot span, and cv rejects them
+    # with guidance to pass spanning predictors.
+    df, _, _ = _make_panel(n_donors=4)
+    with pytest.raises(ValueError, match="span BOTH the training"):
+        synthetic_control(df, "y", "treated", "unit", "year", v_method="cv", seed=0, **_FAST)
+
+
+def test_cv_runs_and_reports_validation_mspe():
+    df, _, _ = _make_panel(n_donors=4)
+    res = _fit_cv(df, seed=0)
+    assert np.isfinite(res.att)
+    assert res.mspe_v is not None and np.isfinite(res.mspe_v)  # validation MSPE
+    assert abs(sum(res.donor_weights.values()) - 1.0) < 1e-6
+
+
+def test_cv_default_t0_is_half_and_explicit_t0_changes_result():
+    df, _, _ = _make_panel(n_donors=4)  # 6 pre periods -> default t0 = 3
+    res_default = _fit_cv(df, seed=0)
+    res_t0_3 = _fit_cv(df, v_cv_t0=3, seed=0)
+    res_t0_2 = _fit_cv(df, v_cv_t0=2, seed=0)
+    # Default == explicit t0=3 (len(pre)//2 == 3).
+    assert res_default.mspe_v == pytest.approx(res_t0_3.mspe_v, abs=1e-12)
+    # A different split (different validation window) yields a different criterion value.
+    assert res_t0_2.mspe_v != pytest.approx(res_t0_3.mspe_v, abs=1e-9)
+
+
+def test_cv_t0_out_of_range_raises():
+    # The t0-range check fires before the predictor-precondition check.
+    df, _, _ = _make_panel(n_donors=4)  # 6 pre periods -> valid 1..5
+    with pytest.raises(ValueError, match="out of range"):
+        synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="cv",
+            special_predictors=_CV_SPANNING,
+            v_cv_t0=6,
+            **_FAST,
+        )
+
+
+def test_cv_requires_two_pre_periods():
+    # A single pre period cannot form both a training and validation window (this n_pre<2
+    # check fires before the predictor-precondition check).
+    rows = []
+    years = [2000, 2001, 2002]
+    rng = np.random.default_rng(0)
+    for j in range(3):
+        for yr in years:
+            rows.append({"unit": f"d{j}", "year": yr, "y": 10.0 + rng.normal(), "treated": 0})
+    for i, yr in enumerate(years):  # pre = {2000}; post = {2001, 2002}
+        rows.append({"unit": "treated", "year": yr, "y": 11.0 + i, "treated": int(i >= 1)})
+    df = pd.DataFrame(rows)
+    with pytest.raises(ValueError, match="requires at least 2 pre-treatment periods"):
+        synthetic_control(df, "y", "treated", "unit", "year", v_method="cv", **_FAST)
+
+
+def test_cv_single_donor_validates_and_surfaces_v_cv_t0():
+    # The single-donor (J==1) fast path must NOT bypass cv's v_cv_t0 resolution/validation:
+    # an out-of-range split still raises, and a valid split is resolved + surfaced on the
+    # result, even though the single-donor synthetic is degenerate (w = 1). Spanning
+    # predictors keep the cv precondition satisfied so we exercise the J==1 path itself.
+    df, _, _ = _make_panel(n_donors=1)  # 6 pre periods 2000-2005
+    with pytest.raises(ValueError, match="out of range"):
+        synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="cv",
+            special_predictors=_CV_SPANNING,
+            v_cv_t0=99,
+            **_FAST,
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # degenerate single-donor warning
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="cv",
+            special_predictors=_CV_SPANNING,
+            v_cv_t0=2,
+            **_FAST,
+        )
+    assert res.n_donors == 1
+    assert res.v_cv_t0 == 2  # surfaced despite the degenerate single-donor fast path
+    assert abs(sum(res.donor_weights.values()) - 1.0) < 1e-9
+    # Documented degenerate contract: V unidentified with one donor -> uniform v_weights +
+    # mspe_v None, same as every other v_method (the cv selection would be inert here).
+    vw = list(res.v_weights.values())
+    assert np.allclose(vw, 1.0 / len(vw))
+    assert res.mspe_v is None
+
+
+def test_cv_same_seed_reproducible_under_multistart():
+    # Footnote-7 non-uniqueness: with a FIXED SEED the cv fit is reproducible under
+    # multistart — the deterministic tie-break selects the same V* (closest-to-uniform
+    # among ties) regardless of start-evaluation order. cv is seeded like nested (the
+    # n_starts>=4 Dirichlet starts are seed-dependent), so this asserts same-seed
+    # reproducibility at n_starts=3 (3 deterministic heuristic starts), NOT
+    # seed-independence.
+    df, _, _ = _make_panel(n_donors=4)
+    r1 = _fit_cv(df, n_starts=3, seed=0)
+    r2 = _fit_cv(df, n_starts=3, seed=0)
+    assert r1.att == r2.att
+    assert r1.donor_weights == r2.donor_weights
+
+
+def test_cv_reaggregation_matches_custom_v_per_window_steps():
+    # R-parity anchor: the cv fit's REPORTED weights come from the step-4 refit of V* on the
+    # VALIDATION-window re-aggregated predictors, and mspe_v is the validation MSPE of the
+    # step-2/3 fit of V* on the TRAINING-window re-aggregated predictors. Both per-window
+    # fits are reproduced via the R-anchored custom_v path: re-aggregate each spec over its
+    # window (intersect its periods) and fit custom_v=V* on those re-aggregated predictors.
+    # R Synth has no built-in CV function (ADH 2015's CV is a manual two-dataprep re-run);
+    # this self-consistency anchors both CV steps to the custom_v path (transitively
+    # R-anchored by the PR-1 Basque custom_v parity).
+    df, _, _ = _make_panel(n_donors=4)
+    res = _fit_cv(df, seed=0)
+    snap = res._fit_snapshot
+    pre = snap.pre_periods
+    t0 = len(pre) // 2  # default = 3
+    tr_set, va_set = set(pre[:t0]), set(pre[t0:])
+    v_star = np.array(list(res.v_weights.values()))  # selected V, in spec order
+    # Re-aggregate each spec over each window (the faithful ADH-2015 per-window dataprep).
+    train_reagg = [(s.var, [p for p in s.periods if p in tr_set], s.op) for s in snap.specs]
+    val_reagg = [(s.var, [p for p in s.periods if p in va_set], s.op) for s in snap.specs]
+    # Each spec genuinely re-aggregates to DIFFERENT periods per window (the two-window
+    # distinction is real, not a no-op).
+    assert all(tp != vp for (_, tp, _), (_, vp, _) in zip(train_reagg, val_reagg))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fin = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            special_predictors=val_reagg,
+            custom_v=v_star,
+            inner_min_decrease=1e-3,
+        )
+        tr = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            special_predictors=train_reagg,
+            custom_v=v_star,
+            inner_min_decrease=1e-3,
+        )
+    # Step 4: reported weights == V* refit on the VALIDATION-window re-aggregated predictors.
+    for d in snap.donor_ids:
+        assert res.donor_weights.get(d, 0.0) == pytest.approx(
+            fin.donor_weights.get(d, 0.0), abs=1e-6
+        )
+    # Step 3: mspe_v == validation MSPE of V* fit on the TRAINING-window re-aggregated preds.
+    Y = snap.pivots[snap.outcome]
+    Z1 = Y.loc[pre, snap.treated_id].to_numpy(float)
+    Z0 = Y.loc[pre, snap.donor_ids].to_numpy(float)
+    w_tr = np.array([tr.donor_weights.get(d, 0.0) for d in snap.donor_ids])
+    val_mspe = float(np.mean((Z1[t0:] - Z0[t0:] @ w_tr) ** 2))
+    assert res.mspe_v == pytest.approx(val_mspe, abs=1e-7)
+
+
+# --- cv placebo threading + in-time ----------------------------------------
+
+
+def test_cv_placebo_refit_uses_cv_and_enters_reference_set(monkeypatch):
+    # The in-space placebo refits must take the cv per-window re-aggregation branch (NOT
+    # fall through to nested) AND actually enter the permutation reference set.
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    res = _fit_for_placebo(n_donors=4, v_method="cv", special_predictors=_CV_SPANNING)
+    real_cv = sc._outer_solve_V_cv
+    state = {"calls": 0}
+
+    def spy(*a, **k):
+        state["calls"] += 1
+        return real_cv(*a, **k)
+
+    monkeypatch.setattr(sc, "_outer_solve_V_cv", spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_space_placebo()
+    assert state["calls"] >= res.n_donors  # the cv branch ran for each placebo unit
+    assert res.n_placebos >= 1 and res._placebo_status == "ran"  # placebos entered the set
+
+
+def test_cv_in_time_placebo_pinned_t0_nulled_after_truncation():
+    # An explicit v_cv_t0 that exceeds the truncated pre-fake window is nulled to the
+    # //2 default for the placebo refit (not preserved across in-time truncation), so the
+    # backdated date still runs. Backdate to 2004 keeps both spanning specs spanning.
+    df, _, _ = _make_panel(n_donors=4)  # pre = 2000..2005
+    res = _fit_cv(df, v_cv_t0=4, seed=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        itp = res.in_time_placebo(
+            [2004]
+        )  # truncated pre-fake = {2000..2003}; t0=4 invalid -> nulled
+    assert itp.loc[itp["placebo_period"] == 2004, "status"].iloc[0] == "ran"
+
+
+def test_cv_in_time_placebo_matches_fresh_backdated_fit():
+    # Self-consistency: the in-time placebo under cv equals a fresh cv fit on the
+    # backdated panel (fixed seed + n_starts=1 -> deterministic). Backdate to 2004:
+    # pre-fake = {2000..2003}, the spanning specs truncate to {2000,2002}/{2001,2003}
+    # (still spanning the t0=2 split), so the date is feasible.
+    df, _, _ = _make_panel(n_donors=4)  # pre = 2000..2005
+    res = _fit_cv(df, seed=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        itp = res.in_time_placebo([2004])
+    placebo_att = itp.loc[itp["placebo_period"] == 2004, "placebo_att"].iloc[0]
+    back = df[df["year"] <= 2005].copy()
+    back["treated"] = ((back["unit"] == "treated") & (back["year"] >= 2004)).astype(int)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        # backdated pre-fake = {2000..2003}; the spanning specs truncated to that window.
+        fresh = synthetic_control(
+            back,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="cv",
+            special_predictors=[("y", [2000, 2002], "mean"), ("y", [2001, 2003], "mean")],
+            seed=0,
+            n_starts=1,
+            optimizer_options={"maxiter": 50},
+            inner_min_decrease=1e-3,
+        )
+    assert placebo_att == pytest.approx(fresh.att, abs=1e-7)
+
+
+def test_cv_v_cv_t0_surfaced_on_results_and_serialized():
+    # The new v_cv_t0 constructor param must appear on the public results surface
+    # (downstream-propagation rule): a public field (the RESOLVED split), in to_dict()
+    # /to_dataframe(), and surviving a pickle round-trip; None for non-cv methods.
+    df, _, _ = _make_panel(n_donors=4)  # 6 pre periods -> default split 3
+    res_default = _fit_cv(df, seed=0)
+    res_explicit = _fit_cv(df, v_cv_t0=2, seed=0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res_nested = synthetic_control(df, "y", "treated", "unit", "year", seed=0, **_FAST)
+    # Resolved value: None constructor -> len(pre)//2 = 3; explicit -> 2; non-cv -> None.
+    assert res_default.v_cv_t0 == 3
+    assert res_explicit.v_cv_t0 == 2
+    assert res_nested.v_cv_t0 is None
+    # to_dict() / to_dataframe() carry it.
+    assert res_explicit.to_dict()["v_cv_t0"] == 2
+    assert res_explicit.to_dataframe()["v_cv_t0"].iloc[0] == 2
+    # Survives pickling (it is a public scalar, not snapshot-only).
+    restored = pickle.loads(pickle.dumps(res_explicit))
+    assert restored.v_cv_t0 == 2
+
+
+def test_cv_in_time_placebo_empty_window_is_infeasible_not_failed():
+    # A truncated cv date can keep a predictor overall yet leave it on only ONE side of
+    # the split (the other window then has NO predictor) -> the fully-spanning precondition
+    # is broken -> STRUCTURAL infeasibility, must report status="infeasible" (not "failed").
+    # Use a single special predictor spanning both windows at full pre but only the training
+    # side after backdating.
+    # Panel: 4 donors, years 2000..2010 (10 pre 2000..2009, post 2010). One special
+    # predictor on {2000, 2008}: at full pre (split t0=5) both windows hold it (feasible
+    # headline fit); backdated to 2005 the pre-fake is {2000..2004}, the spec truncates
+    # to {2000}, split t0=2 -> validation window {2002,2003,2004} has no predictor.
+    rng = np.random.default_rng(0)
+    years = list(range(2000, 2011))
+    rows = []
+    for j in range(4):
+        series = rng.normal(10, 2) + rng.normal(0, 0.3) * np.arange(11) + rng.normal(0, 0.15, 11)
+        for t in range(11):
+            rows.append({"unit": f"d{j}", "year": years[t], "y": float(series[t]), "treated": 0})
+    treated = rng.normal(10, 2) + rng.normal(0, 0.3) * np.arange(11) + rng.normal(0, 0.1, 11)
+    treated = treated.copy()
+    treated[10] += 3.0
+    for t in range(11):
+        rows.append(
+            {"unit": "treated", "year": years[t], "y": float(treated[t]), "treated": int(t >= 10)}
+        )
+    df = pd.DataFrame(rows)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="cv",
+            special_predictors=[("y", [2000, 2008], "mean")],
+            seed=0,
+            **_FAST,
+        )
+        itp = res.in_time_placebo([2005])
+    assert itp.loc[itp["placebo_period"] == 2005, "status"].iloc[0] == "infeasible"
+
+
+# --- cv flat-window identification gate (local codex R9 P0) -----------------
+
+
+def _cv_panel_flat_years(flat_years, treated_flat=True):
+    # 4 donors + treated, years 2000-2007 (pre 2000-2005, post 2006-2007). In `flat_years`
+    # every DONOR has the same outcome (=10) -> zero cross-DONOR variance for any predictor
+    # re-aggregated onto those years (X0·W is constant in W -> unidentified); other pre
+    # years vary across donors. treated_flat just sets whether the treated unit also equals
+    # 10 there (True) or differs at 12 (False) — either way the DONORS are identical, so the
+    # cv donor-identification gate fires regardless of the treated unit's value.
+    rng = np.random.default_rng(0)
+    years = list(range(2000, 2008))
+    rows = []
+    for j in range(4):
+        for yr in years:
+            if yr in flat_years:
+                y = 10.0
+            elif yr <= 2005:
+                y = 5.0 + j + rng.normal(0, 0.2)
+            else:
+                y = 10.0 + rng.normal(0, 0.2)
+            rows.append({"unit": f"d{j}", "year": yr, "y": y, "treated": 0})
+    for yr in years:
+        if yr in flat_years:
+            y = 10.0 if treated_flat else 12.0
+        elif yr <= 2005:
+            y = 5.5 + rng.normal(0, 0.2)
+        else:
+            y = 13.0
+        rows.append({"unit": "treated", "year": yr, "y": y, "treated": int(yr >= 2006)})
+    return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("treated_flat", [True, False])
+def test_cv_rejects_window_with_no_donor_variation(treated_flat):
+    # Fail-closed identification gate: W is identified by the DONORS being distinguishable
+    # (X0·W is a convex combination of donor columns). If every donor has identical
+    # predictors in a window, X0·W is constant in W -> flat objective -> arbitrary weights
+    # reported as converged. The headline fit must RAISE. The validation window
+    # {2003,2004,2005} is constant across all donors, so _CV_SPANNING re-aggregates to
+    # donor-indistinguishable validation predictors (t0=3). This must fail closed EVEN when
+    # the treated unit differs (treated_flat=False) — treated-vs-donor variation does NOT
+    # identify W (the gate that an earlier revision missed).
+    df = _cv_panel_flat_years({2003, 2004, 2005}, treated_flat=treated_flat)
+    with pytest.raises(ValueError, match="every donor has identical predictors"):
+        _fit_cv(df, seed=0)
+
+
+def test_cv_in_time_placebo_flat_window_is_infeasible_not_failed():
+    # A backdated date can leave a cv window with no cross-DONOR variation even when the
+    # headline fit is well-posed -> STRUCTURAL infeasibility (status="infeasible", not a
+    # convergence "failed"). Donors are identical in 2002,2003 only, so the headline windows
+    # still carry donor variation (via 2000/2001/2004/2005) but backdating to 2004 (pre-fake
+    # {2000..2003}, t0=2) makes the validation window {2002,2003} donor-indistinguishable.
+    df = _cv_panel_flat_years({2002, 2003}, treated_flat=True)
+    res = _fit_cv(df, seed=0)
+    assert np.isfinite(res.att)  # headline well-posed (donors vary in the other years)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        itp = res.in_time_placebo([2004])
+    assert itp.loc[itp["placebo_period"] == 2004, "status"].iloc[0] == "infeasible"
+
+
+def test_cv_in_space_placebo_excludes_donor_flat_refits():
+    # In-space placebo path (solve-level sentinel): the FULL donor set is distinguishable so
+    # the headline fit is well-posed, but dropping donor d0 (pseudo-treating it) leaves the
+    # remaining donors {d1,d2,d3} identical in the validation window -> that placebo's pool
+    # is donor-indistinguishable and must be EXCLUDED (not enter with arbitrary "converged"
+    # weights). Placebos for d1/d2/d3 keep d0 in the pool, so they remain identified.
+    rng = np.random.default_rng(3)
+    years = list(range(2000, 2008))
+    rows = []
+    for j in range(4):
+        for yr in years:
+            if yr in (2003, 2004, 2005):
+                y = 8.0 if j == 0 else 10.0  # d1=d2=d3 identical; d0 distinguishes the full set
+            elif yr <= 2005:
+                y = 5.0 + j + rng.normal(0, 0.2)  # training varies across all donors
+            else:
+                y = 10.0 + rng.normal(0, 0.2)
+            rows.append({"unit": f"d{j}", "year": yr, "y": y, "treated": 0})
+    for yr in years:
+        y = 12.0 if yr in (2003, 2004, 2005) else (5.5 + rng.normal(0, 0.2) if yr <= 2005 else 13.0)
+        rows.append({"unit": "treated", "year": yr, "y": y, "treated": int(yr >= 2006)})
+    df = pd.DataFrame(rows)
+    res = _fit_cv(df, seed=0)
+    assert np.isfinite(res.att)  # headline well-posed: the full donor set is distinguishable
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_space_placebo()
+    # The d0 placebo (pool {d1,d2,d3} identical in val) is dropped; the others enter.
+    assert res._placebo_status == "ran"
+    assert 1 <= res.n_placebos < res.n_donors
+    assert res.n_failed >= 1
+
+
+@pytest.mark.parametrize("specs", [_CV_SPANNING, [("y", [2000, 2002, 2004], "mean")]])
+def test_cv_fails_closed_when_training_solve_truncates(specs):
+    # The training-window solve defines mspe_v (Eq. 9's held-out criterion); if it truncates
+    # (inner_max_iter too small) the fit must FAIL CLOSED — mspe_v=NaN and _fit_converged
+    # False — so downstream placebo/LOO diagnostics never run off an invalid CV criterion.
+    # Covers BOTH the general multi-predictor path and the single-predictor k==1 fast path.
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="cv",
+            special_predictors=specs,
+            seed=0,
+            n_starts=1,
+            inner_max_iter=1,  # truncate the inner Frank-Wolfe solve
+            inner_min_decrease=1e-3,
+        )
+    assert np.isnan(res.mspe_v)
+    assert res._fit_converged is False
+
+
+def test_leave_one_out_cv_branch_and_fresh_reduced_pool_parity(monkeypatch):
+    # leave_one_out() under v_method="cv" must (a) actually exercise the cv re-aggregation
+    # branch (_outer_solve_V_cv), and (b) each drop's ATT must match a FRESH cv fit on the
+    # reduced donor pool (self-consistency; deterministic at n_starts=1) — the LOO wrapper
+    # was threaded for cv, so it needs direct coverage, not just in-space/in-time.
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    df, _, _ = _make_panel(n_donors=4)
+    res = _fit_cv(df, seed=0)
+    real_cv = sc._outer_solve_V_cv
+    state = {"calls": 0}
+
+    def spy(*a, **k):
+        state["calls"] += 1
+        return real_cv(*a, **k)
+
+    monkeypatch.setattr(sc, "_outer_solve_V_cv", spy)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loo = res.leave_one_out()
+    assert res._loo_status == "ran"
+    loo_rows = loo[loo["status"] == "loo"]
+    assert state["calls"] >= len(loo_rows) >= 1  # the cv branch ran for each drop
+
+    # Fresh-reduced-pool parity for the most influential drop (the spy forwards to the real
+    # solver, so the fresh fit below is unaffected by the patch).
+    dropped = loo_rows.iloc[0]["dropped_unit"]
+    loo_att = loo_rows.iloc[0]["att"]
+    reduced = df[df["unit"] != dropped].copy()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fresh = synthetic_control(
+            reduced,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="cv",
+            special_predictors=_CV_SPANNING,
+            seed=0,
+            n_starts=1,
+            optimizer_options={"maxiter": 50},
+            inner_min_decrease=1e-3,
+        )
+    assert loo_att == pytest.approx(fresh.att, abs=1e-7)
