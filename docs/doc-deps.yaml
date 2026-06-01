@@ -452,6 +452,13 @@ sources:
       - path: docs/api/local_linear.rst
         type: api_reference
 
+  diff_diff/agent_workflow.py:
+    drift_risk: low
+    docs:
+      - path: diff_diff/guides/llms-autonomous.txt
+        section: "agent_workflow recommended starting call"
+        type: user_guide
+
   diff_diff/profile.py:
     drift_risk: low
     docs:
