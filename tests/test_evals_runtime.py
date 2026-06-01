@@ -1581,3 +1581,36 @@ def test_materialize_rewraps_post_add_git_failure(tmp_path, monkeypatch):
             case_dir=str(case_dir),
         )
     assert cleaned["n"] >= 1, "a post-add failure must clean up the leaked worktree"
+
+
+def test_worktrees_namespaced_per_invocation(monkeypatch):
+    """Two invocations (CodexReviewer instances) must NOT share a worktree path for the
+    same (case, config, repeat) — otherwise a concurrent smoke/run could cleanup() each
+    other's live checkout mid-review and corrupt the A/B."""
+    from adapters import ci_prompt, worktree
+    from adapters.codex_reviewer import CodexReviewer
+    from engine.models import STRATUM_HISTORICAL, Case
+
+    seen = []
+
+    class _Mat:
+        worktree_dir = "/tmp/reviewer-eval-test/wt"
+        base_sha = "b"
+        head_sha = "h"
+
+    def _fake_mat(case_id, fixture, repo_root, worktrees_root, case_dir="", worktree_key=None):
+        seen.append(worktree_key)
+        return _Mat()
+
+    monkeypatch.setattr(worktree, "materialize", _fake_mat, raising=True)
+    monkeypatch.setattr(worktree, "cleanup", lambda *a, **k: None, raising=True)
+    monkeypatch.setattr(ci_prompt, "build_ci_prompt", lambda **kw: "PROMPT", raising=True)
+
+    case = Case(id="x", stratum=STRATUM_HISTORICAL, fixture={"_case_dir": ""})
+    r1 = CodexReviewer(repo_root=str(_REPO), runs_root="/tmp/reviewer-eval-test", prompt_text="B")
+    r2 = CodexReviewer(repo_root=str(_REPO), runs_root="/tmp/reviewer-eval-test", prompt_text="B")
+    assert r1._wt_namespace != r2._wt_namespace, "each invocation gets a unique worktree namespace"
+    r1.prompt_sha_for(case)
+    r2.prompt_sha_for(case)
+    assert seen[0] != seen[1], "same case, different invocations -> distinct worktree keys"
+    assert r1._wt_namespace in seen[0] and r2._wt_namespace in seen[1]

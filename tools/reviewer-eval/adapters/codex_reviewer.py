@@ -27,6 +27,7 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from typing import Optional
 
 from engine.models import Config, ReviewOutput, to_jsonable
@@ -62,6 +63,12 @@ class CodexReviewer:
         # codex is run busts the cache even when the prompt and recorded config are
         # unchanged — recorded==executed is the harness's core integrity claim.
         self.backend_contract_sha = self._backend_contract_sha(self._mod)
+        # Per-invocation worktree namespace: all worktree dirs for THIS reviewer are
+        # prefixed with it, so two concurrent invocations (e.g. a `smoke` and a `run`,
+        # or two `run --subdir` processes) never resolve the same (case, config, repeat)
+        # to one checkout and cleanup() each other's live worktree mid-review. Ephemeral
+        # — worktrees are created+torn down per review and not part of run identity.
+        self._wt_namespace = uuid.uuid4().hex[:12]
         self._cli_version: Optional[str] = None
 
     # -- reviewer interface (duck-typed by engine.runner) ------------------- #
@@ -210,7 +217,9 @@ class CodexReviewer:
         the prompt builder, the materializer, or the case busts the cache without
         having to guess which inputs to fingerprint.
         """
-        prompt, wt_dir, _head = self.build_prompt_for_case(case, worktree_key=f"{case.id}.__sha__")
+        prompt, wt_dir, _head = self.build_prompt_for_case(
+            case, worktree_key=f"{self._wt_namespace}.{case.id}.__sha__"
+        )
         try:
             return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         finally:
@@ -239,7 +248,7 @@ class CodexReviewer:
                 f"harness only models v1 — recorded must equal executed, so fail closed "
                 f"rather than record a version it does not actually run."
             )
-        worktree_key = f"{case.id}.{config.id}.r{repeat_idx}"
+        worktree_key = f"{self._wt_namespace}.{case.id}.{config.id}.r{repeat_idx}"
         prompt, wt_dir, _head = self.build_prompt_for_case(case, worktree_key=worktree_key)
         prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
         t0 = time.monotonic()
