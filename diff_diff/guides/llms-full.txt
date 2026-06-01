@@ -616,7 +616,7 @@ scm.fit(
 ) -> SyntheticControlResults
 ```
 
-**Inference:** NONE analytical — `se`/`t_stat`/`p_value`/`conf_int` are always NaN. `att` is the mean post-period gap. Significance via in-space placebo permutation inference: `results.in_space_placebo()` reassigns treatment to each donor, refits against the other J-1 donors (the real treated unit is excluded from every placebo pool), and sets `placebo_p_value = rank/(n_placebos+1)` from the post/pre RMSPE-ratio. The permutation `placebo_p_value` is a SEPARATE field from the (NaN) `p_value`; `is_significant` stays bound to `p_value`. Predictor periods must lie within the pre window; `post_periods` must be a contiguous suffix cross-checked against `D` (no anticipation).
+**Inference:** NONE analytical — `se`/`t_stat`/`p_value`/`conf_int` are always NaN. `att` is the mean post-period gap. Significance via in-space placebo permutation inference: `results.in_space_placebo()` reassigns treatment to each donor, refits against the other J-1 donors (the real treated unit is excluded from every placebo pool), and sets `placebo_p_value = rank/(n_placebos+1)` from the post/pre RMSPE-ratio. The permutation `placebo_p_value` is a SEPARATE field from the (NaN) `p_value`; `is_significant` stays bound to `p_value`. **ADH-2015 §4 robustness (opt-in, analytical inference unchanged):** `results.leave_one_out()` drops each positively-weighted donor and re-fits (per-drop ATT/`delta_att` — large `delta_att` ⇒ single-donor dependence); `results.in_time_placebo()` backdates the intervention and checks for a spurious pre-period gap (TRUNCATE windowing — predictor windows in the held-out region are dropped). Predictor periods must lie within the pre window; `post_periods` must be a contiguous suffix cross-checked against `D` (no anticipation).
 
 **Usage:**
 
@@ -1298,7 +1298,7 @@ Returned by `SyntheticControl.fit()`.
 | `pre_periods`, `post_periods` | `list` | Calendar-sorted periods |
 | `v_method`, `standardize` | `str` | Echoed configuration |
 
-**Methods:** `in_space_placebo()` (opt-in permutation inference; refits one synthetic control per donor), `get_placebo_df()` (per-unit RMSPE-ratio table incl. the treated row), `summary()`, `print_summary()`, `to_dict()`, `to_dataframe()`, `get_gap_df()`, `get_weights_df()`
+**Methods:** `in_space_placebo()` (opt-in permutation inference; refits one synthetic control per donor), `get_placebo_df()` (per-unit RMSPE-ratio table incl. the treated row), `leave_one_out()` (ADH-2015 §4 donor robustness; drops each positively-weighted donor → per-drop ATT/`delta_att` table) + `get_leave_one_out_df()`/`get_leave_one_out_gaps()`, `in_time_placebo()` (ADH-2015 §4 backdating placebo; reassigns the intervention earlier, TRUNCATE windowing, placebo ATT ~0 if no real pre-effect) + `get_in_time_placebo_df()`/`get_in_time_placebo_gaps()`, `summary()`, `print_summary()`, `to_dict()`, `to_dataframe()`, `get_gap_df()`, `get_weights_df()`
 
 ### TripleDifferenceResults
 

@@ -2077,8 +2077,10 @@ class TestSCMNative:
         assert "herfindahl" in native["weight_concentration"]
         # Placebo is opt-in: NOT auto-run inside the report.
         assert native["in_space_placebo"]["status"] == "not_run"
-        # In-time placebo / leave-one-out are ADH 2015 (not implemented here).
-        assert "in_time_placebo" not in native and "leave_one_out" not in native
+        # The ADH-2015 diagnostics are also opt-in: surfaced as "not_run" stubs until
+        # the user calls leave_one_out() / in_time_placebo().
+        assert native["leave_one_out"]["status"] == "not_run"
+        assert native["in_time_placebo"]["status"] == "not_run"
 
     def test_scm_native_surfaces_placebo_after_optin_run(self, scm_fit):
         res, _ = scm_fit
@@ -2089,6 +2091,25 @@ class TestSCMNative:
         block = native["in_space_placebo"]
         assert block["n_placebos"] == res.n_placebos
         assert block["placebo_p_value"] == pytest.approx(res.placebo_p_value)
+
+    def test_scm_native_surfaces_leave_one_out_after_optin_run(self, scm_fit):
+        res, _ = scm_fit
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res.leave_one_out()
+            native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+        block = native["leave_one_out"]
+        assert block["status"] == "ran"
+        assert block["att_range"] is not None and len(block["att_range"]) == 2
+
+    def test_scm_native_surfaces_in_time_placebo_after_optin_run(self, scm_fit):
+        res, _ = scm_fit
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res.in_time_placebo()
+            native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+        block = native["in_time_placebo"]
+        assert block["status"] == "ran" and block["n_dates"] >= 1
 
     def test_scm_does_not_call_honest_did(self, scm_fit):
         """HonestDiD sensitivity should NOT run on SCM (fit-based / native path)."""
@@ -2108,18 +2129,22 @@ class TestSCMNative:
         res, _ = scm_fit  # the fixture does NOT run the placebo
         schema = DiagnosticReport(res).to_dict()
         labels = " ".join(s.get("label", "") for s in schema.get("next_steps", [])).lower()
-        assert "placebo" in labels  # the significance recommendation still surfaces
+        # Target the IN-SPACE step specifically (the in-time-placebo step's label also
+        # contains "placebo" but is a different, always-on ADH-2015 recommendation).
+        assert "in-space placebo" in labels  # the significance recommendation surfaces
 
     def test_scm_placebo_step_completes_after_run(self, scm_fit):
-        """Once the opt-in placebo has been run, DR stops recommending it."""
+        """Once the opt-in in-space placebo has been run, DR stops recommending it."""
         res, _ = scm_fit
         before = DiagnosticReport(res).to_dict()["next_steps"]
-        assert any("placebo" in s.get("label", "").lower() for s in before)
+        assert any("in-space placebo" in s.get("label", "").lower() for s in before)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             res.in_space_placebo()  # opt-in significance procedure now done
         after = DiagnosticReport(res).to_dict()["next_steps"]
-        assert not any("placebo" in s.get("label", "").lower() for s in after)
+        # The in-space step is suppressed; the (differently-tagged) in-time-placebo
+        # and leave-one-out recommendations are unaffected.
+        assert not any("in-space placebo" in s.get("label", "").lower() for s in after)
 
     def test_scm_rejects_precomputed_parallel_trends_and_sensitivity(self, scm_fit):
         # Like SDiD/TROP, SCM computes its PT verdict internally (the scm_fit

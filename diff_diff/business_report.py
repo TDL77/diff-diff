@@ -1019,6 +1019,9 @@ def _lift_robustness(dr: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         native_block["pre_rmspe"] = native.get("pre_rmspe")
         native_block["weight_concentration"] = native.get("weight_concentration")
         native_block["in_space_placebo"] = native.get("in_space_placebo")
+        # ADH-2015 robustness diagnostics (opt-in; "not_run" stub until run).
+        native_block["leave_one_out"] = native.get("leave_one_out")
+        native_block["in_time_placebo"] = native.get("in_time_placebo")
     return {
         "bacon": {
             "status": bacon.get("status"),

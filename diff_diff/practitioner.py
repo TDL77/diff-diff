@@ -718,6 +718,42 @@ def _handle_synthetic_control(results: Any):
             priority="medium",
             step_name="estimator_selection",
         ),
+        _step(
+            baker_step=6,
+            label="Leave-one-out donor robustness (ADH 2015)",
+            why=(
+                "Re-fit dropping each reportably-weighted donor (weight above the 1e-6 "
+                "floor) in turn to confirm the "
+                "estimate is not driven by a single donor (Abadie-Diamond-Hainmueller "
+                "2015, Section 4); a large delta_att when one donor is removed flags "
+                "single-donor dependence."
+            ),
+            code=(
+                "loo_df = results.leave_one_out()\n"
+                "print(loo_df)  # baseline + per-dropped-donor ATT and delta_att"
+            ),
+            priority="medium",
+            # Not a standard STEPS tag, so a caller's completed_steps (validated
+            # against STEPS) can never auto-suppress this opt-in recommendation.
+            step_name="loo_jackknife",
+        ),
+        _step(
+            baker_step=6,
+            label="In-time (backdating) placebo (ADH 2015)",
+            why=(
+                "Reassign the intervention to an earlier pre-period and confirm no "
+                "spurious gap appears before the true treatment date (Abadie-Diamond-"
+                "Hainmueller 2015, Section 4, Figure 4)."
+            ),
+            code=(
+                "itp_df = results.in_time_placebo()\n"
+                "print(itp_df)  # per-backdated-date placebo ATT (should be ~0)"
+            ),
+            priority="medium",
+            # Non-standard tag (not in STEPS) -> never auto-suppressed; deliberately
+            # NOT "sensitivity" (a caller could mark that done and drop this step).
+            step_name="in_time_placebo",
+        ),
         _robustness_compare_step("SyntheticDiD or CS"),
     ]
     warnings = _check_nan_att(results)

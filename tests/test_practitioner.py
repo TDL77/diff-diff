@@ -356,6 +356,9 @@ class TestResultTypeDispatch:
         all_labels = " ".join(s.get("label", "") for s in output["next_steps"]).lower()
         assert "in_space_placebo" in all_code
         assert "placebo" in all_labels
+        # The ADH-2015 robustness steps also surface (opt-in diagnostics, non-STEPS
+        # tags so a caller's completed_steps can never suppress them).
+        assert "leave_one_out" in all_code and "in_time_placebo" in all_code
         # SCM is not a staggered DiD: no control-group / anticipation knobs.
         handler_steps = [s for s in output["next_steps"] if s["baker_step"] > 2]
         handler_code = " ".join(s.get("code", "") for s in handler_steps)

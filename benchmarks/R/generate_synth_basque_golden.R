@@ -79,6 +79,37 @@ synthetic_path <- as.numeric(dp$Y0plot %*% so$solution.w)
 treated_path <- as.numeric(dp$Y1plot)
 years <- as.integer(rownames(dp$Y1plot))
 
+# --- Leave-one-out golden (ADH 2015 §4 donor robustness) ---------------------
+# Drop the highest-weight donor (region 10, Cataluna) and re-fit with the
+# ORIGINAL solution.v held fixed (custom.v), so the reduced-pool W-solve is
+# deterministic and directly comparable to SyntheticControlResults.leave_one_out()
+# on a v_method="custom" fit (which likewise reuses the original custom_v on the
+# donor pool minus the dropped unit — specs/V are unchanged, only the donors shrink).
+loo_drop <- 10L
+controls_loo <- controls[controls != loo_drop]
+invisible(capture.output({
+  dp_loo <- dataprep(
+    foo = basque,
+    predictors = predictors,
+    predictors.op = "mean",
+    time.predictors.prior = 1964:1969,
+    special.predictors = special,
+    dependent = "gdpcap",
+    unit.variable = "regionno",
+    unit.names.variable = "regionname",
+    time.variable = "year",
+    treatment.identifier = 17,
+    controls.identifier = controls_loo,
+    time.optimize.ssr = 1960:1969,
+    time.plot = 1955:1997
+  )
+  so_loo <- synth(dp_loo, custom.v = as.numeric(so$solution.v))
+}))
+w_loo <- as.numeric(so_loo$solution.w)
+synthetic_path_loo <- as.numeric(dp_loo$Y0plot %*% so_loo$solution.w)
+gap_loo <- as.numeric(dp_loo$Y1plot) - synthetic_path_loo
+att_loo <- mean(gap_loo[years >= 1970])  # mean post-period gap (treatment year 1970)
+
 golden <- list(
   config = list(
     treated_regionno = 17,
@@ -104,7 +135,13 @@ golden <- list(
   years = years,
   treated_path = treated_path,
   synthetic_path = synthetic_path,
-  gap = treated_path - synthetic_path
+  gap = treated_path - synthetic_path,
+  leave_one_out = list(
+    dropped_regionno = loo_drop,
+    solution_w = as.list(setNames(w_loo, colnames(dp_loo$X0))),
+    att = att_loo,
+    gap = gap_loo
+  )
 )
 
 dir.create("tests/data", showWarnings = FALSE, recursive = TRUE)

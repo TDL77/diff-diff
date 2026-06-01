@@ -2251,8 +2251,11 @@ class DiagnosticReport:
         DR never triggers it implicitly, because it refits one synthetic control
         per donor (potentially many nested V searches) and the placebo layer is
         opt-in by design. (This differs from SDiD's cheaper in-time-placebo sweep,
-        which ``_sdid_native`` runs inline.) Only the in-space placebo is exposed;
-        in-time placebo and leave-one-out are ADH 2015 (not implemented).
+        which ``_sdid_native`` runs inline.) The ADH-2015 §4 diagnostics —
+        leave-one-out donor robustness (``leave_one_out()``) and the in-time
+        (backdating) placebo (``in_time_placebo()``) — are surfaced the same way:
+        opt-in, reported only once the user has run them (each refits the synthetic
+        control one or more times), else a ``status="not_run"`` stub.
         """
         out: Dict[str, Any] = {"status": "ran", "estimator": "SyntheticControl"}
         out["pre_rmspe"] = _to_python_float(getattr(r, "pre_rmspe", None))
@@ -2325,6 +2328,127 @@ class DiagnosticReport:
                     "Call results.in_space_placebo() to run in-space placebo "
                     "permutation inference (opt-in; refits one synthetic control "
                     "per donor)."
+                ),
+            }
+
+        # Leave-one-out donor robustness (ADH 2015 §4): opt-in, surfaced once run.
+        if getattr(r, "_loo_df", None) is not None:
+            loo_status = getattr(r, "_loo_status", None)
+            if loo_status == "ran":
+                att_range = getattr(r, "_loo_att_range", None)
+                out["leave_one_out"] = {
+                    "status": "ran",
+                    # Headline single-donor-dependence metric: the largest baseline-
+                    # relative swing (max |delta_att|). Preferred over att_range, which
+                    # can look narrow even when every drop shifts the ATT far from the
+                    # full-fit baseline in the same direction.
+                    "max_abs_delta_att": _to_python_float(
+                        getattr(r, "_loo_max_abs_delta_att", None)
+                    ),
+                    "att_range": (
+                        [_to_python_float(att_range[0]), _to_python_float(att_range[1])]
+                        if att_range is not None
+                        else None
+                    ),
+                    "n_failed": _to_python_scalar(getattr(r, "_loo_n_failed", None)),
+                }
+            else:
+                _loo_reasons = {
+                    "treated_fit_nonconverged": (
+                        "leave_one_out() was run but the treated unit's own SCM fit "
+                        "did not converge at fit time, so the baseline ATT is not a "
+                        "valid reference for the leave-one-out deltas."
+                    ),
+                    "too_few_donors": (
+                        "leave_one_out() was run but fewer than 2 donors are available "
+                        "(dropping one must leave a non-empty pool)."
+                    ),
+                    "all_refits_failed": (
+                        "leave_one_out() was run but every donor-drop refit failed to "
+                        "converge, so no valid leave-one-out estimate was produced "
+                        "(see the status='failed' rows); raise n_starts or loosen the "
+                        "optimizer tolerances."
+                    ),
+                }
+                out["leave_one_out"] = {
+                    "status": "infeasible",
+                    # Machine-readable code so consumers can distinguish a numerical
+                    # convergence failure ("all_refits_failed") from structural
+                    # infeasibility ("too_few_donors") without parsing `reason`.
+                    "reason_code": loo_status,
+                    "reason": _loo_reasons.get(
+                        loo_status, "leave_one_out() produced no valid refits."
+                    ),
+                }
+        else:
+            out["leave_one_out"] = {
+                "status": "not_run",
+                "reason": (
+                    "Call results.leave_one_out() to run leave-one-out donor "
+                    "robustness (opt-in; refits once per reportably-weighted donor)."
+                ),
+            }
+
+        # In-time (backdating) placebo (ADH 2015 §4): opt-in, surfaced once run.
+        if getattr(r, "_in_time_df", None) is not None:
+            in_time_status = getattr(r, "_in_time_status", None)
+            if in_time_status == "ran":
+                itp = r._in_time_df
+                ran = itp[itp["status"] == "ran"] if "status" in itp else itp
+                max_abs_att = float(ran["placebo_att"].abs().max()) if len(ran) else None
+                out["in_time_placebo"] = {
+                    "status": "ran",
+                    "n_dates": _to_python_scalar(int(len(itp))),
+                    "max_abs_placebo_att": _to_python_float(max_abs_att),
+                    "n_failed": _to_python_scalar(getattr(r, "_in_time_n_failed", None)),
+                }
+            else:
+                _it_reasons = {
+                    "treated_fit_nonconverged": (
+                        "in_time_placebo() was run but the treated unit's own SCM fit "
+                        "did not converge at fit time."
+                    ),
+                    "too_few_pre_periods": (
+                        "in_time_placebo() was run but there are too few pre-treatment "
+                        "periods for any feasible placebo date (need >=3)."
+                    ),
+                    "all_dates_infeasible": (
+                        "in_time_placebo() was run but every placebo date was "
+                        "infeasible (no pre-fake period, all predictors dropped, or "
+                        "the supplied custom_v had zero mass on the surviving "
+                        "predictors after truncation)."
+                    ),
+                    "all_dates_failed": (
+                        "in_time_placebo() was run but every placebo refit failed to "
+                        "converge (none was dimensionally infeasible); raise n_starts "
+                        "or loosen the optimizer tolerances."
+                    ),
+                    "all_dates_unusable": (
+                        "in_time_placebo() was run but no placebo date produced a usable "
+                        "result: some refits failed to converge AND some dates were "
+                        "dimensionally infeasible (see n_failed / n_infeasible)."
+                    ),
+                }
+                out["in_time_placebo"] = {
+                    "status": "infeasible",
+                    # Machine-readable code distinguishing a numerical convergence
+                    # failure ("all_dates_failed") from structural infeasibility
+                    # ("all_dates_infeasible" / "too_few_pre_periods") or a mix
+                    # ("all_dates_unusable"), without parsing `reason`. The n_failed /
+                    # n_infeasible counts give the exact breakdown.
+                    "reason_code": in_time_status,
+                    "n_failed": _to_python_scalar(getattr(r, "_in_time_n_failed", None)),
+                    "n_infeasible": _to_python_scalar(getattr(r, "_in_time_n_infeasible", None)),
+                    "reason": _it_reasons.get(
+                        in_time_status, "in_time_placebo() produced no valid refits."
+                    ),
+                }
+        else:
+            out["in_time_placebo"] = {
+                "status": "not_run",
+                "reason": (
+                    "Call results.in_time_placebo() to run the in-time (backdating) "
+                    "placebo (opt-in; refits per backdated date)."
                 ),
             }
         return out

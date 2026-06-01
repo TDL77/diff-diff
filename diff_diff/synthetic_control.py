@@ -30,7 +30,7 @@ source / Abadie-Gardeazabal (2003) App. B. See ``docs/methodology/REGISTRY.md``
 """
 
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple, cast
 
 import numpy as np
@@ -523,6 +523,9 @@ class SyntheticControl:
             pre_periods=list(pre_periods),
             post_periods=list(post_periods),
             donor_ids=list(donor_ids),
+            # Freeze the reportably-weighted support (donor_weights keys, in donor_ids
+            # order) so leave_one_out() is immune to post-fit mutation of donor_weights.
+            weighted_donor_ids=[d for d in donor_ids if d in donor_weights],
             treated_id=treated_id,
             standardize=self.standardize,
             v_method=self.v_method,
@@ -1310,3 +1313,88 @@ def _placebo_fit_unit(
     post_gaps = np.array([gap_path[p] for p in snap.post_periods], dtype=float)
     scale = float(np.max(np.abs(Z1))) if Z1.size else 0.0
     return gap_path, _rmspe_ratio(pre_gaps, post_gaps, scale)
+
+
+# =============================================================================
+# in-time (backdating) placebo (ADH 2015 §4) — used by
+# SyntheticControlResults.in_time_placebo() via function-level import
+# =============================================================================
+
+
+def _truncate_snapshot_in_time(
+    snap: _SyntheticControlFitSnapshot,
+    t_f: Any,
+) -> Tuple[Optional[_SyntheticControlFitSnapshot], List[str]]:
+    """Build a snapshot for an in-time placebo reassigning the intervention to ``t_f``.
+
+    Re-cuts the panel so the **pre-fake** window is the pre-periods strictly before
+    ``t_f`` and the **post-fake** window is the held-out pre-periods from ``t_f``
+    onward (``t_f`` is the first post-fake period). The true post-treatment periods
+    are EXCLUDED entirely — ``all_periods`` is set to ``pre_fake + post_fake`` so the
+    placebo refit (which fits V/W on ``pre_periods`` and measures the gap over
+    ``all_periods``) never sees treatment-contaminated data.
+
+    Predictor specs are TRUNCATED to the pre-fake window (ADH 2015 §4 "lag the
+    predictors accordingly"; for our absolute-period specs this means intersecting
+    each spec's ``periods`` with the pre-fake window). A spec whose window lies
+    ENTIRELY in the held-out region is DROPPED (its label is collected for an
+    aggregated warning), and ``custom_v`` is subset in lockstep with the surviving
+    specs so its length stays ``== len(kept_specs)``.
+
+    Returns ``(modified_snapshot, dropped_spec_labels)``, or ``(None, dropped)`` when
+    the date is infeasible: fewer than 2 pre-fake periods (the weight / V solve needs
+    at least 2), no post-fake period, or every predictor dropped. ``t_f`` must be an
+    element of ``snap.pre_periods`` (the caller validates membership).
+    """
+    pre = snap.pre_periods
+    idx = pre.index(t_f)  # positional split (period labels may be non-numeric)
+    new_pre = list(pre[:idx])
+    new_post = list(pre[idx:])  # t_f is the first post-fake period
+    pre_set = set(new_pre)
+
+    kept_specs: List[_PredictorSpec] = []
+    keep_mask: List[int] = []
+    dropped: List[str] = []
+    for i, spec in enumerate(snap.specs):
+        # Intersect with the pre-fake window (preserves the spec's canonical order).
+        kept_periods = [p for p in spec.periods if p in pre_set]
+        if kept_periods:
+            # NEW spec object — never mutate the shared snapshot specs in place.
+            kept_specs.append(replace(spec, periods=kept_periods))
+            keep_mask.append(i)
+        else:
+            dropped.append(spec.label)
+
+    # Feasibility: >=2 pre-fake periods, >=1 post-fake period (to measure the placebo
+    # gap), and at least one surviving predictor. The >=2 pre-fake rule is DELIBERATELY
+    # stricter than the base estimator's T0>=1 allowance (which warns that single-pre
+    # nested-V selection is unreliable): an auto-swept placebo date with a single
+    # pre-fake period is a trivially-matchable, non-credible pre-fit, so it is dropped
+    # as infeasible rather than surfaced as a "ran" placebo. Documented as a Note in
+    # docs/methodology/REGISTRY.md §SyntheticControl.
+    if len(new_pre) < 2 or len(new_post) < 1 or not kept_specs:
+        return None, dropped
+
+    # Subset custom_v IN LOCKSTEP with the surviving specs (custom_v length must stay
+    # == k = len(specs); a desync silently misaligns V on the custom path). RAVEL first:
+    # fit() accepts array-like custom_v (e.g. a (1, k) row vector) and the snapshot keeps
+    # its original shape, so `[keep_mask]` would otherwise index the wrong axis of a 2D
+    # custom_v and raise (matches _placebo_fit_unit, which also ravels at use).
+    new_custom_v = (
+        None if snap.custom_v is None else np.asarray(snap.custom_v, dtype=float).ravel()[keep_mask]
+    )
+    # A custom V whose surviving entries sum to ~0 (all mass was on dropped specs)
+    # cannot fit — _placebo_fit_unit's `v / v.sum()` would be 0/0. This is the date
+    # being INFEASIBLE UNDER THE SUPPLIED custom_v, not a solver-convergence failure,
+    # so return None (→ status="infeasible") rather than letting the refit "fail".
+    if new_custom_v is not None and float(np.sum(new_custom_v)) <= 0.0:
+        return None, dropped
+    snap_mod = replace(
+        snap,
+        specs=kept_specs,
+        all_periods=new_pre + new_post,
+        pre_periods=new_pre,
+        post_periods=new_post,
+        custom_v=new_custom_v,
+    )
+    return snap_mod, dropped

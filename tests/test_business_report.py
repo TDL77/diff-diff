@@ -825,6 +825,19 @@ class TestSCMBusinessReport:
         assert "weight_concentration" in native
         assert native["in_space_placebo"]["n_placebos"] == res.n_placebos
 
+    def test_scm_robustness_block_surfaces_adh2015_diagnostics(self, scm_fit):
+        # After running the opt-in ADH-2015 diagnostics, the robustness block must
+        # carry their native sub-blocks (lifted from estimator_native_diagnostics).
+        res, _ = scm_fit
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res.leave_one_out()
+            res.in_time_placebo()
+            rob = BusinessReport(res, auto_diagnostics=True).to_dict()["robustness"]
+        native = rob["estimator_native"]
+        assert native["leave_one_out"]["status"] == "ran"
+        assert native["in_time_placebo"]["status"] == "ran"
+
     def test_staggered_triple_diff_assumption_uses_ddd_not_generic_pt(self):
         class StaggeredTripleDiffResults:
             pass
