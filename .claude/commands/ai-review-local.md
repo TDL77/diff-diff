@@ -16,7 +16,7 @@ Two backends are supported:
 
 | Backend | Latency | Cost | Quality |
 |---|---|---|---|
-| `api` (`gpt-5.5`) | 30-60s | $0.05-0.50/run, metered via `OPENAI_API_KEY` | Single-shot — won't grep, can't load files on its own initiative |
+| `api` (`gpt-5.5`) | 30-60s | ~$0.10-1.00/run, metered via `OPENAI_API_KEY` | Single-shot — won't grep, can't load files on its own initiative |
 | `codex` (any auth) | 3-15 min | depends on your `codex login` mode (subscription vs API key) — see codex docs | Agentic — matches CI Codex reviewer, can grep / load files / multi-turn |
 
 Choose with `--backend {auto,codex,api}` (default `auto`):
