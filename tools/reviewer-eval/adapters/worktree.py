@@ -18,7 +18,10 @@ trip a recall floor).
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
+import shutil
 import subprocess
 from dataclasses import dataclass
 from typing import Optional
@@ -46,11 +49,44 @@ def _resolve(repo: str, rev: str) -> str:
     return cp.stdout.strip()
 
 
+def _worktree_leaf(key: str) -> str:
+    """Collision-resistant, path-safe leaf directory name for a worktree key.
+
+    A digest (NOT a lossy slug) so distinct keys like ``a/b`` and ``a_b`` never alias
+    the same checkout (which would let one parallel job clobber another's), and
+    reserved/traversal ids (``.`` / ``..`` / anything with separators) can never escape
+    ``worktrees_root`` — the leaf is pure ``[A-Za-z0-9-]``. A short readable prefix
+    aids debugging; the digest guarantees uniqueness even when prefixes collide.
+    """
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
+    slug = re.sub(r"[^A-Za-z0-9]+", "-", key).strip("-")[:32]
+    return f"{slug}-{digest}" if slug else digest
+
+
 def _ensure_present(repo: str, sha: str) -> None:
     if _git(repo, ["cat-file", "-e", f"{sha}^{{commit}}"], check=False).returncode != 0:
         raise MaterializeError(
             f"commit {sha} not present in repo {repo}; fetch it before materializing."
         )
+
+
+def _resolve_patch_path(case_id: str, case_dir: Optional[str], patch_rel: Optional[str]) -> str:
+    """Resolve ``fixture.patch`` within ``case_dir`` and reject anything that escapes
+    it (an absolute path or a ``..`` traversal), so a case cannot make the eval read
+    files outside its own directory."""
+    if not patch_rel:
+        raise MaterializeError(f"{case_id}: stored_patch missing 'patch'")
+    if os.path.isabs(patch_rel):
+        raise MaterializeError(
+            f"{case_id}: patch path {patch_rel!r} must be relative to the case directory"
+        )
+    base = os.path.realpath(case_dir or ".")
+    full = os.path.realpath(os.path.join(base, patch_rel))
+    if full != base and not full.startswith(base + os.sep):
+        raise MaterializeError(
+            f"{case_id}: patch path {patch_rel!r} escapes its case directory {case_dir!r}"
+        )
+    return os.path.join(case_dir or "", patch_rel)
 
 
 def materialize(
@@ -76,11 +112,22 @@ def materialize(
     base = fixture.get("base_sha")
     if not base:
         raise MaterializeError(f"{case_id}: fixture missing base_sha")
+    # Resolve + contain the stored_patch path BEFORE any worktree work, so an
+    # absolute/escaping path fails fast (no leaked worktree) and never reads outside
+    # the case directory.
+    patch_path = (
+        _resolve_patch_path(case_id, case_dir, fixture.get("patch"))
+        if kind == "stored_patch"
+        else None
+    )
     _ensure_present(repo_root, base)
     base = _resolve(repo_root, base)
 
     os.makedirs(worktrees_root, exist_ok=True)
-    wt = os.path.join(worktrees_root, (worktree_key or case_id).replace("/", "_"))
+    # Leaf is a path-safe digest of the key — never the raw (possibly traversal-laden
+    # or colliding) case id, so a reserved id like ".." can't target worktrees_root's
+    # parent and distinct keys never share a checkout.
+    wt = os.path.join(worktrees_root, _worktree_leaf(worktree_key or case_id))
     # Clean any stale worktree from a previous crashed run.
     if os.path.exists(wt):
         cleanup(wt, repo_root)
@@ -102,10 +149,9 @@ def materialize(
             raise MaterializeError(f"{case_id}: worktree add failed: {cp.stderr.strip()}")
         try:
             if kind == "stored_patch":
-                patch_rel = fixture.get("patch")
-                if not patch_rel:
-                    raise MaterializeError(f"{case_id}: stored_patch missing 'patch'")
-                patch_path = os.path.join(case_dir or "", patch_rel)
+                # patch_path was resolved + contained above (fail-fast, pre-worktree);
+                # it is non-None whenever kind == "stored_patch".
+                assert patch_path is not None
                 if not os.path.exists(patch_path):
                     raise MaterializeError(f"{case_id}: patch not found at {patch_path}")
                 ap = _git(wt, ["apply", "--whitespace=nowarn", patch_path], check=False)
@@ -124,7 +170,9 @@ def materialize(
                     raise MaterializeError(
                         f"{case_id}: git revert failed (conflict on drift): " f"{rv.stderr.strip()}"
                     )
-            _git(wt, ["add", "-A"])
+            add = _git(wt, ["add", "-A"], check=False)
+            if add.returncode != 0:
+                raise MaterializeError(f"{case_id}: git add failed: {add.stderr.strip()}")
             msg = fixture.get("commit_message", f"eval: inject bug for {case_id}")
             # Identity is provided inline so the eval never depends on global git config.
             commit = _git(
@@ -150,6 +198,13 @@ def materialize(
         except MaterializeError:
             cleanup(wt, repo_root)
             raise
+        except Exception as exc:  # noqa: BLE001 - clean up + rewrap as a case-scoped error
+            # Any other post-`worktree add` failure (e.g. a CalledProcessError from a
+            # check=True git call) must NOT leak the detached worktree or crash
+            # verify-corpus/run with a raw traceback — clean up and surface it as an
+            # infra-level MaterializeError (-> INFRA_ERROR RunResult, never a missed bug).
+            cleanup(wt, repo_root)
+            raise MaterializeError(f"{case_id}: materialization failed: {exc}") from exc
 
     raise MaterializeError(f"{case_id}: unknown fixture kind {kind!r}")
 
@@ -158,8 +213,16 @@ def cleanup(worktree_dir: str, repo_root: str) -> None:
     """Remove a worktree (best-effort; prune dangling admin files)."""
     _git(repo_root, ["worktree", "remove", "--force", worktree_dir], check=False)
     _git(repo_root, ["worktree", "prune"], check=False)
-    # Belt-and-suspenders: if the dir somehow survived, leave it (a later run
-    # cleans it) rather than rm -rf'ing an unexpected path.
+    # If the path SURVIVED (an interrupted/partial run can leave an orphaned dir that
+    # is no longer a registered worktree — `git worktree remove` then fails, and the
+    # next `git worktree add` to the same key would fail too), force-remove it. Guard
+    # on the CANONICAL path (realpath resolves any ``..``/``.``) and require it to be a
+    # STRICT child of a managed ``.worktrees/`` root, so a reserved id can never make
+    # this delete runs/ or the worktrees root itself.
+    real = os.path.realpath(worktree_dir)
+    parent = os.path.dirname(real)
+    if os.path.isdir(real) and os.path.basename(parent) == ".worktrees" and real != parent:
+        shutil.rmtree(real, ignore_errors=True)
 
 
 __all__ = ["materialize", "cleanup", "Materialized", "MaterializeError"]

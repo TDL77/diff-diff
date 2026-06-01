@@ -27,6 +27,12 @@ class CLIVersionMismatch(RuntimeError):
     """Raised when arms would run under different reviewer CLI versions."""
 
 
+class ConfoundMismatch(RuntimeError):
+    """Raised when arms differ in a held-constant confound (effort / sandbox /
+    action_version). The model must be the ONLY variable across arms; any other
+    drift would silently confound the A/B and is aborted up front."""
+
+
 def _plan_runs(
     cases: list[Case],
     configs: list[Config],
@@ -47,6 +53,7 @@ def _case_snapshot(case: Case) -> dict:
     Stored on every RunResult so ``compare`` renders ground truth from what the
     run actually saw, not from the (possibly later-edited) live corpus.
     """
+    rerun = case.fixture.get("rerun", {}) if isinstance(case.fixture, dict) else {}
     return {
         "title": case.title,
         "stratum": case.stratum,
@@ -54,6 +61,11 @@ def _case_snapshot(case: Case) -> dict:
         "expect_no_blockers": case.expect_no_blockers,
         "allow_severities": case.allow_severities,
         "known_fp_topics": case.known_fp_topics,
+        # Grading context the bundle must show, or rerun/notes-dependent cases can't
+        # be graded faithfully: the documented case notes and, for a re-review case,
+        # the prior review the reviewer was actually given.
+        "notes": case.notes,
+        "previous_review": (rerun or {}).get("previous_review", ""),
     }
 
 
@@ -65,7 +77,6 @@ def run_matrix(
     k: int = 1,
     max_parallel: int = 5,
     progress: Optional[Callable[[str], None]] = None,
-    assert_cli_equal: bool = True,
 ) -> list[RunResult]:
     """Execute the full matrix, resuming completed runs, returning all results.
 
@@ -78,18 +89,46 @@ def run_matrix(
             progress(msg)
 
     # Pin/assert the reviewer CLI version up front so a drift aborts before we
-    # spend any compute (the model must be the only difference between arms).
+    # spend any compute. This is a FIDELITY check (live CLI must match each config's
+    # pin), so it runs for every config — including a single-arm smoke run — not only
+    # multi-arm comparisons. A config that doesn't pin a version (cli_version=None)
+    # is skipped.
     cli_version = ""
+    cli_error: Optional[Exception] = None
     try:
         cli_version = reviewer.cli_version()
     except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+        cli_error = exc
         log(f"WARNING: could not read reviewer CLI version: {exc}")
-    if assert_cli_equal:
-        for config in configs:
-            if config.cli_version and cli_version and config.cli_version != cli_version:
-                raise CLIVersionMismatch(
-                    f"config {config.id} pins cli_version={config.cli_version!r} "
-                    f"but reviewer reports {cli_version!r}; aborting to avoid a "
+    # Fail closed: if any config PINS a CLI version but we couldn't read the live one,
+    # abort rather than run under an unverified CLI (the pin is a recorded==executed
+    # confound). Previously a cli_version() failure left cli_version="" and silently
+    # skipped the pin check.
+    if any(c.cli_version for c in configs) and not cli_version:
+        raise CLIVersionMismatch(
+            f"configs pin cli_version but the live reviewer CLI version is unavailable"
+            f"{f' ({cli_error})' if cli_error else ''}; aborting rather than run under "
+            f"an unverified CLI."
+        )
+    for config in configs:
+        if config.cli_version and config.cli_version != cli_version:
+            raise CLIVersionMismatch(
+                f"config {config.id} pins cli_version={config.cli_version!r} "
+                f"but reviewer reports {cli_version!r}; aborting to run under the "
+                f"pinned CLI (fidelity / unconfounded A/B)."
+            )
+
+    # The model is the ONLY intended variable. Abort a multi-arm comparison that
+    # drifts in any held-constant confound (effort/sandbox/action_version) — these
+    # are recorded/hashed but a divergence would silently confound the A/B, which
+    # is exactly what the harness exists to avoid. (One arm can't be confounded.)
+    if len(configs) >= 2:
+        for field in ("effort", "sandbox", "action_version"):
+            values = {getattr(c, field) for c in configs}
+            if len(values) > 1:
+                raise ConfoundMismatch(
+                    f"configs differ in {field!r} ({sorted(values)}); the model must "
+                    f"be the only variable across arms — aborting to avoid a "
                     f"confounded A/B comparison."
                 )
 
@@ -97,11 +136,19 @@ def run_matrix(
     # rerun with a changed model (under the same config id) gets a distinct key
     # and never resumes a stale run for a different experiment.
     def _tag(config: Config) -> str:
+        # Fail closed: the experiment tag is load-bearing for resume. A fallback
+        # tag (e.g. "") would weaken the run key so a stale artifact from a
+        # different model/backend could be resumed under an unchanged prompt. The
+        # reviewer interface REQUIRES experiment_tag; if it can't be computed, abort
+        # rather than silently risk a confounded resume.
         try:
             return reviewer.experiment_tag(config)
-        except Exception as exc:  # noqa: BLE001 - degrade, don't crash the matrix
-            log(f"WARNING: experiment_tag failed for {config.id}: {exc}")
-            return ""
+        except Exception as exc:
+            raise RuntimeError(
+                f"experiment_tag failed for config {config.id}: {exc}; cannot key "
+                f"runs safely — aborting (a fallback tag risks resuming a stale "
+                f"experiment)."
+            ) from exc
 
     config_tags = {config.id: _tag(config) for config in configs}
 
@@ -121,6 +168,11 @@ def run_matrix(
     results: list[RunResult] = []
     pending: list[tuple[Case, Config, int]] = []
 
+    # prompt_sha_for(case) rematerializes the worktree; it's case-scoped for a fixed
+    # reviewer, so memoize per case.id to avoid recomputing it for every cached
+    # (config, repeat) of the same case on a resumed run.
+    _prompt_sha_cache: dict[str, str] = {}
+
     def _prompt_matches(case, cached) -> bool:
         # Reuse a cached run ONLY if the model would see byte-identical input now —
         # so an edit to the prompt builder / materializer / case busts the cache,
@@ -129,7 +181,11 @@ def run_matrix(
         if not cached.prompt_sha:
             return False  # legacy artifact w/o a recorded prompt: rerun to be safe
         try:
-            return reviewer.prompt_sha_for(case) == cached.prompt_sha
+            sha = _prompt_sha_cache.get(case.id)
+            if sha is None:
+                sha = reviewer.prompt_sha_for(case)
+                _prompt_sha_cache[case.id] = sha
+            return sha == cached.prompt_sha
         except AttributeError:
             return True  # minimal reviewer w/o prompt_sha_for: fall back to key match
         except Exception as exc:  # noqa: BLE001 - can't verify -> rerun
@@ -204,4 +260,4 @@ def run_matrix(
     return results
 
 
-__all__ = ["run_matrix", "CLIVersionMismatch"]
+__all__ = ["run_matrix", "CLIVersionMismatch", "ConfoundMismatch"]

@@ -18,6 +18,11 @@
       "type": "array",
       "items": {"enum": ["P0", "P1", "P2", "P3"]}
     },
+    "expected_files": {
+      "description": "Exact post-diff path contract; verify() requires the diff to touch precisely these files. REQUIRED for expect_no_blockers (negative-control) cases.",
+      "type": "array",
+      "items": {"type": "string"}
+    },
     "notes": {"type": "string"},
     "fixture": {
       "type": "object",
@@ -36,6 +41,13 @@
             "body": {"type": "string"},
             "source": {"type": "string"},
             "pr_number": {"type": "integer"}
+          }
+        },
+        "rerun": {
+          "description": "Re-review state. When previous_review is present, the case is built as a CI re-review (prior output injected as <previous-ai-review-output>).",
+          "type": "object",
+          "properties": {
+            "previous_review": {"type": "string"}
           }
         }
       },

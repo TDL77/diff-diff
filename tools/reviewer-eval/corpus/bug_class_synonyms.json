@@ -1,5 +1,5 @@
 {
-  "_comment": "Maps a ground-truth bug_class to keyword phrases the auto-scorer looks for in a finding's summary (class corroboration, step 3 of the match rule). A finding whose summary contains ALL tokens of ANY listed phrase corroborates the class. Keep phrases short (1-2 tokens) and lowercase. The engine treats these as opaque; only this corpus file knows diff-diff's bug vocabulary.",
+  "_comment": "Maps a ground-truth bug_class to keyword phrases that are surfaced in the side-by-side comparison bundle (under each bug's 'keywords') so the LLM/human grader has diff-diff's vocabulary for judging whether a review named this class of defect. The carved-back harness has no auto-scorer — these are read context, not a match rule. Keep phrases short (1-2 tokens) and lowercase. The engine treats them as opaque; only this corpus file knows diff-diff's bug vocabulary.",
   "dummy_name_collision": ["collision", "duplicate", "collide", "coef_dict", "dummy", "alignment", "rank"],
   "fail_closed_nan": ["nan", "noise floor", "spurious", "finite", "degrees of freedom", "dof", "fail closed"],
   "full_domain_gate": ["active sample", "subpop", "full domain", "support", "treated", "mask", "rank-deficient"],

@@ -121,21 +121,35 @@ def test_corpus_loads_seed_cases():
     assert s3.expect_no_blockers is True
 
 
-def test_seed_cases_match_schema_required_fields():
-    """Lightweight schema check (no jsonschema dep): required fields + enums."""
+def test_seed_cases_match_schema_constraints():
+    """Lightweight schema check (no jsonschema dep): required fields, enums, the
+    top-level additionalProperties=false allowlist, and the per-kind fixture
+    requirements — all mirrored from manifest.schema.json so typos in optional
+    metadata can't be silently defaulted by the loader."""
     schema = json.loads((_EVAL_ROOT / "corpus" / "manifest.schema.json").read_text())
     required = set(schema["required"])
+    allowed_top = set(schema["properties"])
+    assert schema.get("additionalProperties") is False, "schema must forbid unknown top-level keys"
     severities = set(
         schema["properties"]["ground_truth"]["items"]["properties"]["expected_severity"]["enum"]
     )
     kinds = set(schema["properties"]["fixture"]["properties"]["kind"]["enum"])
+    # mirror the fixture allOf conditionals (kind -> the field it requires)
+    kind_req = {"git_range": "head_sha", "stored_patch": "patch", "git_revert": "revert_commit"}
     cases_dir = _EVAL_ROOT / "corpus" / "cases"
     found = 0
     for case_json in cases_dir.glob("*/*/case.json"):
         d = json.loads(case_json.read_text())
         found += 1
         assert required <= set(d), f"{case_json} missing {required - set(d)}"
-        assert d["fixture"]["kind"] in kinds
+        assert (
+            set(d) <= allowed_top
+        ), f"{case_json} has unknown top-level keys {set(d) - allowed_top}"
+        kind = d["fixture"]["kind"]
+        assert kind in kinds
+        assert (
+            kind_req[kind] in d["fixture"]
+        ), f"{case_json} {kind} fixture missing {kind_req[kind]}"
         for bug in d.get("ground_truth", []):
             assert bug["expected_severity"] in severities
     assert found >= 2, "expected at least the two seed cases"
@@ -205,9 +219,13 @@ def test_s1_inject_diff_undrifted_at_base():
 def test_touches_notebook_predicate():
     from adapters.ci_prompt import touches_notebook
 
+    # Only TUTORIAL notebooks (docs/tutorials/*.ipynb) are special-cased by CI.
     assert touches_notebook("M\tdocs/tutorials/foo.ipynb") is True
-    # rename line: STATUS \t old \t new — the .ipynb target must still trip it
-    assert touches_notebook("R100\told.py\tdocs/x.ipynb") is True
+    # rename TO a tutorial notebook trips it (destination column is a tutorial nb)
+    assert touches_notebook("R100\told.py\tdocs/tutorials/new.ipynb") is True
+    # a NON-tutorial .ipynb rides the normal diff path (same as CI) -> not guarded
+    assert touches_notebook("M\tnotebooks/foo.ipynb") is False
+    assert touches_notebook("R100\told.py\tdocs/x.ipynb") is False
     # the seed cases touch .py / .md, not notebooks
     assert touches_notebook("M\tdiff_diff/estimators.py") is False
     assert touches_notebook("A\tCHANGELOG.md\nM\tdiff_diff/x.py") is False

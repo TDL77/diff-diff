@@ -169,7 +169,7 @@ Deferred items from PR reviews that were not addressed before merge.
 | Issue | Location | PR | Priority |
 |-------|----------|----|----------|
 | Drift test for tutorial 24 qualitative power claims (monotonic dilution fast→slow; CS-vs-2×2 MDE crossover/near-parity at slow rollout) — pins the prose against estimator-default/simulation drift | `docs/tutorials/24_staggered_vs_collapsed_power.ipynb` | staggered-analysis-2x2 | Low |
-| Port the CI `<notebook-prose>` extraction into the reviewer-eval harness (notebook cases are currently guarded out of `verify-corpus`/`run`) | `tools/reviewer-eval/adapters/ci_prompt.py` | local-review | Low |
+| Port the CI `<notebook-prose>` extraction into the reviewer-eval harness so `docs/tutorials/*.ipynb` cases (currently guarded out of `verify-corpus`/`run`) can be reviewed with CI-equivalent context | `tools/reviewer-eval/adapters/ci_prompt.py` | local-review | Low |
 | R comparison tests spawn separate `Rscript` per test (slow CI) | `tests/test_methodology_twfe.py:294` | #139 | Low |
 | CS R helpers hard-code `xformla = ~ 1`; no covariate-adjusted R benchmark for IRLS path | `tests/test_methodology_callaway.py` | #202 | Low |
 | Doc-snippet smoke tests only cover `.rst` files; `.txt` AI guides outside CI validation | `tests/test_doc_snippets.py` | #239 | Low |

@@ -5,12 +5,15 @@ The script is not part of an installable package; it has a ``__main__`` guard
 ``importlib.util.spec_from_file_location`` — the exact pattern the existing
 ``tests/test_openai_review.py`` ``review_mod`` fixture uses.
 
-We reuse from it (do NOT reimplement): ``_build_codex_cmd``, ``call_codex``
-(faithful CI codex invocation), ``parse_review_findings`` (markdown→findings),
-``estimate_tokens`` / ``estimate_cost`` / ``PRICING``. We deliberately do NOT
-use ``compile_prompt`` (it inlines REGISTRY — the API-backend path; CI does
-not). This module lives in ``adapters/`` precisely because it couples to
-diff-diff internals; the generic engine never imports it.
+We reuse from it (do NOT reimplement): ``call_codex`` + ``_build_codex_cmd`` (the
+faithful CI codex invocation; their source is also hashed into experiment identity
+via ``inspect.getsource``) and ``estimate_tokens`` (the prompt-size estimate
+recorded in each run's usage). The carved-back, bundle-first harness does NOT
+score, so it does not use ``parse_review_findings`` / ``estimate_cost`` /
+``PRICING``; and it deliberately does NOT use ``compile_prompt`` (it inlines
+REGISTRY — the API-backend path; CI does not). This module lives in ``adapters/``
+precisely because it couples to diff-diff internals; the generic engine never
+imports it.
 """
 
 from __future__ import annotations

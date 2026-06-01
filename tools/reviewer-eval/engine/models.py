@@ -103,6 +103,12 @@ class Case:
     expect_no_blockers: bool = False  # True ⇒ any P0/P1 is a false positive
     allow_severities: list[str] = field(default_factory=lambda: ["P2", "P3"])
     known_fp_topics: list[dict[str, Any]] = field(default_factory=list)
+    # Exact post-diff path contract. When set, verify() requires the diff to touch
+    # EXACTLY these files — REQUIRED for negative controls (expect_no_blockers), so a
+    # mis-pinned clean case can't silently become a code-changing diff that the grader
+    # still treats as blocker-free. For ground-truth cases it's optional (the
+    # ground_truth.file subset check applies when it's absent).
+    expected_files: list[str] = field(default_factory=list)
     weight: float = 1.0  # retained so the corpus JSON loads unchanged
     notes: str = ""
 

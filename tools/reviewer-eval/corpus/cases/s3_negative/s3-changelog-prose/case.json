@@ -15,6 +15,7 @@
     }
   },
   "ground_truth": [],
+  "expected_files": ["CHANGELOG.md"],
   "known_fp_topics": [],
   "notes": "Seed S3 clean control: a one-line CHANGELOG prose correction (single-file docs change). Any P0/P1 finding here is a false positive. Real merged commit 29d1e140..e16668ff, both SHAs verified to resolve 2026-05-30."
 }

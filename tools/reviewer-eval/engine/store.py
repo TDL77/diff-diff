@@ -1,9 +1,11 @@
 """Persistence for run artifacts + content-hash resume keys.
 
 GENERIC — stdlib-only (``json``, ``hashlib``, ``os``). Stores one JSON file per
-RunResult keyed by a content hash of ``(case, config, repeat, prompt_sha,
-cli_version)`` so a crashed full run resumes by skipping already-completed
-runs. The store never imports a VCS or reviewer backend.
+RunResult keyed by a content hash of ``(case_id, config_id, repeat,
+experiment_tag, case_tag)`` (see ``run_key``) so a crashed full run resumes by
+skipping already-completed runs — and a changed model/prompt/backend
+(``experiment_tag``) or edited case (``case_tag``) yields a distinct key rather
+than resuming a stale artifact. The store never imports a VCS or reviewer backend.
 """
 
 from __future__ import annotations

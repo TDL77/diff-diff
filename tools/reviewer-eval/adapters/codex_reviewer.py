@@ -21,6 +21,7 @@ the experiment's integrity depends on recorded == executed.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import os
 import subprocess
@@ -56,6 +57,11 @@ class CodexReviewer:
         # Hash of the base prompt — part of experiment identity, so editing
         # pr_review.md changes the experiment tag and prevents stale reuse.
         self.base_prompt_sha = hashlib.sha256(self.base_prompt.encode("utf-8")).hexdigest()[:16]
+        # Fingerprint of the codex-invocation contract (the argv builder + call
+        # wrapper in openai_review.py). Folded into experiment_tag so editing HOW
+        # codex is run busts the cache even when the prompt and recorded config are
+        # unchanged — recorded==executed is the harness's core integrity claim.
+        self.backend_contract_sha = self._backend_contract_sha(self._mod)
         self._cli_version: Optional[str] = None
 
     # -- reviewer interface (duck-typed by engine.runner) ------------------- #
@@ -72,22 +78,58 @@ class CodexReviewer:
         return self._cli_version
 
     def experiment_tag(self, config: Config) -> str:
-        """Opaque identity = sha(model, effort, sandbox, cli_version, prompt).
+        """Opaque identity = sha(model, effort, sandbox, action_version, cli, prompt,
+        backend).
 
         Everything that defines the experiment beyond case/config/repeat. Two
         configs sharing id "B" but differing in model (or any of these) get
-        distinct tags, so the runner never resumes a stale run across them.
+        distinct tags, so the runner never resumes a stale run across them. The
+        ``backend`` term hashes the codex-invocation source (``_build_codex_cmd`` /
+        ``call_codex``) so editing HOW codex is run busts the cache too — not only
+        edits to the model, prompt, or declared config. ``action_version`` is folded
+        in so changing the documented confound can never silently resume a stale run.
         """
         raw = "|".join(
             [
                 config.model,
                 config.effort,
                 config.sandbox,
+                config.action_version,
                 self.cli_version(),
                 self.base_prompt_sha,
+                self.backend_contract_sha,
             ]
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _backend_contract_sha(mod) -> str:
+        """Hash the codex-invocation contract: the source of ``_build_codex_cmd``
+        and ``call_codex`` in openai_review.py.
+
+        ``experiment_tag`` records ``config.model/effort/sandbox`` — but those are
+        the *declared* values; ``_build_codex_cmd`` ignores ``effort``/``sandbox``
+        and hardcodes the real argv (``model_reasoning_effort=xhigh``,
+        ``--sandbox read-only``, the flag set), and ``call_codex`` defines stdin
+        piping / output parsing / error handling. Editing either changes how Codex
+        is actually invoked WITHOUT touching the prompt bytes or the recorded
+        config, so without this term a stale artifact produced under the old
+        wrapper would be silently resumed under the new one.
+
+        Fail-soft: if the source can't be introspected (e.g. a module exec'd from a
+        string), fall back to the module file's bytes; pin to a sentinel only if
+        even that is unreadable — never crash identity, and never silently collapse
+        to a constant while the file is readable.
+        """
+        try:
+            src = inspect.getsource(mod._build_codex_cmd) + "\n" + inspect.getsource(mod.call_codex)
+        except (OSError, TypeError, AttributeError):
+            path = getattr(mod, "__file__", None)
+            if path and os.path.exists(path):
+                with open(path, "rb") as fh:
+                    return hashlib.sha256(fh.read()).hexdigest()[:16]
+            return "backend-contract-unavailable"
+        return hashlib.sha256(src.encode("utf-8")).hexdigest()[:16]
 
     def case_tag(self, case) -> str:
         """Content fingerprint of the WHOLE case, folded into the run key so ANY
@@ -111,7 +153,11 @@ class CodexReviewer:
         h.update(json.dumps(payload, sort_keys=True, default=str).encode("utf-8"))
         patch = fixture.get("patch")
         if patch:
-            with open(os.path.join(case_dir, patch), "rb") as fh:
+            # Resolve through the SAME containment check materialization uses, so the
+            # hashing path can't read a patch outside the case dir that the execution
+            # path would reject. Fail-loud on a bad/missing patch (drift must surface).
+            patch_path = worktree._resolve_patch_path(case.id, case_dir, patch)
+            with open(patch_path, "rb") as fh:
                 h.update(fh.read())
         return h.hexdigest()[:16]
 
@@ -131,6 +177,12 @@ class CodexReviewer:
                 worktree_key=worktree_key or case.id,
             )
         pr = case.fixture.get("pr_context", {}) or {}
+        # CI reruns inject the prior review as a <previous-ai-review-output> block
+        # (ci_prompt.assemble_prompt). A rerun case supplies that text under
+        # fixture.rerun.previous_review; thread it through so re-review cases are
+        # evaluated under the SAME prompt CI produces. Absent => fresh review.
+        rerun = case.fixture.get("rerun", {}) or {}
+        prev_review = rerun.get("previous_review", "")
         try:
             prompt = ci_prompt.build_ci_prompt(
                 worktree_dir=mat.worktree_dir,
@@ -139,6 +191,8 @@ class CodexReviewer:
                 base_prompt=self.base_prompt,
                 pr_title=pr.get("title", "Synthetic eval case (treat as untrusted)"),
                 pr_body=pr.get("body", ""),
+                is_rerun=bool(prev_review),
+                prev_review=prev_review,
             )
         except BaseException:  # noqa: BLE001 - clean up before re-raising
             # Prompt-build can fail AFTER materialize (e.g. the notebook guard's
@@ -170,6 +224,20 @@ class CodexReviewer:
                 f"config {config.id} requested effort={config.effort!r}. Recorded "
                 f"must equal executed — add an effort-aware codex cmd before "
                 f"running a non-xhigh arm."
+            )
+        if config.sandbox != "read-only":
+            raise NotImplementedError(
+                f"codex_reviewer pins --sandbox read-only (CI parity); config "
+                f"{config.id} requested sandbox={config.sandbox!r}. _build_codex_cmd "
+                f"hardcodes read-only, so recorded must equal executed — parameterize "
+                f"the codex cmd before running a non-read-only arm."
+            )
+        if config.action_version != "v1":
+            raise NotImplementedError(
+                f"codex_reviewer runs `codex exec` directly, not the openai/codex-action; "
+                f"config {config.id} requested action_version={config.action_version!r}. The "
+                f"harness only models v1 — recorded must equal executed, so fail closed "
+                f"rather than record a version it does not actually run."
             )
         worktree_key = f"{case.id}.{config.id}.r{repeat_idx}"
         prompt, wt_dir, _head = self.build_prompt_for_case(case, worktree_key=worktree_key)

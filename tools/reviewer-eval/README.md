@@ -76,11 +76,13 @@ Codex CLI version is identical across arms, so the model is the only variable.
 
 ## Known limitations
 
-- **Notebook cases aren't supported yet.** CI excludes `.ipynb` from the diff *and*
-  appends a sanitized `<notebook-prose>` block; this harness reproduces only the
-  exclusion, so a notebook-touching case would be reviewed with less context than
-  CI. `verify-corpus` and `run` both reject such cases until the extraction is
-  ported (see `ci_prompt.touches_notebook`).
+- **Tutorial-notebook cases aren't supported yet.** CI special-cases only
+  `docs/tutorials/*.ipynb`: it excludes them from the diff *and* appends a sanitized
+  `<notebook-prose>` block; this harness reproduces only the exclusion, so a
+  tutorial-notebook case would be reviewed with less context than CI. `verify-corpus`
+  and `run` reject such cases until the extraction is ported (see
+  `ci_prompt.touches_notebook`). Non-tutorial `.ipynb` ride the normal diff path,
+  exactly as CI handles them.
 - One `run` invocation = one experiment (run `--configs A,B` together). `compare`
   reads the per-run manifest (`runs/<subdir>-manifest.json`), so rerunning into the
   same `--subdir` with a changed model **replaces** the comparison rather than
@@ -90,4 +92,4 @@ Codex CLI version is identical across arms, so the model is the only variable.
 
 Grow the corpus from 2 seed cases to ~10 real cases (mine bugs, pin SHAs, freeze
 `inject.diff` patches), run both arms, read the bundle, and decide. That curation
-+ the live A/B run is deliberately a separate step from this harness.
+plus the live A/B run is deliberately a separate step from this harness.

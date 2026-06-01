@@ -5,8 +5,9 @@ Pipeline:
 
   verify-corpus   Materialize every case and assert its diff touches the
                   expected files (no codex; cheap; run in CI-lite).
-  smoke           Tiny matrix (default: control arm, k=1) end-to-end to
-                  validate plumbing -- the FIRST command that calls codex.
+  smoke           Tiny matrix (default: control arm, 1 case, k=1) end-to-end
+                  to validate plumbing -- the FIRST command that calls codex.
+                  Pass --limit 0 to run the whole selected corpus.
   run             Full A/B matrix; saves each arm's RAW review markdown.
   compare         Emit one side-by-side bundle (ground truth + both arms' raw
                   reviews) for an LLM (or you) to read into a caught/missed/
@@ -45,6 +46,47 @@ def _manifest_path(subdir: str) -> str:
     return os.path.join(RUNS_DIR, f"{subdir}-manifest.json")
 
 
+def _invalidate_manifest_if_exists(subdir: str) -> None:
+    """If a prior manifest exists for ``subdir``, replace it with a failure marker.
+    Called at the start of a run attempt so a failed/aborted rerun (even one that
+    exits at input validation) can never leave a PRIOR run's manifest live for
+    ``compare``. A fresh subdir is left manifest-less (a no-op misconfig fabricates
+    nothing); ``compare`` already fails closed on a missing manifest."""
+    path = _manifest_path(subdir)
+    if os.path.exists(path):
+        write_json(path, {"failed": True, "error": "superseded by an incomplete rerun"})
+
+
+def _safe_subdir(subdir: str) -> bool:
+    """True iff ``subdir`` resolves to a real child of RUNS_DIR. ``--subdir`` flows
+    straight into filesystem paths (store dir, manifest, comparison.md), so reject
+    absolute paths and ``..`` traversal that would read/write outside runs/."""
+    base = os.path.realpath(RUNS_DIR)
+    full = os.path.realpath(os.path.join(RUNS_DIR, subdir or ""))
+    return full.startswith(base + os.sep)
+
+
+def _verify_cases(loader, cases) -> int:
+    """Fail-closed preflight: materialize + sanity-check every selected case BEFORE
+    any Codex call, so a stale/malformed case can't be reviewed and graded against
+    stale ground truth. Returns the count of invalid cases (0 = all OK) and prints
+    each failure. (``verify-corpus`` is the same check as a standalone command.)"""
+    errors = []
+    for c in cases:
+        err = loader.verify(c)
+        if err:
+            errors.append((c.id, err))
+    for case_id, err in errors[:10]:
+        print(f"  CASE INVALID: {case_id}: {err}", file=sys.stderr)
+    if errors:
+        print(
+            f"{len(errors)} of {len(cases)} selected case(s) failed validation; "
+            "aborting before any codex call (run `verify-corpus` to debug).",
+            file=sys.stderr,
+        )
+    return len(errors)
+
+
 def _load_configs() -> dict:
     return read_json(os.path.join(CONFIG_DIR, "configs.json"))  # type: ignore[return-value]
 
@@ -75,6 +117,11 @@ def _resolve_configs(arg: str):
     caller can abort, rather than silently running a partial/empty matrix.
     """
     requested = [c for c in (arg or "").split(",") if c]
+    # Reject duplicate ids ("A,A"): run identity, artifacts, and bundle columns key
+    # off config_id, so a repeat would alias both arms onto one identity and collapse
+    # the comparison rather than running two arms.
+    if len(set(requested)) != len(requested):
+        return None
     configs = _make_configs(requested)
     if not configs or len(configs) != len(requested):
         return None
@@ -83,7 +130,7 @@ def _resolve_configs(arg: str):
 
 def _bad_configs_msg(arg: str) -> str:
     return (
-        f"invalid --configs {arg!r}: unknown or empty config id(s) "
+        f"invalid --configs {arg!r}: unknown, empty, or duplicate config id(s) "
         "(valid ids come from config/configs.json, e.g. A,B)"
     )
 
@@ -130,9 +177,17 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     if configs is None:
         print(_bad_configs_msg(args.configs), file=sys.stderr)
         return 1
+    if _verify_cases(loader, cases):
+        return 1
     reviewer = _build_reviewer(repo_root)
     print(f"codex CLI version: {reviewer.cli_version()}")
     store = RunStore(os.path.join(RUNS_DIR, "smoke"))
+    # smoke is a LIVE plumbing/auth/connectivity check (the README's "first real codex
+    # call"), so it must actually exercise codex every time — clear any cached smoke
+    # artifacts so run_matrix never resumes a stale success.
+    for name in os.listdir(store.root):
+        if name.endswith(".json"):
+            os.remove(os.path.join(store.root, name))
     results = run_matrix(
         cases,
         configs,
@@ -141,7 +196,6 @@ def cmd_smoke(args: argparse.Namespace) -> int:
         k=args.k,
         max_parallel=args.max_parallel,
         progress=lambda m: print(f"  {m}"),
-        assert_cli_equal=len(configs) > 1,
     )
     ok = sum(1 for r in results if r.ok)
     print(f"\nsmoke: {ok}/{len(results)} runs ok")
@@ -154,6 +208,17 @@ def cmd_smoke(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     from engine.runner import run_matrix
 
+    if not _safe_subdir(args.subdir):
+        print(
+            f"invalid --subdir {args.subdir!r}: must stay within the runs directory",
+            file=sys.stderr,
+        )
+        return 1
+    # A run attempt into <subdir> supersedes any prior experiment there: invalidate an
+    # EXISTING manifest now, so even an early exit (bad configs, zero cases, a corpus-
+    # load error) can't leave the previous run's manifest live for compare. A fresh
+    # subdir stays manifest-less here; compare fails closed on a missing manifest.
+    _invalidate_manifest_if_exists(args.subdir)
     repo_root = find_repo_root()
     loader = CorpusLoader(CORPUS_DIR, repo_root)
     cases = loader.load_cases(args.strata)
@@ -164,8 +229,19 @@ def cmd_run(args: argparse.Namespace) -> int:
     if configs is None:
         print(_bad_configs_msg(args.configs), file=sys.stderr)
         return 1
+    # Past input validation, this is a real run attempt: invalidate the manifest now
+    # and overwrite it with run_ids ONLY on success. Every failure from here on (an
+    # invalid case, reviewer/runner error, an interrupt, or an infra failure) then
+    # leaves the subdir in a failed state that `compare` refuses — a prior run's
+    # manifest is never exposed as the current experiment. (A pure input-validation
+    # no-op above leaves any existing manifest untouched.)
+    write_json(_manifest_path(args.subdir), {"failed": True, "error": "run did not complete"})
+    if _verify_cases(loader, cases):
+        return 1
     reviewer = _build_reviewer(repo_root)
     store = RunStore(os.path.join(RUNS_DIR, args.subdir))
+    # If run_matrix raises (ConfoundMismatch, CLIVersionMismatch, an interrupt, ...)
+    # the up-front failure marker stays in place and the exception propagates.
     results = run_matrix(
         cases,
         configs,
@@ -179,26 +255,37 @@ def cmd_run(args: argparse.Namespace) -> int:
     infra = [r for r in results if not r.ok]
     if infra:
         # Fail closed: an INFRA_ERROR (a notebook case, or a codex/worktree failure)
-        # means the experiment is incomplete. Don't write a manifest — so `compare`
-        # can't present a partial run as a valid A/B — and exit non-zero. The OK runs
-        # stay cached, so a re-run resumes them and only retries the failures.
+        # means the experiment is incomplete. Replace the up-front marker with a
+        # detailed failure marker (no run_ids) so `compare` refuses, and exit
+        # non-zero. The OK runs stay cached, so a re-run resumes them and only
+        # retries the failures.
         for r in infra[:10]:
             print(
                 f"  INFRA_ERROR: {r.case_id} {r.config_id} r{r.repeat_idx}: {r.infra_error}",
                 file=sys.stderr,
             )
+        write_json(
+            _manifest_path(args.subdir),
+            {"failed": True, "n_infra_errors": len(infra), "configs": [c.id for c in configs]},
+        )
         print(
-            f"\n{ok}/{len(results)} runs ok, {len(infra)} FAILED — no manifest written. "
-            "Fix the failing case(s) and re-run (ok runs resume from cache).",
+            f"\n{ok}/{len(results)} runs ok, {len(infra)} FAILED — manifest marked "
+            "incomplete. Fix the failing case(s) and re-run (ok runs resume from cache).",
             file=sys.stderr,
         )
         return 2
     # Manifest scopes `compare` to THIS invocation's runs, so a later rerun into the
-    # same subdir can't silently mix experiments into one bundle.
+    # same subdir can't silently mix experiments into one bundle. It also records the
+    # rubric provenance (base_prompt_sha) so compare can refuse if pr_review.md drifts
+    # between run and compare (the grader is pointed at the live rubric).
     run_ids = [r.run_id for r in results if r.run_id]
     write_json(
         _manifest_path(args.subdir),
-        {"run_ids": run_ids, "configs": [c.id for c in configs]},
+        {
+            "run_ids": run_ids,
+            "configs": [c.id for c in configs],
+            "base_prompt_sha": getattr(reviewer, "base_prompt_sha", ""),
+        },
     )
     print(f"\n{ok}/{len(results)} runs ok. Next: compare --subdir {args.subdir}")
     return 0
@@ -211,8 +298,17 @@ def cmd_compare(args: argparse.Namespace) -> int:
     its own as-reviewed case snapshot), scoped to the last `run` invocation via its
     manifest. Writes runs/<subdir>/comparison.md. No corpus reload, no scoring.
     """
+    import hashlib
+
+    from adapters import ci_prompt
     from engine.compare import build_bundle
 
+    if not _safe_subdir(args.subdir):
+        print(
+            f"invalid --subdir {args.subdir!r}: must stay within the runs directory",
+            file=sys.stderr,
+        )
+        return 1
     runs = RunStore(os.path.join(RUNS_DIR, args.subdir)).load_all()
     if not runs:
         print(f"no runs found under runs/{args.subdir}", file=sys.stderr)
@@ -223,14 +319,51 @@ def cmd_compare(args: argparse.Namespace) -> int:
     manifest_path = _manifest_path(args.subdir)
     try:
         manifest = read_json(manifest_path)
-        wanted = set(manifest.get("run_ids", []))  # type: ignore[union-attr]
     except (OSError, ValueError):
-        wanted = None
-    if wanted is None:
+        manifest = None
+    if isinstance(manifest, dict) and manifest.get("failed"):
+        # The last `run` into this subdir failed/incomplete (its manifest is a
+        # failure marker, not a run_ids set). Refuse rather than fall back to the
+        # "no manifest -> compare ALL" path, which would silently surface leftover
+        # runs as if they were a valid experiment.
         print(
-            f"  WARNING: no manifest at {os.path.basename(manifest_path)}; comparing "
-            f"ALL runs under runs/{args.subdir} (may mix experiments). Re-run `run` "
-            "to regenerate it.",
+            f"the last `run` into runs/{args.subdir} failed/incomplete — no valid "
+            f"experiment to compare. Fix the failing case(s) and re-run `run` first.",
+            file=sys.stderr,
+        )
+        return 1
+    # Rubric provenance: the bundle points graders at the LIVE pr_review.md as "the
+    # exact rubric every config was given". Fail closed if it drifted since the run,
+    # or we'd grade stored reviews under a different standard.
+    stored_rubric = manifest.get("base_prompt_sha") if isinstance(manifest, dict) else None
+    if stored_rubric:
+        live_rubric = hashlib.sha256(
+            ci_prompt.read_current_prompt(find_repo_root()).encode("utf-8")
+        ).hexdigest()[:16]
+        if live_rubric != stored_rubric:
+            print(
+                f"the review rubric (.github/codex/prompts/pr_review.md) changed since this "
+                f"run (stored {stored_rubric}, live {live_rubric}); compare would grade the "
+                f"stored reviews under a different rubric. Re-run `run`, or restore the prompt.",
+                file=sys.stderr,
+            )
+            return 1
+    wanted = set(manifest.get("run_ids", [])) if isinstance(manifest, dict) else None
+    if wanted is None:
+        # No manifest: a completed `run` always writes one, so this means the subdir
+        # holds legacy/manually-accumulated runs. Fail closed (one run = one
+        # experiment) unless the operator explicitly opts into a mixed bundle.
+        if not getattr(args, "allow_mixed", False):
+            print(
+                f"no manifest at {os.path.basename(manifest_path)} for runs/{args.subdir}; "
+                f"refusing to compare (one run = one experiment). Re-run `run`, or pass "
+                f"--allow-mixed to compare ALL runs in the subdir.",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"  WARNING: --allow-mixed: comparing ALL runs under runs/{args.subdir} "
+            f"(may mix experiments).",
             file=sys.stderr,
         )
     else:
@@ -242,6 +375,17 @@ def cmd_compare(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         runs = [r for r in runs if r.run_id in wanted]
+        # Fail closed on incomplete coverage: load_all silently drops missing/corrupt
+        # artifacts, so a bundle built from a subset would bias the A/B read. Every
+        # run_id the manifest promised must actually be present.
+        missing = wanted - {r.run_id for r in runs}
+        if missing:
+            print(
+                f"manifest lists {len(wanted)} run(s) but {len(missing)} artifact(s) are "
+                f"missing/unreadable under runs/{args.subdir}: {sorted(missing)}; re-run `run`.",
+                file=sys.stderr,
+            )
+            return 1
         if not runs:
             print(
                 f"manifest matched no runs under runs/{args.subdir}; re-run `run`.",
@@ -272,11 +416,13 @@ def main() -> int:
     pv.add_argument("--strata", nargs="*", default=None)
     pv.set_defaults(func=cmd_verify_corpus)
 
-    ps = sub.add_parser("smoke", help="tiny end-to-end run (first codex call)")
+    ps = sub.add_parser("smoke", help="tiny end-to-end run (1 case; first codex call)")
     ps.add_argument("--configs", default="A")
     ps.add_argument("--strata", nargs="*", default=None)
     ps.add_argument("--k", type=int, default=1)
-    ps.add_argument("--limit", type=int, default=0)
+    ps.add_argument(
+        "--limit", type=int, default=1, help="cap selected cases (default 1; pass 0 to run all)"
+    )
     ps.add_argument("--max-parallel", type=int, default=2)
     ps.set_defaults(func=cmd_smoke)
 
@@ -290,6 +436,11 @@ def main() -> int:
 
     pc = sub.add_parser("compare", help="emit the side-by-side bundle to grade")
     pc.add_argument("--subdir", default="full")
+    pc.add_argument(
+        "--allow-mixed",
+        action="store_true",
+        help="compare ALL runs in the subdir when no manifest exists (may mix experiments)",
+    )
     pc.set_defaults(func=cmd_compare)
 
     args = p.parse_args()

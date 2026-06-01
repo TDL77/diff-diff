@@ -39,25 +39,37 @@ DIFF_EXCLUDES = (
 
 DEFAULT_PROMPT_RELPATH = os.path.join(".github", "codex", "prompts", "pr_review.md")
 
-# CI also appends a sanitized <notebook-prose> block extracted from changed .ipynb
-# (notebook_md_extract.py); this module reproduces only the diff exclusion above,
-# NOT the prose. Until that extraction is ported, notebook-touching cases are
-# GUARDED out (build_ci_prompt raises; corpus_loader.verify rejects).
+# CI special-cases ONLY tutorial notebooks (docs/tutorials/*.ipynb): it excludes
+# them from the diff body (DIFF_EXCLUDES above) AND appends a sanitized
+# <notebook-prose> block extracted from them (notebook_md_extract.py). This module
+# reproduces the exclusion but NOT the prose, so a TUTORIAL-notebook case would be
+# reviewed with less context than CI and is GUARDED out (build_ci_prompt raises;
+# corpus_loader.verify rejects) until that extraction is ported. Non-tutorial
+# .ipynb are not special-cased by CI — they ride the normal diff path, so the
+# harness leaves them alone too.
 _NOTEBOOK_UNSUPPORTED = (
-    "notebook case unsupported: ci_prompt does not reproduce the CI workflow's "
-    "<notebook-prose> block (extracted from changed .ipynb via notebook_md_extract.py); "
-    "port that extraction before adding a notebook-touching case."
+    "tutorial-notebook case unsupported: ci_prompt does not reproduce the CI workflow's "
+    "<notebook-prose> block (extracted from docs/tutorials/*.ipynb via notebook_md_extract.py); "
+    "port that extraction before adding a docs/tutorials notebook case."
 )
 
 
+def _is_tutorial_notebook(path: str) -> bool:
+    p = path.strip()
+    return p.startswith("docs/tutorials/") and p.endswith(".ipynb")
+
+
 def touches_notebook(name_status: str) -> bool:
-    """True if a ``git diff --name-status`` block touches any ``.ipynb`` path.
+    """True if a ``git diff --name-status`` block touches a TUTORIAL notebook
+    (``docs/tutorials/*.ipynb``) — the only notebooks CI special-cases (diff
+    exclusion + <notebook-prose>). Non-tutorial ``.ipynb`` ride the normal diff path
+    (same as CI) and do NOT trip this.
 
     Handles rename lines (``R100\\told\\tnew``) by checking every path column.
     """
     for line in name_status.splitlines():
         for path in line.split("\t")[1:]:
-            if path.strip().endswith(".ipynb"):
+            if _is_tutorial_notebook(path):
                 return True
     return False
 
