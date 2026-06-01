@@ -5635,3 +5635,136 @@ class TestEventStudySurveyCband:
             r = est.fit(panel, "outcome", "dose", "period", "unit", survey=sd)
         assert r.vcov_type == "hc1"
         assert r.variance_formula == "survey_binder_tsl_2sls"
+
+
+# =============================================================================
+# TODO L74: extensive-margin / positive-untreated-mass fit-time warning
+# =============================================================================
+
+_EXTENSIVE_MARGIN_SUBSTR = "exactly-zero post-period dose"
+
+
+def _panel_with_zero_fraction(G, n_zero, seed=0):
+    """continuous_at_zero 2-period panel with EXACTLY ``n_zero`` zero post doses.
+
+    The positive interior is drawn from Uniform(0.2, 1.0) so no accidental
+    zeros sneak in — the exactly-zero fraction is precisely ``n_zero / G``.
+    """
+    rng = np.random.default_rng(seed)
+    d = rng.uniform(0.2, 1.0, G)
+    d[:n_zero] = 0.0
+    dy = 0.3 * d + 0.1 * rng.standard_normal(G)
+    return _make_panel(d, dy)
+
+
+class TestExtensiveMarginWarning:
+    """The overall ``fit()`` path warns above a 10% exactly-zero-dose cutoff.
+
+    Locks the TODO L74 fit-time UserWarning: HAD targets a WAS assuming no
+    genuine untreated group, so a substantial exactly-zero (untreated) mass
+    suggests a real extensive margin where standard DiD may be preferable.
+    """
+
+    def test_fires_above_threshold(self):
+        # 40/200 = 20% exactly-zero -> warning fires.
+        panel = _panel_with_zero_fraction(200, 40, seed=0)
+        with pytest.warns(UserWarning, match=_EXTENSIVE_MARGIN_SUBSTR):
+            HeterogeneousAdoptionDiD().fit(panel, "outcome", "dose", "period", "unit")
+
+    def test_fires_exactly_at_threshold(self):
+        # 20/200 = 10% exactly -> the >= cutoff fires at the boundary.
+        panel = _panel_with_zero_fraction(200, 20, seed=1)
+        with pytest.warns(UserWarning, match=_EXTENSIVE_MARGIN_SUBSTR):
+            HeterogeneousAdoptionDiD().fit(panel, "outcome", "dose", "period", "unit")
+
+    def test_message_names_count_and_pct(self):
+        panel = _panel_with_zero_fraction(200, 40, seed=0)
+        with pytest.warns(UserWarning) as rec:
+            HeterogeneousAdoptionDiD().fit(panel, "outcome", "dose", "period", "unit")
+        msgs = [str(w.message) for w in rec if _EXTENSIVE_MARGIN_SUBSTR in str(w.message)]
+        assert len(msgs) == 1
+        # Names the count/total and percentage, and points to standard DiD.
+        assert "40/200" in msgs[0]
+        assert "20%" in msgs[0]
+        assert "standard DiD" in msgs[0]
+
+    def test_no_fire_all_positive(self):
+        # No exactly-zero units -> no extensive-margin warning.
+        panel = _panel_with_zero_fraction(200, 0, seed=2)
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            HeterogeneousAdoptionDiD().fit(panel, "outcome", "dose", "period", "unit")
+        assert not any(_EXTENSIVE_MARGIN_SUBSTR in str(w.message) for w in rec)
+
+    def test_no_fire_just_below_threshold(self):
+        # 19/200 = 9.5% < 10% -> no warning (boundary no-fire).
+        panel = _panel_with_zero_fraction(200, 19, seed=3)
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            HeterogeneousAdoptionDiD().fit(panel, "outcome", "dose", "period", "unit")
+        assert not any(_EXTENSIVE_MARGIN_SUBSTR in str(w.message) for w in rec)
+
+    def test_event_study_with_never_treated_does_not_warn(self):
+        # Scope lock: the event-study path REQUIRES never-treated units
+        # (Appendix B.2), so a 20% never-treated mass must NOT trip the
+        # overall-path extensive-margin warning. The warning code sits after
+        # the event-study dispatch returns, so it is structurally unreachable
+        # here — this test guards against a future re-placement regressing it.
+        rng = np.random.default_rng(4)
+        d_at_F = rng.uniform(0.2, 1.0, 200)
+        d_at_F[:40] = 0.0  # 20% never-treated (dose 0 at every period)
+        panel = _make_multi_period_panel(d_at_F, n_periods=5, F=3, seed=4)
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            _fit_es(
+                HeterogeneousAdoptionDiD(),
+                panel,
+                "outcome",
+                "dose",
+                "period",
+                "unit",
+            )
+        assert not any(_EXTENSIVE_MARGIN_SUBSTR in str(w.message) for w in rec)
+
+
+class TestCovariatesTrap:
+    """TODO L73: ``fit(covariates=...)`` raises NotImplementedError.
+
+    Covariate-adjusted HAD (de Chaisemartin et al. 2026, Appendix B.1 /
+    Theorem 6) is not implemented; the explicit param surfaces the roadmap
+    instead of a bare ``TypeError`` from an unknown kwarg.
+    """
+
+    def test_covariates_raises_overall(self):
+        d, dy = _dgp_continuous_at_zero(200, seed=0)
+        panel = _make_panel(d, dy)
+        with pytest.raises(NotImplementedError, match="Appendix B.1"):
+            HeterogeneousAdoptionDiD().fit(
+                panel, "outcome", "dose", "period", "unit", covariates=["x"]
+            )
+
+    def test_covariates_raises_event_study(self):
+        # Raises before the event-study dispatch, so any panel suffices.
+        d, dy = _dgp_continuous_at_zero(200, seed=0)
+        panel = _make_panel(d, dy)
+        with pytest.raises(NotImplementedError, match="multivariate"):
+            HeterogeneousAdoptionDiD().fit(
+                panel,
+                "outcome",
+                "dose",
+                "period",
+                "unit",
+                aggregate="event_study",
+                covariates=["x"],
+            )
+
+    def test_covariates_none_default_does_not_raise(self):
+        # The default covariates=None preserves the pre-PR fit path.
+        d, dy = _dgp_continuous_at_zero(400, seed=0)
+        panel = _make_panel(d, dy)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            r = HeterogeneousAdoptionDiD().fit(
+                panel, "outcome", "dose", "period", "unit", covariates=None
+            )
+        assert np.isfinite(r.att)

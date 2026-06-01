@@ -121,6 +121,17 @@ _VALID_AGGREGATES = ("overall", "event_study")
 _MASS_POINT_VCOV_SUPPORTED = ("classical", "hc1")
 _MASS_POINT_VCOV_UNSUPPORTED = ("hc2", "hc2_bm")
 
+# Extensive-margin / positive-untreated-mass warning (TODO L74). The paper (de
+# Chaisemartin et al. 2026, Section 2 / Assumption 3) defines HAD for the case
+# where no genuine untreated group exists, and recommends users with a real
+# untreated mass consider a standard DiD instead. The paper prescribes "warn"
+# but NO numeric cutoff, and explicitly RETAINS small untreated shares (Garrett
+# et al.: 12/2954 ~ 0.4%, with nominal coverage), so this fit-time UserWarning
+# fires only above a library-convention fraction of EXACTLY-zero post-period
+# doses. Overall path ONLY — the event-study path requires never-treated units
+# per Appendix B.2, so an untreated mass is expected there, not a misuse signal.
+_HAD_EXTENSIVE_MARGIN_ZERO_DOSE_FRAC = 0.10
+
 # Target-parameter label per design. Design 1' targets the WAS (Assumption 3);
 # Design 1 targets WAS_{d_lower} (Assumption 5 or 6), which also applies to
 # the mass-point path (paper Section 3.2.4).
@@ -2844,6 +2855,7 @@ class HeterogeneousAdoptionDiD:
         *,
         survey_design: Any = None,
         trends_lin: bool = False,
+        covariates: Any = None,
     ) -> Union[HeterogeneousAdoptionDiDResults, HeterogeneousAdoptionDiDEventStudyResults]:
         """Fit the HAD estimator.
 
@@ -2973,6 +2985,14 @@ class HeterogeneousAdoptionDiD:
             ``survey`` / ``weights``); raises ``NotImplementedError``
             if combined. Default ``False`` preserves bit-exact
             backcompat with all pre-PR fits.
+        covariates : array-like or None, default None, keyword-only
+            NOT YET IMPLEMENTED. Reserved for the covariate-adjusted HAD
+            identification of de Chaisemartin et al. (2026), Appendix B.1 /
+            Theorem 6 (the multivariate-covariate extension). A non-None
+            value raises ``NotImplementedError`` with a pointer to that
+            extension; pre-residualize the outcome on the covariates before
+            calling ``fit()``, or omit ``covariates=`` for the unconditional
+            WAS estimand.
 
         Returns
         -------
@@ -2984,6 +3004,15 @@ class HeterogeneousAdoptionDiD:
             staggered panels auto-filters to the last cohort plus
             never-treated): per-event-time WAS estimates with per-
             horizon arrays.
+
+        Notes
+        -----
+        On the ``aggregate="overall"`` path, ``fit()`` emits a ``UserWarning``
+        when a non-trivial fraction (``>= 10%``, a library convention) of
+        units have exactly-zero post-period dose — a genuine untreated mass
+        for which a standard DiD may be more appropriate (de Chaisemartin
+        et al. 2026, Section 2). The event-study path does not warn: it
+        *requires* never-treated units per Appendix B.2.
         """
         # ---- aggregate / survey_design / survey / weights validation ----
         if aggregate not in _VALID_AGGREGATES:
@@ -2994,6 +3023,26 @@ class HeterogeneousAdoptionDiD:
         n_set = sum(x is not None for x in (survey_design, survey, weights))
         if n_set > 1:
             raise ValueError(HAD_DUAL_KNOB_MUTEX_MSG_DATA_IN)
+
+        # ---- covariates= future-work trap (TODO L73) ----
+        # Covariate-adjusted HAD identification (de Chaisemartin et al. 2026,
+        # Appendix B.1 / Theorem 6 — the multivariate-covariate extension) is not
+        # implemented. An explicit param + NotImplementedError surfaces the roadmap
+        # (vs the bare TypeError a missing kwarg would raise) while leaving
+        # unknown-kwarg typos a normal TypeError. Placed after the survey/weights
+        # mutex and before the event-study dispatch so the single raise covers BOTH
+        # aggregate="overall" and aggregate="event_study".
+        if covariates is not None:
+            raise NotImplementedError(
+                "HeterogeneousAdoptionDiD.fit(covariates=...) is not yet "
+                "implemented. Covariate-adjusted HAD identification (de "
+                "Chaisemartin et al. 2026, Appendix B.1 / Theorem 6 — the "
+                "multivariate-covariate extension) requires a multivariate "
+                "nonparametric regression of dY on (D, X) at the dose boundary, "
+                "which is not derived here. Pre-residualize the outcome on the "
+                "covariates before calling fit(), or omit covariates= for the "
+                "unconditional WAS estimand."
+            )
 
         # ---- trends_lin scope gates (PR #389 / Phase 4 R-parity).
         # `trends_lin=True` implements paper Eq 17 linear-trend detrending
@@ -3128,6 +3177,34 @@ class HeterogeneousAdoptionDiD:
             t_post,
             None,
         )
+
+        # ---- Extensive-margin / positive-untreated-mass warning (TODO L74) ----
+        # d_arr is the per-unit post-period dose D_{g,2} (D_{g,1}=0, so dD = D_2);
+        # exactly-zero entries are genuinely untreated units. The `== 0.0` test
+        # mirrors the qug_test `d == 0` convention (had_pretests.py). Fraction-only
+        # (no absolute floor); fires at/above the library-convention cutoff. See the
+        # _HAD_EXTENSIVE_MARGIN_ZERO_DOSE_FRAC definition for the paper rationale.
+        # This runs on the overall path only: the event-study dispatch returns
+        # above, and the event-study path requires never-treated units (App. B.2).
+        n_zero = int((d_arr == 0.0).sum())
+        if n_zero and n_zero / d_arr.shape[0] >= _HAD_EXTENSIVE_MARGIN_ZERO_DOSE_FRAC:
+            frac_zero = n_zero / d_arr.shape[0]
+            warnings.warn(
+                f"{n_zero}/{d_arr.shape[0]} units ({frac_zero:.0%}) have exactly-"
+                f"zero post-period dose. HeterogeneousAdoptionDiD targets a "
+                f"Weighted Average Slope under the assumption that all units "
+                f"receive a positive, heterogeneous dose with no genuine control "
+                f"group (de Chaisemartin et al. 2026, Section 2 / Assumption 3). A "
+                f"substantial untreated mass suggests a genuine extensive margin, "
+                f"where a standard DiD using the untreated units as controls may be "
+                f"more appropriate. (The paper retains small untreated shares — "
+                f"e.g. 12/2954 in Garrett et al. — with nominal coverage; this "
+                f"warning fires only at/above a "
+                f"{_HAD_EXTENSIVE_MARGIN_ZERO_DOSE_FRAC:.0%} library-convention "
+                f"cutoff.)",
+                UserWarning,
+                stacklevel=2,
+            )
 
         # Resolve survey/weights into per-unit weights + optional
         # ResolvedSurveyDesign (for PSU/strata/FPC composition).

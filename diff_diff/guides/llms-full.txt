@@ -763,6 +763,7 @@ had.fit(
     *,
     survey_design: SurveyDesign | None = None, # Canonical survey-design kwarg (weights, strata, PSU, FPC)
     trends_lin: bool = False,                  # Eq 17 linear-trend detrending. Requires aggregate="event_study"; needs F>=3 (pre-period depth) for the regression; rejects ALL weighting entry paths (survey_design= / survey= / weights= all raise NotImplementedError under trends_lin).
+    covariates: Any | None = None,             # NOT IMPLEMENTED — non-None raises NotImplementedError (deferred Appendix B.1 / Theorem 6 covariate-adjusted extension; pre-residualize the outcome on covariates as a workaround)
 ) -> HeterogeneousAdoptionDiDResults | HeterogeneousAdoptionDiDEventStudyResults
 ```
 
