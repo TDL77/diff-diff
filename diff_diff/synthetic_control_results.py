@@ -48,6 +48,12 @@ class _SyntheticControlFitSnapshot:
     pre_periods: List[Any]
     post_periods: List[Any]
     donor_ids: List[Any]
+    # The treated unit's reportably-weighted donor support (donor ids with weight above
+    # the 1e-6 interpretability floor), FROZEN at fit time and ordered by donor_ids.
+    # leave_one_out() iterates this immutable list — NOT the mutable, presentation-level
+    # results.donor_weights dict — so post-fit mutation cannot change which donors are
+    # dropped, and the robustness result depends only on the fit.
+    weighted_donor_ids: List[Any]
     treated_id: Any
     standardize: str
     v_method: str
@@ -195,6 +201,39 @@ class SyntheticControlResults:
         # "all_placebos_failed". A small string, so it survives pickling.
         self._placebo_status: Optional[str] = None
 
+        # --- ADH 2015 §4 robustness diagnostics (opt-in, populated by ---
+        # --- leave_one_out() / in_time_placebo()). Same panel-vs-scalar split as ---
+        # --- the in-space placebo: the small per-row tables (_loo_df / _in_time_df), ---
+        # --- scalar summaries and status strings survive pickling; the per-refit ---
+        # --- gap-path dicts (_loo_gaps / _in_time_gaps) are panel-derived and nulled ---
+        # --- by __getstate__. analytical se/t/p/ci stay NaN throughout.
+        self._loo_df: Optional[pd.DataFrame] = None
+        self._loo_gaps: Optional[Dict[Any, Dict[Any, float]]] = None
+        # Reason a leave-one-out run was infeasible/absent. Values: None (not run),
+        # "ran", "treated_fit_nonconverged", "too_few_donors", "all_refits_failed".
+        self._loo_status: Optional[str] = None
+        # (min, max) ATT across the successful leave-one-out refits (the absolute
+        # spread of counterfactual ATTs); None until run.
+        self._loo_att_range: Optional[Tuple[float, float]] = None
+        # The headline single-donor-dependence number: max |att_loo - baseline_att|
+        # over the successful drops. Baseline-RELATIVE, so a uniform shift of every
+        # drop away from the baseline is NOT masked the way a narrow raw att_range
+        # would be. None until run.
+        self._loo_max_abs_delta_att: Optional[float] = None
+        self._loo_n_failed: int = 0
+        self._in_time_df: Optional[pd.DataFrame] = None
+        self._in_time_gaps: Optional[Dict[Any, Dict[Any, float]]] = None
+        # Reason an in-time placebo run was infeasible/absent. Values: None (not run),
+        # "ran", "treated_fit_nonconverged", "too_few_pre_periods",
+        # "all_dates_infeasible", "all_dates_failed", "all_dates_unusable" (a mix of
+        # failed + infeasible dates with none usable).
+        self._in_time_status: Optional[str] = None
+        self._in_time_n_failed: int = 0
+        # Number of placebo dates that were dimensionally infeasible (too few pre-fake
+        # periods, all predictors dropped, or a zero-mass surviving custom_v). Surfaced
+        # alongside _in_time_n_failed so a mixed no-success run reports an accurate mix.
+        self._in_time_n_infeasible: int = 0
+
     def __getstate__(self) -> Dict[str, Any]:
         """Exclude panel-derived internal state from pickling.
 
@@ -209,6 +248,12 @@ class SyntheticControlResults:
         state = self.__dict__.copy()
         state["_fit_snapshot"] = None
         state["_placebo_gaps"] = None
+        # ADH-2015 diagnostic gap paths are panel-derived (same hazard as
+        # _placebo_gaps); the small _loo_df / _in_time_df tables + scalar summaries
+        # survive so a round-tripped result still reports the diagnostic, but the
+        # overlay gap accessors raise (re-fit to recompute).
+        state["_loo_gaps"] = None
+        state["_in_time_gaps"] = None
         return state
 
     def __repr__(self) -> str:
@@ -727,3 +772,583 @@ class SyntheticControlResults:
         self._placebo_status = "ran" if n_placebos > 0 else "all_placebos_failed"
         self._placebo_df = pd.DataFrame(rows, columns=self._PLACEBO_COLS)
         return self._placebo_df.copy()
+
+    _LOO_COLS = [
+        "dropped_unit",
+        "att",
+        "pre_rmspe",
+        "post_rmspe",
+        "rmspe_ratio",
+        "delta_att",
+        "status",
+    ]
+
+    def leave_one_out(self, n_starts: Optional[int] = None) -> pd.DataFrame:
+        """
+        Leave-one-out donor robustness (Abadie-Diamond-Hainmueller 2015, Section 4).
+
+        Drops each **reportably-weighted** donor, one at a time, and re-fits the
+        treated unit's synthetic control against the remaining donor pool. The
+        per-drop ATTs reveal whether the estimated effect is driven by any single
+        donor (ADH 2015 overlay the leave-one-out counterfactual trajectories for
+        this purpose; :meth:`get_leave_one_out_gaps` returns those paths). This is a
+        thin re-run of the validated SCM solver — it has **no analytical standard
+        error**; ``se``/``t_stat``/``p_value``/``conf_int`` and ``is_significant``
+        are unaffected (still bound to the NaN analytical ``p_value``).
+
+        The drop set is exactly the donors in ``donor_weights`` — those above the
+        ``1e-6`` interpretability floor (``synthetic_control._MIN_REPORT_WEIGHT``).
+        A donor with negligible weight ``0 < w ≤ 1e-6`` is excluded (its removal
+        moves the ATT by ~the weight, so its ``delta_att`` would be ~0 — an
+        uninformative row), keeping the LOO table aligned with the reported support;
+        a zero-weight donor's removal leaves the synthetic unchanged. (This `1e-6`
+        approximation of "positive weight" is documented in REGISTRY §SyntheticControl.)
+        A donor that carries ALL the weight is still dropped (the others absorb its
+        mass on re-fit); its large ``delta_att`` is exactly the single-donor-dependence
+        signal this diagnostic exists to surface, NOT a failure.
+
+        Parameters
+        ----------
+        n_starts : int, optional
+            Override the multistart count for each leave-one-out refit's nested V
+            search. Default None inherits the original fit's ``n_starts``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One ``status="baseline"`` row (the full fit, ``delta_att=0``) followed by
+            one row per dropped donor (``status="loo"``, or ``"failed"`` with NaN
+            metrics when its refit did not converge), sorted by ``|delta_att|``
+            descending (failed rows last). Columns: ``dropped_unit``, ``att``,
+            ``pre_rmspe``, ``post_rmspe``, ``rmspe_ratio``, ``delta_att``
+            (``att_loo - full_att``), ``status``.
+
+        Raises
+        ------
+        ValueError
+            If the fit snapshot is unavailable (e.g. this result was unpickled).
+        """
+        if self._fit_snapshot is None:
+            raise ValueError(
+                "leave_one_out() requires the fit snapshot on the results object. "
+                "This result appears to have been loaded from serialization (which "
+                "excludes the snapshot) or produced by an older estimator version. "
+                "Re-fit to enable leave-one-out donor robustness."
+            )
+        from diff_diff.synthetic_control import _mspe, _placebo_fit_unit
+
+        snap = self._fit_snapshot
+        if n_starts is None:
+            n_starts_eff = snap.n_starts
+        else:
+            # Mirror the estimator constructor's validation so a bad override fails
+            # fast instead of silently coercing into a degenerate refit (cf.
+            # in_space_placebo()).
+            if not isinstance(n_starts, (int, np.integer)) or n_starts < 1:
+                raise ValueError(f"n_starts override must be a positive integer, got {n_starts!r}")
+            n_starts_eff = int(n_starts)
+
+        # Baseline row: read DIRECTLY from the full fit (do NOT re-fit), so the
+        # reference ATT — and therefore delta_att=0.0 — is exact.
+        baseline_row = {
+            "dropped_unit": None,
+            "att": float(self.att),
+            "pre_rmspe": float(self.pre_rmspe),
+            "post_rmspe": float(np.sqrt(_mspe(self.gap_path, snap.post_periods))),
+            "rmspe_ratio": float(self.rmspe_ratio),
+            "delta_att": 0.0,
+            "status": "baseline",
+        }
+
+        # Fail closed when the treated unit's own fit did not converge: a truncated /
+        # under-optimized baseline ATT makes every leave-one-out delta meaningless.
+        if not self._fit_converged:
+            warnings.warn(
+                "Leave-one-out skipped: the treated unit's own SCM fit did not "
+                "converge at fit time (inner Frank-Wolfe weight solve and/or outer V "
+                "search), so the baseline ATT is not a valid optimum to compare "
+                "leave-one-out refits against. Re-fit with a larger inner_max_iter / "
+                "looser inner_min_decrease (inner) and/or a larger "
+                "optimizer_options['maxiter'] / more n_starts (outer V search).",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._loo_status = "treated_fit_nonconverged"
+            self._loo_att_range = None
+            self._loo_n_failed = 0
+            self._loo_gaps = {}
+            self._loo_df = pd.DataFrame([baseline_row], columns=self._LOO_COLS)
+            return self._loo_df.copy()
+
+        # Dropping any donor requires at least one donor left in the pool.
+        if len(snap.donor_ids) < 2:
+            warnings.warn(
+                "Leave-one-out donor robustness requires at least 2 donors (dropping "
+                f"one must leave a non-empty pool); only {len(snap.donor_ids)} "
+                "available. Returning the baseline fit only.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._loo_status = "too_few_donors"
+            self._loo_att_range = None
+            self._loo_n_failed = 0
+            self._loo_gaps = {}
+            self._loo_df = pd.DataFrame([baseline_row], columns=self._LOO_COLS)
+            return self._loo_df.copy()
+
+        # Drop the FROZEN reportably-weighted support captured at fit time (donor ids
+        # with weight above the 1e-6 floor, in donor_ids order). Reading the snapshot —
+        # NOT the mutable presentation-level self.donor_weights — makes the result
+        # depend only on the fit and immune to post-fit mutation of donor_weights.
+        pos_donors = list(snap.weighted_donor_ids)
+        loo_gaps: Dict[Any, Dict[Any, float]] = {}
+        loo_rows: List[Dict[str, Any]] = []
+        atts: List[float] = []
+        n_failed = 0
+
+        for d in pos_donors:
+            pool = [x for x in snap.donor_ids if x != d]
+            fitted = _placebo_fit_unit(snap, snap.treated_id, pool, n_starts_eff)
+            if fitted is None:
+                n_failed += 1
+                loo_rows.append(
+                    {
+                        "dropped_unit": d,
+                        "att": np.nan,
+                        "pre_rmspe": np.nan,
+                        "post_rmspe": np.nan,
+                        "rmspe_ratio": np.nan,
+                        "delta_att": np.nan,
+                        "status": "failed",
+                    }
+                )
+                continue
+            gap_path_d, ratio_d = fitted
+            loo_gaps[d] = gap_path_d
+            att_d = float(np.mean([gap_path_d[p] for p in snap.post_periods]))
+            atts.append(att_d)
+            loo_rows.append(
+                {
+                    "dropped_unit": d,
+                    "att": att_d,
+                    "pre_rmspe": float(np.sqrt(_mspe(gap_path_d, snap.pre_periods))),
+                    "post_rmspe": float(np.sqrt(_mspe(gap_path_d, snap.post_periods))),
+                    "rmspe_ratio": ratio_d,
+                    "delta_att": att_d - float(self.att),
+                    "status": "loo",
+                }
+            )
+
+        # Sort successful drops by |delta_att| desc (most influential donor first);
+        # non-converged drops sort last.
+        finite_rows = sorted(
+            (r for r in loo_rows if r["status"] == "loo"),
+            key=lambda r: abs(r["delta_att"]),
+            reverse=True,
+        )
+        failed_rows = [r for r in loo_rows if r["status"] == "failed"]
+        ordered = [baseline_row] + finite_rows + failed_rows
+
+        if n_failed > 0:
+            warnings.warn(
+                f"{n_failed} of {len(pos_donors)} leave-one-out refits failed to "
+                "converge and are reported with NaN metrics (status='failed'); the "
+                "ATT range uses the remaining refits.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        self._loo_gaps = loo_gaps
+        self._loo_n_failed = int(n_failed)
+        self._loo_att_range = (min(atts), max(atts)) if atts else None
+        # Baseline-relative headline: the largest swing of any single donor-drop from
+        # the full-fit ATT (max |delta_att|). Robust to a uniform shift that a raw
+        # att_range would understate.
+        self._loo_max_abs_delta_att = max(abs(a - float(self.att)) for a in atts) if atts else None
+        # Distinguish a real run from "every donor-drop refit failed to converge"
+        # (no valid leave-one-out estimate produced) so DR/BR do not report an empty
+        # diagnostic as completed. (pos_donors empty — a converged fit always has >=1
+        # positive weight — falls through to "ran": baseline-only, benign.)
+        self._loo_status = "all_refits_failed" if (pos_donors and not atts) else "ran"
+        self._loo_df = pd.DataFrame(ordered, columns=self._LOO_COLS)
+        return self._loo_df.copy()
+
+    def get_leave_one_out_df(self) -> pd.DataFrame:
+        """
+        Get the leave-one-out donor-robustness table (see :meth:`leave_one_out`).
+
+        Survives pickling. Raises if :meth:`leave_one_out` has not been run.
+
+        Returns
+        -------
+        pandas.DataFrame
+        """
+        if self._loo_df is None:
+            raise ValueError("No leave-one-out results yet; call leave_one_out() first.")
+        return self._loo_df.copy()
+
+    def get_leave_one_out_gaps(self) -> pd.DataFrame:
+        """
+        Long-form leave-one-out gap paths, for the overlay ("spaghetti") plot.
+
+        One row per (dropped donor, period) for every converged leave-one-out refit.
+        Columns: ``dropped_unit``, ``period``, ``gap``, ``phase`` (``"pre"``/
+        ``"post"``) — mirroring :meth:`get_gap_df`. These per-period paths are
+        panel-derived and are NOT retained after pickling.
+
+        Returns
+        -------
+        pandas.DataFrame
+
+        Raises
+        ------
+        ValueError
+            If :meth:`leave_one_out` has not been run, or if the gap paths were
+            dropped on pickling (re-fit and re-run to recompute them).
+        """
+        if self._loo_df is None:
+            raise ValueError("No leave-one-out results yet; call leave_one_out() first.")
+        if self._loo_gaps is None:
+            raise ValueError(
+                "Leave-one-out gap paths are not retained after pickling "
+                "(panel-derived); re-run leave_one_out() on a freshly fitted result "
+                "to recompute them."
+            )
+        rows: List[Dict[str, Any]] = []
+        for unit, gap_path in self._loo_gaps.items():
+            for period in list(self.pre_periods) + list(self.post_periods):
+                if period in gap_path:
+                    phase = "post" if period in self.post_periods else "pre"
+                    rows.append(
+                        {
+                            "dropped_unit": unit,
+                            "period": period,
+                            "gap": gap_path[period],
+                            "phase": phase,
+                        }
+                    )
+        return pd.DataFrame(rows, columns=["dropped_unit", "period", "gap", "phase"])
+
+    _IN_TIME_COLS = [
+        "placebo_period",
+        "placebo_att",
+        "pre_fit_rmspe",
+        "rmspe_ratio",
+        "n_pre_fake",
+        "n_post_fake",
+        "n_dropped_specs",
+        "status",
+    ]
+
+    def in_time_placebo(
+        self,
+        placebo_periods: Optional[Any] = None,
+        n_starts: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """
+        In-time (backdating) placebo (Abadie-Diamond-Hainmueller 2015, Section 4).
+
+        Reassigns the intervention to an earlier pre-treatment date ``t_f`` and re-fits
+        the synthetic control using ONLY pre-``t_f`` information, then measures the
+        "effect" over the held-out window ``[t_f, T0)``. A credible synthetic control
+        should show **no spurious gap** there (ADH 2015 Figure 4, German reunification
+        backdated to 1975). This is a thin re-run of the validated SCM solver — it has
+        **no analytical standard error**; ``se``/``t_stat``/``p_value``/``conf_int`` and
+        ``is_significant`` are unaffected.
+
+        **Windowing convention (TRUNCATE).** The placebo fit uses only periods strictly
+        before ``t_f``: pre-period-outcome predictors become the pre-``t_f`` outcomes,
+        and covariate / special predictor windows are intersected with the pre-``t_f``
+        window. A predictor window lying ENTIRELY in the held-out region ``[t_f, T0)``
+        is dropped (surfaced in ``n_dropped_specs`` + an aggregated warning). For
+        outcome-predictor fits this equals the literal "lag the predictors" re-run of a
+        manual ``Synth::synth`` (R has no in-time-placebo function); see
+        ``docs/methodology/REGISTRY.md`` for the recognized deviation note.
+
+        Parameters
+        ----------
+        placebo_periods : period value or list of period values, optional
+            The pseudo-intervention date(s), each a member of ``pre_periods``. Default
+            None sweeps every feasible interior pre-date (at least 2 pre-fake periods to
+            fit + at least 1 post-fake period to measure the gap). A date that is a true
+            post-treatment period, or not a pre-period at all, raises ``ValueError``; a
+            valid pre-date that is dimensionally infeasible (too few pre-fake periods, or
+            all predictors dropped) yields a ``status="infeasible"`` row (no raise).
+        n_starts : int, optional
+            Override the multistart count for each placebo refit's nested V search.
+            Default None inherits the original fit's ``n_starts``.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per placebo date. Columns: ``placebo_period``, ``placebo_att`` (mean
+            gap over the held-out window — should be ~0 if no real pre-period effect),
+            ``pre_fit_rmspe``, ``rmspe_ratio`` (post-fake/pre-fake), ``n_pre_fake``,
+            ``n_post_fake``, ``n_dropped_specs``, ``status`` (``"ran"`` / ``"infeasible"``
+            / ``"failed"``).
+
+        Raises
+        ------
+        ValueError
+            If the fit snapshot is unavailable (e.g. this result was unpickled), or an
+            explicit ``placebo_periods`` entry is a post-treatment period / not a
+            pre-period.
+        """
+        if self._fit_snapshot is None:
+            raise ValueError(
+                "in_time_placebo() requires the fit snapshot on the results object. "
+                "This result appears to have been loaded from serialization (which "
+                "excludes the snapshot) or produced by an older estimator version. "
+                "Re-fit to enable the in-time placebo."
+            )
+        from diff_diff.synthetic_control import (
+            _mspe,
+            _placebo_fit_unit,
+            _truncate_snapshot_in_time,
+        )
+
+        snap = self._fit_snapshot
+        if n_starts is None:
+            n_starts_eff = snap.n_starts
+        else:
+            if not isinstance(n_starts, (int, np.integer)) or n_starts < 1:
+                raise ValueError(f"n_starts override must be a positive integer, got {n_starts!r}")
+            n_starts_eff = int(n_starts)
+
+        pre = list(snap.pre_periods)
+        empty = pd.DataFrame([], columns=self._IN_TIME_COLS)
+
+        # Fail closed when the treated unit's own fit did not converge: a truncated /
+        # under-optimized baseline makes the placebo comparison meaningless.
+        if not self._fit_converged:
+            warnings.warn(
+                "In-time placebo skipped: the treated unit's own SCM fit did not "
+                "converge at fit time (inner Frank-Wolfe weight solve and/or outer V "
+                "search). Re-fit with a larger inner_max_iter / looser "
+                "inner_min_decrease (inner) and/or a larger optimizer_options['maxiter'] "
+                "/ more n_starts (outer V search).",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._in_time_status = "treated_fit_nonconverged"
+            self._in_time_n_failed = 0
+            self._in_time_gaps = {}
+            self._in_time_df = empty
+            return empty.copy()
+
+        # A feasible date needs >=2 pre-fake + >=1 post-fake period -> >=3 pre periods.
+        # The >=2 pre-fake rule is a deliberate Note-documented restriction (an auto-
+        # swept single-pre-fake placebo is a non-credible pre-fit; see REGISTRY).
+        if len(pre) < 3:
+            warnings.warn(
+                "In-time placebo requires at least 3 pre-treatment periods (a feasible "
+                "placebo date needs >=2 pre-fake periods to fit and >=1 post-fake period "
+                f"to measure the gap); only {len(pre)} available.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._in_time_status = "too_few_pre_periods"
+            self._in_time_n_failed = 0
+            self._in_time_gaps = {}
+            self._in_time_df = empty
+            return empty.copy()
+
+        if placebo_periods is None:
+            # Sweep every feasible pre-date (positional: idx>=2 gives >=2 pre-fake +
+            # >=1 post-fake; idx<2 would leave fewer than 2 pre-fake periods).
+            dates: List[Any] = [pre[i] for i in range(2, len(pre))]
+        else:
+            if isinstance(placebo_periods, (list, tuple, set, np.ndarray, pd.Index, pd.Series)):
+                dates = list(placebo_periods)
+            else:
+                dates = [placebo_periods]
+            # An explicit but EMPTY container is a malformed request (NOT "every date
+            # was infeasible") — fail fast, consistent with the post-date / non-pre
+            # date raises below. Pass None to sweep all feasible pre-dates.
+            if not dates:
+                raise ValueError(
+                    "placebo_periods is empty; pass None to sweep all feasible "
+                    "pre-dates, or a non-empty list of pre-period date(s)."
+                )
+            pre_set = set(pre)
+            post_set = set(snap.post_periods)
+            for d in dates:
+                if d in post_set:
+                    raise ValueError(
+                        f"placebo_period {d!r} is a true post-treatment period; an "
+                        "in-time placebo date must lie in the pre-treatment window."
+                    )
+                if d not in pre_set:
+                    raise ValueError(
+                        f"placebo_period {d!r} is not a pre-treatment period "
+                        f"(pre_periods = {pre})."
+                    )
+            # De-duplicate + canonicalize to pre-period order (mirrors _resolve_periods):
+            # duplicate / unordered explicit dates must not trigger duplicate refits or
+            # inflate n_dates.
+            _requested = set(dates)
+            dates = [p for p in pre if p in _requested]
+
+        in_time_gaps: Dict[Any, Dict[Any, float]] = {}
+        rows: List[Dict[str, Any]] = []
+        dropped_all: set = set()
+        n_failed = 0
+        n_infeasible = 0
+        n_ran = 0
+
+        for t_f in dates:
+            idx = pre.index(t_f)
+            n_pre_fake = idx
+            n_post_fake = len(pre) - idx
+            snap_mod, dropped = _truncate_snapshot_in_time(snap, t_f)
+            dropped_all.update(dropped)
+            if snap_mod is None:
+                n_infeasible += 1
+                rows.append(
+                    {
+                        "placebo_period": t_f,
+                        "placebo_att": np.nan,
+                        "pre_fit_rmspe": np.nan,
+                        "rmspe_ratio": np.nan,
+                        "n_pre_fake": n_pre_fake,
+                        "n_post_fake": n_post_fake,
+                        "n_dropped_specs": len(dropped),
+                        "status": "infeasible",
+                    }
+                )
+                continue
+            fitted = _placebo_fit_unit(snap_mod, snap.treated_id, snap.donor_ids, n_starts_eff)
+            if fitted is None:
+                n_failed += 1
+                rows.append(
+                    {
+                        "placebo_period": t_f,
+                        "placebo_att": np.nan,
+                        "pre_fit_rmspe": np.nan,
+                        "rmspe_ratio": np.nan,
+                        "n_pre_fake": n_pre_fake,
+                        "n_post_fake": n_post_fake,
+                        "n_dropped_specs": len(dropped),
+                        "status": "failed",
+                    }
+                )
+                continue
+            gap_path, ratio = fitted
+            in_time_gaps[t_f] = gap_path
+            placebo_att = float(np.mean([gap_path[p] for p in snap_mod.post_periods]))
+            rows.append(
+                {
+                    "placebo_period": t_f,
+                    "placebo_att": placebo_att,
+                    "pre_fit_rmspe": float(np.sqrt(_mspe(gap_path, snap_mod.pre_periods))),
+                    "rmspe_ratio": ratio,
+                    "n_pre_fake": n_pre_fake,
+                    "n_post_fake": n_post_fake,
+                    "n_dropped_specs": len(dropped),
+                    "status": "ran",
+                }
+            )
+            n_ran += 1
+
+        if dropped_all:
+            warnings.warn(
+                "In-time placebo (TRUNCATE convention): predictor(s) "
+                f"{sorted(map(str, dropped_all))} fell entirely in the held-out "
+                "post-fake window for some placebo date(s) and were dropped from those "
+                "refits (see the n_dropped_specs column).",
+                UserWarning,
+                stacklevel=2,
+            )
+        if n_infeasible > 0:
+            warnings.warn(
+                f"{n_infeasible} in-time placebo date(s) were dimensionally infeasible "
+                "(too few pre-fake periods or all predictors dropped) and are reported "
+                "with status='infeasible' (NaN metrics).",
+                UserWarning,
+                stacklevel=2,
+            )
+        if n_failed > 0:
+            warnings.warn(
+                f"{n_failed} in-time placebo refit(s) failed to converge and are "
+                "reported with status='failed' (NaN metrics).",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        self._in_time_gaps = in_time_gaps
+        self._in_time_n_failed = int(n_failed)
+        self._in_time_n_infeasible = int(n_infeasible)
+        # When no date ran, classify the cause precisely so the downstream reason text
+        # is never false: a pure convergence failure ("all_dates_failed", actionable —
+        # raise n_starts / loosen tolerances) and pure dimensional infeasibility
+        # ("all_dates_infeasible", structural) are distinct; a MIX of both gets its own
+        # "all_dates_unusable" code (both counters are surfaced) rather than being
+        # mislabeled as exclusively one or the other.
+        if n_ran > 0:
+            self._in_time_status = "ran"
+        elif n_failed > 0 and n_infeasible > 0:
+            self._in_time_status = "all_dates_unusable"
+        elif n_failed > 0:
+            self._in_time_status = "all_dates_failed"
+        else:
+            self._in_time_status = "all_dates_infeasible"
+        self._in_time_df = pd.DataFrame(rows, columns=self._IN_TIME_COLS)
+        return self._in_time_df.copy()
+
+    def get_in_time_placebo_df(self) -> pd.DataFrame:
+        """
+        Get the in-time placebo table (see :meth:`in_time_placebo`).
+
+        Survives pickling. Raises if :meth:`in_time_placebo` has not been run.
+
+        Returns
+        -------
+        pandas.DataFrame
+        """
+        if self._in_time_df is None:
+            raise ValueError("No in-time placebo results yet; call in_time_placebo() first.")
+        return self._in_time_df.copy()
+
+    def get_in_time_placebo_gaps(self) -> pd.DataFrame:
+        """
+        Long-form in-time placebo gap paths, for the backdating overlay plot.
+
+        One row per (placebo date, period) for every converged in-time refit. Columns:
+        ``placebo_period``, ``period``, ``gap``, ``phase`` (``"pre_fake"`` for periods
+        before the placebo date, ``"post_fake"`` for the held-out window from it on).
+        These per-period paths are panel-derived and are NOT retained after pickling.
+
+        Returns
+        -------
+        pandas.DataFrame
+
+        Raises
+        ------
+        ValueError
+            If :meth:`in_time_placebo` has not been run, or if the gap paths were
+            dropped on pickling (re-fit and re-run to recompute them).
+        """
+        if self._in_time_df is None:
+            raise ValueError("No in-time placebo results yet; call in_time_placebo() first.")
+        if self._in_time_gaps is None:
+            raise ValueError(
+                "In-time placebo gap paths are not retained after pickling "
+                "(panel-derived); re-run in_time_placebo() on a freshly fitted result "
+                "to recompute them."
+            )
+        pre = list(self.pre_periods)
+        rows: List[Dict[str, Any]] = []
+        for t_f, gap_path in self._in_time_gaps.items():
+            split = pre.index(t_f)
+            for period in pre:
+                if period in gap_path:
+                    phase = "post_fake" if pre.index(period) >= split else "pre_fake"
+                    rows.append(
+                        {
+                            "placebo_period": t_f,
+                            "period": period,
+                            "gap": gap_path[period],
+                            "phase": phase,
+                        }
+                    )
+        return pd.DataFrame(rows, columns=["placebo_period", "period", "gap", "phase"])

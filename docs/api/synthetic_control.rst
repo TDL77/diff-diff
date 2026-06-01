@@ -25,6 +25,15 @@ reported estimate. Significance comes from **in-space placebo permutation infere
 ``placebo_p_value = rank/(n_placebos+1)``). This permutation p-value is a separate field
 from the (NaN) ``p_value``; ``is_significant`` stays bound to ``p_value``.
 
+**Robustness diagnostics (ADH 2015 §4, opt-in):**
+:meth:`~diff_diff.SyntheticControlResults.leave_one_out` drops each reportably-weighted (weight > 1e-6)
+donor and re-fits (per-drop ATT / ``delta_att`` table — a large ``delta_att`` flags
+single-donor dependence), and
+:meth:`~diff_diff.SyntheticControlResults.in_time_placebo` reassigns the intervention to an
+earlier pre-date and checks for a spurious gap before the true treatment date (the
+backdating placebo; ``placebo_att`` should be ~0). Both re-run the validated solver and
+leave the analytical inference fields NaN.
+
 **Distinct from** :class:`~diff_diff.SyntheticDiD` (Arkhangelsky et al. 2021), which adds
 time weights and ridge regularization; classic SCM uses **donor weights only** plus the
 outer ``V`` search.
@@ -71,6 +80,12 @@ Results container for synthetic control estimation.
 
       ~SyntheticControlResults.in_space_placebo
       ~SyntheticControlResults.get_placebo_df
+      ~SyntheticControlResults.leave_one_out
+      ~SyntheticControlResults.get_leave_one_out_df
+      ~SyntheticControlResults.get_leave_one_out_gaps
+      ~SyntheticControlResults.in_time_placebo
+      ~SyntheticControlResults.get_in_time_placebo_df
+      ~SyntheticControlResults.get_in_time_placebo_gaps
       ~SyntheticControlResults.summary
       ~SyntheticControlResults.print_summary
       ~SyntheticControlResults.to_dict

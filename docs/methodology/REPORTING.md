@@ -266,11 +266,13 @@ a library setting.
   under `estimator_native_diagnostics`. `SyntheticControlResults`
   routes parallel-trends to the `scm_fit` analogue (`pre_rmspe`,
   verdict `design_enforced_pt`) and surfaces `pre_rmspe`, donor-weight
-  concentration, and the in-space placebo permutation p-value under
-  `estimator_native_diagnostics` — the placebo block is populated only
-  when the caller has already run `in_space_placebo()` (opt-in; DR never
-  triggers the per-donor refit loop implicitly), and it omits
-  HonestDiD-style `sensitivity` (significance IS the placebo).
+  concentration, the in-space placebo permutation p-value, and the
+  ADH-2015 leave-one-out (`leave_one_out`) and in-time placebo
+  (`in_time_placebo`) blocks under `estimator_native_diagnostics` — each
+  is populated only when the caller has already run the corresponding
+  opt-in method (DR never triggers a refit loop implicitly; otherwise a
+  `status="not_run"` stub), and it omits HonestDiD-style `sensitivity`
+  (significance IS the placebo).
   `EfficientDiDResults` PT runs through `EfficientDiD.hausman_pretest`
   (the estimator's native PT-All vs PT-Post check).
 

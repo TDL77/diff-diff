@@ -32,7 +32,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from diff_diff import SyntheticControl, SyntheticControlResults, synthetic_control
+from diff_diff import (
+    DiagnosticReport,
+    SyntheticControl,
+    SyntheticControlResults,
+    synthetic_control,
+)
 from tests.conftest import assert_nan_inference
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -845,6 +850,35 @@ def test_basque_tier2_nested_band():
     assert res.donor_weights.get(10, 0) + res.donor_weights.get(14, 0) > 0.7
 
 
+def test_basque_tier1_leave_one_out_parity():
+    """Tier-1 LOO (deterministic): dropping the dominant donor (region 10) with R's
+    ``solution.v`` held fixed, the reduced-pool refit's ATT and gap path match R's
+    drop-donor ``synth`` exactly (a direct R anchor on the reduced-pool W-solve;
+    ``leave_one_out()`` on a custom-V fit reuses that fixed V on the donor pool minus
+    the dropped unit). Region 10 carries ~85% of the full-pool weight, so dropping it
+    swings the synthetic onto regions 7+14 — the single-donor-dependence signal LOO
+    exists to surface."""
+    golden, df = _load_golden()
+    if "leave_one_out" not in golden:
+        pytest.skip("LOO golden missing — regenerate via the R script.")
+    loo_g = golden["leave_one_out"]
+    dropped = int(loo_g["dropped_regionno"])
+    custom_v = np.asarray(golden["solution_v"], dtype=float)
+    res = SyntheticControl(v_method="custom", custom_v=custom_v).fit(
+        df, "gdpcap", "treated", "regionno", "year", **_basque_kwargs(golden)
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loo = res.leave_one_out()
+    row = loo[(loo["status"] == "loo") & (loo["dropped_unit"] == dropped)]
+    assert len(row) == 1
+    assert float(row["att"].iloc[0]) == pytest.approx(float(loo_g["att"]), abs=1e-2)
+    # Full reduced-pool gap trajectory (1955-1997) matches R's drop-donor synth.
+    gaps = res.get_leave_one_out_gaps()
+    gap_py = gaps[gaps["dropped_unit"] == dropped].sort_values("period")["gap"].to_numpy()
+    np.testing.assert_allclose(gap_py, np.asarray(loo_g["gap"], dtype=float), atol=2e-2)
+
+
 # ---------------------------------------------------------------------------
 # In-space placebo permutation inference (Abadie-Diamond-Hainmueller 2010 §2.4)
 # ---------------------------------------------------------------------------
@@ -1328,4 +1362,845 @@ def test_rmspe_ratio_is_root_scale():
     assert _rmspe_ratio(pre, post, scale=10.0) == pytest.approx(1.5)
     # Zero post-effect -> ratio 0; perfect pre-fit -> finite (floored), not inf.
     assert _rmspe_ratio(pre, np.zeros(2), scale=10.0) == pytest.approx(0.0)
+    # Perfect pre-fit (zero pre-gaps) -> floored denominator -> finite, not inf.
     assert np.isfinite(_rmspe_ratio(np.zeros(2), post, scale=10.0))
+
+
+# ---------------------------------------------------------------------------
+# Leave-one-out donor robustness (ADH 2015 §4)
+# ---------------------------------------------------------------------------
+
+
+def _equal_mix_panel(n_donors=5, T=8, T0=6, effect=3.0, seed=1):
+    """Near-identical donors -> equal-ish weights -> dropping any one barely moves
+    the synthetic (the LOO-stable regime)."""
+    rng = np.random.default_rng(seed)
+    years = list(range(2000, 2000 + T))
+    base = rng.normal(10, 0.4, n_donors)
+    common = np.cumsum(rng.normal(0, 0.2, T))  # shared trend
+    donors = {j: base[j] + common + rng.normal(0, 0.08, T) for j in range(n_donors)}
+    treated = np.mean([donors[j] for j in range(n_donors)], axis=0) + rng.normal(0, 0.04, T)
+    treated = treated.copy()
+    treated[T0:] += effect
+    rows = []
+    for j in range(n_donors):
+        for t in range(T):
+            rows.append({"unit": f"d{j}", "year": years[t], "y": donors[j][t], "treated": 0})
+    for t in range(T):
+        rows.append({"unit": "treated", "year": years[t], "y": treated[t], "treated": int(t >= T0)})
+    return pd.DataFrame(rows)
+
+
+def _single_donor_panel(n_donors=4, T=8, T0=6, effect=3.0, seed=2):
+    """One donor (d0) tracks the treated unit; the rest are far away -> weight
+    concentrates on d0 -> dropping d0 swings the result (the LOO-fragile regime)."""
+    rng = np.random.default_rng(seed)
+    years = list(range(2000, 2000 + T))
+    d0_path = 10 + np.cumsum(rng.normal(0, 0.3, T))
+    donors = {0: d0_path + rng.normal(0, 0.03, T)}
+    for j in range(1, n_donors):
+        donors[j] = (25.0 + 6.0 * j) + np.cumsum(rng.normal(0, 0.3, T))  # far from treated
+    treated = d0_path + rng.normal(0, 0.03, T)
+    treated = treated.copy()
+    treated[T0:] += effect
+    rows = []
+    for j in range(n_donors):
+        for t in range(T):
+            rows.append({"unit": f"d{j}", "year": years[t], "y": donors[j][t], "treated": 0})
+    for t in range(T):
+        rows.append({"unit": "treated", "year": years[t], "y": treated[t], "treated": int(t >= T0)})
+    return pd.DataFrame(rows)
+
+
+def _fit_cheap(df):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return synthetic_control(df, "y", "treated", "unit", "year", seed=0, **_FAST)
+
+
+_LOO_COLS = ["dropped_unit", "att", "pre_rmspe", "post_rmspe", "rmspe_ratio", "delta_att", "status"]
+
+
+def test_leave_one_out_baseline_row_and_structure():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loo = res.leave_one_out()
+    assert list(loo.columns) == _LOO_COLS
+    # Exactly one baseline row, first, reading directly from the full fit.
+    base = loo.iloc[0]
+    # dropped_unit is "not applicable" for the baseline row (pandas renders the
+    # None as NA in the donor-id column).
+    assert base["status"] == "baseline" and pd.isna(base["dropped_unit"])
+    assert base["att"] == pytest.approx(res.att) and base["delta_att"] == 0.0
+    assert base["pre_rmspe"] == pytest.approx(res.pre_rmspe)
+    assert base["rmspe_ratio"] == pytest.approx(res.rmspe_ratio)
+    # One LOO row per positively-weighted donor (no failures on this clean panel).
+    pos = [d for d in res._fit_snapshot.donor_ids if d in res.donor_weights]
+    loo_rows = loo[loo["status"] == "loo"]
+    assert set(loo_rows["dropped_unit"]) == set(pos)
+    assert res._loo_n_failed == 0 and res._loo_status == "ran"
+    # delta_att == att - full att, exactly.
+    for _, r in loo_rows.iterrows():
+        assert r["delta_att"] == pytest.approx(r["att"] - res.att)
+    # Sorted by |delta_att| descending.
+    deltas = loo_rows["delta_att"].abs().to_numpy()
+    assert np.all(np.diff(deltas) <= 1e-12)
+    # att_range spans the LOO refits.
+    lo, hi = res._loo_att_range
+    assert lo <= hi and lo == pytest.approx(loo_rows["att"].min())
+    assert hi == pytest.approx(loo_rows["att"].max())
+
+
+def test_leave_one_out_stable_when_no_donor_dominates():
+    res = _fit_cheap(_equal_mix_panel(n_donors=5, effect=3.0))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loo = res.leave_one_out()
+    loo_rows = loo[loo["status"] == "loo"]
+    # Near-identical donors -> dropping any one barely moves the ATT (well under the
+    # 3.0 effect). att_range is correspondingly tight.
+    assert loo_rows["delta_att"].abs().max() < 1.0
+    lo, hi = res._loo_att_range
+    assert (hi - lo) < 1.0
+
+
+def test_leave_one_out_swings_when_one_donor_dominates():
+    res = _fit_cheap(_single_donor_panel(n_donors=4, effect=3.0))
+    # Weight concentrates on d0.
+    assert res.donor_weights.get("d0", 0.0) > 0.5
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loo = res.leave_one_out()
+    loo_rows = loo[loo["status"] == "loo"]
+    # Dropping the dominant donor is the most influential drop (top finite row) and
+    # moves the ATT by a non-trivial amount.
+    top = loo_rows.iloc[0]
+    assert top["dropped_unit"] == "d0"
+    assert abs(top["delta_att"]) > 0.2
+
+
+def test_leave_one_out_deterministic():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        loo1 = res.leave_one_out()
+        loo2 = res.leave_one_out()
+    pd.testing.assert_frame_equal(loo1, loo2)
+
+
+def test_leave_one_out_requires_two_donors():
+    res = _fit_for_placebo(n_donors=1)
+    with pytest.warns(UserWarning, match="at least 2 donors"):
+        loo = res.leave_one_out()
+    assert len(loo) == 1 and loo.iloc[0]["status"] == "baseline"
+    assert res._loo_status == "too_few_donors" and res._loo_att_range is None
+
+
+def test_leave_one_out_fails_closed_on_nonconverged_treated_fit():
+    df, _, _ = _make_panel(n_donors=4, effect=3.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df, "y", "treated", "unit", "year", seed=0, inner_max_iter=1, **_FAST_CHURN
+        )
+    assert res._fit_converged is False
+    with pytest.warns(UserWarning, match="did not converge at fit time"):
+        loo = res.leave_one_out()
+    assert len(loo) == 1 and loo.iloc[0]["status"] == "baseline"
+    assert res._loo_status == "treated_fit_nonconverged"
+
+
+def test_leave_one_out_refit_failure_tallied(monkeypatch):
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    res = _fit_for_placebo(n_donors=4)
+    real_fit_unit = sc._placebo_fit_unit
+    calls = {"n": 0}
+
+    def flaky_fit_unit(snap, unit, donor_pool, n_starts):
+        calls["n"] += 1
+        if calls["n"] == 1:  # first leave-one-out refit "fails"
+            return None
+        return real_fit_unit(snap, unit, donor_pool, n_starts)
+
+    monkeypatch.setattr(sc, "_placebo_fit_unit", flaky_fit_unit)
+    with pytest.warns(UserWarning, match="failed to converge"):
+        loo = res.leave_one_out()
+    assert res._loo_n_failed == 1
+    failed = loo[loo["status"] == "failed"]
+    assert len(failed) == 1
+    assert failed[["att", "pre_rmspe", "rmspe_ratio", "delta_att"]].isna().all().all()
+    # Failed rows sort last (after the baseline + the converged LOO rows).
+    assert loo.iloc[-1]["status"] == "failed"
+
+
+def test_leave_one_out_pickle_drops_gaps_keeps_table():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.leave_one_out()
+    restored = pickle.loads(pickle.dumps(res))
+    # The summary table + scalars survive; panel-derived gap paths do not.
+    pd.testing.assert_frame_equal(restored.get_leave_one_out_df(), res.get_leave_one_out_df())
+    assert restored._loo_gaps is None
+    assert restored._loo_att_range == res._loo_att_range
+    with pytest.raises(ValueError, match="not retained after pickling"):
+        restored.get_leave_one_out_gaps()
+
+
+def test_leave_one_out_gaps_long_form():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.leave_one_out()
+    gaps = res.get_leave_one_out_gaps()
+    assert list(gaps.columns) == ["dropped_unit", "period", "gap", "phase"]
+    pos = [d for d in res._fit_snapshot.donor_ids if d in res.donor_weights]
+    assert set(gaps["dropped_unit"]) == set(pos)
+    # Every dropped donor has a full pre+post trajectory.
+    n_periods = len(res.pre_periods) + len(res.post_periods)
+    assert (gaps.groupby("dropped_unit").size() == n_periods).all()
+    assert set(gaps["phase"]) == {"pre", "post"}
+
+
+def test_leave_one_out_accessor_before_run_raises():
+    res = _fit_for_placebo(n_donors=4)
+    with pytest.raises(ValueError, match="call leave_one_out"):
+        res.get_leave_one_out_df()
+    with pytest.raises(ValueError, match="call leave_one_out"):
+        res.get_leave_one_out_gaps()
+
+
+def test_leave_one_out_does_not_touch_analytical_inference():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.leave_one_out()
+    assert_nan_inference(
+        {"se": res.se, "t_stat": res.t_stat, "p_value": res.p_value, "conf_int": res.conf_int}
+    )
+    assert res.is_significant is False
+
+
+def test_leave_one_out_requires_snapshot():
+    res = _fit_for_placebo(n_donors=4)
+    restored = pickle.loads(pickle.dumps(res))
+    with pytest.raises(ValueError, match="requires the fit snapshot"):
+        restored.leave_one_out()
+
+
+# ---------------------------------------------------------------------------
+# In-time placebo: snapshot-truncation helper (ADH 2015 §4)
+# ---------------------------------------------------------------------------
+
+
+def _snap_for_in_time(**kw):
+    return _fit_for_placebo(n_donors=4, **kw)._fit_snapshot
+
+
+def test_truncate_snapshot_positional_split():
+    from diff_diff.synthetic_control import _truncate_snapshot_in_time
+
+    snap = _snap_for_in_time()
+    assert list(snap.pre_periods) == [2000, 2001, 2002, 2003, 2004, 2005]
+    mod, _ = _truncate_snapshot_in_time(snap, 2003)
+    assert mod is not None
+    assert mod.pre_periods == [2000, 2001, 2002]  # pre-fake = strictly before t_f
+    assert mod.post_periods == [2003, 2004, 2005]  # post-fake = held-out pre, t_f first
+    # all_periods EXCLUDES the true post periods (2006, 2007) -> airtight no-peeking.
+    assert mod.all_periods == [2000, 2001, 2002, 2003, 2004, 2005]
+    assert 2006 not in mod.all_periods and 2007 not in mod.all_periods
+
+
+def test_truncate_snapshot_drops_specs_in_held_out_window():
+    from diff_diff.synthetic_control import _truncate_snapshot_in_time
+
+    snap = _snap_for_in_time()  # default pre_period_outcomes="all": one lag per pre period
+    mod, dropped = _truncate_snapshot_in_time(snap, 2003)
+    for spec in mod.specs:  # surviving specs reference only pre-fake periods
+        assert all(p < 2003 for p in spec.periods)
+    assert len(dropped) == 3  # lags at 2003/2004/2005 dropped
+    assert len(mod.specs) == len(snap.specs) - 3
+
+
+def test_truncate_snapshot_custom_v_lockstep():
+    from diff_diff.synthetic_control import _truncate_snapshot_in_time
+
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=np.arange(1.0, 7.0),  # distinct entries to verify the subset
+            inner_min_decrease=1e-3,
+        )
+    snap = res._fit_snapshot
+    mod, _ = _truncate_snapshot_in_time(snap, 2003)
+    # custom_v subset IN LOCKSTEP with the surviving specs (the default lag specs are
+    # ordered by ascending pre period, so the first three entries survive).
+    assert mod.custom_v is not None and len(mod.custom_v) == len(mod.specs)
+    np.testing.assert_array_equal(mod.custom_v, np.array([1.0, 2.0, 3.0]))
+
+
+def test_truncate_snapshot_straddling_window_partial_keep():
+    from diff_diff.synthetic_control import _truncate_snapshot_in_time
+
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            special_predictors=[("y", [2002, 2003, 2004], "mean")],
+            pre_period_outcomes=[2000, 2001],
+            inner_min_decrease=1e-3,
+        )
+    snap = res._fit_snapshot
+    mod, _ = _truncate_snapshot_in_time(snap, 2003)
+    # The special predictor straddles t_f -> truncated to its pre-fake part [2002].
+    special = [s for s in mod.specs if s.kind == "special"]
+    assert len(special) == 1 and special[0].periods == [2002]
+
+
+def test_truncate_snapshot_infeasible_too_few_pre_fake():
+    from diff_diff.synthetic_control import _truncate_snapshot_in_time
+
+    snap = _snap_for_in_time()
+    # Fewer than 2 pre-fake periods -> infeasible (the deliberate >=2 rule; an
+    # auto-swept single-pre-fake placebo is a non-credible pre-fit — documented Note).
+    assert _truncate_snapshot_in_time(snap, 2000)[0] is None  # 0 pre-fake
+    assert _truncate_snapshot_in_time(snap, 2001)[0] is None  # 1 pre-fake
+
+
+def test_truncate_snapshot_infeasible_all_specs_dropped():
+    from diff_diff.synthetic_control import _truncate_snapshot_in_time
+
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            special_predictors=[("y", [2004, 2005], "mean")],
+            pre_period_outcomes=[2004, 2005],
+            inner_min_decrease=1e-3,
+        )
+    snap = res._fit_snapshot
+    # t_f=2003 leaves >=2 pre-fake periods, but every spec lives in [2004, 2005]
+    # -> all dropped -> infeasible (cannot fit with zero predictors).
+    mod, dropped = _truncate_snapshot_in_time(snap, 2003)
+    assert mod is None and len(dropped) == len(snap.specs)
+
+
+def test_truncate_snapshot_does_not_mutate_original():
+    from diff_diff.synthetic_control import _truncate_snapshot_in_time
+
+    snap = _snap_for_in_time()
+    before = [list(s.periods) for s in snap.specs]
+    _truncate_snapshot_in_time(snap, 2003)
+    after = [list(s.periods) for s in snap.specs]
+    assert before == after  # shared spec objects are never mutated in place
+
+
+# ---------------------------------------------------------------------------
+# In-time placebo: end-to-end (ADH 2015 §4)
+# ---------------------------------------------------------------------------
+
+_IN_TIME_COLS = [
+    "placebo_period",
+    "placebo_att",
+    "pre_fit_rmspe",
+    "rmspe_ratio",
+    "n_pre_fake",
+    "n_post_fake",
+    "n_dropped_specs",
+    "status",
+]
+
+
+def test_in_time_placebo_near_zero_when_effect_post_only():
+    # The effect is only in the TRUE post window (>=2006); every backdated placebo
+    # falls in the clean pre window, so the placebo "effect" should be ~0.
+    res = _fit_for_placebo(n_donors=4, effect=3.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        itp = res.in_time_placebo()
+    assert list(itp.columns) == _IN_TIME_COLS
+    ran = itp[itp["status"] == "ran"]
+    assert len(ran) > 0
+    assert ran["placebo_att"].abs().max() < 1.0  # well below the 3.0 true effect
+
+
+def test_in_time_placebo_sweep_feasibility():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        itp = res.in_time_placebo()
+    # pre = [2000..2005] -> feasible dates = pre[2:] = [2002, 2003, 2004, 2005]
+    # (>=2 pre-fake periods — the deliberate Note-documented restriction).
+    assert list(itp["placebo_period"]) == [2002, 2003, 2004, 2005]
+    assert (itp["status"] == "ran").all()
+    # n_pre_fake + n_post_fake == n_pre for every row, with >=2 pre-fake + >=1 post-fake.
+    assert ((itp["n_pre_fake"] + itp["n_post_fake"]) == len(res.pre_periods)).all()
+    assert (itp["n_pre_fake"] >= 2).all() and (itp["n_post_fake"] >= 1).all()
+
+
+def test_in_time_placebo_explicit_post_date_raises():
+    res = _fit_for_placebo(n_donors=4)
+    with pytest.raises(ValueError, match="true post-treatment period"):
+        res.in_time_placebo([2006])
+
+
+def test_in_time_placebo_date_not_in_pre_raises():
+    res = _fit_for_placebo(n_donors=4)
+    with pytest.raises(ValueError, match="not a pre-treatment period"):
+        res.in_time_placebo([1999])
+
+
+def test_in_time_placebo_empty_explicit_input_raises():
+    # An explicit but EMPTY container is malformed (NOT "every date infeasible") -> raise
+    # (codex R6 P1). None still means "sweep all feasible dates".
+    res = _fit_for_placebo(n_donors=4)
+    for empty in ([], (), pd.Index([]), np.array([])):
+        with pytest.raises(ValueError, match="placebo_periods is empty"):
+            res.in_time_placebo(empty)
+    # The malformed call must not leave any in-time state behind.
+    assert res._in_time_df is None and res._in_time_status is None
+
+
+def test_in_time_placebo_dedups_and_canonicalizes_explicit_dates():
+    # Duplicate / unordered explicit dates -> de-duplicated + pre-period-ordered, so no
+    # duplicate refits and n_dates is not inflated (codex R7 P3).
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        itp = res.in_time_placebo([2004, 2002, 2004])  # duplicate 2004, unordered
+    assert list(itp["placebo_period"]) == [2002, 2004]  # unique, canonical pre-period order
+
+
+def test_in_time_placebo_ran_block_reports_partial_coverage():
+    # CI codex P2: a sweep where SOME dates ran and SOME were infeasible must surface
+    # n_ran / n_infeasible on the status="ran" block so coverage is not overstated.
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_time_placebo([2001, 2003])  # 2001 infeasible (1 pre-fake), 2003 runs
+    assert res._in_time_status == "ran"  # at least one date ran
+    block = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]["in_time_placebo"]
+    assert block["status"] == "ran"
+    assert block["n_dates"] == 2 and block["n_ran"] == 1
+    assert block["n_infeasible"] == 1 and block["n_failed"] == 0
+
+
+def test_leave_one_out_immune_to_donor_weights_mutation():
+    # Codex R8 P1: the LOO drop-set is FROZEN at fit time (snap.weighted_donor_ids =
+    # the >1e-6 reportable support), NOT read from the mutable presentation-level
+    # donor_weights dict. So mutating donor_weights after the fit must NOT change which
+    # donors are dropped — the robustness result depends only on the fit.
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        before = set(res.leave_one_out()[lambda d: d["status"] != "baseline"]["dropped_unit"])
+    assert before == set(res._fit_snapshot.weighted_donor_ids)  # drops the frozen support
+    # Mutate the public dict: drop a real donor, inject a bogus one.
+    victim = next(iter(res.donor_weights))
+    res.donor_weights = {k: v for k, v in res.donor_weights.items() if k != victim}
+    res.donor_weights["bogus_donor"] = 0.99
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        after = set(res.leave_one_out()[lambda d: d["status"] != "baseline"]["dropped_unit"])
+    assert after == before  # unchanged by the mutation
+    assert "bogus_donor" not in after  # a donor not in the fit is never dropped
+    assert victim in after  # still dropped despite removal from donor_weights
+
+
+def test_in_time_placebo_early_date_infeasible_no_raise():
+    res = _fit_for_placebo(n_donors=4)
+    # A valid pre-date with too few (<2) pre-fake periods -> NaN infeasible row +
+    # warning, NOT a raise.
+    with pytest.warns(UserWarning, match="infeasible"):
+        itp = res.in_time_placebo([2001])  # 1 pre-fake period
+    assert len(itp) == 1 and itp.iloc[0]["status"] == "infeasible"
+    assert np.isnan(itp.iloc[0]["placebo_att"])
+
+
+def test_in_time_placebo_custom_v_zero_mass_is_infeasible_not_failed():
+    # A custom_v whose mass lies entirely on specs that TRUNCATE drops leaves a
+    # zero-mass surviving V -> the date is INFEASIBLE under the supplied custom_v,
+    # NOT a convergence failure (codex R2 P1b: v/v.sum() would be 0/0).
+    df, _, _ = _make_panel(n_donors=4)  # default: 6 lag specs (2000..2005)
+    v = np.array([0.0, 0.0, 0.0, 1.0, 1.0, 1.0])  # all mass on the 2003/2004/2005 lags
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=v,
+            inner_min_decrease=1e-3,
+        )
+        itp = res.in_time_placebo([2003])  # keeps lags 2000/2001/2002 -> all zero weight
+    row = itp[itp["placebo_period"] == 2003]
+    assert len(row) == 1 and row.iloc[0]["status"] == "infeasible"  # NOT "failed"
+    assert res._in_time_status == "all_dates_infeasible"
+
+
+def test_leave_one_out_uniform_shift_surfaced_by_delta_not_range(monkeypatch):
+    # Codex R3 P1b: when every donor-drop shifts the ATT the SAME way, the raw
+    # att_range has ~zero width (looks stable) but the donor dependence is large.
+    # The headline metric must be baseline-relative (max |delta_att|), not the range.
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    res = _fit_for_placebo(n_donors=4)
+    baseline = float(res.att)
+    snap = res._fit_snapshot
+    shift = 5.0  # same large shift for EVERY drop -> uniform
+
+    def uniform_shift(snap_arg, unit, pool, n_starts):
+        gp = {p: 0.0 for p in snap.pre_periods}
+        gp.update({p: baseline + shift for p in snap.post_periods})
+        return gp, 1.0
+
+    monkeypatch.setattr(sc, "_placebo_fit_unit", uniform_shift)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.leave_one_out()
+    lo, hi = res._loo_att_range
+    assert (hi - lo) == pytest.approx(0.0, abs=1e-9)  # raw range would hide the shift
+    assert res._loo_max_abs_delta_att == pytest.approx(shift, abs=1e-9)  # delta reveals it
+    native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+    assert native["leave_one_out"]["max_abs_delta_att"] == pytest.approx(shift, abs=1e-9)
+
+
+def test_in_time_placebo_windowed_covariate_dropped_and_warns():
+    # A special predictor measured over [2004, 2005] falls entirely in the held-out
+    # window for t_f=2003 -> dropped (TRUNCATE) + warning + n_dropped_specs reflects it.
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            special_predictors=[("y", [2004, 2005], "mean")],
+            pre_period_outcomes=[2000, 2001, 2002, 2003],
+            inner_min_decrease=1e-3,
+        )
+    with pytest.warns(UserWarning, match="dropped"):
+        itp = res.in_time_placebo([2003])
+    row = itp.iloc[0]
+    # The special predictor (and the lag at 2003) lie in [2003, 2005] -> dropped.
+    assert row["n_dropped_specs"] >= 1 and row["status"] == "ran"
+
+
+def test_in_time_placebo_all_specs_dropped_infeasible():
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            special_predictors=[("y", [2004, 2005], "mean")],
+            pre_period_outcomes=[2004, 2005],
+            inner_min_decrease=1e-3,
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        itp = res.in_time_placebo([2003])  # every predictor is at 2004/2005
+    assert itp.iloc[0]["status"] == "infeasible"
+
+
+def test_in_time_placebo_custom_v_runs_without_shape_error():
+    # End-to-end guard for the custom_v lockstep subset: without it the custom path
+    # would raise a shape mismatch once specs are dropped.
+    df, _, _ = _make_panel(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=np.ones(6),
+            inner_min_decrease=1e-3,
+        )
+        itp = res.in_time_placebo()
+    assert (itp["status"] == "ran").any()
+
+
+def test_in_time_placebo_accepts_2d_custom_v():
+    # fit() accepts an array-like custom_v (e.g. a (1, k) row vector, raveled during
+    # validation); the in-time TRUNCATE subset must ravel before indexing or a 2D
+    # custom_v raises IndexError (codex R5 P1). Must match the 1D result exactly.
+    df, _, _ = _make_panel(n_donors=4)
+    v1d = np.arange(1.0, 7.0)
+    v2d = v1d.reshape(1, 6)  # row-vector form accepted at fit time
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res1 = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=v1d,
+            inner_min_decrease=1e-3,
+        )
+        res2 = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=v2d,
+            inner_min_decrease=1e-3,
+        )
+        itp1 = res1.in_time_placebo([2003])
+        itp2 = res2.in_time_placebo([2003])  # would IndexError before the ravel fix
+    pd.testing.assert_frame_equal(itp1, itp2)
+
+
+def test_in_time_placebo_deterministic():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        itp1 = res.in_time_placebo()
+        itp2 = res.in_time_placebo()
+    pd.testing.assert_frame_equal(itp1, itp2)
+
+
+def test_in_time_placebo_fails_closed_on_nonconverged_treated_fit():
+    df, _, _ = _make_panel(n_donors=4, effect=3.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df, "y", "treated", "unit", "year", seed=0, inner_max_iter=1, **_FAST_CHURN
+        )
+    assert res._fit_converged is False
+    with pytest.warns(UserWarning, match="did not converge"):
+        itp = res.in_time_placebo()
+    assert len(itp) == 0 and res._in_time_status == "treated_fit_nonconverged"
+
+
+def test_in_time_placebo_pickle_drops_gaps_keeps_table():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_time_placebo()
+    restored = pickle.loads(pickle.dumps(res))
+    pd.testing.assert_frame_equal(restored.get_in_time_placebo_df(), res.get_in_time_placebo_df())
+    assert restored._in_time_gaps is None
+    with pytest.raises(ValueError, match="not retained after pickling"):
+        restored.get_in_time_placebo_gaps()
+    with pytest.raises(ValueError, match="requires the fit snapshot"):
+        restored.in_time_placebo()
+
+
+def test_in_time_placebo_gaps_long_form():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_time_placebo([2003])
+    gaps = res.get_in_time_placebo_gaps()
+    assert list(gaps.columns) == ["placebo_period", "period", "gap", "phase"]
+    assert set(gaps["phase"]) == {"pre_fake", "post_fake"}
+    # Periods before t_f=2003 are pre_fake; 2003+ are post_fake.
+    assert set(gaps.loc[gaps["phase"] == "pre_fake", "period"]) == {2000, 2001, 2002}
+    assert set(gaps.loc[gaps["phase"] == "post_fake", "period"]) == {2003, 2004, 2005}
+
+
+def test_in_time_placebo_accessor_before_run_raises():
+    res = _fit_for_placebo(n_donors=4)
+    with pytest.raises(ValueError, match="call in_time_placebo"):
+        res.get_in_time_placebo_df()
+    with pytest.raises(ValueError, match="call in_time_placebo"):
+        res.get_in_time_placebo_gaps()
+
+
+def test_in_time_placebo_does_not_touch_analytical_inference():
+    res = _fit_for_placebo(n_donors=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_time_placebo()
+    assert_nan_inference(
+        {"se": res.se, "t_stat": res.t_stat, "p_value": res.p_value, "conf_int": res.conf_int}
+    )
+    assert res.is_significant is False
+
+
+# ---------------------------------------------------------------------------
+# Self-consistency parity: the ADH-2015 diagnostics are EXACT re-runs of the
+# validated solver on the equivalent sub-problem.
+#
+# R `Synth` has NO in-time-placebo or leave-one-out function (verified against its
+# full CRAN function index), so there is no canonical R *output* to match for these
+# diagnostics specifically. Instead we prove (deterministically, via a fixed custom
+# V) that leave_one_out() equals a from-scratch fit on the reduced donor pool, and
+# in_time_placebo() equals a from-scratch fit on the backdated/truncated panel.
+# Because the custom-V solver is itself R-anchored on Basque
+# (test_basque_tier1_custom_v_parity), this transitively anchors the diagnostics to
+# R while directly validating that the re-run mechanism is exact (not approximate).
+# ---------------------------------------------------------------------------
+
+
+def test_leave_one_out_matches_fresh_reduced_pool_fit():
+    df, _, _ = _make_panel(n_donors=4)
+    v = np.arange(1.0, 7.0)  # k = 6 default lag predictors; fixed V -> deterministic
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=v,
+            inner_min_decrease=1e-3,
+        )
+        loo = res.leave_one_out()
+    donor_ids = list(res._fit_snapshot.donor_ids)
+    d = [x for x in donor_ids if x in res.donor_weights][0]  # a positively-weighted donor
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fresh = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=v,
+            inner_min_decrease=1e-3,
+            donor_pool=[x for x in donor_ids if x != d],
+        )
+    loo_att = loo.loc[loo["dropped_unit"] == d, "att"].iloc[0]
+    assert loo_att == pytest.approx(fresh.att, abs=1e-7)
+
+
+def test_in_time_placebo_matches_fresh_backdated_fit():
+    df, _, _ = _make_panel(n_donors=4)  # years 2000-2007, T0=6 -> pre = 2000..2005
+    v = np.arange(1.0, 7.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = synthetic_control(
+            df,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=v,
+            inner_min_decrease=1e-3,
+        )
+        itp = res.in_time_placebo([2003])
+    placebo_att = itp.loc[itp["placebo_period"] == 2003, "placebo_att"].iloc[0]
+    # Fresh backdated fit: drop the true post periods, treat 2003 as the intervention,
+    # feed the pre-fake-subset V (lags at 2000/2001/2002 -> v[:3]).
+    back = df[df["year"] <= 2005].copy()
+    back["treated"] = ((back["unit"] == "treated") & (back["year"] >= 2003)).astype(int)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fresh = synthetic_control(
+            back,
+            "y",
+            "treated",
+            "unit",
+            "year",
+            v_method="custom",
+            custom_v=v[:3],
+            inner_min_decrease=1e-3,
+        )
+    assert placebo_att == pytest.approx(fresh.att, abs=1e-7)
+
+
+# ---------------------------------------------------------------------------
+# All-refits-failed branches (codex R1 P1): when EVERY refit fails to converge,
+# the status must NOT be reported as "ran" / mislabeled as dimensional infeasibility.
+# ---------------------------------------------------------------------------
+
+
+def test_leave_one_out_all_refits_failed_status(monkeypatch):
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    res = _fit_for_placebo(n_donors=4)
+    monkeypatch.setattr(sc, "_placebo_fit_unit", lambda *a, **k: None)  # every drop fails
+    with pytest.warns(UserWarning, match="failed to converge"):
+        loo = res.leave_one_out()
+    # Distinct status (NOT "ran"); att_range is None; baseline + only failed rows.
+    assert res._loo_status == "all_refits_failed"
+    assert res._loo_att_range is None
+    assert (loo["status"] != "loo").all()  # no successful drop
+    assert (loo.iloc[1:]["status"] == "failed").all()
+    # DiagnosticReport must surface it as NOT "ran", with the convergence reason.
+    native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+    assert native["leave_one_out"]["status"] != "ran"
+    # Machine-readable code distinguishes numerical failure from structural infeasibility.
+    assert native["leave_one_out"]["reason_code"] == "all_refits_failed"
+    assert "failed to converge" in native["leave_one_out"]["reason"]
+
+
+def test_in_time_placebo_all_dates_failed_status(monkeypatch):
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    res = _fit_for_placebo(n_donors=4)
+    monkeypatch.setattr(sc, "_placebo_fit_unit", lambda *a, **k: None)  # every refit fails
+    with pytest.warns(UserWarning, match="failed to converge"):
+        itp = res.in_time_placebo()
+    # Convergence failure must NOT be mislabeled as dimensional infeasibility.
+    assert res._in_time_status == "all_dates_failed"
+    assert (itp["status"] == "failed").all() and len(itp) > 0
+    native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+    assert native["in_time_placebo"]["status"] != "ran"
+    assert native["in_time_placebo"]["reason_code"] == "all_dates_failed"
+    assert "failed to converge" in native["in_time_placebo"]["reason"]
+
+
+def test_in_time_placebo_mixed_failed_and_infeasible_status(monkeypatch):
+    # Codex R8 P2: a no-success run with BOTH a dimensionally-infeasible date AND a
+    # convergence-failed date must report the mixed "all_dates_unusable" status with
+    # both counts — NOT be mislabeled as exclusively failed (which would falsely claim
+    # "none was dimensionally infeasible").
+    import importlib
+
+    sc = importlib.import_module("diff_diff.synthetic_control")
+    res = _fit_for_placebo(n_donors=4)
+    # Feasible dates "fail" to converge; 2001 (1 pre-fake) is dimensionally infeasible.
+    monkeypatch.setattr(sc, "_placebo_fit_unit", lambda *a, **k: None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        itp = res.in_time_placebo([2001, 2003])  # 2001 infeasible, 2003 fails
+    assert res._in_time_status == "all_dates_unusable"
+    assert res._in_time_n_failed == 1 and res._in_time_n_infeasible == 1
+    assert set(itp["status"]) == {"infeasible", "failed"}
+    block = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]["in_time_placebo"]
+    assert block["reason_code"] == "all_dates_unusable"
+    assert block["n_failed"] == 1 and block["n_infeasible"] == 1
