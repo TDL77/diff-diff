@@ -2151,3 +2151,77 @@ class TestMPDAbsorbedFERParity:
         np.testing.assert_allclose(pe_a.se, pe_f.se, atol=1e-12)
         np.testing.assert_allclose(res_absorb.avg_att, res_fe.avg_att, atol=1e-12)
         np.testing.assert_allclose(res_absorb.avg_se, res_fe.avg_se, atol=1e-12)
+
+
+class TestTWFECovariateNameCollision:
+    """PR3: TwoWayFixedEffects covariate-name collision guard.
+
+    On the full-dummy HC2/HC2-BM path covariates are zipped into the coefficient
+    dict alongside "const"/"ATT" and the unit/time dummies, so a colliding
+    covariate would silently overwrite that coefficient. The within-transform
+    (default HC1) path exposes only {"ATT": att}, but the covariate is still in
+    X and a covariate named "_treatment_post" would clobber the internal
+    interaction column, so the guard fires on ALL paths. Lives here next to the
+    full-dummy ``len(coefficients) == vcov.shape[0]`` invariant.
+    """
+
+    @staticmethod
+    def _panel_with(covname: str) -> pd.DataFrame:
+        df = _make_did_panel(n_units=30, seed=20260420)
+        # unit 0..29 / time {0,1}: get_dummies(drop_first=True) keeps
+        # "_fe_unit_1".."_fe_unit_29" and "_fe_time_1".
+        df[covname] = np.random.default_rng(99).normal(size=len(df))
+        return df
+
+    @pytest.mark.parametrize("vcov_type", ["hc1", "hc2"])
+    @pytest.mark.parametrize(
+        "name", ["const", "ATT", "_treatment_post", "_fe_unit_1", "_fe_time_1"]
+    )
+    def test_collision_raises_on_all_paths(self, vcov_type, name):
+        df = self._panel_with(name)
+        with pytest.raises(ValueError, match="collide"):
+            TwoWayFixedEffects(vcov_type=vcov_type).fit(
+                df, outcome="y", treatment="treated", time="time", unit="unit",
+                covariates=[name],
+            )
+
+    def test_hc2_full_dummy_noncolliding_preserves_coefs(self):
+        df = self._panel_with("x1")
+        r = TwoWayFixedEffects(vcov_type="hc2").fit(
+            df, outcome="y", treatment="treated", time="time", unit="unit",
+            covariates=["x1"],
+        )
+        ck = r.coefficients
+        assert "ATT" in ck and "x1" in ck
+        # No key overwritten: dict size matches the full-dummy vcov rank.
+        assert len(ck) == r.vcov.shape[0]
+
+    def test_within_transform_noncolliding_returns_att_only(self):
+        df = self._panel_with("x1")
+        r = TwoWayFixedEffects().fit(  # default hc1 -> within-transform
+            df, outcome="y", treatment="treated", time="time", unit="unit",
+            covariates=["x1"],
+        )
+        # The within-transform path exposes only the ATT coefficient by design;
+        # the covariate is NOT a dict key there (so there is no overwrite surface).
+        assert set(r.coefficients.keys()) == {"ATT"}
+
+    def test_within_path_does_not_materialize_fe_dummies(self, monkeypatch):
+        # Regression: the within-transform (default hc1) path must NOT build full
+        # unit/time dummy matrices merely to reserve collision names — that would
+        # defeat its high-cardinality scaling contract. Reserved names come from
+        # fe_dummy_names (category levels only), so pd.get_dummies must never be
+        # called on this path.
+        df = self._panel_with("x1")
+
+        def _boom(*args, **kwargs):
+            raise AssertionError(
+                "pd.get_dummies must not be called on the within-transform path"
+            )
+
+        monkeypatch.setattr(pd, "get_dummies", _boom)
+        r = TwoWayFixedEffects().fit(
+            df, outcome="y", treatment="treated", time="time", unit="unit",
+            covariates=["x1"],
+        )
+        assert set(r.coefficients.keys()) == {"ATT"}

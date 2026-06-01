@@ -3555,3 +3555,169 @@ class TestCollinearityDetection:
 
         assert np.isfinite(results.att)
         assert results.se > 0
+
+
+class TestCovariateNameCollision:
+    """PR3: a covariate whose name equals a reserved structural term silently
+    overwrote that coefficient in the zip()-built coef_dict (dict last-write-wins).
+    The DiD-family estimators now raise ValueError; non-colliding covariates leave
+    the structural coefficients intact. TWFE collision tests live in
+    tests/test_estimators_vcov_type.py (next to the full-dummy invariant)."""
+
+    @staticmethod
+    def _did_data():
+        rng = np.random.default_rng(7)
+        rows = []
+        for unit in range(60):
+            treated = int(unit < 30)
+            for post in (0, 1):
+                y = 1.0 + 2.0 * treated * post + rng.normal()
+                rows.append({"unit": unit, "treated": treated, "post": post, "outcome": y})
+        df = pd.DataFrame(rows)
+        df["x1"] = np.random.default_rng(11).normal(size=len(df))
+        return df
+
+    @staticmethod
+    def _mpd_data():
+        rng = np.random.default_rng(7)
+        rows = []
+        for unit in range(60):
+            treated = int(unit < 30)
+            ueff = rng.normal()
+            for period in range(6):
+                y = (
+                    10.0 + ueff + 0.5 * period
+                    + (3.0 if (treated and period >= 3) else 0.0)
+                    + rng.normal(0, 0.5)
+                )
+                rows.append(
+                    {"unit": unit, "treated": treated, "time": period, "outcome": y}
+                )
+        df = pd.DataFrame(rows)
+        df["x1"] = np.random.default_rng(11).normal(size=len(df))
+        return df
+
+    def test_did_collision_for_each_structural_name(self):
+        # Drive the reserved set from a clean fit's actual coefficient keys so
+        # the test cannot drift from the real var_names (const/treated/post/
+        # treated:post), plus the internal _treat_time working column.
+        data = self._did_data()
+        clean = DifferenceInDifferences().fit(
+            data, "outcome", "treated", "post", covariates=["x1"]
+        )
+        reserved = [k for k in clean.coefficients if k != "x1"] + ["_treat_time"]
+        assert "const" in reserved and "treated:post" in reserved  # sanity
+        for name in reserved:
+            d2 = data.copy()
+            if name not in d2.columns:
+                d2[name] = np.random.default_rng(5).normal(size=len(d2))
+            with pytest.raises(ValueError, match="collide"):
+                DifferenceInDifferences().fit(
+                    d2, "outcome", "treated", "post", covariates=[name]
+                )
+
+    def test_did_fixed_effects_dummy_collision(self):
+        # get_dummies(region, prefix="region", drop_first=True) drops "region_A"
+        # and keeps "region_B" -> a covariate named "region_B" collides.
+        data = self._did_data()
+        data["region"] = np.where(data["unit"] % 2 == 0, "A", "B")
+        data["region_B"] = np.random.default_rng(2).normal(size=len(data))
+        with pytest.raises(ValueError, match="collide"):
+            DifferenceInDifferences().fit(
+                data, "outcome", "treated", "post",
+                covariates=["region_B"], fixed_effects=["region"],
+            )
+
+    def test_did_noncolliding_preserves_structural_coefs(self):
+        data = self._did_data()
+        r = DifferenceInDifferences().fit(
+            data, "outcome", "treated", "post", covariates=["x1"]
+        )
+        ck = r.coefficients
+        assert np.isfinite(ck["const"]) and np.isfinite(ck["treated:post"])
+        assert "x1" in ck and ck["x1"] != ck["treated:post"]
+        # No key was overwritten: dict size matches the vcov rank.
+        assert len(ck) == r.vcov.shape[0]
+
+    def test_did_formula_colliding_raises(self):
+        data = self._did_data()
+        data["const"] = np.random.default_rng(3).normal(size=len(data))
+        with pytest.raises(ValueError, match="collide"):
+            DifferenceInDifferences().fit(data, formula="outcome ~ treated*post + const")
+
+    def test_did_formula_noncolliding_works(self):
+        data = self._did_data()
+        r = DifferenceInDifferences().fit(data, formula="outcome ~ treated*post + x1")
+        assert "x1" in r.coefficients
+
+    def test_did_duplicate_covariates_raise(self):
+        data = self._did_data()
+        with pytest.raises(ValueError, match="duplicate"):
+            DifferenceInDifferences().fit(
+                data, "outcome", "treated", "post", covariates=["x1", "x1"]
+            )
+
+    def test_mpd_collision_for_each_structural_name(self):
+        data = self._mpd_data()
+        clean = MultiPeriodDiD().fit(
+            data, "outcome", "treated", "time", covariates=["x1"]
+        )
+        # const/treated/period_*/treated:period_* (actual keys) + internal column.
+        reserved = [k for k in clean.coefficients if k != "x1"] + ["_did_treatment"]
+        assert any(k.startswith("period_") for k in reserved)  # sanity
+        for name in reserved:
+            d2 = data.copy()
+            if name not in d2.columns:
+                d2[name] = np.random.default_rng(5).normal(size=len(d2))
+            with pytest.raises(ValueError, match="collide"):
+                MultiPeriodDiD().fit(
+                    d2, "outcome", "treated", "time", covariates=[name]
+                )
+
+    def test_mpd_noncolliding_preserves_structural_coefs(self):
+        data = self._mpd_data()
+        r = MultiPeriodDiD().fit(
+            data, "outcome", "treated", "time", covariates=["x1"]
+        )
+        ck = r.coefficients
+        assert "x1" in ck and np.isfinite(ck["const"])
+        assert any(k.startswith("period_") for k in ck)
+        assert len(ck) == r.vcov.shape[0]
+
+    def test_mpd_fixed_effect_dummy_collides_with_period_keys(self):
+        # Backstop: a NON-time fixed effect whose get_dummies names match the
+        # structural period_{p} event-study keys must raise (would otherwise
+        # silently overwrite those coefficients) — the FE dummy is appended to
+        # var_names directly, so the upfront covariate guard cannot catch it.
+        data = self._mpd_data()
+        data["period"] = data["time"]  # FE column 'period' -> 'period_1'... dummies
+        with pytest.raises(ValueError, match="collide"):
+            MultiPeriodDiD().fit(
+                data, "outcome", "treated", "time",
+                covariates=["x1"], fixed_effects=["period"],
+            )
+
+    def test_synthetic_did_unaffected_by_guard(self):
+        # SyntheticDiD overrides fit() and never reaches the base-class guard;
+        # a covariate must still fit (regression lock that the guard didn't leak).
+        rng = np.random.default_rng(42)
+        rows = []
+        for unit in range(30):
+            treated = int(unit < 5)
+            ueff = rng.normal(0, 3)
+            for period in range(8):
+                y = (
+                    10.0 + ueff + 0.5 * period
+                    + (5.0 if (treated and period >= 4) else 0.0)
+                    + rng.normal(0, 0.5)
+                )
+                rows.append(
+                    {"unit": unit, "period": period, "treated": treated, "outcome": y}
+                )
+        d = pd.DataFrame(rows)
+        d["x1"] = rng.normal(size=len(d))
+        r = SyntheticDiD().fit(
+            d, "outcome", "treated", unit="unit", time="period",
+            post_periods=[4, 5, 6, 7], covariates=["x1"],
+        )
+        assert np.isfinite(r.att)

@@ -30,8 +30,11 @@ from diff_diff.results import DiDResults, MultiPeriodDiDResults, PeriodEffect
 from diff_diff.utils import (
     WildBootstrapResults,
     demean_by_group,
+    fe_dummy_names,
     safe_inference,
     validate_binary,
+    validate_covariate_names,
+    validate_design_term_names,
     wild_bootstrap_se,
 )
 
@@ -255,6 +258,11 @@ class DifferenceInDifferences:
             If provided, overrides outcome, treatment, and time parameters.
         covariates : list, optional
             List of covariate column names to include as linear controls.
+            Names must not collide with reserved structural terms (``const``,
+            the treatment/time column names, the ``{treatment}:{time}``
+            interaction, fixed-effect dummy names, or internal working columns)
+            and must be unique; a collision or duplicate raises ``ValueError``
+            (it would otherwise silently overwrite a structural coefficient).
         fixed_effects : list, optional
             List of categorical column names to include as fixed effects.
             Creates dummy variables for each category (drops first level).
@@ -286,7 +294,9 @@ class DifferenceInDifferences:
         Raises
         ------
         ValueError
-            If required parameters are missing or data validation fails.
+            If required parameters are missing or data validation fails, or if
+            a covariate name collides with a reserved structural term name or
+            duplicates another covariate.
 
         Examples
         --------
@@ -465,6 +475,21 @@ class DifferenceInDifferences:
         else:
             dt = d * t
 
+        # Reject covariate names that collide with reserved structural terms.
+        # Covariate names are appended verbatim to var_names below and zipped
+        # into coef_dict, so a covariate named like a structural term would
+        # silently overwrite that coefficient (dict last-write-wins). The
+        # reserved set covers the intercept, treatment/time indicators, the
+        # interaction, the internal _treat_time working column, and any
+        # fixed-effect dummy names (derived via fe_dummy_names WITHOUT
+        # materializing the dummy matrix; names match the get_dummies build
+        # below exactly). validate_design_term_names re-checks the FINAL list.
+        _reserved = {"const", treatment, time, f"{treatment}:{time}", "_treat_time"}
+        if fixed_effects:
+            for fe in fixed_effects:
+                _reserved.update(fe_dummy_names(working_data[fe], fe))
+        validate_covariate_names(covariates, _reserved, estimator="DifferenceInDifferences")
+
         # Build design matrix
         X = np.column_stack([np.ones(len(y)), d, t, dt])
         var_names = ["const", treatment, time, f"{treatment}:{time}"]
@@ -484,6 +509,12 @@ class DifferenceInDifferences:
                 for col in dummies.columns:
                     X = np.column_stack([X, dummies[col].values.astype(float)])
                     var_names.append(col)
+
+        # Reject any duplicate in the FINAL term list (e.g. a fixed-effect dummy
+        # colliding with a structural term) BEFORE the regression — so the fit is
+        # not wasted and no misleading multicollinearity warning is emitted ahead
+        # of the intended ValueError.
+        validate_design_term_names(var_names, estimator="DifferenceInDifferences")
 
         # Extract ATT index (coefficient on interaction term)
         att_idx = 3  # Index of interaction term
@@ -1244,6 +1275,12 @@ class MultiPeriodDiD(DifferenceInDifferences):
             All other periods are treated as pre-treatment.
         covariates : list, optional
             List of covariate column names to include as linear controls.
+            Names must not collide with reserved structural terms (``const``,
+            the treatment column name, ``period_{p}`` dummies, the
+            ``{treatment}:period_{p}`` interactions, fixed-effect dummy names, or
+            internal working columns) and must be unique; a collision or
+            duplicate raises ``ValueError`` (it would otherwise silently
+            overwrite a structural coefficient).
         fixed_effects : list, optional
             List of categorical column names to include as fixed effects.
         absorb : list, optional
@@ -1271,7 +1308,9 @@ class MultiPeriodDiD(DifferenceInDifferences):
         Raises
         ------
         ValueError
-            If required parameters are missing or data validation fails.
+            If required parameters are missing or data validation fails, or if
+            a covariate name collides with a reserved structural term name or
+            duplicates another covariate.
         """
         # Fall back to analytical inference if wild bootstrap requested
         # (must happen before _resolve_survey_for_fit which rejects bootstrap+survey).
@@ -1567,6 +1606,27 @@ class MultiPeriodDiD(DifferenceInDifferences):
             d = working_data[treatment].values.astype(float)
         t = working_data[time].values
 
+        # Reject covariate names that collide with reserved structural terms.
+        # Covariates are appended verbatim to var_names below and zipped into
+        # coef_dict, so a covariate named like a structural term (intercept,
+        # treatment, a period dummy, a treatment-period interaction, an internal
+        # _did_* working column, or a fixed-effect dummy) would silently
+        # overwrite that coefficient (dict last-write-wins). FE dummy names are
+        # derived via fe_dummy_names (no dummy-matrix materialization), matching
+        # the construction below (and applying the same fe==time skip).
+        # validate_design_term_names re-checks the FINAL list before coef_dict.
+        _reserved = {"const", treatment, "_did_treatment"}
+        _reserved.update(f"period_{p}" for p in non_ref_periods)
+        _reserved.update(f"{treatment}:period_{p}" for p in non_ref_periods)
+        _reserved.update(f"_did_period_{p}" for p in non_ref_periods)
+        _reserved.update(f"_did_interact_{p}" for p in non_ref_periods)
+        if fixed_effects:
+            for fe in fixed_effects:
+                if fe == time:
+                    continue
+                _reserved.update(fe_dummy_names(working_data[fe], fe))
+        validate_covariate_names(covariates, _reserved, estimator="MultiPeriodDiD")
+
         # Build design matrix
         # Start with intercept and treatment main effect
         X = np.column_stack([np.ones(len(y)), d])
@@ -1624,6 +1684,12 @@ class MultiPeriodDiD(DifferenceInDifferences):
                 for col in dummies.columns:
                     X = np.column_stack([X, dummies[col].values.astype(float)])
                     var_names.append(col)
+
+        # Reject any duplicate in the FINAL term list (e.g. a fixed-effect dummy
+        # colliding with a structural period_{p} key) BEFORE the regression — so
+        # the fit is not wasted and no misleading multicollinearity warning is
+        # emitted ahead of the intended ValueError.
+        validate_design_term_names(var_names, estimator="MultiPeriodDiD")
 
         # Fit OLS using unified backend
         # Pass cluster_ids to solve_ols for proper vcov computation
@@ -1983,7 +2049,8 @@ class MultiPeriodDiD(DifferenceInDifferences):
         n_treated = n_treated_raw
         n_control = n_control_raw
 
-        # Create coefficient dictionary
+        # Create coefficient dictionary (var_names uniqueness already enforced
+        # before the fit above).
         coef_dict = {name: coef for name, coef in zip(var_names, coefficients)}
 
         # Store results

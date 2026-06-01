@@ -4,7 +4,7 @@ Utility functions for difference-in-differences estimation.
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -65,6 +65,156 @@ def validate_binary(arr: np.ndarray, name: str) -> None:
     unique_values = np.unique(arr[~np.isnan(arr)])
     if not np.all(np.isin(unique_values, [0, 1])):
         raise ValueError(f"{name} must be binary (0 or 1). " f"Found values: {unique_values}")
+
+
+def validate_covariate_names(
+    covariates: Optional[List[str]],
+    reserved_names: Iterable[str],
+    *,
+    estimator: str = "estimator",
+) -> None:
+    """
+    Validate that covariate column names do not collide with reserved
+    structural term names (and are not duplicated within ``covariates``).
+
+    Fitted coefficients are stored in a ``name -> value`` dict built by zipping
+    a variable-name list -- structural term names PLUS the user covariate column
+    names appended verbatim -- with the coefficient vector. A covariate whose
+    name equals a reserved structural name (the intercept ``const``, the
+    treatment/time indicators, the interaction term, period dummies,
+    fixed-effect dummies, or an internal working column) would silently
+    overwrite the structural coefficient (Python dict last-write-wins),
+    corrupting the result with no error. Duplicate names within ``covariates``
+    collapse to a single dict entry the same way.
+
+    The comparison is case-sensitive: column names and dict keys are
+    case-sensitive, so e.g. ``Const`` does not actually collide with ``const``
+    and is allowed.
+
+    Parameters
+    ----------
+    covariates : list of str or None
+        User-supplied covariate column names. ``None`` or empty is a no-op.
+    reserved_names : iterable of str
+        Reserved structural term names this estimator builds (estimator-specific).
+    estimator : str
+        Estimator name, used in the error message.
+
+    Raises
+    ------
+    ValueError
+        If a covariate name collides with a reserved structural name, or if
+        ``covariates`` contains duplicate names.
+    """
+    if not covariates:
+        return
+    reserved = set(reserved_names)
+    collisions = sorted({c for c in covariates if c in reserved})
+    if collisions:
+        raise ValueError(
+            f"{estimator}: covariate name(s) {collisions} collide with reserved "
+            f"structural term name(s). These names are used internally for the "
+            f"intercept, the treatment/time indicators, the interaction term, "
+            f"period dummies, fixed-effect dummies, or internal working columns, "
+            f"and a colliding covariate would silently overwrite the structural "
+            f"coefficient. Rename the covariate column(s). Reserved names for "
+            f"this fit: {sorted(reserved)}."
+        )
+    seen: set = set()
+    duplicates = []
+    for c in covariates:
+        if c in seen:
+            duplicates.append(c)
+        seen.add(c)
+    if duplicates:
+        raise ValueError(
+            f"{estimator}: duplicate covariate name(s) {sorted(set(duplicates))} "
+            f"in `covariates`. Each covariate maps to one coefficient; duplicates "
+            f"collapse to a single entry. Remove the duplicate(s)."
+        )
+
+
+def validate_design_term_names(
+    var_names: Iterable[str],
+    *,
+    estimator: str = "estimator",
+) -> None:
+    """
+    Raise if the assembled design term-name list contains duplicates.
+
+    Backstop for :func:`validate_covariate_names`: even after the user
+    covariates are cleared, a fixed-effect dummy name (``{fe}_{value}``) can
+    still collide with a structural term — most notably a ``MultiPeriodDiD``
+    ``period_{p}`` event-study key when a non-time fixed effect produces matching
+    dummy names — or with another dummy. Such a duplicate would silently
+    overwrite a coefficient when ``var_names`` is zipped into the result's
+    ``coefficients`` dict (Python dict last-write-wins). This checks the FINAL
+    name list (structural terms + covariates + fixed-effect dummies) right
+    before the dict is built, catching collisions that depend on the data and so
+    cannot be known up front.
+
+    Parameters
+    ----------
+    var_names : iterable of str
+        The fully assembled design-matrix column-name list.
+    estimator : str
+        Estimator name, used in the error message.
+
+    Raises
+    ------
+    ValueError
+        If any name appears more than once.
+    """
+    seen: set = set()
+    duplicates = []
+    for name in var_names:
+        if name in seen:
+            duplicates.append(name)
+        seen.add(name)
+    if duplicates:
+        raise ValueError(
+            f"{estimator}: the fitted design has duplicate term name(s) "
+            f"{sorted(set(duplicates))} — a covariate or fixed-effect dummy name "
+            f"collides with a structural term (intercept, treatment/time "
+            f"indicators, the interaction, or period dummies) or with another "
+            f"column. This would silently overwrite a coefficient in the result. "
+            f"Rename the offending fixed-effect category or covariate column."
+        )
+
+
+def fe_dummy_names(col: pd.Series, prefix: str) -> List[str]:
+    """
+    Reserved fixed-effect dummy column names for the collision guard, matching
+    ``pd.get_dummies(col, prefix=prefix, drop_first=True).columns`` WITHOUT
+    materializing the dense ``(n x G)`` dummy matrix.
+
+    The within-transform ``TwoWayFixedEffects`` path is specifically designed to
+    avoid expanding high-cardinality fixed-effect dummies (that is its scaling
+    contract), so the collision guard must reserve those names without building
+    the dummy block. ``pd.get_dummies`` orders categories via
+    ``pd.Categorical(col).categories`` — sorted unique values for a plain column,
+    the declared category order for a ``Categorical`` — then ``drop_first=True``
+    drops the first. This derivation reproduces that exactly (including
+    ``Categorical`` columns with a non-default category order) at ``O(G)`` memory.
+
+    Parameters
+    ----------
+    col : pandas.Series
+        The fixed-effect / unit / time column.
+    prefix : str
+        Dummy-name prefix (the project uses ``fe`` for ``fixed_effects`` and
+        ``_fe_{unit}`` / ``_fe_{time}`` for TWFE unit/time dummies).
+
+    Returns
+    -------
+    list of str
+        The kept (post ``drop_first``) dummy column names.
+    """
+    if isinstance(col.dtype, pd.CategoricalDtype):
+        cats = list(col.cat.categories)
+    else:
+        cats = list(pd.Categorical(col).categories)
+    return [f"{prefix}_{c}" for c in cats[1:]]
 
 
 def warn_if_not_converged(
