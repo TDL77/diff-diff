@@ -639,9 +639,9 @@ and covariate-adjusted specifications.)
 - Implementation: 130 unit tests in `tests/test_efficient_did.py` + 12 validation tests in `tests/test_efficient_did_validation.py`
 - Hausman pretest: implemented per Theorem A.1 with Moore-Penrose pseudoinverse for finite-sample non-PSD variance-difference matrix
 - Survey support: pweight + strata/PSU/FPC via TSL on EIF scores; covariates DR path with WLS outcome regression and weighted sieve normal equations
+- Paper review on file: `docs/methodology/papers/chen-santanna-xie-2025-review.md` (PR-A, 2026-05-31) — faithful paper-sourced transcription of arXiv:2506.17729v1 (assumptions S/O/NA/PT-Post/PT-All; Theorem 3.1/3.2 EIFs + Corollaries 3.1/3.2; §4 sieve/kernel DR estimation; Theorem 4.1 SEs; Theorem A.1 Hausman; HRS Table 6 anchor)
 
-**Outstanding for promotion:**
-- **No paper review on file** under `docs/methodology/papers/` — write one
+**Outstanding for promotion (PR-B source validation; paper review now on file):**
 - Dedicated `tests/test_methodology_efficient_did.py` with Theorem 3.2 / Equation 3.5 / Equation 4.3 numbered Verified Components walk-through
 - Cross-language anchor: the paper's empirical replication uses HRS data following Sun-Abraham (2021); a same-data benchmark against the paper's reported numbers (or a same-DGP MC against R alternatives) would substantiate the EIF construction
 - Documented deviations: linear OLS working models for outcome regressions vs. paper's general nonparametric specification (DR safety net acknowledged but not separately validated); fixed-weight bootstrap aggregation vs. WIF-corrected analytical aggregation
@@ -1410,10 +1410,10 @@ more graceful handling of edge cases while still signaling invalid inference to 
 
 Promotion priority for the **In Progress** entries, ordered by what's blocked on substantive review work (top of list = needs review next) vs. consolidation pass (bottom of list = mostly tracker walk-through):
 
-**Substantive-review-blocked (no methodology test file, no paper review, no R parity):**
+**Substantive-review-blocked (still missing a methodology test file / R parity — and, except for EfficientDiD, a paper review):**
 
 1. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
-2. **EfficientDiD** — no paper review on file; substantial implementation work (`tests/test_efficient_did.py` + validation tests) needs paper-vs-code audit against Chen, Sant'Anna & Xie (2025).
+2. **EfficientDiD** — **paper review on file** (PR-A, `chen-santanna-xie-2025-review.md`); remaining PR-B work is the source-validation pass — `tests/test_methodology_efficient_did.py` (Theorem 3.1/3.2 / Eq 3.5 / Eq 4.3 Verified Components), the HRS Table 6 cross-language anchor, and the documented deviations against Chen, Sant'Anna & Xie (2025).
 3. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
