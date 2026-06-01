@@ -137,7 +137,10 @@ class CorpusLoader:
         if not os.path.isdir(self.cases_dir):
             return cases
         for stratum in sorted(os.listdir(self.cases_dir)):
-            if strata and stratum not in strata:
+            # Distinguish None (no --strata -> all strata) from [] (a bare --strata with
+            # no values -> an explicit empty selection that must match NOTHING, so a typo
+            # / empty shell expansion fails closed instead of silently running everything).
+            if strata is not None and stratum not in strata:
                 continue
             stratum_dir = os.path.join(self.cases_dir, stratum)
             if not os.path.isdir(stratum_dir):

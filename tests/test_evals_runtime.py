@@ -1614,3 +1614,25 @@ def test_worktrees_namespaced_per_invocation(monkeypatch):
     r2.prompt_sha_for(case)
     assert seen[0] != seen[1], "same case, different invocations -> distinct worktree keys"
     assert r1._wt_namespace in seen[0] and r2._wt_namespace in seen[1]
+
+
+def test_resolve_configs_rejects_empty_selectors():
+    """Malformed comma selectors must fail closed, not silently drop empty segments and
+    run a narrower matrix than intended."""
+    import run_eval
+
+    for bad in ("A,", ",A", "A,,B", "", ",", "A, ,B"):
+        assert run_eval._resolve_configs(bad) is None, f"{bad!r} must fail closed"
+    assert run_eval._resolve_configs("A,B") is not None, "valid A,B still resolves"
+    assert run_eval._resolve_configs("A") is not None, "valid single arm still resolves"
+
+
+def test_load_cases_distinguishes_none_from_empty_strata():
+    """No --strata (None) loads all; a bare --strata ([]) selects NOTHING (fail closed),
+    not the whole corpus."""
+    from adapters.corpus_loader import CorpusLoader
+
+    loader = CorpusLoader(str(_EVAL_ROOT / "corpus"), str(_REPO))
+    assert len(loader.load_cases(None)) >= 2, "None (no flag) loads all strata"
+    assert loader.load_cases([]) == [], "bare --strata ([]) must select nothing"
+    assert {c.id for c in loader.load_cases(["s3_negative"])} == {"s3-changelog-prose"}

@@ -116,7 +116,11 @@ def _resolve_configs(arg: str):
     Fail-closed: a typo like ``--configs Z`` (or ``A,Z``) returns None so the
     caller can abort, rather than silently running a partial/empty matrix.
     """
-    requested = [c for c in (arg or "").split(",") if c]
+    requested = (arg or "").split(",")
+    # Reject malformed/empty selectors ("", "A,", ",A", "A,,B") rather than silently
+    # dropping empty segments and running a narrower matrix than the operator intended.
+    if any(c == "" for c in requested):
+        return None
     # Reject duplicate ids ("A,A"): run identity, artifacts, and bundle columns key
     # off config_id, so a repeat would alias both arms onto one identity and collapse
     # the comparison rather than running two arms.
