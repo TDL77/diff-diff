@@ -7,6 +7,7 @@ on:
       - 'docs/**'
       - 'diff_diff/**'
       - 'tests/test_doc_snippets.py'
+      - 'tests/test_doc_deps_integrity.py'
       # tests/conftest.py is auto-loaded by pytest for the snippet
       # test run and mutates sys.path + MPLBACKEND (conftest.py:14, 18);
       # changes there can break snippet exec without touching the test
@@ -24,6 +25,7 @@ on:
       - 'docs/**'
       - 'diff_diff/**'
       - 'tests/test_doc_snippets.py'
+      - 'tests/test_doc_deps_integrity.py'
       - 'tests/conftest.py'
       - 'pyproject.toml'
       # sphinx-build job mirrors RTD setup; trigger when RTD config drifts
@@ -40,7 +42,7 @@ permissions:
 
 jobs:
   doc-snippets:
-    name: Validate RST code snippets
+    name: Validate doc snippets + doc-deps integrity
     # Skip unrelated label churn: a non-ready-for-ci label add/remove won't run this job.
     if: >-
       github.event_name != 'pull_request'
@@ -69,6 +71,13 @@ jobs:
         # source without invoking the maturin/Rust build (mirrors the
         # `python-fallback` job in rust-test.yml).
         run: PYTHONPATH=. DIFF_DIFF_BACKEND=python pytest tests/test_doc_snippets.py -v
+
+      - name: Run doc-deps integrity check
+        # Validates docs/doc-deps.yaml: no stale referenced paths, no unmapped
+        # public source modules. Same PYTHONPATH=. prefix as above because
+        # tests/conftest.py imports diff_diff at collection and the install
+        # step does not install diff_diff.
+        run: PYTHONPATH=. DIFF_DIFF_BACKEND=python pytest tests/test_doc_deps_integrity.py -v
 
   sphinx-build:
     name: Sphinx HTML build (-W warnings as errors)
