@@ -15,6 +15,9 @@ from diff_diff.estimators import DifferenceInDifferences
 from diff_diff.linalg import LinearRegression
 from diff_diff.results import DiDResults
 from diff_diff.utils import (
+    validate_covariate_names,
+)
+from diff_diff.utils import (
     within_transform as _within_transform_util,
 )
 
@@ -135,7 +138,12 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         unit : str
             Name of unit identifier column.
         covariates : list, optional
-            List of covariate column names.
+            List of covariate column names. Names must not collide with reserved
+            structural terms (``const``, ``ATT``, unit/time fixed-effect dummy
+            names, or the internal ``_treatment_post`` column) and must be
+            unique; a collision or duplicate raises ``ValueError`` (it would
+            otherwise silently overwrite a structural coefficient on the
+            full-dummy HC2/HC2-BM path).
         survey_design : SurveyDesign, optional
             Survey design specification for design-based inference. When provided,
             uses Taylor Series Linearization for variance estimation and
@@ -145,6 +153,12 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         -------
         DiDResults
             Estimation results.
+
+        Raises
+        ------
+        ValueError
+            If a covariate name collides with a reserved structural term name
+            or duplicates another covariate.
         """
         # Validate unit column exists
         if unit not in data.columns:
@@ -281,6 +295,20 @@ class TwoWayFixedEffects(DifferenceInDifferences):
 
         n_units = data[unit].nunique()
         n_times = data[time].nunique()
+
+        # Reject covariate names that collide with reserved structural terms.
+        # On the full-dummy (HC2/HC2-BM) path covariates are zipped into the
+        # coefficient dict alongside "const"/"ATT" and the unit/time dummies, so
+        # a colliding covariate would silently overwrite that coefficient (dict
+        # last-write-wins). The within-transform path does not expose covariates
+        # in the dict, but the covariate is still in X and a covariate named
+        # "_treatment_post" would clobber the internal interaction column; we
+        # therefore guard ALL paths. Unit/time dummy names use the SAME
+        # get_dummies call as the full-dummy construction below.
+        _reserved = {"const", "ATT", "_treatment_post"}
+        _reserved.update(pd.get_dummies(data[unit], prefix=f"_fe_{unit}", drop_first=True).columns)
+        _reserved.update(pd.get_dummies(data[time], prefix=f"_fe_{time}", drop_first=True).columns)
+        validate_covariate_names(covariates, _reserved, estimator="TwoWayFixedEffects")
 
         if use_full_dummy:
             # HC2 / HC2-BM full-dummy build: bypass the within-transform

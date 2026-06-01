@@ -32,6 +32,7 @@ from diff_diff.utils import (
     demean_by_group,
     safe_inference,
     validate_binary,
+    validate_covariate_names,
     wild_bootstrap_se,
 )
 
@@ -255,6 +256,11 @@ class DifferenceInDifferences:
             If provided, overrides outcome, treatment, and time parameters.
         covariates : list, optional
             List of covariate column names to include as linear controls.
+            Names must not collide with reserved structural terms (``const``,
+            the treatment/time column names, the ``{treatment}:{time}``
+            interaction, fixed-effect dummy names, or internal working columns)
+            and must be unique; a collision or duplicate raises ``ValueError``
+            (it would otherwise silently overwrite a structural coefficient).
         fixed_effects : list, optional
             List of categorical column names to include as fixed effects.
             Creates dummy variables for each category (drops first level).
@@ -286,7 +292,9 @@ class DifferenceInDifferences:
         Raises
         ------
         ValueError
-            If required parameters are missing or data validation fails.
+            If required parameters are missing or data validation fails, or if
+            a covariate name collides with a reserved structural term name or
+            duplicates another covariate.
 
         Examples
         --------
@@ -464,6 +472,22 @@ class DifferenceInDifferences:
             dt = working_data["_treat_time"].values.astype(float)
         else:
             dt = d * t
+
+        # Reject covariate names that collide with reserved structural terms.
+        # Covariate names are appended verbatim to var_names below and zipped
+        # into coef_dict, so a covariate named like a structural term would
+        # silently overwrite that coefficient (dict last-write-wins). The
+        # reserved set covers the intercept, treatment/time indicators, the
+        # interaction, the internal _treat_time working column, and any
+        # fixed-effect dummy names (derived from the SAME get_dummies call used
+        # to build them below, so the names match exactly).
+        _reserved = {"const", treatment, time, f"{treatment}:{time}", "_treat_time"}
+        if fixed_effects:
+            for fe in fixed_effects:
+                _reserved.update(
+                    pd.get_dummies(working_data[fe], prefix=fe, drop_first=True).columns
+                )
+        validate_covariate_names(covariates, _reserved, estimator="DifferenceInDifferences")
 
         # Build design matrix
         X = np.column_stack([np.ones(len(y)), d, t, dt])
@@ -1244,6 +1268,12 @@ class MultiPeriodDiD(DifferenceInDifferences):
             All other periods are treated as pre-treatment.
         covariates : list, optional
             List of covariate column names to include as linear controls.
+            Names must not collide with reserved structural terms (``const``,
+            the treatment column name, ``period_{p}`` dummies, the
+            ``{treatment}:period_{p}`` interactions, fixed-effect dummy names, or
+            internal working columns) and must be unique; a collision or
+            duplicate raises ``ValueError`` (it would otherwise silently
+            overwrite a structural coefficient).
         fixed_effects : list, optional
             List of categorical column names to include as fixed effects.
         absorb : list, optional
@@ -1271,7 +1301,9 @@ class MultiPeriodDiD(DifferenceInDifferences):
         Raises
         ------
         ValueError
-            If required parameters are missing or data validation fails.
+            If required parameters are missing or data validation fails, or if
+            a covariate name collides with a reserved structural term name or
+            duplicates another covariate.
         """
         # Fall back to analytical inference if wild bootstrap requested
         # (must happen before _resolve_survey_for_fit which rejects bootstrap+survey).
@@ -1566,6 +1598,27 @@ class MultiPeriodDiD(DifferenceInDifferences):
         else:
             d = working_data[treatment].values.astype(float)
         t = working_data[time].values
+
+        # Reject covariate names that collide with reserved structural terms.
+        # Covariates are appended verbatim to var_names below and zipped into
+        # coef_dict, so a covariate named like a structural term (intercept,
+        # treatment, a period dummy, a treatment-period interaction, an internal
+        # _did_* working column, or a fixed-effect dummy) would silently
+        # overwrite that coefficient (dict last-write-wins). FE dummy names use
+        # the SAME get_dummies call (and fe==time skip) as the construction below.
+        _reserved = {"const", treatment, "_did_treatment"}
+        _reserved.update(f"period_{p}" for p in non_ref_periods)
+        _reserved.update(f"{treatment}:period_{p}" for p in non_ref_periods)
+        _reserved.update(f"_did_period_{p}" for p in non_ref_periods)
+        _reserved.update(f"_did_interact_{p}" for p in non_ref_periods)
+        if fixed_effects:
+            for fe in fixed_effects:
+                if fe == time:
+                    continue
+                _reserved.update(
+                    pd.get_dummies(working_data[fe], prefix=fe, drop_first=True).columns
+                )
+        validate_covariate_names(covariates, _reserved, estimator="MultiPeriodDiD")
 
         # Build design matrix
         # Start with intercept and treatment main effect

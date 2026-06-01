@@ -4,7 +4,7 @@ Utility functions for difference-in-differences estimation.
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -65,6 +65,73 @@ def validate_binary(arr: np.ndarray, name: str) -> None:
     unique_values = np.unique(arr[~np.isnan(arr)])
     if not np.all(np.isin(unique_values, [0, 1])):
         raise ValueError(f"{name} must be binary (0 or 1). " f"Found values: {unique_values}")
+
+
+def validate_covariate_names(
+    covariates: Optional[List[str]],
+    reserved_names: Iterable[str],
+    *,
+    estimator: str = "estimator",
+) -> None:
+    """
+    Validate that covariate column names do not collide with reserved
+    structural term names (and are not duplicated within ``covariates``).
+
+    Fitted coefficients are stored in a ``name -> value`` dict built by zipping
+    a variable-name list -- structural term names PLUS the user covariate column
+    names appended verbatim -- with the coefficient vector. A covariate whose
+    name equals a reserved structural name (the intercept ``const``, the
+    treatment/time indicators, the interaction term, period dummies,
+    fixed-effect dummies, or an internal working column) would silently
+    overwrite the structural coefficient (Python dict last-write-wins),
+    corrupting the result with no error. Duplicate names within ``covariates``
+    collapse to a single dict entry the same way.
+
+    The comparison is case-sensitive: column names and dict keys are
+    case-sensitive, so e.g. ``Const`` does not actually collide with ``const``
+    and is allowed.
+
+    Parameters
+    ----------
+    covariates : list of str or None
+        User-supplied covariate column names. ``None`` or empty is a no-op.
+    reserved_names : iterable of str
+        Reserved structural term names this estimator builds (estimator-specific).
+    estimator : str
+        Estimator name, used in the error message.
+
+    Raises
+    ------
+    ValueError
+        If a covariate name collides with a reserved structural name, or if
+        ``covariates`` contains duplicate names.
+    """
+    if not covariates:
+        return
+    reserved = set(reserved_names)
+    collisions = sorted({c for c in covariates if c in reserved})
+    if collisions:
+        raise ValueError(
+            f"{estimator}: covariate name(s) {collisions} collide with reserved "
+            f"structural term name(s). These names are used internally for the "
+            f"intercept, the treatment/time indicators, the interaction term, "
+            f"period dummies, fixed-effect dummies, or internal working columns, "
+            f"and a colliding covariate would silently overwrite the structural "
+            f"coefficient. Rename the covariate column(s). Reserved names for "
+            f"this fit: {sorted(reserved)}."
+        )
+    seen: set = set()
+    duplicates = []
+    for c in covariates:
+        if c in seen:
+            duplicates.append(c)
+        seen.add(c)
+    if duplicates:
+        raise ValueError(
+            f"{estimator}: duplicate covariate name(s) {sorted(set(duplicates))} "
+            f"in `covariates`. Each covariate maps to one coefficient; duplicates "
+            f"collapse to a single entry. Remove the duplicate(s)."
+        )
 
 
 def warn_if_not_converged(

@@ -29,6 +29,7 @@ from diff_diff.utils import (
     equivalence_test_trends,
     safe_inference,
     validate_binary,
+    validate_covariate_names,
 )
 
 # =============================================================================
@@ -1302,3 +1303,42 @@ class TestComputeSDIDEstimator:
         # Control DiD: 14 - 10 = 4
         # tau = 9 - 4 = 5
         assert abs(tau - 5.0) < 1e-6
+
+
+class TestValidateCovariateNames:
+    """Tests for validate_covariate_names (covariate/reserved-term collision guard)."""
+
+    def test_none_is_noop(self):
+        validate_covariate_names(None, {"const", "treated"})
+
+    def test_empty_is_noop(self):
+        validate_covariate_names([], {"const", "treated"})
+
+    def test_non_colliding_passes(self):
+        # Should not raise.
+        validate_covariate_names(["x1", "x2"], {"const", "treated", "treated:post"})
+
+    def test_collision_raises(self):
+        with pytest.raises(ValueError, match="collide"):
+            validate_covariate_names(["const"], {"const", "treated"})
+
+    def test_collision_lists_offender_and_estimator(self):
+        with pytest.raises(ValueError, match="MyEstimator") as exc:
+            validate_covariate_names(
+                ["age", "const"], {"const", "treated"}, estimator="MyEstimator"
+            )
+        # The offending name is reported (not the innocent one as a collision).
+        assert "const" in str(exc.value)
+
+    def test_case_sensitive_does_not_collide(self):
+        # Column names / dict keys are case-sensitive; "Const" != "const".
+        validate_covariate_names(["Const"], {"const", "treated"})
+
+    def test_duplicate_covariates_raise(self):
+        with pytest.raises(ValueError, match="duplicate"):
+            validate_covariate_names(["x1", "x1"], {"const"})
+
+    def test_duplicate_takes_precedence_only_when_no_collision(self):
+        # A name that both collides AND is duplicated reports the collision first.
+        with pytest.raises(ValueError, match="collide"):
+            validate_covariate_names(["const", "const"], {"const"})
