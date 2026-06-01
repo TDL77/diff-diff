@@ -510,6 +510,12 @@ class DifferenceInDifferences:
                     X = np.column_stack([X, dummies[col].values.astype(float)])
                     var_names.append(col)
 
+        # Reject any duplicate in the FINAL term list (e.g. a fixed-effect dummy
+        # colliding with a structural term) BEFORE the regression — so the fit is
+        # not wasted and no misleading multicollinearity warning is emitted ahead
+        # of the intended ValueError.
+        validate_design_term_names(var_names, estimator="DifferenceInDifferences")
+
         # Extract ATT index (coefficient on interaction term)
         att_idx = 3  # Index of interaction term
         att_var_name = f"{treatment}:{time}"
@@ -686,7 +692,6 @@ class DifferenceInDifferences:
         n_control = n_control_raw
 
         # Create coefficient dictionary
-        validate_design_term_names(var_names, estimator="DifferenceInDifferences")
         coef_dict = {name: coef for name, coef in zip(var_names, coefficients)}
 
         # Determine inference method and bootstrap info
@@ -1680,6 +1685,12 @@ class MultiPeriodDiD(DifferenceInDifferences):
                     X = np.column_stack([X, dummies[col].values.astype(float)])
                     var_names.append(col)
 
+        # Reject any duplicate in the FINAL term list (e.g. a fixed-effect dummy
+        # colliding with a structural period_{p} key) BEFORE the regression — so
+        # the fit is not wasted and no misleading multicollinearity warning is
+        # emitted ahead of the intended ValueError.
+        validate_design_term_names(var_names, estimator="MultiPeriodDiD")
+
         # Fit OLS using unified backend
         # Pass cluster_ids to solve_ols for proper vcov computation
         # This handles rank-deficient matrices by returning NaN for dropped columns
@@ -2038,11 +2049,8 @@ class MultiPeriodDiD(DifferenceInDifferences):
         n_treated = n_treated_raw
         n_control = n_control_raw
 
-        # Backstop: reject any duplicate in the FINAL term list (e.g. a
-        # fixed-effect dummy colliding with a structural `period_{p}` key)
-        # before it silently overwrites a coefficient in the dict below.
-        validate_design_term_names(var_names, estimator="MultiPeriodDiD")
-        # Create coefficient dictionary
+        # Create coefficient dictionary (var_names uniqueness already enforced
+        # before the fit above).
         coef_dict = {name: coef for name, coef in zip(var_names, coefficients)}
 
         # Store results
