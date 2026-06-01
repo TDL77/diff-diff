@@ -108,6 +108,8 @@ Synthetic Control Method
 
 - **Abadie, A., Diamond, A., & Hainmueller, J. (2015).** "Comparative Politics and the Synthetic Control Method." *American Journal of Political Science*, 59(2), 495-510. https://doi.org/10.1111/ajps.12116
 
+- **Firpo, S., & Possebom, V. (2018).** "Synthetic Control Method: Inference, Sensitivity Analysis and Confidence Sets." *Journal of Causal Inference*, 6(2), 20160026. https://doi.org/10.1515/jci-2016-0026
+
 Synthetic Difference-in-Differences
 -----------------------------------
 
