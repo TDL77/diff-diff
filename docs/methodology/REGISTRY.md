@@ -1974,7 +1974,7 @@ Convergence criterion: stop when objective decrease < min_decrease² (default mi
 
 ## SyntheticControl
 
-**Primary source:** [Abadie, A., Diamond, A., & Hainmueller, J. (2010). "Synthetic Control Methods for Comparative Case Studies: Estimating the Effect of California's Tobacco Control Program." *JASA*, 105(490), 493–505.](https://doi.org/10.1198/jasa.2009.ap08746) Method originates in Abadie & Gardeazabal (2003). Paper reviews on file: `docs/methodology/papers/abadie-diamond-hainmueller-2010-review.md` (primary), `...-2015-review.md`, `abadie-2021-review.md`, `chernozhukov-wuthrich-zhu-2021-review.md`.
+**Primary source:** [Abadie, A., Diamond, A., & Hainmueller, J. (2010). "Synthetic Control Methods for Comparative Case Studies: Estimating the Effect of California's Tobacco Control Program." *JASA*, 105(490), 493–505.](https://doi.org/10.1198/jasa.2009.ap08746) Method originates in Abadie & Gardeazabal (2003). Paper reviews on file: `docs/methodology/papers/abadie-diamond-hainmueller-2010-review.md` (primary), `...-2015-review.md`, `abadie-2021-review.md`, `chernozhukov-wuthrich-zhu-2021-review.md`, `firpo-possebom-2018-review.md` (inference: sensitivity analysis + confidence sets by test inversion).
 
 Classic synthetic control (donor/unit weights only) for a single treated unit, distinct from `SyntheticDiD` (Arkhangelsky et al. 2021), which adds time weights and ridge regularization. Equation (1) of ADH 2010 shows classic SCM **generalizes the TWFE/DiD model** (recovered when the factor loadings `λ_t` are constant in time).
 
