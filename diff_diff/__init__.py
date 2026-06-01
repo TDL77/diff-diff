@@ -298,7 +298,7 @@ ETWFE = WooldridgeDiD
 DCDH = ChaisemartinDHaultfoeuille
 HAD = HeterogeneousAdoptionDiD
 
-__version__ = "3.4.2"
+__version__ = "3.5.0"
 __all__ = [
     # Estimators
     "DifferenceInDifferences",
