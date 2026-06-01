@@ -63,6 +63,10 @@ class _SyntheticControlFitSnapshot:
     optimizer_options: Optional[Dict[str, Any]]
     inner_max_iter: int
     inner_min_decrease: float
+    # Training/validation split index for v_method="cv" (positional into pre_periods);
+    # None → len(pre_periods)//2 default. Carried so in-space/LOO/in-time placebo refits
+    # reproduce the same CV split as the treated fit.
+    v_cv_t0: Optional[int]
 
 
 @dataclass
@@ -101,10 +105,19 @@ class SyntheticControlResults:
         the interpretability floor (1e-6) are dropped.
     v_weights : dict
         Mapping ``{predictor_label: v}`` — the diagonal predictor-importance
-        matrix V, trace-normalized to sum to 1.
+        matrix V, trace-normalized to sum to 1. On the degenerate **single-donor**
+        path (one donor forces ``w=[1]``) V is unidentified — every V yields the same
+        synthetic — so ``v_weights`` is **uniform** for every ``v_method`` (including
+        ``cv`` / ``inverse_variance``), with a ``UserWarning`` emitted at fit time.
     predictor_balance : pandas.DataFrame
         Predictor-balance table: for each predictor, the treated value, the
-        synthetic value (donor-weighted), and the donor-pool mean.
+        synthetic value (donor-weighted), and the donor-pool mean. Under
+        ``v_method="cv"`` the reported ``donor_weights`` come from the ADH-2015 step-4
+        refit on the **validation-window** re-aggregated predictors, so the ``treated`` /
+        ``synthetic`` / ``donor_mean`` values are reported on that same validation-window
+        basis (each spec re-aggregated over ``pre[v_cv_t0:]``) — the row's ``predictor``
+        label remains the full spec identity, so it stays aligned with ``v_weights``. For
+        every other ``v_method`` the values are the full-pre-period predictor aggregates.
     gap_path : dict
         Mapping ``{period: gap}`` for ALL periods (pre periods carry the fit
         residual used for ``pre_rmspe``; post periods carry the effect path).
@@ -112,15 +125,24 @@ class SyntheticControlResults:
         Root mean squared prediction error over the pre-treatment periods (the
         primary fit diagnostic).
     mspe_v : float, optional
-        The outer-objective value (pre-period outcome MSPE of ``W*(V*)``),
-        populated only when the nested outer search actually runs; None on the
-        ``v_method="custom"`` path and on the degenerate single-donor path.
+        The outer-objective value of the selected ``V``: the **pre-period** outcome
+        MSPE of ``W*(V*)`` under ``v_method="nested"``, or the held-out
+        **validation-window** outcome MSPE under ``v_method="cv"`` (the CV selection
+        criterion). None when there is no outer search — the ``v_method="custom"``
+        and ``"inverse_variance"`` paths and the degenerate single-donor path. Not
+        comparable across ``v_method`` values (different objective windows).
     treated_unit : Any
         The treated unit's identifier.
     pre_periods, post_periods : list
         Calendar-sorted pre / post period values.
     v_method : str
-        ``"nested"`` (data-driven V) or ``"custom"`` (user-supplied V).
+        ``"nested"`` (data-driven V), ``"custom"`` (user-supplied V), ``"cv"``
+        (out-of-sample cross-validation V), or ``"inverse_variance"`` (closed-form
+        ``1/Var(X)`` V).
+    v_cv_t0 : int, optional
+        The training/validation split index actually used under ``v_method="cv"``
+        (the resolved value — equals ``n_pre_periods // 2`` when the constructor's
+        ``v_cv_t0`` was None). None for every other ``v_method``. Survives pickling.
     standardize : str
         ``"std"`` (per-row SD scaling) or ``"none"``.
     alpha : float
@@ -164,6 +186,7 @@ class SyntheticControlResults:
     standardize: str
     alpha: float = 0.05
     mspe_v: Optional[float] = None
+    v_cv_t0: Optional[int] = None
     survey_metadata: Optional[Any] = field(default=None)
     # In-space placebo permutation inference (Abadie-Diamond-Hainmueller 2010
     # Section 2.4), populated by ``in_space_placebo()``. ``rmspe_ratio`` (the
@@ -323,7 +346,12 @@ class SyntheticControlResults:
             f"{'Standardization:':<28} {self.standardize:>10}",
         ]
         if self.mspe_v is not None and np.isfinite(self.mspe_v):
-            lines.append(f"{'Outer-objective MSPE:':<28} {self.mspe_v:>10.6f}")
+            # Under cv, mspe_v is the held-out VALIDATION-window MSPE (the CV selection
+            # criterion), not the pre-period objective minimized on the nested path.
+            _mspe_label = "Validation MSPE:" if self.v_method == "cv" else "Outer-objective MSPE:"
+            lines.append(f"{_mspe_label:<28} {self.mspe_v:>10.6f}")
+        if self.v_method == "cv" and self.v_cv_t0 is not None:
+            lines.append(f"{'CV train/val split (t0):':<28} {self.v_cv_t0:>10d}")
 
         if self.survey_metadata is not None:
             lines.extend(_format_survey_block(self.survey_metadata, 75))
@@ -445,6 +473,7 @@ class SyntheticControlResults:
             "mspe_v": self.mspe_v,
             "treated_unit": self.treated_unit,
             "v_method": self.v_method,
+            "v_cv_t0": self.v_cv_t0,
             "standardize": self.standardize,
             # In-space placebo permutation inference. rmspe_ratio is set at fit;
             # placebo_p_value / n_placebos / n_failed stay at their no-inference
@@ -594,7 +623,7 @@ class SyntheticControlResults:
         Parameters
         ----------
         n_starts : int, optional
-            Override the multistart count for each placebo's nested V search.
+            Override the multistart count for each placebo's outer V search (nested/cv).
             Default None inherits the original fit's ``n_starts``. The placebo
             loop is the cost driver (one outer V search per donor); lower it for a
             faster, coarser scan.
@@ -757,10 +786,19 @@ class SyntheticControlResults:
             p_value = rank / (n_placebos + 1)
 
         if n_failed > 0:
+            cv_note = (
+                " Under v_method='cv' an excluded refit may instead be STRUCTURALLY "
+                "infeasible (the pseudo-treated unit's donor pool is indistinguishable in a "
+                "re-aggregated CV window) — remedied by adjusting the predictors, v_cv_t0, "
+                "or the donor pool, NOT inner_max_iter / n_starts."
+                if snap.v_method == "cv"
+                else ""
+            )
             warnings.warn(
-                f"{n_failed} of {n_donors} in-space placebos failed to converge "
-                "and were excluded from the permutation distribution; "
-                f"placebo_p_value uses the remaining {n_placebos}.",
+                f"{n_failed} of {n_donors} in-space placebos were excluded from the "
+                "permutation distribution (the refit did not reach a valid optimum — a "
+                "non-converged inner weight solve or outer V search); "
+                f"placebo_p_value uses the remaining {n_placebos}.{cv_note}",
                 UserWarning,
                 stacklevel=2,
             )
@@ -810,8 +848,8 @@ class SyntheticControlResults:
         Parameters
         ----------
         n_starts : int, optional
-            Override the multistart count for each leave-one-out refit's nested V
-            search. Default None inherits the original fit's ``n_starts``.
+            Override the multistart count for each leave-one-out refit's outer V
+            search (nested/cv). Default None inherits the original fit's ``n_starts``.
 
         Returns
         -------
@@ -950,10 +988,19 @@ class SyntheticControlResults:
         ordered = [baseline_row] + finite_rows + failed_rows
 
         if n_failed > 0:
+            cv_note = (
+                " Under v_method='cv' a 'failed' drop may instead be STRUCTURALLY "
+                "infeasible (the reduced donor pool is indistinguishable in a re-aggregated "
+                "CV window) — remedied by adjusting the predictors, v_cv_t0, or the donor "
+                "pool, NOT inner_max_iter / n_starts."
+                if snap.v_method == "cv"
+                else ""
+            )
             warnings.warn(
-                f"{n_failed} of {len(pos_donors)} leave-one-out refits failed to "
-                "converge and are reported with NaN metrics (status='failed'); the "
-                "ATT range uses the remaining refits.",
+                f"{n_failed} of {len(pos_donors)} leave-one-out refits were excluded with "
+                "NaN metrics (status='failed'; the refit did not reach a valid optimum — a "
+                "non-converged inner weight solve or outer V search); the ATT range uses "
+                f"the remaining refits.{cv_note}",
                 UserWarning,
                 stacklevel=2,
             )
@@ -1075,7 +1122,7 @@ class SyntheticControlResults:
             valid pre-date that is dimensionally infeasible (too few pre-fake periods, or
             all predictors dropped) yields a ``status="infeasible"`` row (no raise).
         n_starts : int, optional
-            Override the multistart count for each placebo refit's nested V search.
+            Override the multistart count for each placebo refit's outer V search (nested/cv).
             Default None inherits the original fit's ``n_starts``.
 
         Returns
@@ -1261,9 +1308,11 @@ class SyntheticControlResults:
             )
         if n_infeasible > 0:
             warnings.warn(
-                f"{n_infeasible} in-time placebo date(s) were dimensionally infeasible "
-                "(too few pre-fake periods or all predictors dropped) and are reported "
-                "with status='infeasible' (NaN metrics).",
+                f"{n_infeasible} in-time placebo date(s) were structurally infeasible "
+                "(too few pre-fake periods, all predictors dropped, or — under "
+                "v_method='cv' — a kept predictor no longer spans both windows, or a "
+                "re-aggregated window loses cross-donor variation, after truncation) and "
+                "are reported with status='infeasible' (NaN metrics).",
                 UserWarning,
                 stacklevel=2,
             )

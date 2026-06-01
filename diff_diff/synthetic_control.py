@@ -9,9 +9,11 @@ Gardeazabal (2003).
 A single treated unit's counterfactual is built as a convex combination of
 "donor" (never-treated) units. Donor weights ``W*(V)`` solve a simplex-constrained
 weighted least-squares fit of the treated unit's predictors; the predictor-importance
-matrix ``V`` (diagonal, PSD) is either chosen data-driven by minimizing pre-period
-outcome MSPE ("nested") or supplied by the user ("custom"). The treatment-effect
-path is the gap ``α̂_1t = Y_1t − Σ_j w_j · Y_jt`` over the post periods.
+matrix ``V`` (diagonal, PSD) is chosen data-driven by minimizing pre-period outcome MSPE
+("nested"), by out-of-sample cross-validation ("cv", split at ``v_cv_t0``), or by the
+closed-form inverse-variance heuristic ("inverse_variance"), or supplied by the user
+("custom"). The treatment-effect path is the gap ``α̂_1t = Y_1t − Σ_j w_j · Y_jt`` over
+the post periods.
 
 Distinct from :class:`~diff_diff.SyntheticDiD` (Arkhangelsky et al. 2021), which adds
 time weights and ridge regularization: classic SCM uses **donor weights only** and a
@@ -80,15 +82,28 @@ class SyntheticControl:
 
     Parameters
     ----------
-    v_method : {"nested", "custom"}, default "nested"
+    v_method : {"nested", "custom", "cv", "inverse_variance"}, default "nested"
         How the predictor-importance matrix V is chosen. ``"nested"`` selects V
         data-driven by minimizing the pre-period outcome MSPE of ``W*(V)``
         (ADH 2010 §2.3). ``"custom"`` uses the user-supplied ``custom_v`` and
-        skips the outer search.
+        skips the outer search. ``"cv"`` selects V by out-of-sample
+        cross-validation (ADH 2015 §; Abadie 2021 Eq. 9): the pre-period is split
+        at ``v_cv_t0`` into a training and a validation window; V is chosen to
+        minimize the validation-window outcome MSPE of the training-fit weights,
+        then the final weights are re-estimated on the validation-window
+        predictors. ``"inverse_variance"`` uses the closed-form
+        ``v_h = 1/Var(X_{h·})`` (Abadie 2021 §3.2(a); variance over donors+treated),
+        applied to the RAW predictors so the effective objective is the
+        unit-variance-rescaled ``Σ_h diff_h²/Var_h`` — no search, deterministic. Note
+        this rescaling *is* what ``standardize="std"`` does, so the ``standardize``
+        setting does not compose with it (equivalent to uniform V on standardized
+        predictors); applying ``1/Var`` on already-standardized rows would
+        double-rescale to ``Σ_h diff_h²/Var_h²``.
     custom_v : array-like, optional
         Diagonal of V (length = number of predictors). Required iff
-        ``v_method="custom"``; must be None when ``v_method="nested"``. Must be
-        finite and non-negative; trace-normalized internally.
+        ``v_method="custom"``; must be None for every other ``v_method``
+        (``nested`` / ``cv`` / ``inverse_variance``). Must be finite and
+        non-negative; trace-normalized internally.
     optimizer_options : dict, optional
         Extra options merged into every ``scipy.optimize.minimize`` call in the
         outer V search (e.g. ``maxiter``, ``xatol``, ``fatol``).
@@ -112,6 +127,12 @@ class SyntheticControl:
         Significance level recorded for downstream (placebo) inference.
     seed : int, optional
         Seed for the multistart random (Dirichlet) starting points.
+    v_cv_t0 : int, optional
+        Training/validation split index for ``v_method="cv"`` only (positional
+        into the pre-periods: training = ``pre[:v_cv_t0]``, validation =
+        ``pre[v_cv_t0:]``). Must leave at least 1 training and 1 validation
+        pre-period. Default None → ``len(pre_periods) // 2`` (Abadie 2021's
+        ``t0 = T0/2``). Must be None unless ``v_method="cv"``.
     """
 
     def __init__(
@@ -125,6 +146,7 @@ class SyntheticControl:
         standardize: str = "std",
         alpha: float = 0.05,
         seed: Optional[int] = None,
+        v_cv_t0: Optional[int] = None,
     ):
         self.v_method = v_method
         self.custom_v = custom_v
@@ -135,6 +157,7 @@ class SyntheticControl:
         self.standardize = standardize
         self.alpha = alpha
         self.seed = seed
+        self.v_cv_t0 = v_cv_t0
 
         self._validate_config()
 
@@ -148,8 +171,11 @@ class SyntheticControl:
 
     def _validate_config(self) -> None:
         """Validate hyperparameters; shared by ``__init__`` and ``set_params``."""
-        if self.v_method not in ("nested", "custom"):
-            raise ValueError(f"v_method must be one of ('nested', 'custom'), got {self.v_method!r}")
+        if self.v_method not in ("nested", "custom", "cv", "inverse_variance"):
+            raise ValueError(
+                "v_method must be one of ('nested', 'custom', 'cv', 'inverse_variance'), "
+                f"got {self.v_method!r}"
+            )
         if self.standardize not in ("std", "none"):
             raise ValueError(
                 f"standardize must be one of ('std', 'none'), got {self.standardize!r}"
@@ -157,9 +183,9 @@ class SyntheticControl:
         # custom_v cross-field rules — fail-closed, never silently ignore.
         if self.v_method == "custom" and self.custom_v is None:
             raise ValueError("custom_v is required when v_method='custom'.")
-        if self.v_method == "nested" and self.custom_v is not None:
+        if self.v_method != "custom" and self.custom_v is not None:
             raise ValueError(
-                "custom_v must be None when v_method='nested' "
+                f"custom_v must be None when v_method={self.v_method!r} "
                 "(it would be silently ignored otherwise)."
             )
         if self.custom_v is not None:
@@ -184,6 +210,23 @@ class SyntheticControl:
             )
         if not (0 < self.alpha < 1):
             raise ValueError(f"alpha must be in (0, 1), got {self.alpha!r}")
+        # v_cv_t0 is meaningful ONLY for v_method="cv" — fail closed (never silently
+        # ignore). The full range check (1 <= t0 <= n_pre-1) needs the fitted pre-period
+        # count and is enforced in fit(); here we validate type/positivity + the
+        # cross-field rule. (bool is an int subclass but is rejected by the < 1 path only
+        # for False; treat True/False as invalid via the explicit bool guard.)
+        if self.v_cv_t0 is not None:
+            if self.v_method != "cv":
+                raise ValueError(
+                    "v_cv_t0 is only valid when v_method='cv' "
+                    f"(got v_method={self.v_method!r}); leave v_cv_t0=None otherwise."
+                )
+            if isinstance(self.v_cv_t0, bool) or not isinstance(self.v_cv_t0, (int, np.integer)):
+                raise ValueError(
+                    f"v_cv_t0 must be a positive integer or None, got {self.v_cv_t0!r}"
+                )
+            if self.v_cv_t0 < 1:
+                raise ValueError(f"v_cv_t0 must be >= 1, got {self.v_cv_t0!r}")
 
     def get_params(self) -> Dict[str, Any]:
         """Get estimator parameters."""
@@ -197,6 +240,7 @@ class SyntheticControl:
             "standardize": self.standardize,
             "alpha": self.alpha,
             "seed": self.seed,
+            "v_cv_t0": self.v_cv_t0,
         }
 
     def set_params(self, **params) -> "SyntheticControl":
@@ -385,10 +429,18 @@ class SyntheticControl:
                 "unit or a donor over their selected periods. Restrict predictor_window / "
                 "special_predictors periods to where the variable is observed."
             )
-        X1s, X0s, _ = _standardize(X1, X0, self.standardize)
-
-        k = X1s.shape[0]
+        # Standardized predictors feed the nested / custom paths. inverse_variance applies
+        # 1/Var to the RAW predictors (standardization would double-rescale to 1/Var²); cv
+        # re-standardizes each window separately inside _outer_solve_V_cv (ADH runs a
+        # separate dataprep per window). Both bind X1s/X0s to the raw matrices here so they
+        # never trigger _standardize's (irrelevant) full-pre zero-variance-row warning on a
+        # path that does not use the full-pre standardized matrices.
+        k = X1.shape[0]
         J = len(donor_ids)
+        if self.v_method in ("inverse_variance", "cv"):
+            X1s, X0s = X1, X0
+        else:
+            X1s, X0s, _ = _standardize(X1, X0, self.standardize)
 
         # --- solve for V and donor weights ---
         # mspe_v is the OUTER-objective value; it is populated only when a nested V
@@ -397,21 +449,112 @@ class SyntheticControl:
         # ``outer_converged`` tracks whether the nested V search reached an optimum
         # (trivially True when there is no outer search: custom V or a single donor).
         outer_converged = True
+        # The RESOLVED cv train/validation split actually used (None unless v_method="cv");
+        # surfaced on the Results object as public, pickle-surviving metadata.
+        resolved_v_cv_t0: Optional[int] = None
+        # Resolve + validate the cv split and the cv predictor precondition UP FRONT, before
+        # the single-donor / solve dispatch, so an invalid v_cv_t0 or predictor configuration
+        # fails closed and v_cv_t0 is surfaced consistently even on the degenerate J==1 path
+        # (where the V search is skipped — the single donor forces w=[1] regardless).
+        if self.v_method == "cv":
+            n_pre = len(pre_periods)
+            if n_pre < 2:
+                raise ValueError(
+                    f"v_method='cv' requires at least 2 pre-treatment periods (got {n_pre}) "
+                    "to form a training and a validation window."
+                )
+            t0 = self.v_cv_t0 if self.v_cv_t0 is not None else n_pre // 2
+            if not (1 <= t0 <= n_pre - 1):
+                raise ValueError(
+                    f"v_cv_t0={t0} is out of range; it must leave >=1 training and >=1 "
+                    f"validation pre-period (1 <= v_cv_t0 <= {n_pre - 1})."
+                )
+            _, _, all_spanning = _cv_window_status(specs, pre_periods, t0)
+            if not all_spanning:
+                # PRECONDITION (identification): faithful per-window re-aggregation needs
+                # every predictor measurable on BOTH windows — the training-window fit
+                # (steps 2-3) AND the validation-window step-4 refit. A predictor present
+                # in only one window cannot be re-aggregated on the other, so its V weight
+                # would be unidentified. The default per-period outcome lags are
+                # single-period and live in one window only, so they violate this.
+                raise ValueError(
+                    "v_method='cv' requires every predictor to span BOTH the training "
+                    "window (pre[:v_cv_t0]) and the validation window (pre[v_cv_t0:]) so it "
+                    "can be re-aggregated on each (ADH 2015 cross-validation re-measures "
+                    "each predictor per window). At least one predictor is observed in only "
+                    "one window. The default per-period outcome lags are single-period and "
+                    "cannot span; pass covariate `predictors` or multi-period "
+                    "`special_predictors` that cover both windows (or adjust `v_cv_t0`)."
+                )
+            if not _cv_windows_have_variation(
+                pivots, specs, treated_id, donor_ids, pre_periods, t0
+            ):
+                # IDENTIFICATION (fail-closed): if a window's re-aggregated predictors are
+                # constant ACROSS DONORS (all donor columns identical), X0·W is constant in
+                # W, so the inner solve's objective is flat and returns arbitrary weights
+                # reported as converged. Raise rather than return an arbitrary ATT. (Donor
+                # distinguishability identifies W; treated-vs-donor variation does not.)
+                raise ValueError(
+                    "v_method='cv': a cross-validation window (pre[:v_cv_t0] or "
+                    "pre[v_cv_t0:]) has no variation ACROSS DONORS in ANY predictor after "
+                    "re-aggregation — every donor has identical predictors in that window, "
+                    "so X0·W is constant in W and the weight solve is unidentified (any "
+                    "donor weights fit it equally, even when the treated unit differs). "
+                    "Adjust `v_cv_t0`, the `predictors`/`special_predictors`, or the donor pool."
+                )
+            resolved_v_cv_t0 = t0
         if self.v_method == "custom":
             v = self._prepare_custom_v(k)
             w, converged = _inner_solve_W(X1s, X0s, v, self.inner_max_iter, self.inner_min_decrease)
         elif J == 1:
-            # Degenerate: a single donor forces w = [1.0]; V is irrelevant.
+            # Degenerate: a single donor forces w = [1.0], so the predictor-importance V is
+            # UNIDENTIFIED — every V yields the same synthetic — for EVERY v_method, cv and
+            # inverse_variance included (their selected / closed-form V would be inert). We
+            # report a uniform v_weights and leave mspe_v None, and warn. The donor weights /
+            # gap path / ATT do not depend on V here, so they are unaffected. This is the
+            # documented single-donor contract (REGISTRY §SyntheticControl).
             warnings.warn(
                 "Only one donor unit is available; the synthetic control is that "
-                "single donor (w = 1) and the V search is skipped. SCM is degenerate "
-                "with a single donor.",
+                "single donor (w = 1) and the V search is skipped (V is unidentified with "
+                "one donor), so v_weights is uniform regardless of v_method. SCM is "
+                "degenerate with a single donor.",
                 UserWarning,
                 stacklevel=2,
             )
             v = np.ones(k) / k
             w = np.array([1.0])
             converged = True
+        elif self.v_method == "inverse_variance":
+            # Closed-form V = 1/Var(X) (Abadie 2021 §3.2(a)); no outer search, so
+            # mspe_v stays None and outer_converged stays True. Apply V to the RAW
+            # (UNstandardized) predictors: inverse-variance weighting IS the unit-variance
+            # rescaling, so the effective objective is Σ_h diff_h²/Var_h (the paper's
+            # selector). Using the standardized X1s/X0s here would double-rescale to
+            # Σ_h diff_h²/Var_h² — hence the standardize pre-scaling is intentionally
+            # bypassed on this branch (equivalent to uniform V on standardized predictors).
+            v = _inverse_variance_v(X1, X0)
+            w, converged = _inner_solve_W(X1, X0, v, self.inner_max_iter, self.inner_min_decrease)
+        elif self.v_method == "cv":
+            # Out-of-sample CV V-selection (ADH 2015; Abadie 2021 t0=T0/2). The split and
+            # the predictor precondition were resolved/validated up front (above), so
+            # resolved_v_cv_t0 is a valid int here.
+            assert resolved_v_cv_t0 is not None
+            v, w, converged, mspe_v, outer_converged = _outer_solve_V_cv(
+                pivots,
+                specs,
+                treated_id,
+                donor_ids,
+                Z1,
+                Z0,
+                pre_periods,
+                resolved_v_cv_t0,
+                self.n_starts,
+                self.seed,
+                self.optimizer_options,
+                self.inner_max_iter,
+                self.inner_min_decrease,
+                self.standardize,
+            )
         else:
             v, w, converged, mspe_v, outer_converged = _outer_solve_V(
                 X1,
@@ -471,12 +614,26 @@ class SyntheticControl:
         # --- reporting structures ---
         donor_weights = {donor_ids[j]: float(w[j]) for j in range(J) if w[j] > _MIN_REPORT_WEIGHT}
         v_weights = {labels[i]: float(v[i]) for i in range(k)}
-        synthetic_X = X0 @ w
-        donor_mean = X0.mean(axis=1)
+        # Predictor-balance basis: under cv the reported donor_weights come from the
+        # ADH-2015 step-4 refit on the VALIDATION-window re-aggregated predictors, so the
+        # balance table is reported on that same basis — making the public surface
+        # internally consistent (v_weights + this balance reproduce donor_weights). Every
+        # other V method fits on the full-pre predictors and reports balance there.
+        if self.v_method == "cv":
+            assert resolved_v_cv_t0 is not None
+            bal_specs = cast(
+                List[_PredictorSpec],
+                _truncate_specs_to_window(specs, set(pre_periods[resolved_v_cv_t0:])),
+            )
+            Xb1, Xb0, _ = _build_predictor_matrix(pivots, bal_specs, treated_id, donor_ids)
+        else:
+            Xb1, Xb0 = X1, X0
+        synthetic_X = Xb0 @ w
+        donor_mean = Xb0.mean(axis=1)
         predictor_balance = pd.DataFrame(
             {
                 "predictor": labels,
-                "treated": X1,
+                "treated": Xb1,
                 "synthetic": synthetic_X,
                 "donor_mean": donor_mean,
             }
@@ -504,6 +661,7 @@ class SyntheticControl:
             standardize=self.standardize,
             alpha=self.alpha,
             mspe_v=mspe_v,
+            v_cv_t0=resolved_v_cv_t0,
             rmspe_ratio=rmspe_ratio,
         )
         # Retain the panel state needed to refit each donor as a pseudo-treated
@@ -539,6 +697,7 @@ class SyntheticControl:
             ),
             inner_max_iter=self.inner_max_iter,
             inner_min_decrease=self.inner_min_decrease,
+            v_cv_t0=self.v_cv_t0,
         )
         # Persist whether the treated unit's own fit reached a valid optimum — both
         # the inner Frank-Wolfe weight solve AND (on the nested path) the outer V
@@ -574,7 +733,8 @@ def synthetic_control(
     """
     Convenience function for classic synthetic control estimation.
 
-    Constructor-only keyword arguments (``v_method``, ``custom_v``, ``n_starts``,
+    Constructor-only keyword arguments (``v_method`` — ``"nested"`` / ``"custom"`` /
+    ``"cv"`` / ``"inverse_variance"`` — ``custom_v``, ``v_cv_t0``, ``n_starts``,
     ``standardize``, ``alpha``, ``seed``, ``optimizer_options``,
     ``inner_max_iter``, ``inner_min_decrease``) and ``fit`` keyword arguments
     (``post_periods``, ``treated_unit``, ``predictors``, ``special_predictors``,
@@ -929,6 +1089,47 @@ def _standardize(
     return X1s, X0s, divisor
 
 
+def _inverse_variance_v(X1: np.ndarray, X0: np.ndarray) -> np.ndarray:
+    """Closed-form inverse-variance predictor importance ``v_h = 1/Var(X_{h·})``.
+
+    Abadie (2021) §3.2(a). Variance is taken over donors+treated on the
+    UNSTANDARDIZED predictors ``X1``/``X0``. The caller applies this V to the RAW
+    predictors (NOT the standardized ``X1s``/``X0s``): inverse-variance weighting IS
+    the unit-variance rescaling, so the effective objective is ``Σ_h diff_h²/Var_h``;
+    applying it to already-standardized rows would double-rescale to
+    ``Σ_h diff_h²/Var_h²``. The inverse is **exact** for every strictly-positive
+    variance (``1/Var_h``, no flooring of small-but-positive variances — flooring would
+    distort the relative weights of rows with tiny unequal variances and break the
+    documented closed form). Special handling is reserved for **non-positive** variance:
+    a zero-variance predictor row (no cross-unit information) contributes 0 weight,
+    matching the inverse-variance multistart seed in ``_v_starts``. If EVERY row is
+    zero-variance — or, in the pathological case of a positive variance so tiny that
+    ``1/Var_h`` overflows to a non-finite total — the result falls back to uniform V
+    (with a ``UserWarning``). Trace-normalized to sum to 1 (``W*`` is invariant to V's
+    scale; this just matches ``_prepare_custom_v``).
+    """
+    k = X1.shape[0]
+    combined = np.column_stack([X0, X1.reshape(-1, 1)])
+    row_var = np.var(combined, axis=1, ddof=1)
+    # Exact 1/Var on the strictly-positive rows only (mask the division so a zero-variance
+    # row neither divides by zero nor gets clipped); non-positive rows get 0 weight.
+    inv = np.zeros(k)
+    pos = row_var > 0
+    inv[pos] = 1.0 / row_var[pos]
+    total = float(np.sum(inv))
+    if total <= 0 or not np.isfinite(total):
+        warnings.warn(
+            "inverse_variance V: no usable predictor variance across donors+treated "
+            "(every row is zero-variance, or a positive variance is so tiny that 1/Var "
+            "overflows), so there is no information to weight predictors; falling back to "
+            "uniform V.",
+            UserWarning,
+            stacklevel=2,
+        )
+        return np.ones(k) / k
+    return inv / total
+
+
 def _inner_solve_W(
     X1s: np.ndarray,
     X0s: np.ndarray,
@@ -1196,6 +1397,341 @@ def _outer_solve_V(
     return v_star, w_star, converged, mspe, outer_converged
 
 
+def _truncate_specs_to_window(
+    specs: List["_PredictorSpec"], window: set
+) -> List[Optional["_PredictorSpec"]]:
+    """Re-aggregate each predictor spec over a sub-window of the pre-period.
+
+    Returns a list parallel to ``specs`` whose entry ``i`` is ``specs[i]`` with its
+    ``periods`` intersected with ``window`` (so the spec's op — mean/sum/identity — then
+    recomputes over only those periods), or ``None`` where the spec has NO period in
+    ``window``. RE-aggregating (recomputing the aggregate over the window's periods) is
+    the faithful ADH-2015 cross-validation operation — a separate ``dataprep`` per
+    window — as opposed to masking a fixed full-pre aggregate in/out (which cannot make
+    a spanning predictor out-of-sample, since the full-pre value already bakes in the
+    validation-window observations).
+    """
+    out: List[Optional["_PredictorSpec"]] = []
+    for spec in specs:
+        kept = [p for p in spec.periods if p in window]
+        out.append(replace(spec, periods=kept) if kept else None)
+    return out
+
+
+def _cv_window_status(
+    specs: List["_PredictorSpec"], pre_periods: List[Any], t0: int
+) -> Tuple[bool, bool, bool]:
+    """Classify cv predictor coverage at the positional split ``t0``.
+
+    Returns ``(has_training, has_validation, all_spanning)`` over the spec set, where a
+    spec is *training*-active iff any of its periods lie in ``pre[:t0]`` and
+    *validation*-active iff any lie in ``pre[t0:]``:
+
+    - ``has_training`` / ``has_validation``: at least one spec is active in that window.
+    - ``all_spanning``: EVERY spec is active in BOTH windows — the cv identification
+      precondition for faithful per-window re-aggregation. Each predictor can then be
+      re-measured on the training window for the V-search fit AND on the validation
+      window for the step-4 refit, so the cross-validated ``V*`` is fully identified and
+      drives both fits with no zeroed coordinate. This holds for ADH-2015's shared
+      covariate / multi-period special predictors (which span the windows) but NOT for
+      the window-specific default per-period outcome lags (each lives in one window).
+    """
+    tr_set = set(pre_periods[:t0])
+    va_set = set(pre_periods[t0:])
+    has_tr = has_va = False
+    all_spanning = True
+    for s in specs:
+        in_tr = any(p in tr_set for p in s.periods)
+        in_va = any(p in va_set for p in s.periods)
+        has_tr = has_tr or in_tr
+        has_va = has_va or in_va
+        if not (in_tr and in_va):
+            all_spanning = False
+    return has_tr, has_va, all_spanning
+
+
+def _window_has_donor_variation(X0w: np.ndarray) -> bool:
+    """True iff at least one predictor row varies ACROSS DONORS in this window.
+
+    SCM weights are identified by the DONORS being distinguishable: ``X0·W`` is a convex
+    combination of the donor columns, so if every predictor row is constant across donors
+    (all donor columns identical) then ``X0·W`` is the same for every simplex ``W`` and the
+    weight solve is unidentified — ``_inner_solve_W`` returns arbitrary (tie-broken) weights
+    while reporting convergence, REGARDLESS of whether the treated unit differs (the treated
+    unit is the matching target, not part of W's identification). So this checks donor-side
+    variance only, NOT treated-vs-donor variance. ``_standardize`` merely *warns* on
+    zero-variance rows, so cv needs this as an explicit fail-closed gate. A single donor
+    (``J < 2``) forces ``W=[1]`` and is handled by the J==1 short-circuit, so it is treated
+    as identified here (and avoids a ddof=1 variance over one column).
+    """
+    if X0w.shape[1] < 2:
+        return True
+    return bool(np.any(np.var(X0w, axis=1, ddof=1) > 0))
+
+
+def _cv_windows_have_variation(
+    pivots: Dict[str, pd.DataFrame],
+    specs: List["_PredictorSpec"],
+    treated_id: Any,
+    donor_ids: List[Any],
+    pre_periods: List[Any],
+    t0: int,
+) -> bool:
+    """True iff BOTH cv windows carry identifying cross-DONOR predictor variation.
+
+    For each window, re-aggregate the specs over it and check that at least one row varies
+    across donors (see ``_window_has_donor_variation``). A window with no such variation
+    leaves the weights unidentified, so the CV fit must fail closed (headline ``ValueError``;
+    placebo / backdated refit dropped or marked infeasible) rather than feed arbitrary
+    weights into the ATT or the placebo reference set.
+    """
+    for window in (set(pre_periods[:t0]), set(pre_periods[t0:])):
+        wspecs = [s for s in _truncate_specs_to_window(specs, window) if s is not None]
+        if not wspecs:
+            return False
+        _, X0w, _ = _build_predictor_matrix(pivots, wspecs, treated_id, donor_ids)
+        if not _window_has_donor_variation(X0w):
+            return False
+    return True
+
+
+def _outer_solve_V_cv(
+    pivots: Dict[str, pd.DataFrame],
+    specs: List["_PredictorSpec"],
+    treated_id: Any,
+    donor_ids: List[Any],
+    Z1: np.ndarray,
+    Z0: np.ndarray,
+    pre_periods: List[Any],
+    t0: int,
+    n_starts: int,
+    seed: Optional[int],
+    optimizer_options: Optional[Dict[str, Any]],
+    inner_max_iter: int,
+    inner_min_decrease: float,
+    standardize: str,
+) -> Tuple[np.ndarray, np.ndarray, bool, float, bool]:
+    """Out-of-sample cross-validation V selection (ADH 2015 §; Abadie 2021 Eq. 9).
+
+    Faithful per-window re-aggregation. The pre-period is split positionally at ``t0``
+    into a training window ``pre[:t0]`` and a validation window ``pre[t0:]``. Each
+    predictor spec is RE-AGGREGATED over each window — its op (mean/sum/identity) is
+    recomputed over only the periods that fall in that window — exactly as ADH-2015's
+    cross-validation re-runs ``dataprep`` separately on each window. The predictor
+    dimension ``k`` is preserved: re-aggregation changes each row's VALUES per window,
+    not the number of rows, so V stays ``k``-dimensional throughout.
+
+    - Steps 2-3 (V-search): for each candidate V, fit the training weights on the
+      TRAINING-window re-aggregated predictors and rank V by the held-out
+      validation-window outcome MSPE ``mean((Z1[t0:] - Z0[t0:]@w)**2)`` -> ``V*``.
+      Because each predictor is re-measured on the training window only, the V-search is
+      genuinely out-of-sample for ALL predictor types (a spanning predictor's
+      validation-window observations never enter the training fit) — the property that
+      masking a fixed full-pre aggregate could not deliver.
+    - Step 4 (final weights): re-estimate ``W* = W(V*)`` on the VALIDATION-window
+      re-aggregated predictors (ADH-2015 "predictors from the last part of the
+      pre-period"). The same ``V*`` drives both fits with no zeroed coordinate, so the
+      reported ``v_weights`` (= V*) reproduce the reported ``donor_weights`` on the
+      validation-window predictors.
+
+    Each window's predictor matrix is standardized SEPARATELY (ADH runs a separate
+    ``dataprep`` per window; ``V*`` is predictor-importance applied in each window's own
+    scaled space). The caller (``fit`` / ``_truncate_snapshot_in_time``) enforces the
+    fully-spanning precondition (every spec observed in BOTH windows) before calling, so
+    every re-aggregated spec is non-empty; this guards defensively and fails closed
+    (non-converged sentinel) otherwise.
+
+    Returns ``(v_star, w_star, inner_converged, mspe_v, outer_converged)`` where
+    ``mspe_v`` is the step-3 validation-MSPE selection criterion at V* (the validation
+    MSPE of the TRAINING-window fit).
+    """
+    k = len(specs)
+    train_specs = _truncate_specs_to_window(specs, set(pre_periods[:t0]))
+    val_specs = _truncate_specs_to_window(specs, set(pre_periods[t0:]))
+    Z1_va = Z1[t0:]
+    Z0_va = Z0[t0:, :]
+
+    # Fail closed if any predictor is absent from a window (a non-fully-spanning spec set
+    # — e.g. an in-time-truncated placebo snapshot). The caller enforces the
+    # fully-spanning precondition up front for the headline fit and each placebo date;
+    # this guards the path defensively, returning a non-converged sentinel so the caller
+    # drops/raises rather than crashing on an empty predictor build.
+    if any(s is None for s in train_specs) or any(s is None for s in val_specs):
+        return np.ones(k) / k, np.zeros(len(donor_ids)), False, float("nan"), False
+    train_specs_c = cast(List["_PredictorSpec"], train_specs)
+    val_specs_c = cast(List["_PredictorSpec"], val_specs)
+
+    # Re-aggregate the predictors over each window and standardize each window SEPARATELY.
+    X1_tr, X0_tr, _ = _build_predictor_matrix(pivots, train_specs_c, treated_id, donor_ids)
+    X1_va, X0_va, _ = _build_predictor_matrix(pivots, val_specs_c, treated_id, donor_ids)
+
+    # Fail closed if a window has NO cross-DONOR predictor variation: the donor columns are
+    # then identical, so X0·W is constant in W, the inner solve's objective is flat, and it
+    # returns arbitrary weights while reporting convergence — silently corrupting the ATT
+    # (headline) or the placebo reference set. fit() raises up front for the headline; here
+    # we return the non-converged sentinel so a placebo refit is dropped (_placebo_fit_unit
+    # returns None) instead of entering the permutation rank. (Unit-specific: in-space
+    # placebos reassign the treated role and shrink the donor pool, so donor-distinguishability
+    # must be re-checked for each pseudo-treated unit, not just the headline.)
+    if not _window_has_donor_variation(X0_tr) or not _window_has_donor_variation(X0_va):
+        return np.ones(k) / k, np.zeros(len(donor_ids)), False, float("nan"), False
+
+    X1s_tr, X0s_tr, _ = _standardize(X1_tr, X0_tr, standardize)
+    X1s_va, X0s_va, _ = _standardize(X1_va, X0_va, standardize)
+
+    if k == 1:
+        # Single predictor: V is fixed; re-aggregated in each window (guarded non-empty).
+        v = np.array([1.0])
+        w_tr, conv_tr = _inner_solve_W(X1s_tr, X0s_tr, v, inner_max_iter, inner_min_decrease)
+        w_star, converged = _inner_solve_W(X1s_va, X0s_va, v, inner_max_iter, inner_min_decrease)
+        # mspe_v is Eq. 9's validation MSPE of the TRAINING-window fit, so it is only valid
+        # when that solve converged; if it truncates, fail closed (nan criterion + outer
+        # non-converged) so downstream placebo/LOO diagnostics do not run off an invalid CV
+        # criterion (there is no outer search here, so conv_tr IS the "search" convergence).
+        mspe_v = float(np.mean((Z1_va - Z0_va @ w_tr) ** 2)) if conv_tr else float("nan")
+        return v, w_star, converged, mspe_v, conv_tr
+
+    _st = {"total": 0, "nonconv": 0}
+    # Penalty bound on the VALIDATION window (the objective's window), so a truncated
+    # training fit can never win the argmin. Finite (np.inf floods scipy).
+    _vertex_mspe = [float(np.mean((Z1_va - Z0_va[:, j]) ** 2)) for j in range(Z0_va.shape[1])]
+    _penalty = 10.0 * (max(_vertex_mspe) + 1.0) if _vertex_mspe else 1.0
+
+    def objective(theta: np.ndarray) -> float:
+        v = _softmax(theta)
+        # Step 2: fit the training weights on the TRAINING-window re-aggregated predictors.
+        w, conv = _inner_solve_W(X1s_tr, X0s_tr, v, inner_max_iter, inner_min_decrease)
+        _st["total"] += 1
+        if not conv:
+            _st["nonconv"] += 1
+            return _penalty
+        # Step 3: rank V by the held-out validation-window OUTCOME MSPE.
+        return float(np.mean((Z1_va - Z0_va @ w) ** 2))
+
+    def _uniformity(theta: np.ndarray) -> float:
+        # Squared distance of V=softmax(theta) from uniform; smaller = more uniform.
+        v = _softmax(theta)
+        return float(np.sum((v - 1.0 / k) ** 2))
+
+    # Deterministic tie-break (Abadie 2021 fn. 7: the CV V* "need not be unique" and an
+    # implementation must pick a deterministic tie-break). Among candidates whose
+    # validation MSPE ties to tolerance, prefer the V closest to uniform — a principled,
+    # start-order-independent choice (the densest V among equally-good optima).
+    _tie_rtol, _tie_atol = 1e-9, 1e-12
+
+    def _is_better(
+        new_fun: float,
+        new_x: np.ndarray,
+        new_success: bool,
+        cur_fun: float,
+        cur_x: Optional[np.ndarray],
+        cur_success: bool,
+    ) -> bool:
+        if cur_x is None:
+            return True
+        tol = _tie_atol + _tie_rtol * abs(cur_fun)
+        if new_fun < cur_fun - tol:
+            return True
+        if abs(new_fun - cur_fun) <= tol:
+            # Tie on the validation MSPE. Prefer a CONVERGED candidate over a non-converged
+            # one first — a success=False candidate must not displace a converged incumbent
+            # (which would spuriously flip outer_converged to False and drop the fit /
+            # placebos). Among EQUALLY-converged ties, prefer the V closest to uniform (the
+            # deterministic densest-optimum tie-break, Abadie 2021 fn. 7).
+            if new_success != cur_success:
+                return new_success
+            return _uniformity(new_x) < _uniformity(cur_x) - 1e-15
+        return False
+
+    nm_options = {"maxiter": 1000, "xatol": 1e-8, "fatol": 1e-8}
+    if optimizer_options:
+        nm_options.update(optimizer_options)
+    powell_options = dict(nm_options)
+    if "xatol" in powell_options:
+        powell_options["xtol"] = powell_options.pop("xatol")
+    if "fatol" in powell_options:
+        powell_options["ftol"] = powell_options.pop("fatol")
+
+    rng = np.random.default_rng(seed)
+    # Heuristic starts use the TRAINING-window matrices (the V-search fits there) scored
+    # on the validation outcomes (the CV criterion), so the univariate seed is aligned
+    # with the objective the search actually minimizes.
+    starts, start_total, start_nonconv = _v_starts(
+        k,
+        X1_tr,
+        X0_tr,
+        X1s_tr,
+        X0s_tr,
+        Z1_va,
+        Z0_va,
+        n_starts,
+        rng,
+        inner_max_iter,
+        inner_min_decrease,
+    )
+    _st["total"] += start_total
+    _st["nonconv"] += start_nonconv
+
+    best_x: Optional[np.ndarray] = None
+    best_fun = np.inf
+    best_success = False
+    for theta0 in starts:
+        res = minimize(objective, theta0, method="Nelder-Mead", options=nm_options)
+        if _is_better(float(res.fun), res.x, bool(res.success), best_fun, best_x, best_success):
+            best_fun = float(res.fun)
+            best_x = res.x
+            best_success = bool(res.success)
+
+    # ``starts`` is non-empty (always includes the uniform start) and the first
+    # iteration sets ``best_x`` via the ``cur_x is None`` guard, so it is non-None here.
+    assert best_x is not None
+    res_p = minimize(objective, best_x, method="Powell", options=powell_options)
+    if _is_better(float(res_p.fun), res_p.x, bool(res_p.success), best_fun, best_x, best_success):
+        best_fun = float(res_p.fun)
+        best_x = res_p.x
+        best_success = bool(res_p.success)
+    elif bool(res_p.success) and np.isclose(res_p.fun, best_fun, rtol=1e-5, atol=1e-8):
+        # Powell converged back AT the incumbent objective → validates it as an optimum
+        # (mirrors _outer_solve_V; a "success" at a strictly worse point must NOT flip
+        # best_success).
+        best_success = True
+    outer_converged = best_success
+
+    if not outer_converged:
+        warnings.warn(
+            "Outer CV V-search (Nelder-Mead / Powell) did not converge; the selected "
+            "predictor-importance matrix V (and the resulting donor weights / ATT) may "
+            "be sub-optimal. Increase optimizer_options['maxiter'] or n_starts.",
+            UserWarning,
+            stacklevel=3,
+        )
+    if _st["nonconv"] > 0:
+        warnings.warn(
+            f"Inner Frank-Wolfe did not converge on {_st['nonconv']} of {_st['total']} "
+            f"weight solves during CV V selection (inner_max_iter={inner_max_iter}); those "
+            "evaluations were excluded from V ranking, so the selected V / donor weights / "
+            "ATT may be sub-optimal. Increase inner_max_iter or relax inner_min_decrease.",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    assert best_x is not None  # set in the NM loop above; narrows past the Powell branch
+    v_star = _softmax(best_x)
+    # mspe_v = step-3 selection criterion at V* (validation MSPE of the TRAINING-window fit).
+    # It is Eq. 9's criterion only if the training solve converged; if it truncates (e.g.
+    # inner_max_iter too small), fail closed — nan criterion + outer non-converged — so the
+    # fit and downstream placebo/LOO diagnostics do not run off an invalid CV criterion.
+    w_tr, conv_tr = _inner_solve_W(X1s_tr, X0s_tr, v_star, inner_max_iter, inner_min_decrease)
+    if conv_tr:
+        mspe_v = float(np.mean((Z1_va - Z0_va @ w_tr) ** 2))
+    else:
+        mspe_v = float("nan")
+        outer_converged = False
+    # Step 4 reported weights: refit V* on the VALIDATION-window re-aggregated predictors.
+    w_star, converged = _inner_solve_W(X1s_va, X0s_va, v_star, inner_max_iter, inner_min_decrease)
+    return v_star, w_star, converged, mspe_v, outer_converged
+
+
 def _compute_gap_path(
     Y: pd.DataFrame,
     w: np.ndarray,
@@ -1269,7 +1805,13 @@ def _placebo_fit_unit(
     # treated+donor panel, so a donor reassigned as pseudo-treated has finite cells.
     if not (np.all(np.isfinite(X1)) and np.all(np.isfinite(X0))):
         return None
-    X1s, X0s, _ = _standardize(X1, X0, snap.standardize)
+    # inverse_variance applies 1/Var to the RAW predictors; cv re-standardizes each window
+    # separately inside _outer_solve_V_cv (mirrors fit()). Both skip the full-pre
+    # _standardize pass (unused on those paths) and its irrelevant zero-variance warning.
+    if snap.v_method in ("inverse_variance", "cv"):
+        X1s, X0s = X1, X0
+    else:
+        X1s, X0s, _ = _standardize(X1, X0, snap.standardize)
     Y = snap.pivots[snap.outcome]
     Z1 = Y.loc[snap.pre_periods, unit].to_numpy(dtype=float)
     Z0 = Y.loc[snap.pre_periods, donor_pool].to_numpy(dtype=float)
@@ -1288,6 +1830,40 @@ def _placebo_fit_unit(
         elif len(donor_pool) == 1:
             # Degenerate: a single donor forces w = [1.0]; V is irrelevant.
             w, converged = np.array([1.0]), True
+        elif snap.v_method == "inverse_variance":
+            # Recompute the closed-form V for THIS pseudo-treated unit's predictors,
+            # applied to the RAW predictors (deterministic; no outer search; the
+            # standardize pre-scaling is bypassed to avoid the 1/Var² double-rescale —
+            # see fit()). outer_converged stays True.
+            v = _inverse_variance_v(X1, X0)
+            w, converged = _inner_solve_W(X1, X0, v, snap.inner_max_iter, snap.inner_min_decrease)
+        elif snap.v_method == "cv":
+            # Reproduce the FULL per-window re-aggregation CV procedure for this
+            # pseudo-treated unit so placebos use the SAME estimator as the treated fit.
+            # The positional t0 split and fully-spanning precondition depend only on
+            # snap.specs / snap.pre_periods (NOT on which unit is treated), so a headline
+            # fit that satisfied fully-spanning satisfies it for every pseudo-treated unit;
+            # n_pre>=2 and t0 in range are likewise guaranteed (the headline snapshot was
+            # fit()-validated, and an in-time-truncated snapshot has >=2 pre-fake periods
+            # with an out-of-range pinned t0 nulled to the default).
+            n_pre = len(snap.pre_periods)
+            t0 = snap.v_cv_t0 if snap.v_cv_t0 is not None else n_pre // 2
+            _, w, converged, _, outer_converged = _outer_solve_V_cv(
+                snap.pivots,
+                snap.specs,
+                unit,
+                donor_pool,
+                Z1,
+                Z0,
+                snap.pre_periods,
+                t0,
+                n_starts,
+                snap.seed,
+                snap.optimizer_options,
+                snap.inner_max_iter,
+                snap.inner_min_decrease,
+                snap.standardize,
+            )
         else:
             _, w, converged, _, outer_converged = _outer_solve_V(
                 X1,
@@ -1389,6 +1965,33 @@ def _truncate_snapshot_in_time(
     # so return None (→ status="infeasible") rather than letting the refit "fail".
     if new_custom_v is not None and float(np.sum(new_custom_v)) <= 0.0:
         return None, dropped
+    # An explicitly pinned v_cv_t0 (v_method="cv") may exceed the truncated pre-fake
+    # window's valid range; null it to the //2 default for the placebo refit (the
+    # placebo is a robustness re-run, not the headline — an explicit v_cv_t0 is not
+    # preserved across in-time truncation). None already means "use the default".
+    new_v_cv_t0 = snap.v_cv_t0
+    if new_v_cv_t0 is not None and not (1 <= new_v_cv_t0 <= len(new_pre) - 1):
+        new_v_cv_t0 = None
+    # Under v_method="cv", in-time truncation can break the fully-spanning precondition
+    # even when the headline fit satisfied it: a spec may lose its training-window (or
+    # validation-window) periods to the truncation and stop spanning both windows. That is
+    # a STRUCTURAL infeasibility of the date (not a solver-convergence failure) — return
+    # None (→ status="infeasible") so it is not mislabeled "failed" with
+    # optimizer-remediation messaging. Uses the same fully-spanning precondition the
+    # headline fit enforces (over the kept, re-truncated specs at the truncated split).
+    if snap.v_method == "cv":
+        eff_t0 = new_v_cv_t0 if new_v_cv_t0 is not None else len(new_pre) // 2
+        _, _, all_spanning = _cv_window_status(kept_specs, new_pre, eff_t0)
+        if not all_spanning:
+            return None, dropped
+        # Truncation can also leave a window with NO cross-unit variation (its predictors
+        # become constant across treated+donors) even when fully-spanning still holds —
+        # another STRUCTURAL infeasibility of the date (unidentified weight solve), so mark
+        # it infeasible rather than letting the refit return arbitrary "converged" weights.
+        if not _cv_windows_have_variation(
+            snap.pivots, kept_specs, snap.treated_id, snap.donor_ids, new_pre, eff_t0
+        ):
+            return None, dropped
     snap_mod = replace(
         snap,
         specs=kept_specs,
@@ -1396,5 +1999,6 @@ def _truncate_snapshot_in_time(
         pre_periods=new_pre,
         post_periods=new_post,
         custom_v=new_custom_v,
+        v_cv_t0=new_v_cv_t0,
     )
     return snap_mod, dropped

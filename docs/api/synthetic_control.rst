@@ -7,8 +7,10 @@ Hainmueller 2010; originating in Abadie & Gardeazabal 2003).
 The treated unit's counterfactual is a convex combination of "donor" (never-treated)
 units. Donor weights ``W*(V)`` solve a simplex-constrained, predictor-importance-weighted
 least-squares fit of the treated unit's pre-period predictors; the diagonal
-predictor-importance matrix ``V`` is chosen either data-driven (minimizing pre-period
-outcome MSPE, ``v_method="nested"``) or supplied by the user (``v_method="custom"``). The
+predictor-importance matrix ``V`` is chosen data-driven (minimizing pre-period outcome
+MSPE, ``v_method="nested"``; out-of-sample cross-validation, ``v_method="cv"``; or
+closed-form inverse-variance, ``v_method="inverse_variance"``) or supplied by the user
+(``v_method="custom"``). The
 treatment-effect path is the gap :math:`\hat{\alpha}_{1t} = Y_{1t} - \sum_j w_j Y_{jt}`
 over the post periods.
 
@@ -120,8 +122,20 @@ order (the ordering matches R ``Synth::dataprep``), from:
 
 ``v_method="nested"`` selects the diagonal predictor-importance matrix ``V`` by minimizing
 the pre-period **outcome** MSPE of ``W*(V)`` over a multistart Nelder-Mead search with a
-derivative-free Powell polish. ``v_method="custom"`` takes a user-supplied ``custom_v``
-(one entry per predictor row, trace-normalized) and skips the outer search.
+derivative-free Powell polish. ``v_method="cv"`` selects ``V`` by **out-of-sample
+cross-validation** (Abadie-Diamond-Hainmueller 2015; Abadie 2021): the pre-period is split
+at ``v_cv_t0`` (default ``len(pre)//2``, i.e. ``t0 = T0/2``) into a training and a validation
+window; ``V`` is chosen to minimize the validation-window outcome MSPE of the training-fit
+weights, then the final weights are re-estimated on the validation-window predictors. Each
+predictor is **re-aggregated** over each window (a separate ``dataprep`` per window, as
+ADH 2015's CV does), so it must **span both windows** — the default per-period outcome lags
+(single-period) are rejected; pass spanning covariate / multi-period ``special_predictors``
+(see ``docs/methodology/REGISTRY.md`` §SyntheticControl).
+``v_method="inverse_variance"`` uses the closed-form ``v_h = 1/Var(X_h)`` (variance over
+donors+treated; no search), applied to the **raw** predictors — it intentionally bypasses
+``standardize`` (inverse-variance weighting *is* the unit-variance rescaling). ``v_method="custom"`` takes a user-supplied ``custom_v``
+(one entry per predictor row, trace-normalized) and skips the outer search. ``v_cv_t0``
+must be ``None`` unless ``v_method="cv"``.
 
 .. note::
 
@@ -206,7 +220,7 @@ Comparison with Synthetic DiD
      - None (level matching)
      - Simplex (double difference)
    * - Predictor-importance ``V``
-     - Nested / custom diagonal ``V``
+     - Nested / cv / inverse-variance / custom diagonal ``V``
      - No analog
    * - Inference
      - Placebo permutation (no analytical SE)
