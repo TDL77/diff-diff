@@ -871,6 +871,8 @@ def apply_token_budget(
 PRICING = {
     "gpt-5.4": (2.50, 15.00),
     "gpt-5.4-pro": (30.00, 180.00),
+    "gpt-5.5": (5.00, 30.00),
+    "gpt-5.5-pro": (30.00, 180.00),
     "gpt-4.1": (2.00, 8.00),
     "gpt-4.1-mini": (0.40, 1.60),
     "o3": (2.00, 8.00),
@@ -1140,7 +1142,7 @@ def compile_prompt(
 # ---------------------------------------------------------------------------
 
 ENDPOINT = "https://api.openai.com/v1/responses"
-DEFAULT_MODEL = "gpt-5.4"
+DEFAULT_MODEL = "gpt-5.5"
 DEFAULT_TIMEOUT = 300  # seconds
 REASONING_TIMEOUT = 900  # seconds
 DEFAULT_MAX_TOKENS = 16384
@@ -1149,13 +1151,13 @@ REASONING_MAX_TOKENS = 32768
 
 def _is_reasoning_model(model: str) -> bool:
     """Return True for models that use internal chain-of-thought reasoning."""
-    return model.startswith(("o1", "o3", "o4", "gpt-5.4")) or "-pro" in model
+    return model.startswith(("o1", "o3", "o4", "gpt-5.4", "gpt-5.5")) or "-pro" in model
 
 
 def _resolve_timeout(timeout: "int | None", model: str) -> int:
     """Auto-resolve omitted --timeout based on model class.
 
-    Reasoning models (o1/o3/o4/gpt-5.4/*-pro) get REASONING_TIMEOUT (900s).
+    Reasoning models (o1/o3/o4/gpt-5.4/gpt-5.5/*-pro) get REASONING_TIMEOUT (900s).
     Non-reasoning models get DEFAULT_TIMEOUT (300s).
     Explicit values are passed through unchanged.
     """
@@ -1321,7 +1323,7 @@ def _build_codex_cmd(
 ) -> "list[str]":
     """Construct the argv for `codex exec`.
 
-    Pinned to match the CI Codex action's invocation (gpt-5.4 + xhigh effort +
+    Pinned to match the CI Codex action's invocation (gpt-5.5 + xhigh effort +
     read-only sandbox) so local reviews give CI-equivalent quality.
 
     NOTE: the effort key MUST be `model_reasoning_effort`, not
@@ -1705,7 +1707,7 @@ def main() -> None:
         default=None,
         help=(
             f"HTTP request timeout in seconds (api backend only). If omitted, "
-            f"defaults to {REASONING_TIMEOUT} for reasoning models (gpt-5.4, "
+            f"defaults to {REASONING_TIMEOUT} for reasoning models (gpt-5.4/gpt-5.5, "
             f"*-pro, o1/o3/o4) and {DEFAULT_TIMEOUT} otherwise. Ignored under "
             f"--backend codex (codex manages its own time budget)."
         ),
