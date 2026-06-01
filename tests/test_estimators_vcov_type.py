@@ -2205,3 +2205,23 @@ class TestTWFECovariateNameCollision:
         # The within-transform path exposes only the ATT coefficient by design;
         # the covariate is NOT a dict key there (so there is no overwrite surface).
         assert set(r.coefficients.keys()) == {"ATT"}
+
+    def test_within_path_does_not_materialize_fe_dummies(self, monkeypatch):
+        # Regression: the within-transform (default hc1) path must NOT build full
+        # unit/time dummy matrices merely to reserve collision names — that would
+        # defeat its high-cardinality scaling contract. Reserved names come from
+        # fe_dummy_names (category levels only), so pd.get_dummies must never be
+        # called on this path.
+        df = self._panel_with("x1")
+
+        def _boom(*args, **kwargs):
+            raise AssertionError(
+                "pd.get_dummies must not be called on the within-transform path"
+            )
+
+        monkeypatch.setattr(pd, "get_dummies", _boom)
+        r = TwoWayFixedEffects().fit(
+            df, outcome="y", treatment="treated", time="time", unit="unit",
+            covariates=["x1"],
+        )
+        assert set(r.coefficients.keys()) == {"ATT"}

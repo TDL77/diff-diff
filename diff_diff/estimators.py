@@ -30,6 +30,7 @@ from diff_diff.results import DiDResults, MultiPeriodDiDResults, PeriodEffect
 from diff_diff.utils import (
     WildBootstrapResults,
     demean_by_group,
+    fe_dummy_names,
     safe_inference,
     validate_binary,
     validate_covariate_names,
@@ -480,14 +481,13 @@ class DifferenceInDifferences:
         # silently overwrite that coefficient (dict last-write-wins). The
         # reserved set covers the intercept, treatment/time indicators, the
         # interaction, the internal _treat_time working column, and any
-        # fixed-effect dummy names (derived from the SAME get_dummies call used
-        # to build them below, so the names match exactly).
+        # fixed-effect dummy names (derived via fe_dummy_names WITHOUT
+        # materializing the dummy matrix; names match the get_dummies build
+        # below exactly). validate_design_term_names re-checks the FINAL list.
         _reserved = {"const", treatment, time, f"{treatment}:{time}", "_treat_time"}
         if fixed_effects:
             for fe in fixed_effects:
-                _reserved.update(
-                    pd.get_dummies(working_data[fe], prefix=fe, drop_first=True).columns
-                )
+                _reserved.update(fe_dummy_names(working_data[fe], fe))
         validate_covariate_names(covariates, _reserved, estimator="DifferenceInDifferences")
 
         # Build design matrix
@@ -1606,8 +1606,10 @@ class MultiPeriodDiD(DifferenceInDifferences):
         # coef_dict, so a covariate named like a structural term (intercept,
         # treatment, a period dummy, a treatment-period interaction, an internal
         # _did_* working column, or a fixed-effect dummy) would silently
-        # overwrite that coefficient (dict last-write-wins). FE dummy names use
-        # the SAME get_dummies call (and fe==time skip) as the construction below.
+        # overwrite that coefficient (dict last-write-wins). FE dummy names are
+        # derived via fe_dummy_names (no dummy-matrix materialization), matching
+        # the construction below (and applying the same fe==time skip).
+        # validate_design_term_names re-checks the FINAL list before coef_dict.
         _reserved = {"const", treatment, "_did_treatment"}
         _reserved.update(f"period_{p}" for p in non_ref_periods)
         _reserved.update(f"{treatment}:period_{p}" for p in non_ref_periods)
@@ -1617,9 +1619,7 @@ class MultiPeriodDiD(DifferenceInDifferences):
             for fe in fixed_effects:
                 if fe == time:
                     continue
-                _reserved.update(
-                    pd.get_dummies(working_data[fe], prefix=fe, drop_first=True).columns
-                )
+                _reserved.update(fe_dummy_names(working_data[fe], fe))
         validate_covariate_names(covariates, _reserved, estimator="MultiPeriodDiD")
 
         # Build design matrix

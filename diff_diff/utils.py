@@ -182,6 +182,41 @@ def validate_design_term_names(
         )
 
 
+def fe_dummy_names(col: pd.Series, prefix: str) -> List[str]:
+    """
+    Reserved fixed-effect dummy column names for the collision guard, matching
+    ``pd.get_dummies(col, prefix=prefix, drop_first=True).columns`` WITHOUT
+    materializing the dense ``(n x G)`` dummy matrix.
+
+    The within-transform ``TwoWayFixedEffects`` path is specifically designed to
+    avoid expanding high-cardinality fixed-effect dummies (that is its scaling
+    contract), so the collision guard must reserve those names without building
+    the dummy block. ``pd.get_dummies`` orders categories via
+    ``pd.Categorical(col).categories`` — sorted unique values for a plain column,
+    the declared category order for a ``Categorical`` — then ``drop_first=True``
+    drops the first. This derivation reproduces that exactly (including
+    ``Categorical`` columns with a non-default category order) at ``O(G)`` memory.
+
+    Parameters
+    ----------
+    col : pandas.Series
+        The fixed-effect / unit / time column.
+    prefix : str
+        Dummy-name prefix (the project uses ``fe`` for ``fixed_effects`` and
+        ``_fe_{unit}`` / ``_fe_{time}`` for TWFE unit/time dummies).
+
+    Returns
+    -------
+    list of str
+        The kept (post ``drop_first``) dummy column names.
+    """
+    if isinstance(col.dtype, pd.CategoricalDtype):
+        cats = list(col.cat.categories)
+    else:
+        cats = list(pd.Categorical(col).categories)
+    return [f"{prefix}_{c}" for c in cats[1:]]
+
+
 def warn_if_not_converged(
     converged: bool,
     method_name: str,

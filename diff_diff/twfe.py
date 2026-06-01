@@ -15,6 +15,7 @@ from diff_diff.estimators import DifferenceInDifferences
 from diff_diff.linalg import LinearRegression
 from diff_diff.results import DiDResults
 from diff_diff.utils import (
+    fe_dummy_names,
     validate_covariate_names,
     validate_design_term_names,
 )
@@ -304,11 +305,15 @@ class TwoWayFixedEffects(DifferenceInDifferences):
         # last-write-wins). The within-transform path does not expose covariates
         # in the dict, but the covariate is still in X and a covariate named
         # "_treatment_post" would clobber the internal interaction column; we
-        # therefore guard ALL paths. Unit/time dummy names use the SAME
-        # get_dummies call as the full-dummy construction below.
+        # therefore guard ALL paths. Unit/time dummy names are derived via
+        # fe_dummy_names WITHOUT materializing the dummy matrix — critical here
+        # because the within-transform path (the default hc1/classical/conley
+        # branch) deliberately never expands the full FE dummies (its scaling
+        # contract for high-cardinality panels); a get_dummies build would
+        # defeat that. validate_design_term_names re-checks the full-dummy list.
         _reserved = {"const", "ATT", "_treatment_post"}
-        _reserved.update(pd.get_dummies(data[unit], prefix=f"_fe_{unit}", drop_first=True).columns)
-        _reserved.update(pd.get_dummies(data[time], prefix=f"_fe_{time}", drop_first=True).columns)
+        _reserved.update(fe_dummy_names(data[unit], f"_fe_{unit}"))
+        _reserved.update(fe_dummy_names(data[time], f"_fe_{time}"))
         validate_covariate_names(covariates, _reserved, estimator="TwoWayFixedEffects")
 
         if use_full_dummy:

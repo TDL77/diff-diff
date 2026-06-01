@@ -27,6 +27,7 @@ from diff_diff.utils import (
     compute_sdid_estimator,
     compute_time_weights,
     equivalence_test_trends,
+    fe_dummy_names,
     safe_inference,
     validate_binary,
     validate_covariate_names,
@@ -1365,3 +1366,23 @@ class TestValidateDesignTermNames:
 
     def test_empty_passes(self):
         validate_design_term_names([])
+
+
+class TestFeDummyNames:
+    """fe_dummy_names must match pd.get_dummies(drop_first=True).columns exactly
+    (including Categorical non-default order) without materializing the matrix."""
+
+    @pytest.mark.parametrize(
+        "col",
+        [
+            pd.Series([3, 1, 2, 1]),
+            pd.Series(["b", "a", "c", "a"]),
+            pd.Series(pd.Categorical(["m", "a", "z", "a"], categories=["m", "a", "z"])),
+            pd.Series([2.0, 1.0, 3.0]),
+            pd.Series(["b", "a", np.nan, "a"]),
+        ],
+    )
+    def test_matches_get_dummies(self, col):
+        assert fe_dummy_names(col, "fe") == list(
+            pd.get_dummies(col, prefix="fe", drop_first=True).columns
+        )
