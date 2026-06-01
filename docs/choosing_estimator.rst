@@ -435,14 +435,16 @@ Use :class:`~diff_diff.EfficientDiD` when:
 
 .. note::
 
-   EfficientDiD supports covariate adjustment via a doubly-robust path:
-   sieve-based propensity score ratios combined with a linear OLS outcome
-   regression. The DR property gives consistency if either the OR or the
-   PS is correctly specified, but the linear OLS outcome regression does
-   not generically attain the semiparametric efficiency bound unless the
-   conditional mean is linear in the covariates. The unqualified efficiency
-   claim applies to the no-covariate path only. Pass column names to the
-   ``covariates`` parameter on ``fit()``. See
+   EfficientDiD supports covariate adjustment via a doubly-robust path with
+   all nuisances estimated nonparametrically: sieve-based propensity score
+   ratios, a sieve outcome regression (polynomial basis, AIC/BIC order
+   selection), and a kernel-smoothed conditional covariance. The DR property
+   gives consistency if either the outcome regression or the PS is correctly
+   specified, and the covariate path attains the semiparametric efficiency
+   bound asymptotically under the paper's regularity conditions (a growing
+   sieve; degree 1 reproduces a linear working model, and ``sieve_k_max=1``
+   forces all covariate-path sieves to degree 1). Pass column
+   names to the ``covariates`` parameter on ``fit()``. See
    ``docs/methodology/REGISTRY.md`` for the full contract.
 
 .. code-block:: python

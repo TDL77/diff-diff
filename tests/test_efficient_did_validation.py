@@ -67,12 +67,15 @@ def _get_effect(effects_dict, g, t):
     raise KeyError(f"ATT({g},{t}) not found in results")
 
 
-def _assert_close(actual, expected, label, se=None, se_frac=0.1):
+def _assert_close(actual, expected, label, se=None, se_frac=0.05):
     """Assert actual is close to expected, tolerance based on published SE.
 
-    Default tolerance is 0.1 * SE (10% of one standard error). Our actual
-    diffs are all < 0.03 SE, so this catches real drift while absorbing the
-    4-individual sample difference (656 vs paper's 652).
+    Default tolerance is 0.05 * SE (5% of one published standard error). The HRS
+    fit is deterministic — no covariates, so the closed-form no-covariate path
+    runs with no RNG — and every cell's deviation from the published Table 6
+    value is < 0.03 SE, so this is a tight-but-safe anchor that still absorbs the
+    documented 4-individual sample difference (656 vs the paper's 652; see
+    ``tests/data/README.md``).
     """
     if se is not None:
         tol = se_frac * se

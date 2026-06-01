@@ -2,16 +2,18 @@
 Doubly robust math for the Efficient DiD estimator (with covariates).
 
 Implements the with-covariates path from Chen, Sant'Anna & Xie (2025):
-OLS outcome regression (linear working model), sieve-based propensity
-score ratios (Eq 4.1-4.2), sieve-based inverse propensities (step 4),
-kernel-smoothed conditional Omega*(X) for per-unit efficient weights,
-doubly robust generated outcomes (Eq 4.4), and the efficient influence
-function for analytical standard errors.
+sieve outcome regressions (polynomial basis, AIC/BIC order selection),
+sieve-based propensity score ratios (Eq 4.1-4.2), sieve-based inverse
+propensities (step 4), kernel-smoothed conditional Omega*(X) for per-unit
+efficient weights, doubly robust generated outcomes (Eq 4.4), and the
+efficient influence function for analytical standard errors.
 
-The DR property ensures consistency if either the OLS outcome model or
-the sieve propensity ratio is correctly specified.  The OLS working model
-does not generically guarantee the semiparametric efficiency bound unless
-the conditional mean is linear in covariates (see REGISTRY.md).
+The DR property ensures consistency if either the outcome regression or
+the sieve propensity ratio is correctly specified.  All three nuisances are
+polynomial sieves / a kernel smoother (the paper's flexible-nuisance
+specification, Section 4), so the doubly robust path attains the
+semiparametric efficiency bound under the paper's regularity conditions
+(see REGISTRY.md).
 
 All functions are pure (no state), operating on pre-pivoted numpy arrays.
 """
@@ -37,15 +39,51 @@ def estimate_outcome_regression(
     group_mask: np.ndarray,
     t_col: int,
     tpre_col: int,
+    k_max: Optional[int] = None,
+    criterion: str = "bic",
     unit_weights: Optional[np.ndarray] = None,
 ) -> np.ndarray:
-    """Estimate conditional mean outcome change m_hat(X) for a comparison group.
+    r"""Estimate conditional mean outcome change m_hat(X) via a polynomial sieve.
 
-    Regresses ``(Y_t - Y_{tpre})`` on ``X`` within the units identified by
-    ``group_mask`` using OLS.  Returns predicted values ``m_hat(X_i)`` for
-    **all** units (extrapolated from the within-group fit).
+    Regresses ``(Y_t - Y_{tpre})`` on a polynomial sieve basis ``psi^K(X)`` within
+    the units identified by ``group_mask`` (WLS when ``unit_weights`` is given),
+    selects the sieve degree ``K`` by an OLS information criterion, and returns
+    predicted values ``m_hat(X_i)`` for **all** units (extrapolated from the
+    within-group fit).  This implements ``m_hat_{g',t,tpre}(X) = E[Y_t - Y_{tpre}
+    | G=g', X]`` as a nonparametric (sieve) regression, matching the paper's
+    flexible-nuisance specification (Section 4).  Together with the sieve
+    propensity ratio and kernel-smoothed Omega*(X) the doubly robust path attains
+    the semiparametric efficiency bound under the paper's regularity conditions.
 
-    This implements ``m_hat_{g',t,tpre}(X) = E[Y_t - Y_{tpre} | G=g', X]``.
+    Order selection mirrors :func:`estimate_propensity_ratio_sieve`.  For each
+    degree ``K = 1, ..., k_max`` (capped so the basis dimension stays below the
+    group size), the within-group (W)LS fit is scored by
+
+    .. math::
+        \mathrm{IC}(K) = n \, \log(\mathrm{RSS}_w / n) + c_n \, p_K
+
+    where ``n`` is the within-group **positive-weight support** count (the raw
+    row count when unweighted), ``RSS_w`` the (survey-)weighted residual sum of
+    squares, ``p_K`` the basis dimension, and ``c_n = 2`` (AIC) or ``log(n)``
+    (BIC).  Keying ``n`` and the penalty off the positive-weight support — only
+    ``RSS_w`` is weighted — makes ``IC(K)`` shift by a ``K``-independent constant
+    ``n*log(c)`` under survey-weight rescaling ``w -> c*w`` (the WLS fit itself is
+    weight-scale invariant) **and** makes zero-weight rows fully inert for order
+    selection, so the selected order and ``m_hat`` are invariant both to the
+    survey-weight scale and to zero-weight (e.g. survey-padded) rows.
+
+    A degree whose (weighted) design Gram matrix has condition number above
+    ``1/sqrt(eps)`` (or that yields a non-finite fit) is skipped; if at least one
+    degree succeeds while others are skipped a ``UserWarning`` lists them.  If
+    **every** degree is skipped (e.g. the group is too small for even the linear
+    basis), the estimator falls back to the intercept-only within-group mean of
+    ``Y_t - Y_{tpre}`` (the unconditional outcome regression) with a
+    ``UserWarning`` — distinct from the propensity sieve's constant-ratio fallback.
+    An empty comparison group (``n_group == 0``) returns zeros for all units (no
+    covariate adjustment).
+    Degree 1 (``[1, X]``) reproduces the previous linear-OLS working model up to
+    floating point.  Per-cache-miss cost rises from one OLS to up to ``k_max`` OLS
+    solves, negligible against the kernel-Omega* term.
 
     Parameters
     ----------
@@ -57,36 +95,136 @@ def estimate_outcome_regression(
         Mask selecting units in the comparison group.
     t_col, tpre_col : int
         Column indices in ``outcome_wide`` for the two time periods.
+    k_max : int or None
+        Maximum polynomial degree.  None = ``floor(n_pos^{1/5})`` where ``n_pos``
+        is the within-group positive-weight support count (the raw group size
+        when unweighted) — a growing sieve with no fixed ceiling (the candidate
+        order grows with the support size and is bounded only by
+        ``n_basis < n_pos``), matching the propensity-ratio sieve.
+    criterion : str
+        ``"aic"`` or ``"bic"`` order selection.
     unit_weights : ndarray, shape (n_units,), optional
-        Survey weights at the unit level.  When provided, uses WLS
-        instead of OLS for the within-group regression.
+        Survey weights at the unit level.  When provided, uses WLS for the
+        within-group regression and a weighted RSS in the criterion.
 
     Returns
     -------
     m_hat : ndarray, shape (n_units,)
         Predicted ``E[Y_t - Y_{tpre} | X]`` for every unit.
     """
+    n_units = len(covariate_matrix)
     Y_group = outcome_wide[group_mask]
     delta_y = Y_group[:, t_col] - Y_group[:, tpre_col]
+    n_group = int(np.sum(group_mask))
 
-    X_group = covariate_matrix[group_mask]
-    X_design = np.column_stack([np.ones(len(X_group)), X_group])
+    if criterion not in ("aic", "bic"):
+        raise ValueError(f"criterion must be 'aic' or 'bic', got {criterion!r}")
+
+    if n_group == 0:
+        return np.zeros(n_units)
 
     w_group = unit_weights[group_mask] if unit_weights is not None else None
 
-    coef, _, _ = solve_ols(
-        X_design,
-        delta_y,
-        weights=w_group,
-        weight_type="pweight" if w_group is not None else None,
-        return_vcov=False,
-        rank_deficient_action="warn",
-    )
+    # Positive-weight support.  Zero-weight rows contribute nothing to the WLS
+    # fit, the weighted Gram, or the weighted RSS, so order selection (auto-k_max,
+    # the ``n_basis`` admissibility cap, and the IC sample-size terms) must key
+    # off the positive-weight support count — otherwise padding the panel with
+    # zero-weight (e.g. survey-subpopulation) rows could silently change the
+    # selected ``K`` and hence the DR estimate even though ``m_hat`` is unchanged.
+    if w_group is not None:
+        support = w_group > 0
+        n_pos = int(np.sum(support))
+        delta_y_pos = delta_y[support]
+    else:
+        n_pos = n_group
+        delta_y_pos = delta_y
 
-    X_all = np.column_stack([np.ones(len(covariate_matrix)), covariate_matrix])
-    coef_safe = np.where(np.isfinite(coef), coef, 0.0)
-    m_hat = X_all @ coef_safe
+    # Intercept-only fallback: the unconditional within-group mean of Δy.
+    if w_group is not None and float(np.sum(w_group)) > 0:
+        fallback_mean = float(np.average(delta_y, weights=w_group))
+    else:
+        fallback_mean = float(np.mean(delta_y))
 
+    d = covariate_matrix.shape[1]
+    if k_max is None:
+        k_max = int(n_pos**0.2)
+    k_max = max(k_max, 1)
+
+    c_n = 2.0 if criterion == "aic" else np.log(max(n_pos, 2))
+    cond_threshold = 1.0 / np.sqrt(np.finfo(float).eps)
+
+    # Floor RSS so a (near-)perfect in-sample fit cannot drive log -> -inf and
+    # spuriously select a high degree; ties then break on the K-penalty toward
+    # the simpler order.
+    support_var = float(np.var(delta_y_pos)) if n_pos > 0 else 0.0
+    rss_floor = max(1e-300, 1e-12 * n_pos * support_var)
+
+    best_ic = np.inf
+    best_m_hat = np.full(n_units, fallback_mean)
+    singular_K: List[int] = []
+
+    for K in range(1, k_max + 1):
+        n_basis = comb(K + d, d)
+        # Cap so basis dimension stays below the support size (overfit guard).
+        if n_basis >= n_pos:
+            break
+
+        basis_all = _polynomial_sieve_basis(covariate_matrix, K)
+        basis_group = basis_all[group_mask]
+
+        # Rank guard on the (weighted) design Gram, mirroring the propensity sieve.
+        if w_group is not None:
+            gram = basis_group.T @ (w_group[:, None] * basis_group)
+        else:
+            gram = basis_group.T @ basis_group
+        with np.errstate(invalid="ignore", over="ignore"):
+            gram_cond = float(np.linalg.cond(gram))
+        if not np.isfinite(gram_cond) or gram_cond > cond_threshold:
+            singular_K.append(K)
+            continue
+
+        coef, _, _ = solve_ols(
+            basis_group,
+            delta_y,
+            weights=w_group,
+            weight_type="pweight",
+            return_vcov=False,
+            rank_deficient_action="warn",
+        )
+        if not np.all(np.isfinite(coef)):
+            singular_K.append(K)
+            continue
+
+        resid = delta_y - basis_group @ coef
+        if w_group is not None:
+            rss = float(np.sum(w_group * resid**2))
+        else:
+            rss = float(np.sum(resid**2))
+        rss = max(rss, rss_floor)
+        ic_val = n_pos * np.log(rss / n_pos) + c_n * n_basis
+
+        if ic_val < best_ic:
+            best_ic = ic_val
+            best_m_hat = basis_all @ coef
+
+    if best_ic == np.inf:
+        warnings.warn(
+            "Outcome regression sieve estimation failed for all K values "
+            "(group too small or design rank-deficient at every degree). "
+            "Falling back to the intercept-only within-group mean.",
+            UserWarning,
+            stacklevel=2,
+        )
+    elif singular_K:
+        warnings.warn(
+            f"Outcome regression sieve: skipped K={singular_K} due to "
+            f"rank-deficient or non-finite design. Selected basis used the "
+            f"remaining K values; this may indicate limited covariate variation.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    m_hat = best_m_hat
     non_finite = ~np.isfinite(m_hat)
     if non_finite.any():
         n_bad = int(non_finite.sum())
@@ -96,6 +234,7 @@ def estimate_outcome_regression(
             UserWarning,
             stacklevel=2,
         )
+        m_hat = m_hat.copy()
         m_hat[non_finite] = 0.0
 
     return m_hat
@@ -190,7 +329,10 @@ def estimate_propensity_ratio_sieve(
     mask_gp : ndarray of bool, shape (n_units,)
         Comparison group mask.
     k_max : int or None
-        Maximum polynomial degree. None = ``min(floor(n_gp^{1/5}), 5)``.
+        Maximum polynomial degree. None = ``floor(n_gp^{1/5})`` where ``n_gp`` is
+        the comparison-group positive-weight support count (raw size when
+        unweighted) — a growing sieve with no fixed ceiling (bounded only by
+        ``n_basis < n_gp``).  Zero-weight rows do not affect order selection.
     criterion : str
         ``"aic"`` or ``"bic"``.
     ratio_clip : float
@@ -213,25 +355,32 @@ def estimate_propensity_ratio_sieve(
 
     d = covariate_matrix.shape[1]
 
-    # Default k_max: use comparison group size, not total n
-    if k_max is None:
-        k_max = min(int(n_gp**0.2), 5)
-    k_max = max(k_max, 1)
-
-    # Penalty multiplier for IC
-    # BIC penalty uses observation count (not weighted) — complexity vs distinct obs
-    n_total = int(np.sum(mask_g)) + n_gp
-    c_n = 2.0 if criterion == "aic" else np.log(max(n_total, 2))
-
-    # Weighted totals for loss normalization (raw probability weights)
+    # Survey weights and positive-weight support counts.  Zero-weight rows are
+    # inert in the weighted normal equations and the weighted loss total
+    # ``n_total_w``, so sieve selection (auto-k_max, the n_basis admissibility
+    # cap, and the IC sample-size terms) must key off the positive-weight support
+    # — otherwise padding the panel with zero-weight rows could silently change
+    # the selected K and the DR estimate.  Unweighted: the raw row counts.
     if unit_weights is not None:
         w_g = unit_weights[mask_g]
         w_gp = unit_weights[mask_gp]
+        n_gp_pos = int(np.sum(w_gp > 0))
+        n_total_pos = int(np.sum(w_g > 0)) + n_gp_pos
         n_total_w = float(np.sum(w_g)) + float(np.sum(w_gp))
     else:
         w_g = None
         w_gp = None
-        n_total_w = float(n_total)
+        n_gp_pos = n_gp
+        n_total_pos = int(np.sum(mask_g)) + n_gp
+        n_total_w = float(n_total_pos)
+
+    # Default k_max: grow with the comparison-group support size.
+    if k_max is None:
+        k_max = int(n_gp_pos**0.2)
+    k_max = max(k_max, 1)
+
+    # BIC penalty uses the positive-weight support count (complexity vs distinct obs)
+    c_n = 2.0 if criterion == "aic" else np.log(max(n_total_pos, 2))
 
     best_ic = np.inf
     best_ratio = np.ones(n_units)  # fallback: constant ratio 1
@@ -243,8 +392,8 @@ def estimate_propensity_ratio_sieve(
     for K in range(1, k_max + 1):
         n_basis = comb(K + d, d)
 
-        # Cap K so basis dimension < n_gp (avoid singular system)
-        if n_basis >= n_gp:
+        # Cap K so basis dimension < n_gp_pos (avoid singular system)
+        if n_basis >= n_gp_pos:
             break
 
         basis_all = _polynomial_sieve_basis(covariate_matrix, K)
@@ -287,9 +436,9 @@ def estimate_propensity_ratio_sieve(
         # Derivation: L(beta) = (1/n_w)(beta'A*beta - 2*b'beta).
         # At optimum A*beta = b, so beta'A*beta = b'beta.
         # Therefore L = (1/n_w)(b'beta - 2*b'beta) = -(1/n_w)*b'beta.
-        # Loss uses weighted totals; BIC penalty uses observation count.
+        # Loss uses weighted totals; BIC penalty uses the positive-weight support.
         loss = -float(b @ beta) / n_total_w
-        ic_val = 2.0 * loss + c_n * n_basis / n_total
+        ic_val = 2.0 * loss + c_n * n_basis / n_total_pos
 
         if ic_val < best_ic:
             best_ic = ic_val
@@ -396,14 +545,13 @@ def estimate_inverse_propensity_sieve(
     if n_group == 0:
         return np.ones(n_units)
 
-    if k_max is None:
-        k_max = min(int(n_group**0.2), 5)
-    k_max = max(k_max, 1)
-
-    # BIC penalty uses observation count (not weighted)
-    c_n = 2.0 if criterion == "aic" else np.log(max(n_units, 2))
-
-    # Weighted loss normalization and fallback
+    # Survey weights, fallback, and positive-weight support counts.  Zero-weight
+    # rows are inert in the weighted normal equations and the weighted loss total
+    # ``n_units_w``, so sieve selection (auto-k_max, the n_basis admissibility
+    # cap, and the IC sample-size terms) must key off the positive-weight support
+    # rather than the raw row counts (see the outcome-regression docstring) —
+    # padding with zero-weight rows then cannot change the selected K or the DR
+    # estimate.  Unweighted: the raw row counts.
     if unit_weights is not None:
         w_group = unit_weights[group_mask]
         sum_w_group = float(np.sum(w_group))
@@ -412,10 +560,21 @@ def estimate_inverse_propensity_sieve(
             return np.ones(n_units)
         n_units_w = float(np.sum(unit_weights))
         fallback_ratio = n_units_w / sum_w_group
+        n_group_pos = int(np.sum(w_group > 0))
+        n_units_pos = int(np.sum(unit_weights > 0))
     else:
         w_group = None
         n_units_w = float(n_units)
         fallback_ratio = n_units / n_group
+        n_group_pos = n_group
+        n_units_pos = n_units
+
+    if k_max is None:
+        k_max = int(n_group_pos**0.2)
+    k_max = max(k_max, 1)
+
+    # BIC penalty uses the positive-weight support count
+    c_n = 2.0 if criterion == "aic" else np.log(max(n_units_pos, 2))
 
     best_ic = np.inf
     best_s = np.full(n_units, fallback_ratio)  # fallback: unconditional
@@ -424,7 +583,7 @@ def estimate_inverse_propensity_sieve(
 
     for K in range(1, k_max + 1):
         n_basis = comb(K + d, d)
-        if n_basis >= n_group:
+        if n_basis >= n_group_pos:
             break
 
         basis_all = _polynomial_sieve_basis(covariate_matrix, K)
@@ -460,9 +619,9 @@ def estimate_inverse_propensity_sieve(
         s_hat = basis_all @ beta
 
         # IC: loss = -(1/n_w) * b'beta (same derivation as ratio estimator)
-        # Loss uses weighted totals; BIC penalty uses observation count.
+        # Loss uses weighted totals; BIC penalty uses the positive-weight support.
         loss = -float(b @ beta) / n_units_w
-        ic_val = 2.0 * loss + c_n * n_basis / n_units
+        ic_val = 2.0 * loss + c_n * n_basis / n_units_pos
 
         if ic_val < best_ic:
             best_ic = ic_val
@@ -605,11 +764,26 @@ def compute_generated_outcomes_cov(
 # ---------------------------------------------------------------------------
 
 
-def _silverman_bandwidth(X: np.ndarray) -> float:
+def _silverman_bandwidth(X: np.ndarray, unit_weights: Optional[np.ndarray] = None) -> float:
     """Silverman's rule-of-thumb bandwidth for d-dimensional X.
 
     ``h = (4 / (d + 2))^{1/(d+4)} * median_std * n^{-1/(d+4)}``
+
+    When ``unit_weights`` is provided, the rule is evaluated on the
+    **positive-weight support** (rows with ``w > 0``) only. The dispersion
+    statistic stays unweighted within that support (a documented second-order
+    simplification — survey-weighted bandwidth is deferred), but dropping
+    zero-weight rows keeps the bandwidth — and hence the kernel-smoothed
+    ``Omega*(X)`` and the per-unit efficient weights it feeds — invariant to
+    zero-weight (survey-subpopulation / padded) rows: such rows carry no
+    information yet would otherwise move both ``n`` and the standard deviation
+    (e.g. a zero-weight row with an extreme covariate inflates ``median_std``).
+    Falls back to the full matrix if the support is empty.
     """
+    if unit_weights is not None:
+        support = unit_weights > 0
+        if np.any(support):
+            X = X[support]
     n, d = X.shape
     stds = np.std(X, axis=0)
     stds[stds < 1e-10] = 1.0
@@ -737,7 +911,7 @@ def compute_omega_star_conditional(
         return np.empty((n_units, 0, 0))
 
     if bandwidth is None:
-        bandwidth = _silverman_bandwidth(covariate_matrix)
+        bandwidth = _silverman_bandwidth(covariate_matrix, unit_weights)
 
     t_col = period_to_col[target_t]
     y1_col = period_1_col
@@ -828,7 +1002,9 @@ def compute_omega_star_conditional(
                     )
                     if gp_j not in W_gp_cache:
                         X_gp = covariate_matrix[cohort_masks[gp_j]]
-                        w_gp_j = unit_weights[cohort_masks[gp_j]] if unit_weights is not None else None
+                        w_gp_j = (
+                            unit_weights[cohort_masks[gp_j]] if unit_weights is not None else None
+                        )
                         W_gp_cache[gp_j] = _kernel_weights_matrix(
                             covariate_matrix, X_gp, bandwidth, group_weights=w_gp_j
                         )

@@ -848,7 +848,7 @@ plot_event_study(results)
 
 ### EfficientDiD
 
-Efficient DiD estimator (Chen, Sant'Anna & Xie 2025). Achieves the semiparametric efficiency bound for ATT(g,t) on the **no-covariate path**. Also supports an optional doubly-robust covariate path (sieve-based propensity score ratios + linear OLS outcome regression): the DR property gives consistency if either the OR or the PS is correctly specified, but the linear OLS outcome regression does not generically attain the efficiency bound unless the conditional mean is linear in the covariates. Pass column names to the `covariates` parameter on `fit()`.
+Efficient DiD estimator (Chen, Sant'Anna & Xie 2025). Achieves the semiparametric efficiency bound for ATT(g,t) on the **no-covariate path**. Also supports an optional doubly-robust covariate path with all nuisances estimated nonparametrically (sieve-based propensity score ratios + a sieve outcome regression with AIC/BIC order selection + kernel-smoothed conditional covariance): the DR property gives consistency if either the outcome regression or the PS is correctly specified, and the covariate path attains the efficiency bound asymptotically under the paper's regularity conditions (a *growing* polynomial sieve — no fixed order ceiling — whose basis dimension satisfies Assumption C.1's rate for low-dimensional covariates; degree 1 reproduces a linear working model, and `sieve_k_max=1` forces all covariate-path sieves to degree 1). Pass column names to the `covariates` parameter on `fit()`.
 
 ```python
 EfficientDiD(
