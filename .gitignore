@@ -108,3 +108,6 @@ briefings/
 # Local-only: preprint / under-review manuscript artifacts (not part of the library)
 survey-did-paper-arxiv-v2/
 
+# Reviewer-eval harness — local run artifacts, detached worktrees, comparison bundles
+tools/reviewer-eval/runs/
+

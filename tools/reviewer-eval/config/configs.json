@@ -1,0 +1,21 @@
+{
+  "_comment": "The two reviewer arms. model is the ONLY field intended to differ; effort/sandbox/action_version/cli_version are confounds the runner pins and asserts identical across arms (plan C2). cli_version pinned to codex-cli 0.130.0, confirmed 2026-05-30 to accept gpt-5.5 @ xhigh (the candidate) AND gpt-5.4 (control) — so the same CLI serves both arms and the runner asserts the live `codex --version` matches.",
+  "control": {
+    "id": "A",
+    "model": "gpt-5.4",
+    "effort": "xhigh",
+    "sandbox": "read-only",
+    "action_version": "v1",
+    "cli_version": "codex-cli 0.130.0",
+    "label": "control / current production"
+  },
+  "candidate": {
+    "id": "B",
+    "model": "gpt-5.5",
+    "effort": "xhigh",
+    "sandbox": "read-only",
+    "action_version": "v1",
+    "cli_version": "codex-cli 0.130.0",
+    "label": "candidate / proposed upgrade"
+  }
+}
