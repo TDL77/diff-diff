@@ -16,15 +16,18 @@ This module implements the efficiency-bound-attaining estimator that:
 
 .. note::
 
-   EfficientDiD supports a doubly-robust covariate path: sieve-based
-   propensity score ratios combined with a linear OLS outcome regression.
-   The DR property ensures consistency if either the OR or the PS ratio is
-   correctly specified, but the linear OLS working model for the outcome
-   regression does not generically attain the semiparametric efficiency
-   bound unless the conditional mean is linear in the covariates. The
-   unqualified efficiency-bound claim applies to the no-covariate path
-   only. Pass column names to the ``covariates`` parameter on ``fit()``.
-   See ``docs/methodology/REGISTRY.md`` for the full contract.
+   EfficientDiD supports a doubly-robust covariate path with all nuisances
+   estimated nonparametrically: sieve-based propensity score ratios and a
+   sieve outcome regression (polynomial basis, AIC/BIC order selection),
+   plus the kernel-smoothed conditional covariance. The DR property ensures
+   consistency if either the outcome regression or the PS ratio is correctly
+   specified, and because the nuisances are growing sieves/kernels the
+   covariate path attains the semiparametric efficiency bound asymptotically
+   under the paper's regularity conditions (degree 1 reproduces a linear
+   working model, and ``sieve_k_max=1`` forces all covariate-path sieves to
+   degree 1). Pass column names to the ``covariates``
+   parameter on ``fit()``. See ``docs/methodology/REGISTRY.md`` for the full
+   contract.
 
 **When to use EfficientDiD:**
 
@@ -34,9 +37,10 @@ This module implements the efficiency-bound-attaining estimator that:
 - You need a formal efficiency benchmark for comparing estimators
 
 For covariate-adjusted designs, the doubly-robust path is consistent under
-either outcome-regression or propensity-ratio correctness but does not
-generically attain the efficiency bound under the shipped linear OLS
-outcome regression.
+either outcome-regression or propensity-ratio correctness and attains the
+efficiency bound under the paper's regularity conditions, with all nuisances
+(sieve propensity ratio, sieve outcome regression, kernel covariance)
+estimated nonparametrically.
 
 **Reference:** Chen, X., Sant'Anna, P. H. C., & Xie, H. (2025). Efficient
 Difference-in-Differences and Event Study Estimators.
@@ -148,11 +152,11 @@ Comparison with Other Staggered Estimators
      - Conditional PT
      - Strict exogeneity
    * - Efficiency
-     - Achieves semiparametric bound on the no-covariate path; DR covariate path is consistent but does not generically attain the bound under a linear OLS outcome regression
+     - Achieves the semiparametric bound on the no-covariate path; the doubly-robust covariate path attains it too (under regularity conditions) via sieve nuisances
      - Not efficient
      - Efficient under homogeneity
    * - Covariates
-     - Supported (doubly robust, sieve-based PS + linear OLS OR)
+     - Supported (doubly robust, sieve-based PS ratio + sieve outcome regression)
      - Supported (OR, IPW, DR)
      - Supported
    * - Bootstrap

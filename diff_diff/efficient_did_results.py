@@ -124,9 +124,12 @@ class EfficientDiDResults:
     estimation_path : str
         ``"nocov"`` or ``"dr"`` — which estimation path was used.
     sieve_k_max : int or None
-        Maximum polynomial degree for sieve ratio estimation.
+        Maximum polynomial degree for the covariate-path sieves (propensity
+        ratio, inverse propensity, and outcome regression); ``1`` forces a
+        linear outcome-regression working model.
     sieve_criterion : str
-        Information criterion used (``"aic"`` or ``"bic"``).
+        Information criterion used (``"aic"`` or ``"bic"``) for all
+        covariate-path sieve order selection.
     ratio_clip : float
         Clipping bound for sieve propensity ratios.
     kernel_bandwidth : float or None

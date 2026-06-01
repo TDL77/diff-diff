@@ -4,8 +4,8 @@ Efficient Difference-in-Differences estimator.
 Implements the ATT estimator from Chen, Sant'Anna & Xie (2025).
 Without covariates, achieves the semiparametric efficiency bound via
 closed-form within-group covariances.  With covariates, uses a doubly
-robust path with OLS outcome regression, sieve propensity ratios, and
-kernel-smoothed conditional Omega*(X) (see class docstring for caveats).
+robust path with sieve outcome regressions, sieve propensity ratios, and
+kernel-smoothed conditional Omega*(X) (see class docstring for details).
 
 Under PT-All the model is overidentified and EDiD exploits this for
 tighter inference; under PT-Post it reduces to the standard
@@ -139,6 +139,69 @@ def _compute_se_from_eif(
     return float(np.sqrt(np.mean(eif**2) / n_units))
 
 
+def _hausman_quadratic_form(
+    delta: np.ndarray,
+    cov_post: np.ndarray,
+    cov_all: np.ndarray,
+) -> Tuple[float, int, float, int, bool]:
+    """Hausman statistic from the event-study delta and the two ES covariances.
+
+    Implements the Theorem A.1 test statistic of Chen, Sant'Anna & Xie (2025,
+    arXiv:2506.17729v1).  The variance-difference matrix is
+
+        V = aCov(ES_post) - aCov(ES_all) = cov_post - cov_all
+
+    (restricted minus efficient, PSD under H0 because the efficient estimator has
+    the smaller variance), and the statistic is ``H = delta' V^+ delta`` with
+    ``delta = ES_post - ES_all``.  ``V`` is inverted by Moore-Penrose pseudoinverse
+    and the number of strictly positive eigenvalues is used as the chi-square
+    degrees of freedom -- a finite-sample safeguard for a non-PSD ``V`` that equals
+    ``|E|`` (the number of post-treatment horizons) when ``V`` is well-conditioned.
+
+    Parameters
+    ----------
+    delta : ndarray, shape (|E|,)
+        Event-study difference ``ES_post - ES_all`` (restricted minus efficient).
+    cov_post, cov_all : ndarray, shape (|E|, |E|)
+        Estimator-scale covariances of the restricted (PT-Post) and efficient
+        (PT-All) event-study vectors.
+
+    Returns
+    -------
+    H : float
+        The Hausman statistic (``max(delta' V^+ delta, 0)``); NaN if ``V`` is
+        non-finite or has no positive eigenvalues.
+    effective_rank : int
+        Number of positive eigenvalues of ``V`` (the chi-square degrees of freedom).
+    p_value : float
+        Upper-tail ``chi2(effective_rank)`` p-value; NaN when ``H`` is NaN.
+    n_negative : int
+        Number of substantially negative eigenvalues of ``V`` (efficiency-reversal
+        diagnostic).
+    finite_ok : bool
+        False when ``V`` contains non-finite entries.
+    """
+    from scipy.stats import chi2
+
+    V = cov_post - cov_all
+    if not np.all(np.isfinite(V)):
+        return np.nan, 0, np.nan, 0, False
+
+    eigvals = np.linalg.eigvalsh(V)
+    max_eigval = float(np.max(np.abs(eigvals))) if len(eigvals) > 0 else 0.0
+    tol = max(1e-10 * max_eigval, 1e-15)
+
+    n_negative = int(np.sum(eigvals < -tol))
+    effective_rank = int(np.sum(eigvals > tol))
+    if effective_rank == 0:
+        return np.nan, 0, np.nan, n_negative, True
+
+    V_pinv = np.linalg.pinv(V, rcond=tol / max_eigval if max_eigval > 0 else 1e-10)
+    H = max(float(delta @ V_pinv @ delta), 0.0)
+    p_value = float(chi2.sf(H, df=effective_rank))
+    return H, effective_rank, p_value, n_negative, True
+
+
 class EfficientDiD(EfficientDiDBootstrapMixin):
     """Efficient DiD estimator (Chen, Sant'Anna & Xie 2025).
 
@@ -147,13 +210,15 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
     means and covariances.
 
     With covariates, uses a doubly robust path: sieve-based propensity
-    score ratios (Eq 4.1-4.2), OLS outcome regression, sieve-estimated
-    inverse propensities (algorithm step 4), and kernel-smoothed
-    conditional Omega*(X) with per-unit efficient weights (Eq 3.12).
-    The DR property ensures consistency if either the OLS outcome model
-    or the sieve propensity ratio is correctly specified.  The OLS
-    working model for outcome regressions does not generically guarantee
-    the semiparametric efficiency bound (see REGISTRY.md).
+    score ratios (Eq 4.1-4.2), sieve outcome regressions (polynomial
+    basis, AIC/BIC order selection), sieve-estimated inverse propensities
+    (algorithm step 4), and kernel-smoothed conditional Omega*(X) with
+    per-unit efficient weights (Eq 3.12).  The DR property ensures
+    consistency if either the outcome regression or the sieve propensity
+    ratio is correctly specified; because all nuisances are sieves /
+    kernel smoothers (the paper's flexible-nuisance specification), the
+    covariate path attains the semiparametric efficiency bound under the
+    paper's regularity conditions (see REGISTRY.md).
 
     Parameters
     ----------
@@ -199,10 +264,21 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         ``control_group="last_cohort"``, also trims the pseudo-control
         period set at ``t >= last_g - anticipation`` (see REGISTRY.md).
     sieve_k_max : int or None
-        Maximum polynomial degree for sieve ratio estimation. None = auto
-        (``min(floor(n_gp^{1/5}), 5)``). Only used with covariates.
+        Maximum polynomial degree for the covariate-path sieves — the
+        propensity-ratio, inverse-propensity, AND outcome-regression fits all
+        use it. None = auto (``floor(n_pos^{1/5})`` over each group's
+        positive-weight support ``n_pos`` — the raw group size when unweighted —
+        a growing sieve with no fixed ceiling, bounded by ``n_basis < n_pos``;
+        zero-weight survey rows do not affect order selection). Only
+        used with covariates. ``sieve_k_max=1`` forces every covariate-path
+        sieve (outcome regression and both propensity sieves) to degree 1: it
+        recovers the pre-sieve linear-OLS *outcome regression* but also
+        degree-1-constrains the propensity sieves, so it does not reproduce the
+        exact pre-sieve estimator.
     sieve_criterion : str, default ``"bic"``
-        Information criterion for sieve degree selection: ``"aic"`` or ``"bic"``.
+        Information criterion (``"aic"`` or ``"bic"``) for the order selection
+        of all covariate-path sieves (propensity ratio, inverse propensity, and
+        outcome regression).
     ratio_clip : float, default 20.0
         Clip sieve propensity ratios to ``[1/ratio_clip, ratio_clip]``.
     kernel_bandwidth : float or None
@@ -855,6 +931,8 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
                                 never_treated_mask,
                                 t_col_val,
                                 tpre_col_val,
+                                k_max=self.sieve_k_max,
+                                criterion=self.sieve_criterion,
                                 unit_weights=unit_level_weights,
                             )
                         # m_{g', tpre, 1}(X)
@@ -869,6 +947,8 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
                                 gp_mask_for_reg,
                                 tpre_col_val,
                                 effective_p1_col,
+                                k_max=self.sieve_k_max,
+                                criterion=self.sieve_criterion,
                                 unit_weights=unit_level_weights,
                             )
                         # r_{g, inf}(X) and r_{g, g'}(X) via sieve (Eq 4.1-4.2)
@@ -1672,8 +1752,6 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         -------
         HausmanPretestResult
         """
-        from scipy.stats import chi2
-
         # Fit under both assumptions (analytical SEs only, no bootstrap)
         common_kwargs = dict(
             cluster=cluster,
@@ -1836,22 +1914,16 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
                 cov_all = (eif_all_mat.T @ eif_all_mat) / (n_units**2)
                 cov_post = (eif_post_mat.T @ eif_post_mat) / (n_units**2)
 
-        V = cov_post - cov_all
-
-        if not np.all(np.isfinite(V)):
+        H, effective_rank, p_value, n_negative, finite_ok = _hausman_quadratic_form(
+            delta, cov_post, cov_all
+        )
+        if not finite_ok:
             warnings.warn(
                 "Hausman covariance matrix contains non-finite values. " "The test is unreliable.",
                 UserWarning,
                 stacklevel=2,
             )
             return _nan_result()
-
-        # Eigendecompose V — check for non-PSD
-        eigvals = np.linalg.eigvalsh(V)
-        max_eigval = np.max(np.abs(eigvals)) if len(eigvals) > 0 else 0.0
-        tol = max(1e-10 * max_eigval, 1e-15)
-
-        n_negative = int(np.sum(eigvals < -tol))
         if n_negative > 0:
             warnings.warn(
                 f"Hausman variance-difference matrix V has {n_negative} "
@@ -1860,16 +1932,8 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
                 UserWarning,
                 stacklevel=2,
             )
-
-        effective_rank = int(np.sum(eigvals > tol))
         if effective_rank == 0:
             return _nan_result()
-
-        V_pinv = np.linalg.pinv(V, rcond=tol / max_eigval if max_eigval > 0 else 1e-10)
-        H = float(delta @ V_pinv @ delta)
-        H = max(H, 0.0)
-
-        p_value = float(chi2.sf(H, df=effective_rank))
         reject = p_value < alpha
 
         es_details = pd.DataFrame(

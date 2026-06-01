@@ -50,7 +50,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | ImputationDiD | `imputation.py` | `didimputation` | **In Progress** | — |
 | TwoStageDiD | `two_stage.py` | `did2s` | **In Progress** | — |
 | WooldridgeDiD (ETWFE) | `wooldridge.py` | `etwfe` (R) / `jwdid` (Stata) | **Complete** | 2026-05-22 |
-| EfficientDiD | `efficient_did.py` | (no canonical R package) | **In Progress** | — |
+| EfficientDiD | `efficient_did.py` | (no canonical R package) | **Complete** | 2026-06-01 |
 
 ### Continuous & Universal-Treatment Estimators
 
@@ -631,20 +631,36 @@ and covariate-adjusted specifications.)
 | Module | `efficient_did.py`, `efficient_did_bootstrap.py`, `efficient_did_covariates.py`, `efficient_did_weights.py` |
 | Primary Reference | Chen, Sant'Anna & Xie (2025), *Efficient Difference-in-Differences and Event Study Estimators* |
 | R Reference | (no canonical R package; paper compares against `did` / `DIDmultiplegt` / BJS / Gardner / Wooldridge as benchmarks rather than providing a reference implementation) |
-| Status | **In Progress** |
-| Last Review | — |
+| Status | **Complete** |
+| Last Review | 2026-06-01 |
 
 **Documentation in place:**
-- REGISTRY.md section: `## EfficientDiD` (full Theorem 4.1 EIF, sieve-based propensity-ratio estimation with AIC/BIC, kernel-smoothed conditional covariance, Hausman pretest for PT-All vs PT-Post, survey support)
-- Implementation: 130 unit tests in `tests/test_efficient_did.py` + 12 validation tests in `tests/test_efficient_did_validation.py`
-- Hausman pretest: implemented per Theorem A.1 with Moore-Penrose pseudoinverse for finite-sample non-PSD variance-difference matrix
-- Survey support: pweight + strata/PSU/FPC via TSL on EIF scores; covariates DR path with WLS outcome regression and weighted sieve normal equations
+- REGISTRY.md section: `## EfficientDiD` (full Theorem 4.1 EIF, sieve-based propensity-ratio and outcome-regression estimation with AIC/BIC, kernel-smoothed conditional covariance, Hausman pretest for PT-All vs PT-Post, survey support)
 - Paper review on file: `docs/methodology/papers/chen-santanna-xie-2025-review.md` (PR-A, 2026-05-31) — faithful paper-sourced transcription of arXiv:2506.17729v1 (assumptions S/O/NA/PT-Post/PT-All; Theorem 3.1/3.2 EIFs + Corollaries 3.1/3.2; §4 sieve/kernel DR estimation; Theorem 4.1 SEs; Theorem A.1 Hausman; HRS Table 6 anchor)
+- Tests: `tests/test_efficient_did.py` (unit/API), `tests/test_efficient_did_validation.py` (HRS Table 6 + Compustat MC), and `tests/test_methodology_efficient_did.py` (PR-B paper-equation Verified Components)
 
-**Outstanding for promotion (PR-B source validation; paper review now on file):**
-- Dedicated `tests/test_methodology_efficient_did.py` with Theorem 3.2 / Equation 3.5 / Equation 4.3 numbered Verified Components walk-through
-- Cross-language anchor: the paper's empirical replication uses HRS data following Sun-Abraham (2021); a same-data benchmark against the paper's reported numbers (or a same-DGP MC against R alternatives) would substantiate the EIF construction
-- Documented deviations: linear OLS working models for outcome regressions vs. paper's general nonparametric specification (DR safety net acknowledged but not separately validated); fixed-weight bootstrap aggregation vs. WIF-corrected analytical aggregation
+**Corrections Made (PR-B source validation):** (None — implementation verified correct.) The PR-B walk-through traced each paper result against the source and found the no-covariate path (multi-baseline efficiency recovered via the `g'=g` same-cohort pairs), the generated outcome (Eq 3.9), the optimal weights (Eq 3.5/3.13), the conditional covariance Ω*(X) (Eq 3.12), the analytical SE (Theorem 4.1), the cohort-size event-study aggregation (with the `(G_g − π_g)` WIF correction), and the Hausman covariance direction (Eq A.2, restricted − efficient) all correct.
+
+**Implementation change (deliberate, decided with the maintainer — eliminates a deviation rather than fixing a bug):**
+- Covariate outcome regression upgraded from linear OLS to a **polynomial sieve** (AIC/BIC order selection, same basis family as the propensity-ratio sieve; a *growing* sieve with no fixed order ceiling — `floor(n_pos^{1/5})` over the positive-weight support `n_pos` (raw group size when unweighted; zero-weight survey rows are inert for order selection), bounded by `n_basis < n_pos` — which, since C.1's rate is on the sieve *dimension* `p_K = comb(K+d,d)` (not the polynomial degree, which differ once `d > 1`), satisfies Assumption C.1's uniform-consistency / `o_p(n^{-1/2})` product-rate conditions for the low-dimensional covariate settings typical of DiD) so the doubly-robust covariate path attains the semiparametric efficiency bound asymptotically under the paper's nonparametric-nuisance specification (Section 4 / Theorem 4.1), not only when the conditional mean is linear. Degree 1 reproduces the prior linear OLS *outcome regression*; `sieve_k_max=1` forces all covariate-path sieves to degree 1 (it recovers the linear outcome component but also degree-1-constrains the propensity sieves, so it does **not** reproduce the exact pre-PR estimator). Removing the hard `K≤5` cap also updates the two pre-existing propensity-ratio / inverse-propensity sieves (a no-op for groups under ~3,125 units). `diff_diff/efficient_did_covariates.py::estimate_outcome_regression`.
+- Extracted `_hausman_quadratic_form` (behaviour-preserving) so the Theorem A.1 statistic and effective-rank DOF logic are unit-testable in isolation.
+
+**Verified Components** (`tests/test_methodology_efficient_did.py`, paper-equation-numbered):
+- [x] Inverse-covariance optimal weights `1'Ω*⁻¹/(1'Ω*⁻¹1)` (Eq 3.5 / 3.13) + the min-variance property + the singular-Ω* pseudoinverse path.
+- [x] No-covariate generated outcome (Eq 3.9): `g'=g` telescopes to the per-baseline DiD (Eq 3.3); `g'=∞` to the period-1 long-difference.
+- [x] No-covariate efficient ATT = `weights @ generated_outcomes` (Eq 3.13 / §4.1), rebuilt independently from within-group sample means/covariances.
+- [x] PT-Post just-identified reduction = Callaway-Sant'Anna single-baseline (Corollary 3.1 single-date exact at 1e-9; Corollary 3.2 staggered).
+- [x] Analytical SE = `sqrt(mean(EIF²)/n)` (Theorem 4.1).
+- [x] Hausman statistic (Theorem A.1 / Eq A.2): `H = Δ'V⁺Δ`, `V = aCov(ẼS) − aCov(ÊS)` (restricted − efficient); `df = |E|` (well-conditioned) and `df = effective_rank < |E|` (rank-deficient safeguard); covariance-direction guard.
+- [x] Covariate sieve outcome regression: recovers a nonlinear-in-X conditional mean (K≥2), reproduces linear OLS on linear data (K=1), and beats a forced-linear working model under a nonlinear-nuisance conditional-PT DGP.
+- [x] Empirical anchor: HRS Table 6 (`tests/test_efficient_did_validation.py::TestHRSReplication`) on the paper's data (a derived openICPSR 116186 subset) matches all six ATT(g,t) + ES(0)/ES(1)/ES(2) + ES_avg to < 0.03 published SE; the Compustat MC confirms unbiasedness, the CS efficiency gain, coverage, and SE calibration.
+
+**Deviations (ratified; each carries a recognized REGISTRY label):**
+- `overall_att` is the cohort-size-weighted post-treatment average (Callaway-Sant'Anna convention), not the paper's uniform `ES_avg` (Eq 2.3); `ES_avg` is recoverable from the event-study output.
+- The multiplier bootstrap re-aggregates with fixed cohort-size weights (matching the CS bootstrap); the analytical path carries the `(G_g − π_g)` WIF weight-estimation correction.
+- The Hausman χ² uses the effective rank of `V` as degrees of freedom (a finite-sample safeguard equal to `|E|` when `V` is well-conditioned), rather than a fixed `|E|`.
+- `vcov_type` is permanently narrow to `{"hc1"}` (the IF-based variance has no single design matrix for analytical-sandwich families); the polynomial sieve basis and the Silverman kernel bandwidth are working-model choices the paper leaves open.
+- SEs are i.i.d.-asymptotics (`sqrt(mean(EIF²)/n)` or multiplier bootstrap); cluster/survey EIF variants are documented library extensions beyond the paper's stated scope.
 
 ---
 
@@ -1410,11 +1426,10 @@ more graceful handling of edge cases while still signaling invalid inference to 
 
 Promotion priority for the **In Progress** entries, ordered by what's blocked on substantive review work (top of list = needs review next) vs. consolidation pass (bottom of list = mostly tracker walk-through):
 
-**Substantive-review-blocked (still missing a methodology test file / R parity — and, except for EfficientDiD, a paper review):**
+**Substantive-review-blocked (still missing a methodology test file / R parity and a paper review):**
 
 1. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
-2. **EfficientDiD** — **paper review on file** (PR-A, `chen-santanna-xie-2025-review.md`); remaining PR-B work is the source-validation pass — `tests/test_methodology_efficient_did.py` (Theorem 3.1/3.2 / Eq 3.5 / Eq 4.3 Verified Components), the HRS Table 6 cross-language anchor, and the documented deviations against Chen, Sant'Anna & Xie (2025).
-3. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
+2. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
