@@ -3426,6 +3426,27 @@ def test_get_confidence_set_df_requires_run():
         res.get_confidence_set_df()
 
 
+def test_in_space_placebo_rerun_invalidates_confidence_set():
+    # CI-review P1: a confidence set is computed against the CURRENT placebo reference set,
+    # so an explicit in_space_placebo() rebuild (which _require_placebo_reference even
+    # suggests, via n_starts) must INVALIDATE the cached set rather than report a stale one.
+    res = _exact_combo_fit(effect=3.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.confidence_set(family="constant", gamma=0.25)
+    assert res.effect_confidence_set is not None
+    native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+    assert native["confidence_set"]["status"] == "ran"
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.in_space_placebo(n_starts=2)  # rebuild the reference set
+    assert res.effect_confidence_set is None
+    with pytest.raises(ValueError, match="No confidence set"):
+        res.get_confidence_set_df()
+    native2 = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+    assert native2["confidence_set"]["status"] == "not_run"
+
+
 def test_confidence_set_too_few_donors_raises():
     # One donor -> in_space_placebo cannot form a reference set -> CI / test raise.
     df, years, T0 = _make_panel(n_donors=1, T=10, T0=6)

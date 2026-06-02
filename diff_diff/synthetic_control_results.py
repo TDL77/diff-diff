@@ -721,6 +721,13 @@ class SyntheticControlResults:
         from diff_diff.synthetic_control import _floored_pre_mspe, _mspe, _placebo_fit_unit
 
         snap = self._fit_snapshot
+        # A rebuilt placebo reference set invalidates any previously computed confidence set
+        # (test_sharp_null / confidence_set re-rank against THIS reference set), so drop the
+        # cached confidence-set outputs up front — a stale set must never be reported after an
+        # explicit in_space_placebo() re-run (e.g. with a different n_starts). The snapshot
+        # check above has already passed, so the reference IS about to be rebuilt on every exit.
+        self.effect_confidence_set = None
+        self._confidence_set_df = None
         donors = list(snap.donor_ids)
         n_donors = len(donors)
         if n_starts is None:
