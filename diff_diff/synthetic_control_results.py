@@ -200,6 +200,16 @@ class SyntheticControlResults:
     rmspe_ratio: float = np.nan
     n_placebos: int = 0
     n_failed: int = 0
+    # Confidence set for the treatment-effect path by test inversion (Firpo & Possebom
+    # 2018, "Synthetic Control Method: Inference, Sensitivity Analysis and Confidence
+    # Sets," J. Causal Inference 6(2), §4), populated by ``confidence_set()``. A small
+    # summary dict ``{family, parameter, gamma, lower, upper, contiguous, boundary,
+    # point_estimate, n_grid, n_placebos, status}``; None until ``confidence_set()`` runs.
+    # DELIBERATELY SEPARATE from the always-NaN analytical ``conf_int`` (the Wald interval
+    # classic SCM does not have): this is a PERMUTATION set at level ``1-gamma`` (with
+    # ``gamma`` granular in ``1/(J+1)``), and may be a set / unbounded / non-contiguous —
+    # mirrors how ``placebo_p_value`` is kept distinct from the (NaN) ``p_value``.
+    effect_confidence_set: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         # Internal state set per instance by ``fit()`` / ``in_space_placebo()``.
@@ -223,6 +233,13 @@ class SyntheticControlResults:
         # None (not run), "ran", "treated_fit_nonconverged", "too_few_donors",
         # "all_placebos_failed". A small string, so it survives pickling.
         self._placebo_status: Optional[str] = None
+        # Per-unit floored pre-period denominators (treated + each converged placebo),
+        # captured by in_space_placebo() so the sharp-null test inversion
+        # (test_sharp_null / confidence_set, Firpo & Possebom 2018) re-ranks against the
+        # SAME denominators the placebo run used (the test_sharp_null(0) == placebo_p_value
+        # anchor). Each value uses that unit's OWN pre-outcome scale; the pre window is
+        # f-free so the denominator is grid-invariant. Small dict → survives pickling.
+        self._placebo_pre_denoms: Optional[Dict[Any, float]] = None
 
         # --- ADH 2015 §4 robustness diagnostics (opt-in, populated by ---
         # --- leave_one_out() / in_time_placebo()). Same panel-vs-scalar split as ---
@@ -256,6 +273,11 @@ class SyntheticControlResults:
         # periods, all predictors dropped, or a zero-mass surviving custom_v). Surfaced
         # alongside _in_time_n_failed so a mixed no-success run reports an accurate mix.
         self._in_time_n_infeasible: int = 0
+        # Firpo & Possebom (2018) §4 test-inversion confidence set (opt-in, populated by
+        # confidence_set()). The grid table {param, p_value, in_set} is small / NOT
+        # panel-derived, so it survives pickling by default (NOT nulled by __getstate__);
+        # the public ``effect_confidence_set`` summary dataclass field likewise survives.
+        self._confidence_set_df: Optional[pd.DataFrame] = None
 
     def __getstate__(self) -> Dict[str, Any]:
         """Exclude panel-derived internal state from pickling.
@@ -379,6 +401,45 @@ class SyntheticControlResults:
                 "",
             ]
         )
+        # Test-inversion confidence set (Firpo & Possebom 2018, §4), if computed. Like the
+        # placebo p-value this is permutation-based; the analytical conf_int stays n/a.
+        ecs = self.effect_confidence_set
+        if ecs is not None:
+            fam = ecs["family"]
+            param = ecs["parameter"]
+            conf_pct = 100.0 * (1.0 - ecs["gamma"])
+            lines.append(
+                f"Confidence set by test inversion (Firpo-Possebom 2018; {fam} effect "
+                f"f(t), parameter {param}):"
+            )
+            if ecs["status"] == "ran":
+                note = "" if ecs["contiguous"] else "  (non-contiguous; [lower, upper] hull)"
+                lines.append(
+                    f"  {conf_pct:.1f}% set:".ljust(34)
+                    + f"[{ecs['lower']:.4f}, {ecs['upper']:.4f}]{note}"
+                )
+            elif ecs["status"] == "unbounded":
+                tail = (
+                    " and NON-CONTIGUOUS (hull shown; see get_confidence_set_df())"
+                    if not ecs["contiguous"]
+                    else ""
+                )
+                lines.append(
+                    "  Unbounded (gamma below the 1/(J+1) granularity, or the treated "
+                    f"unit is not the best pre-fit){tail}."
+                )
+            else:  # "empty"
+                lines.append(
+                    "  Empty: every effect in this family is rejected at "
+                    f"gamma={ecs['gamma']:.3g}."
+                )
+            lines.extend(
+                [
+                    "(Permutation-based; the analytical conf_int above stays n/a.)",
+                    "-" * 75,
+                    "",
+                ]
+            )
         # Three states: (1) placebo never run -> point to in_space_placebo();
         # (2) run with a valid reference set -> show the permutation p-value;
         # (3) run but infeasible (no placebo entered the rank, e.g. J<2 or all
@@ -483,6 +544,17 @@ class SyntheticControlResults:
             "n_placebos": self.n_placebos,
             "n_failed": self.n_failed,
         }
+        # Test-inversion confidence set (Firpo & Possebom 2018), flattened to scalars so
+        # to_dataframe() stays a single row of scalars; all None until confidence_set()
+        # runs. The analytical conf_int_lower/upper above stay NaN (no Wald interval).
+        ecs = self.effect_confidence_set
+        result["effect_ci_family"] = ecs["family"] if ecs else None
+        result["effect_ci_parameter"] = ecs["parameter"] if ecs else None
+        result["effect_ci_gamma"] = ecs["gamma"] if ecs else None
+        result["effect_ci_lower"] = ecs["lower"] if ecs else None
+        result["effect_ci_upper"] = ecs["upper"] if ecs else None
+        result["effect_ci_contiguous"] = ecs["contiguous"] if ecs else None
+        result["effect_ci_status"] = ecs["status"] if ecs else None
         if self.survey_metadata is not None:
             sm = self.survey_metadata
             result["weight_type"] = sm.weight_type
@@ -646,7 +718,7 @@ class SyntheticControlResults:
                 "older estimator version. Re-fit to enable in-space placebo "
                 "inference."
             )
-        from diff_diff.synthetic_control import _mspe, _placebo_fit_unit
+        from diff_diff.synthetic_control import _floored_pre_mspe, _mspe, _placebo_fit_unit
 
         snap = self._fit_snapshot
         donors = list(snap.donor_ids)
@@ -697,6 +769,7 @@ class SyntheticControlResults:
             self.n_placebos = 0
             self.n_failed = 0
             self._placebo_gaps = {}
+            self._placebo_pre_denoms = {}
             self._placebo_status = "treated_fit_nonconverged"
             self._placebo_df = pd.DataFrame(rows, columns=self._PLACEBO_COLS)
             return self._placebo_df.copy()
@@ -713,6 +786,7 @@ class SyntheticControlResults:
             self.n_placebos = 0
             self.n_failed = 0
             self._placebo_gaps = {}
+            self._placebo_pre_denoms = {}
             self._placebo_status = "too_few_donors"
             self._placebo_df = pd.DataFrame(rows, columns=self._PLACEBO_COLS)
             return self._placebo_df.copy()
@@ -802,6 +876,20 @@ class SyntheticControlResults:
                 UserWarning,
                 stacklevel=2,
             )
+
+        # Persist each unit's floored pre-period denominator (treated + every converged
+        # placebo) so the sharp-null test inversion (test_sharp_null / confidence_set,
+        # Firpo & Possebom 2018) re-ranks against the SAME denominators this run used —
+        # the test_sharp_null(0) == placebo_p_value anchor. The pre window is f-free so the
+        # denominator is grid-invariant; each unit's floor uses its OWN pre-outcome scale.
+        outcome_pivot = snap.pivots[snap.outcome]
+        pre_denoms: Dict[Any, float] = {}
+        for unit, gp in [(snap.treated_id, self.gap_path), *placebo_gaps.items()]:
+            pre_gaps_u = np.array([gp[p] for p in snap.pre_periods], dtype=float)
+            z1_u = outcome_pivot.loc[snap.pre_periods, unit].to_numpy(dtype=float)
+            scale_u = float(np.max(np.abs(z1_u))) if z1_u.size else 0.0
+            pre_denoms[unit] = _floored_pre_mspe(pre_gaps_u, scale_u)
+        self._placebo_pre_denoms = pre_denoms
 
         self.placebo_p_value = float(p_value)
         self.n_placebos = int(n_placebos)
@@ -1401,3 +1489,328 @@ class SyntheticControlResults:
                         }
                     )
         return pd.DataFrame(rows, columns=["placebo_period", "period", "gap", "phase"])
+
+    # =====================================================================
+    # Confidence sets by test inversion (Firpo & Possebom 2018, §4)
+    # =====================================================================
+
+    def _require_placebo_reference(self, n_starts: Optional[int]) -> None:
+        """Ensure an in-space placebo reference set is available for test inversion.
+
+        Lazily runs :meth:`in_space_placebo` when no reference set has been built yet
+        (raising the same ValueError as that method if the fit snapshot is missing, e.g.
+        on an unpickled result). If a reference set already exists, a non-None ``n_starts``
+        is **ignored with a UserWarning** — the test inversion reuses the single stored set
+        (every sharp null re-ranks the SAME gaps), so honouring ``n_starts`` would mean an
+        expensive O(J) re-fit that the caller did not ask for. Raises ValueError when no
+        valid reference set could be produced (fewer than 2 donors, a non-converged treated
+        fit, or all donor refits failed) — there is then no permutation distribution to
+        invert.
+        """
+        if self._placebo_gaps is None:
+            # Builds the reference set; raises ValueError if the snapshot is unavailable.
+            self.in_space_placebo(n_starts=n_starts)
+        elif n_starts is not None:
+            warnings.warn(
+                "n_starts is ignored: the in-space placebo reference set was already "
+                "computed and is reused (every sharp null / grid value re-ranks the same "
+                "placebo gaps). Re-run in_space_placebo(n_starts=...) explicitly to rebuild "
+                "it with a different multistart count.",
+                UserWarning,
+                stacklevel=3,
+            )
+        if not self._placebo_gaps or self._placebo_status != "ran":
+            reasons = {
+                "treated_fit_nonconverged": (
+                    "the treated unit's own SCM fit did not converge at fit time, so its "
+                    "RMSPE ratio is not a valid optimum to rank against placebos"
+                ),
+                "too_few_donors": (
+                    "fewer than 2 donors are available (each placebo is fit against the "
+                    "other donors)"
+                ),
+                "all_placebos_failed": (
+                    "every donor refit failed to converge, so no placebo entered the "
+                    "reference set"
+                ),
+            }
+            default_reason = "no valid in-space placebo reference set was produced"
+            status = self._placebo_status
+            reason = reasons.get(status, default_reason) if status is not None else default_reason
+            raise ValueError(
+                "Confidence set / sharp-null test requires a valid in-space placebo "
+                f"reference set, but {reason}. (See the in_space_placebo() warning above.)"
+            )
+
+    @staticmethod
+    def _coerce_effect_path(effect: Any, n_post: int) -> np.ndarray:
+        """Coerce ``effect`` to a length-``n_post`` post-period effect path ``f(t)``.
+
+        A scalar broadcasts to a constant path (Eq 11 with ``f(t) = c``); a 1-D array must
+        have one finite value per post period, aligned to the calendar-sorted
+        ``post_periods``. Fails closed on a wrong length or any non-finite value.
+        """
+        arr = np.asarray(effect, dtype=float)
+        if arr.ndim == 0:
+            f = np.full(n_post, float(arr), dtype=float)
+        elif arr.ndim == 1:
+            if arr.shape[0] != n_post:
+                raise ValueError(
+                    f"effect path has length {arr.shape[0]} but there are {n_post} "
+                    "post-treatment periods; pass a scalar (a constant-in-time effect) or "
+                    f"a length-{n_post} array aligned to post_periods (calendar order)."
+                )
+            f = arr
+        else:
+            raise ValueError(
+                "effect must be a scalar (constant effect) or a 1-D array (one value per "
+                f"post period), got a {arr.ndim}-D array."
+            )
+        if not np.all(np.isfinite(f)):
+            raise ValueError("effect contains non-finite (NaN/inf) values.")
+        return f
+
+    def test_sharp_null(
+        self,
+        effect: Any,
+        *,
+        gamma: float = 0.1,
+        n_starts: Optional[int] = None,
+    ) -> pd.Series:
+        """Test a sharp null hypothesis on the treatment-effect path (Firpo & Possebom 2018, §4.1).
+
+        Tests ``H_0^f: α_{1,t} = f(t)`` for every post period (Eq 11) by subtracting the
+        hypothesized effect path ``f(t)`` from the post-period gaps of EVERY unit and
+        re-ranking the treated unit's modified RMSPE ratio against the placebo distribution
+        (Eqs 12–13 at ``φ = 0``, ``v = (1,…,1)`` — the equal-weights benchmark). The
+        synthetic controls are NOT refit: this reuses the gap paths and per-unit
+        denominators :meth:`in_space_placebo` already computed (run lazily here if needed).
+        At ``effect = 0`` the p-value is identically the benchmark ``placebo_p_value``
+        (Eq 5 = Eq 13 with ``f ≡ 0``).
+
+        Parameters
+        ----------
+        effect : float or array-like
+            The hypothesized post-period effect ``f(t)``: a scalar (a constant-in-time
+            effect, Eq 11), or a length-``n_post_periods`` array aligned to ``post_periods``
+            in calendar order (an arbitrary path — e.g. an intervention cost path or a
+            theory-predicted shape).
+        gamma : float, default 0.1
+            Test level; the null is rejected when ``p^f < gamma``. The permutation p-value
+            is granular in ``1/(J+1)`` (Firpo & Possebom fn 8), so not every nominal level
+            is attainable.
+        n_starts : int, optional
+            Multistart count for the lazy :meth:`in_space_placebo` run; ignored (with a
+            warning) if the reference set already exists.
+
+        Returns
+        -------
+        pandas.Series
+            ``p_value`` (``p^f``), ``reject`` (``p^f < gamma``), ``gamma``,
+            ``rmspe_f_treated`` (the treated unit's modified RMSPE ratio), ``n_placebos``
+            (reference-set size), ``n_failed``.
+
+        Raises
+        ------
+        ValueError
+            If ``gamma`` is not in ``(0, 1)``, ``effect`` has the wrong shape / non-finite
+            values, or no valid placebo reference set is available (see
+            :meth:`in_space_placebo`).
+        """
+        from diff_diff.synthetic_control import _sharp_null_pvalue
+
+        if not (0.0 < float(gamma) < 1.0):
+            raise ValueError(f"gamma must be in (0, 1), got {gamma!r}")
+        self._require_placebo_reference(n_starts)
+        post_periods = list(self.post_periods)
+        f_post = self._coerce_effect_path(effect, len(post_periods))
+        assert self._placebo_gaps is not None and self._placebo_pre_denoms is not None
+        p, r1, n_ref = _sharp_null_pvalue(
+            self.gap_path,
+            self._placebo_gaps,
+            post_periods,
+            f_post,
+            self._placebo_pre_denoms,
+            self.treated_unit,
+        )
+        return pd.Series(
+            {
+                "p_value": float(p),
+                "reject": bool(p < float(gamma)),
+                "gamma": float(gamma),
+                "rmspe_f_treated": float(r1),
+                "n_placebos": int(n_ref),
+                "n_failed": int(self.n_failed),
+            }
+        )
+
+    def confidence_set(
+        self,
+        *,
+        family: str = "constant",
+        gamma: float = 0.1,
+        bounds: Optional[Tuple[float, float]] = None,
+        n_grid: int = 200,
+        n_starts: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """Confidence set for the treatment-effect path by test inversion (Firpo & Possebom 2018, §4.2).
+
+        Inverts the sharp-null test (:meth:`test_sharp_null`) over a one-parameter effect
+        family: the confidence set is every parameter value whose sharp null is **not
+        rejected**, ``{ param : p^param > gamma }`` (Eq 14, **strict** inequality). Two
+        families are supported:
+
+        - ``family="constant"`` — ``f(t) = c`` (Eq 15); the set is a confidence **interval**
+          for a constant-in-time effect (Eq 16). The parameter column is ``c``.
+        - ``family="linear"`` — ``f(t) = c̃·(t − T0)`` with the 1-based post-period index
+          ``(t − T0)`` (Eq 17); the set is a confidence **set** over the slope ``c̃``
+          (Eq 18). The parameter column is ``c_tilde``.
+
+        The inversion is a pure re-ranking of the stored placebo gaps (no synthetic-control
+        refits): :meth:`in_space_placebo` is run lazily if needed, then each value only
+        recomputes ``p^param``. With ``bounds=None`` the set is recovered **exactly**:
+        ``p^param`` is piecewise-constant (each placebo's indicator flips only at the real
+        roots of a quadratic in ``param``), so the placebo breakpoints partition the line,
+        ``p`` is evaluated once per induced interval AND at each breakpoint (where a tie
+        under ``≥`` can lift ``p`` above ``gamma``), and the union of accepted
+        intervals/points is the set — with NO centering or monotonicity assumption (accepted
+        tails and disjoint components are handled). With explicit ``bounds`` a fixed
+        ``linspace(*bounds, n_grid)`` grid is scanned instead (grid-limited membership).
+
+        **Boundary convention (paper-sourced, Eq 14):** membership is the *strict* inequality
+        ``p^param > gamma``. The permutation p-value is discrete (a multiple of ``1/(J+1)``),
+        so ``p = gamma`` is reachable and is **excluded** from the set.
+
+        The result is stored on the object: the summary on
+        :attr:`effect_confidence_set` (``{family, parameter, gamma, lower, upper,
+        contiguous, boundary, point_estimate, n_grid, n_placebos, status}``, surviving
+        pickling) and the full grid on :meth:`get_confidence_set_df`. The analytical
+        ``conf_int`` / ``se`` stay NaN — this is a separate permutation object.
+
+        Parameters
+        ----------
+        family : {"constant", "linear"}, default "constant"
+            The one-parameter effect family to invert over.
+        gamma : float, default 0.1
+            Confidence level is ``1 − gamma``; ``p^param > gamma`` defines membership.
+        bounds : (float, float), optional
+            Fixed ``(lo, hi)`` grid for the parameter. Default None uses exact breakpoint
+            inversion (a fixed grid is used only when ``bounds`` is supplied).
+        n_grid : int, default 200
+            Number of grid points evaluated for the returned table (>= 2).
+        n_starts : int, optional
+            Multistart count for the lazy :meth:`in_space_placebo` run; ignored (with a
+            warning) if the reference set already exists.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Columns ``param`` (``c`` for constant, ``c̃`` for linear), ``p_value``
+            (``p^param``), ``in_set`` (``p^param > gamma``). Empty for an ``"empty"`` set;
+            an ``"unbounded"`` exact set with finite breakpoints still returns an inspection
+            grid over a padded breakpoint range (see :attr:`effect_confidence_set`
+            ``status``).
+
+        Raises
+        ------
+        ValueError
+            If ``family`` is unknown, ``gamma`` not in ``(0, 1)``, ``n_grid < 2``, ``bounds``
+            malformed, or no valid placebo reference set is available.
+        """
+        from diff_diff.synthetic_control import _invert_sharp_null
+
+        if family not in ("constant", "linear"):
+            raise ValueError(f"family must be 'constant' or 'linear', got {family!r}")
+        if not (0.0 < float(gamma) < 1.0):
+            raise ValueError(f"gamma must be in (0, 1), got {gamma!r}")
+        if not isinstance(n_grid, (int, np.integer)) or n_grid < 2:
+            raise ValueError(f"n_grid must be an integer >= 2, got {n_grid!r}")
+        if bounds is not None:
+            # Guard the type/length BEFORE indexing so a malformed scalar raises the
+            # documented ValueError (not a bare TypeError from len()/subscription).
+            if (
+                not isinstance(bounds, (tuple, list, np.ndarray))
+                or len(bounds) != 2
+                or not all(isinstance(b, (int, float, np.integer, np.floating)) for b in bounds)
+                or not all(np.isfinite(float(b)) for b in bounds)
+            ):
+                raise ValueError(f"bounds must be a finite (lo, hi) pair, got {bounds!r}")
+            if float(bounds[1]) <= float(bounds[0]):
+                raise ValueError(f"bounds must satisfy hi > lo, got {bounds!r}")
+        self._require_placebo_reference(n_starts)
+        assert self._placebo_gaps is not None and self._placebo_pre_denoms is not None
+        res = _invert_sharp_null(
+            self.gap_path,
+            self._placebo_gaps,
+            list(self.post_periods),
+            self._placebo_pre_denoms,
+            self.treated_unit,
+            family,
+            float(gamma),
+            bounds=(None if bounds is None else (float(bounds[0]), float(bounds[1]))),
+            n_grid=int(n_grid),
+        )
+        status = res["status"]
+        if status == "unbounded":
+            extra = (
+                " The accepted set is ALSO non-contiguous (e.g. two accepted tails with a "
+                "rejected middle, NOT the whole line), so [lower, upper] is only the hull — "
+                "inspect get_confidence_set_df() for the structure."
+                if not res["contiguous"]
+                else ""
+            )
+            warnings.warn(
+                "Confidence set is unbounded: either gamma is below the permutation "
+                "granularity 1/(J+1) (so no effect is ever rejected — Firpo & Possebom "
+                "fn 8), or the treated unit does not have the best pre-treatment fit (so "
+                "the RMSPE ratio does not grow without bound on one side). Reported "
+                "endpoint(s) are +/-inf." + extra,
+                UserWarning,
+                stacklevel=2,
+            )
+        elif status == "empty":
+            warnings.warn(
+                f"Confidence set is empty: every {family} effect in this family is "
+                f"rejected at gamma={gamma:.3g} (the largest attainable p-value does not "
+                "exceed gamma). Endpoints are NaN.",
+                UserWarning,
+                stacklevel=2,
+            )
+        elif not res["contiguous"]:
+            warnings.warn(
+                "Confidence set is non-contiguous (the discrete permutation p-value dips "
+                "below gamma at an interior grid point); [lower, upper] is reported as the "
+                "hull. Inspect get_confidence_set_df() for the full grid.",
+                UserWarning,
+                stacklevel=2,
+            )
+        self.effect_confidence_set = {
+            "family": family,
+            "parameter": "c" if family == "constant" else "c_tilde",
+            "gamma": float(gamma),
+            "lower": float(res["lower"]),
+            "upper": float(res["upper"]),
+            "contiguous": bool(res["contiguous"]),
+            "boundary": "strict",
+            "point_estimate": float(res["point_estimate"]),
+            "n_grid": int(n_grid),
+            "n_placebos": int(res["n_ref"]),
+            "status": status,
+        }
+        self._confidence_set_df = pd.DataFrame(res["grid"], columns=["param", "p_value", "in_set"])
+        return self._confidence_set_df.copy()
+
+    def get_confidence_set_df(self) -> pd.DataFrame:
+        """Get the test-inversion confidence-set grid table (see :meth:`confidence_set`).
+
+        Columns: ``param`` (``c`` constant / ``c̃`` linear), ``p_value`` (``p^param``),
+        ``in_set`` (``p^param > gamma``). Survives pickling. Raises if
+        :meth:`confidence_set` has not been run.
+
+        Returns
+        -------
+        pandas.DataFrame
+        """
+        if self._confidence_set_df is None:
+            raise ValueError("No confidence set yet; call confidence_set() first.")
+        return self._confidence_set_df.copy()

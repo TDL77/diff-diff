@@ -2458,6 +2458,49 @@ class DiagnosticReport:
                     "placebo (opt-in; refits per backdated date)."
                 ),
             }
+
+        # Test-inversion confidence set (Firpo & Possebom 2018 §4): opt-in, surfaced once
+        # the user has run results.confidence_set() (it reuses the in-space placebo
+        # reference set — no refits). The analytical conf_int stays NaN; this is a SEPARATE
+        # permutation set at level 1 - gamma, possibly unbounded or non-contiguous.
+        ecs = getattr(r, "effect_confidence_set", None)
+        if ecs is not None:
+            ecs_status = ecs.get("status")
+            _lo, _hi = ecs.get("lower"), ecs.get("upper")
+            block = {
+                "status": ecs_status,
+                "family": ecs.get("family"),
+                "parameter": ecs.get("parameter"),
+                "gamma": _to_python_float(ecs.get("gamma")),
+                # Emit each endpoint independently: a finite float, else None for a non-finite
+                # side (NaN for an empty set, +/-inf for an unbounded tail) -- keeps the dict
+                # JSON-safe while preserving the FINITE side of a one-sided unbounded set.
+                "lower": float(_lo) if isinstance(_lo, (int, float)) and np.isfinite(_lo) else None,
+                "upper": float(_hi) if isinstance(_hi, (int, float)) and np.isfinite(_hi) else None,
+                "contiguous": bool(ecs.get("contiguous")),
+                "n_placebos": _to_python_scalar(ecs.get("n_placebos")),
+            }
+            if ecs_status == "unbounded":
+                block["reason"] = (
+                    "confidence_set() ran but the set is unbounded (gamma below the "
+                    "1/(J+1) permutation granularity, or the treated unit lacks the best "
+                    "pre-treatment fit); endpoint(s) are +/-inf."
+                )
+            elif ecs_status == "empty":
+                block["reason"] = (
+                    "confidence_set() ran but the set is empty (every effect in the "
+                    "family is rejected at gamma); endpoints are NaN."
+                )
+            out["confidence_set"] = block
+        else:
+            out["confidence_set"] = {
+                "status": "not_run",
+                "reason": (
+                    "Call results.confidence_set() for a test-inversion confidence set of "
+                    "the effect path (Firpo-Possebom 2018; opt-in, reuses the in-space "
+                    "placebo reference set)."
+                ),
+            }
         return out
 
     # -- Heterogeneity helpers --------------------------------------------

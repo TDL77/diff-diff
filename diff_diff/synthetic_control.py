@@ -1761,6 +1761,22 @@ def _mspe(gap_path: Dict[Any, float], periods: List[Any]) -> float:
     return float(np.mean(g**2))
 
 
+def _floored_pre_mspe(pre_gaps: np.ndarray, scale: float) -> float:
+    """Pre-period MSPE with the scale-aware floor used as the RMSPE-ratio denominator.
+
+    ``= max(mean(pre_gaps**2), 1e-8 * max(scale, 1)**2)``. Factored out of
+    ``_rmspe_ratio`` so the sharp-null test inversion (Firpo & Possebom 2018) can reuse
+    the SAME per-unit floored denominator the in-space placebo used — the floor scale is
+    PER-UNIT (``scale`` = ``max|Z1|`` of that unit's pre-period outcomes), so this is
+    what guarantees ``test_sharp_null(0) == placebo_p_value`` bit-for-bit even when the
+    floor bites (a near-perfect pre-fit). The denominator is GRID-INVARIANT under a sharp
+    null whose ``f`` is zero in the pre-period (the operational constant/linear families).
+    """
+    pre_mspe = float(np.mean(pre_gaps**2)) if pre_gaps.size else float("nan")
+    floor = 1e-8 * max(float(scale), 1.0) ** 2
+    return max(pre_mspe, floor)
+
+
 def _rmspe_ratio(pre_gaps: np.ndarray, post_gaps: np.ndarray, scale: float) -> float:
     """Post/pre RMSPE ratio — the in-space placebo test statistic (ADH 2010 §2.4).
 
@@ -1777,10 +1793,339 @@ def _rmspe_ratio(pre_gaps: np.ndarray, post_gaps: np.ndarray, scale: float) -> f
     ``scale`` is the magnitude of the unit's pre-period outcomes. Mirrors the
     ``_fit_tol`` poor-fit guard in ``fit()``.
     """
-    pre_mspe = float(np.mean(pre_gaps**2)) if pre_gaps.size else float("nan")
     post_mspe = float(np.mean(post_gaps**2)) if post_gaps.size else float("nan")
-    floor = 1e-8 * max(float(scale), 1.0) ** 2
-    return float(np.sqrt(post_mspe / max(pre_mspe, floor)))
+    return float(np.sqrt(post_mspe / _floored_pre_mspe(pre_gaps, scale)))
+
+
+# =============================================================================
+# Sharp-null test inversion (Firpo & Possebom 2018, "Synthetic Control Method:
+# Inference, Sensitivity Analysis and Confidence Sets," J. Causal Inference 6(2)).
+# These helpers RE-RANK the gap paths the in-space placebo already computed (Eqs
+# 12-13, φ=0, v=(1,...,1)); no synthetic-control refits. The benchmark f≡0 case is
+# identically the existing in-space placebo permutation (Eq 5 = Eq 13 at f≡0).
+# =============================================================================
+
+
+def _constant_f_post(c: float, n_post: int) -> np.ndarray:
+    """Constant-in-time post-period effect path f(t)=c (Firpo & Possebom Eq 15)."""
+    return np.full(n_post, float(c), dtype=float)
+
+
+def _linear_f_post(c_tilde: float, n_post: int) -> np.ndarray:
+    """Linear-in-time post-period effect path f(t)=c̃·(t−T0) (Firpo & Possebom Eq 17).
+
+    ``(t−T0)`` is the 1-based post-period index (1 for the first post period), so the
+    path is ``c̃·[1, 2, …, n_post]`` aligned to calendar-sorted ``post_periods``.
+    """
+    return float(c_tilde) * np.arange(1, n_post + 1, dtype=float)
+
+
+def _rmspe_f_ratio(
+    gap_path: Dict[Any, float],
+    post_periods: List[Any],
+    f_post: np.ndarray,
+    pre_denom: float,
+) -> float:
+    """RMSPE^f ratio under a common-effect sharp null (Firpo & Possebom Eq 12).
+
+    Subtracts the post-period effect path ``f_post`` (length ``len(post_periods)``,
+    aligned to calendar-sorted ``post_periods``) from the unit's post gaps, then divides
+    by the GRID-INVARIANT floored pre-period denominator ``pre_denom`` (the pre window is
+    ``f``-free for the operational constant/linear families, Eqs 15/17, so the
+    denominator is unchanged across the inversion grid). Returns
+    ``sqrt(mean_post((g_t − f_t)**2) / pre_denom)``.
+    """
+    post = np.array([gap_path[p] for p in post_periods], dtype=float)
+    resid = post - np.asarray(f_post, dtype=float)
+    post_mspe = float(np.mean(resid**2)) if resid.size else float("nan")
+    return float(np.sqrt(post_mspe / pre_denom))
+
+
+def _sharp_null_pvalue(
+    treated_gap: Dict[Any, float],
+    placebo_gaps: Dict[Any, Dict[Any, float]],
+    post_periods: List[Any],
+    f_post: np.ndarray,
+    pre_denoms: Dict[Any, float],
+    treated_id: Any,
+) -> Tuple[float, float, int]:
+    """Permutation p-value for a common-effect sharp null (Firpo & Possebom Eq 13, φ=0, v=1).
+
+    ``p^f = (1 + #{converged placebos j : RMSPE^f_j ≥ RMSPE^f_1}) / (n_ref + 1)`` — the
+    treated unit is the "+1" and ``n_ref`` is the number of converged placebos (the SAME
+    reference set the in-space placebo built). ``placebo_gaps`` maps each converged donor
+    to its gap path; ``pre_denoms`` maps each unit (treated + those donors) to its floored
+    pre-denominator. Ties counted via ``>=`` so the p-value is conservative, matching
+    ``in_space_placebo``. Returns ``(p, rmspe_f_treated, n_ref)``.
+    """
+    f_post = np.asarray(f_post, dtype=float)
+    r1 = _rmspe_f_ratio(treated_gap, post_periods, f_post, pre_denoms[treated_id])
+    n_ref = 0
+    n_ge = 0
+    for j, g in placebo_gaps.items():
+        rj = _rmspe_f_ratio(g, post_periods, f_post, pre_denoms[j])
+        n_ref += 1
+        if rj >= r1:
+            n_ge += 1
+    p = (1 + n_ge) / (n_ref + 1)
+    return p, r1, n_ref
+
+
+def _invert_sharp_null(
+    treated_gap: Dict[Any, float],
+    placebo_gaps: Dict[Any, Dict[Any, float]],
+    post_periods: List[Any],
+    pre_denoms: Dict[Any, float],
+    treated_id: Any,
+    family: str,
+    gamma: float,
+    *,
+    bounds: Optional[Tuple[float, float]] = None,
+    n_grid: int = 200,
+) -> Dict[str, Any]:
+    """Invert the sharp-null RMSPE^f test over a one-parameter effect family.
+
+    Returns the confidence set ``{ param : p^param > gamma }`` (Firpo & Possebom Eqs
+    14/16/18; STRICT inequality -- ``p == gamma`` is excluded). ``family`` is ``"constant"``
+    (``f(t)=param``, Eq 15) or ``"linear"`` (``f(t)=param*(t-T0)``, Eq 17).
+
+    ``p^param`` is a piecewise-constant step function of the scalar ``param`` (each placebo's
+    indicator flips only at the real roots of a quadratic in ``param``), so with
+    ``bounds=None`` the EXACT set is recovered with NO shape assumption (no "centered
+    interval" / monotonicity): the placebo breakpoints partition the line, ``p`` is evaluated
+    once per induced interval (and the two unbounded tails), and the union of intervals with
+    ``p > gamma`` is the set -- correctly handling accepted tails, disjoint components, and the
+    empty / unbounded cases. With explicit ``bounds`` a fixed ``linspace(*bounds, n_grid)``
+    grid is scanned instead (grid-limited membership). Each ``p`` is a pure O(J) re-ranking.
+
+    Result dict: ``{lower, upper, contiguous, status, n_ref, point_estimate, grid}`` where
+    ``status`` is ``"ran"`` / ``"empty"`` / ``"unbounded"``, ``point_estimate`` is the treated
+    unit's own RMSPE-minimizing ``param`` (the ATT for constant, the no-intercept OLS slope
+    for linear -- reported for reference, NOT assumed to maximize ``p``), and ``grid`` is a
+    list of ``(param, p_value, in_set)`` rows for the returned table.
+    """
+    if family not in ("constant", "linear"):
+        raise ValueError(f"family must be 'constant' or 'linear', got {family!r}")
+    n_post = len(post_periods)
+    # Family shape s_t and per-unit moments of A_u(param) = mean_t((g_ut - param*s_t)**2)
+    # = S2*param**2 - 2*P_u*param + Q_u  (s_t = 1 constant / (t - T0) linear; S2 = mean(s**2)).
+    s = (
+        np.ones(n_post, dtype=float)
+        if family == "constant"
+        else np.arange(1, n_post + 1, dtype=float)
+    )
+    S2 = float(np.mean(s**2)) if n_post else 0.0
+
+    def moments(gap_path: Dict[Any, float], unit: Any) -> Tuple[float, float, float]:
+        g = np.array([gap_path[p] for p in post_periods], dtype=float)
+        return float(np.mean(g * s)), float(np.mean(g**2)), pre_denoms[unit]
+
+    P1, Q1, D1 = moments(treated_gap, treated_id)
+    placebo_mom = [moments(gp, j) for j, gp in placebo_gaps.items()]
+    n_ref = len(placebo_mom)
+    # The treated unit's own RMSPE-minimizing param: reported as the point estimate ONLY
+    # (it is NOT assumed to maximize p -- see the exact-inversion comment below).
+    center = float(P1 / S2) if S2 > 0 else 0.0
+
+    def pval(param: float) -> float:
+        # p^param = (1 + #{placebos j : A_j/D_j >= A_1/D_1}) / (n_ref + 1). Comparing A/D is
+        # monotone-equivalent to comparing the RMSPE ratios sqrt(A/D), so this is identical to
+        # _sharp_null_pvalue / test_sharp_null (the squared form just avoids the sqrt).
+        r1 = ((S2 * param - 2.0 * P1) * param + Q1) / D1
+        n_ge = sum(
+            1 for (Pj, Qj, Dj) in placebo_mom if ((S2 * param - 2.0 * Pj) * param + Qj) / Dj >= r1
+        )
+        return (1 + n_ge) / (n_ref + 1)
+
+    def grid_rows(lo: float, hi: float) -> List[Tuple[float, float, bool]]:
+        if not (np.isfinite(lo) and np.isfinite(hi)) or hi <= lo:
+            return []
+        out: List[Tuple[float, float, bool]] = []
+        for x in np.linspace(lo, hi, max(int(n_grid), 2)):
+            p = pval(float(x))
+            out.append((float(x), float(p), bool(p > gamma)))
+        return out
+
+    # ----- fixed-grid path (user-supplied bounds) -----
+    if bounds is not None:
+        lo_b, hi_b = float(bounds[0]), float(bounds[1])
+        if hi_b <= lo_b:
+            raise ValueError(f"bounds must be (lo, hi) with hi > lo, got {bounds!r}")
+        rows = grid_rows(lo_b, hi_b)
+        accepted = [x for x, _, ok in rows if ok]
+        if not accepted:
+            return {
+                "lower": np.nan,
+                "upper": np.nan,
+                "contiguous": True,
+                "status": "empty",
+                "n_ref": n_ref,
+                "point_estimate": center,
+                "grid": rows,
+            }
+        lower, upper = min(accepted), max(accepted)
+        contiguous = all(ok for x, _, ok in rows if lower <= x <= upper)
+        return {
+            "lower": lower,
+            "upper": upper,
+            "contiguous": contiguous,
+            "status": "ran",
+            "n_ref": n_ref,
+            "point_estimate": center,
+            "grid": rows,
+        }
+
+    # ----- exact piecewise-constant inversion (bounds=None; no shape assumption) -----
+    # p^param is a step function of param: each placebo's indicator flips only at the real
+    # roots of A_j(param)*D1 - A_1(param)*Dj = 0, a quadratic in param. So the EXACT set is
+    # recovered with NO "centered interval" / monotonicity assumption -- collect every placebo
+    # breakpoint, evaluate p once on each open interval they induce (plus the two unbounded
+    # tails), and union the intervals with p > gamma. This correctly handles accepted tails,
+    # disjoint components, and the empty / unbounded cases: a poor-pre-fit treated unit can
+    # have its accepted region in the TAILS, not around the point estimate.
+    if gamma < 1.0 / (n_ref + 1):
+        # p >= 1/(J+1) everywhere (the treated ranks itself), so nothing is ever rejected
+        # (Firpo & Possebom fn 8 -- the discrete granularity); the set is all of R.
+        return {
+            "lower": -np.inf,
+            "upper": np.inf,
+            "contiguous": True,
+            "status": "unbounded",
+            "n_ref": n_ref,
+            "point_estimate": center,
+            "grid": [],
+        }
+
+    def quad_roots(a: float, b: float, c: float) -> List[float]:
+        # Real roots of a*x**2 + b*x + c, degenerate-safe (linear / constant fall through).
+        if abs(a) <= 1e-15:
+            return [] if abs(b) <= 1e-15 else [-c / b]
+        disc = b * b - 4.0 * a * c
+        if disc < 0.0:
+            return []
+        sq = disc**0.5
+        return [(-b - sq) / (2.0 * a), (-b + sq) / (2.0 * a)]
+
+    # g_j(param) = A_j(param)*D1 - A_1(param)*Dj = a*param^2 + b*param + c; the indicator
+    # 1[g_j(param) >= 0] == 1[RMSPE^param_j >= RMSPE^param_1], and breakpoints (where an
+    # indicator flips) are the real roots of each g_j.
+    coeffs = [
+        (S2 * (D1 - Dj), -2.0 * (Pj * D1 - P1 * Dj), Qj * D1 - Q1 * Dj)
+        for (Pj, Qj, Dj) in placebo_mom
+    ]
+    raw_breaks: List[float] = []
+    for a, b, c in coeffs:
+        raw_breaks.extend(quad_roots(a, b, c))
+    breaks: List[float] = []
+    for r in sorted(raw_breaks):
+        # dedup near-equal roots so each interval midpoint stays strictly interior
+        if not breaks or abs(r - breaks[-1]) > 1e-12 + 1e-9 * abs(r):
+            breaks.append(r)
+
+    def pval_break(r: float) -> float:
+        # p AT a breakpoint: strict-`>` membership (Eq 14) combined with the conservative
+        # tie-counting `>=` (Eqs 5/13) means a placebo that EXACTLY ties the treated at a root
+        # is counted, so p can spike above gamma there even when both neighboring open
+        # intervals are rejected (a tangent / co-located root => an isolated accepted point).
+        # A relative tolerance registers the tie robustly in floating point.
+        n_ge = 0
+        for a, b, c in coeffs:
+            gj = (a * r + b) * r + c
+            if gj >= -(1e-9 * (abs(a) * r * r + abs(b) * abs(r) + abs(c)) + 1e-12):
+                n_ge += 1
+        return (1 + n_ge) / (n_ref + 1)
+
+    if not breaks:
+        # p is constant in param (e.g. every placebo shares the treated's moments + denom).
+        if pval(center) > gamma:
+            return {
+                "lower": -np.inf,
+                "upper": np.inf,
+                "contiguous": True,
+                "status": "unbounded",
+                "n_ref": n_ref,
+                "point_estimate": center,
+                "grid": [],
+            }
+        return {
+            "lower": np.nan,
+            "upper": np.nan,
+            "contiguous": True,
+            "status": "empty",
+            "n_ref": n_ref,
+            "point_estimate": center,
+            "grid": [],
+        }
+
+    # Atoms along the line: cell_0, b_0, cell_1, b_1, ..., b_{m-1}, cell_m (2m+1 atoms). p is
+    # constant on each open cell (sampled at an interior point) and is evaluated WITH the tie
+    # tolerance at each breakpoint. The set = union of accepted atoms; consecutive accepted
+    # atoms share a boundary => one connected component, a rejected atom splits components
+    # (so an accepted breakpoint whose neighbor cells are both rejected is a singleton).
+    m = len(breaks)
+    cell_pts = (
+        [breaks[0] - 1.0]
+        + [0.5 * (breaks[k] + breaks[k + 1]) for k in range(m - 1)]
+        + [breaks[-1] + 1.0]
+    )
+    cell_in = [pval(x) > gamma for x in cell_pts]
+    break_in = [pval_break(r) > gamma for r in breaks]
+    acc = [cell_in[i // 2] if i % 2 == 0 else break_in[(i - 1) // 2] for i in range(2 * m + 1)]
+    if not any(acc):
+        return {
+            "lower": np.nan,
+            "upper": np.nan,
+            "contiguous": True,
+            "status": "empty",
+            "n_ref": n_ref,
+            "point_estimate": center,
+            "grid": [],
+        }
+
+    def atom_extent(i: int) -> Tuple[float, float]:
+        if i % 2 == 0:
+            k = i // 2  # open cell k = (left boundary, right boundary)
+            return (-np.inf if k == 0 else breaks[k - 1], np.inf if k == m else breaks[k])
+        b = breaks[(i - 1) // 2]  # a breakpoint singleton
+        return (b, b)
+
+    components: List[Tuple[float, float]] = []
+    i = 0
+    while i < len(acc):
+        if not acc[i]:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(acc) and acc[j + 1]:
+            j += 1
+        components.append((atom_extent(i)[0], atom_extent(j)[1]))
+        i = j + 1
+
+    lower = min(comp[0] for comp in components)
+    upper = max(comp[1] for comp in components)
+    contiguous = len(components) == 1
+    status = "ran" if (np.isfinite(lower) and np.isfinite(upper)) else "unbounded"
+    # Display grid: the finite hull, else a padded breakpoint range (for inspection only).
+    if np.isfinite(lower) and np.isfinite(upper):
+        if upper <= lower:
+            # A pure singleton set (lower == upper, a lone accepted breakpoint): a zero-width
+            # range yields an empty grid_rows(), so emit the single accepted point explicitly
+            # (with its tie-spike p) — the inspection table must reflect the non-empty set.
+            grid = [(float(lower), float(pval_break(lower)), True)]
+        else:
+            grid = grid_rows(lower, upper)
+    else:
+        pad = max(1.0, breaks[-1] - breaks[0])
+        grid = grid_rows(breaks[0] - pad, breaks[-1] + pad)
+    return {
+        "lower": float(lower),
+        "upper": float(upper),
+        "contiguous": bool(contiguous),
+        "status": status,
+        "n_ref": n_ref,
+        "point_estimate": center,
+        "grid": grid,
+    }
 
 
 def _placebo_fit_unit(

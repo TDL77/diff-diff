@@ -38,6 +38,15 @@ from diff_diff import (
     SyntheticControlResults,
     synthetic_control,
 )
+from diff_diff.synthetic_control import (
+    _constant_f_post,
+    _floored_pre_mspe,
+    _invert_sharp_null,
+    _linear_f_post,
+    _rmspe_f_ratio,
+    _rmspe_ratio,
+    _sharp_null_pvalue,
+)
 from tests.conftest import assert_nan_inference
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -3013,3 +3022,498 @@ def test_leave_one_out_cv_branch_and_fresh_reduced_pool_parity(monkeypatch):
             inner_min_decrease=1e-3,
         )
     assert loo_att == pytest.approx(fresh.att, abs=1e-7)
+
+
+# ===========================================================================
+# Confidence sets by test inversion (Firpo & Possebom 2018, Section 4)
+# ===========================================================================
+#
+# Two opt-in SyntheticControlResults methods built ON TOP of the in-space placebo:
+# test_sharp_null(effect) tests H_0^f: alpha_1t = f(t) by re-ranking the stored
+# placebo gaps (Eqs 12-13, phi=0, v=(1,...,1)); confidence_set(family=...) inverts
+# that test over a one-parameter family (Eqs 14/16/18, strict p^f > gamma). No SCM
+# refits. The benchmark f==0 case is identically the existing placebo_p_value
+# (Eq 5 = Eq 13 at f==0). No R anchor (Synth has no test inversion): validated by
+# self-consistency to the placebo p-value, a numpy oracle, and a coverage MC.
+
+
+def _gp(pre_vals, post_vals, pre_periods, post_periods):
+    """Build a {period: gap} path from pre/post value lists."""
+    d = {p: float(v) for p, v in zip(pre_periods, pre_vals)}
+    d.update({p: float(v) for p, v in zip(post_periods, post_vals)})
+    return d
+
+
+# Hand-built scenario for the helper-level oracle tests: the treated unit has the
+# best pre-fit and a constant +2 post effect; 4 placebos have worse pre-fit + scattered
+# post gaps (so for large |c| the treated becomes the most-deviant unit -> bounded set).
+_ORACLE_PRE = [0, 1, 2]
+_ORACLE_POST = [3, 4, 5]
+_ORACLE_TREATED = _gp([0.08, -0.06, 0.05], [2.0, 2.0, 2.0], _ORACLE_PRE, _ORACLE_POST)
+_ORACLE_PLACEBOS = {
+    "a": _gp([0.3, -0.3, 0.3], [0.6, -0.4, 0.2], _ORACLE_PRE, _ORACLE_POST),
+    "b": _gp([-0.3, 0.3, 0.2], [-0.5, 0.4, 0.3], _ORACLE_PRE, _ORACLE_POST),
+    "c": _gp([0.2, 0.3, -0.3], [0.3, 0.5, -0.4], _ORACLE_PRE, _ORACLE_POST),
+    "d": _gp([-0.2, 0.3, 0.3], [0.4, -0.3, 0.5], _ORACLE_PRE, _ORACLE_POST),
+}
+
+
+def _oracle_pre_denoms(scale=1.0):
+    units = {0: _ORACLE_TREATED, **_ORACLE_PLACEBOS}
+    return {
+        u: _floored_pre_mspe(np.array([gp[p] for p in _ORACLE_PRE]), scale)
+        for u, gp in units.items()
+    }
+
+
+def test_sharp_null_pvalue_matches_independent_oracle():
+    pre_denoms = _oracle_pre_denoms()
+    for c in (0.0, 1.0, 2.0, 3.5, -1.0):
+        f = _constant_f_post(c, len(_ORACLE_POST))
+        p, r1, n_ref = _sharp_null_pvalue(
+            _ORACLE_TREATED, _ORACLE_PLACEBOS, _ORACLE_POST, f, pre_denoms, 0
+        )
+        # Independent re-implementation of Eqs 12-13.
+        resid_t = np.array([_ORACLE_TREATED[q] for q in _ORACLE_POST]) - f
+        r1_o = float(np.sqrt(np.mean(resid_t**2) / pre_denoms[0]))
+        rj = []
+        for u, gp in _ORACLE_PLACEBOS.items():
+            resid = np.array([gp[q] for q in _ORACLE_POST]) - f
+            rj.append(float(np.sqrt(np.mean(resid**2) / pre_denoms[u])))
+        p_o = (1 + sum(1 for r in rj if r >= r1_o)) / (len(rj) + 1)
+        assert n_ref == 4
+        assert r1 == pytest.approx(r1_o)
+        assert p == pytest.approx(p_o), (c, p, p_o)
+
+
+def test_sharp_null_zero_equals_rmspe_ratio_helper():
+    # Eq 13 at f==0 reduces to the ADH RMSPE-ratio statistic (Eq 4).
+    scale = 1.0
+    pre_denoms = _oracle_pre_denoms(scale)
+    f0 = _constant_f_post(0.0, len(_ORACLE_POST))
+    _, r1, _ = _sharp_null_pvalue(
+        _ORACLE_TREATED, _ORACLE_PLACEBOS, _ORACLE_POST, f0, pre_denoms, 0
+    )
+    pre = np.array([_ORACLE_TREATED[p] for p in _ORACLE_PRE])
+    post = np.array([_ORACLE_TREATED[p] for p in _ORACLE_POST])
+    assert r1 == pytest.approx(_rmspe_ratio(pre, post, scale))
+
+
+def test_floored_pre_denominator_is_per_unit_not_global():
+    # M1: the RMSPE floor scale is PER-UNIT max|Z1|. For a near-perfect pre-fit (the
+    # floor bites), a wrong GLOBAL scale would change the denominator and break the
+    # f==0 == placebo_p_value anchor. Assert the per-unit denom == the _rmspe_ratio
+    # denom and differs from a global-scale denom.
+    pre = np.array([1e-9, -1e-9, 5e-10])  # near-perfect pre-fit -> the floor dominates
+    post = np.array([2.0, 2.0, 2.0])
+    scale_unit = 10.0
+    denom_unit = _floored_pre_mspe(pre, scale_unit)  # 1e-8 * 10**2 = 1e-6
+    denom_global = _floored_pre_mspe(pre, 1.0)  # 1e-8
+    assert denom_unit == pytest.approx(1e-6)
+    assert not np.isclose(denom_unit, denom_global)
+    gp = _gp(list(pre), list(post), _ORACLE_PRE, _ORACLE_POST)
+    f0 = _constant_f_post(0.0, 3)
+    assert _rmspe_f_ratio(gp, _ORACLE_POST, f0, denom_unit) == pytest.approx(
+        _rmspe_ratio(pre, post, scale_unit)
+    )
+    # The wrong global denom yields a materially different statistic.
+    assert not np.isclose(
+        _rmspe_f_ratio(gp, _ORACLE_POST, f0, denom_unit),
+        _rmspe_f_ratio(gp, _ORACLE_POST, f0, denom_global),
+    )
+
+
+def test_invert_constant_set_brackets_true_effect():
+    pre_denoms = _oracle_pre_denoms()
+    res = _invert_sharp_null(
+        _ORACLE_TREATED, _ORACLE_PLACEBOS, _ORACLE_POST, pre_denoms, 0, "constant", 0.25, n_grid=120
+    )
+    assert res["status"] == "ran"
+    assert res["point_estimate"] == pytest.approx(2.0)  # center = att = mean post gap
+    assert res["lower"] <= 2.0 <= res["upper"]
+    assert res["contiguous"]
+
+
+def test_invert_strict_boundary_excludes_p_equals_gamma():
+    # Eq 14 membership is STRICT (p^f > gamma). Use fixed wide bounds so the grid spans
+    # rejected points too; with 4 placebos gamma=0.4 (=2/5) is attainable, so some grid
+    # points have p == gamma and MUST be excluded.
+    pre_denoms = _oracle_pre_denoms()
+    res = _invert_sharp_null(
+        _ORACLE_TREATED,
+        _ORACLE_PLACEBOS,
+        _ORACLE_POST,
+        pre_denoms,
+        0,
+        "constant",
+        0.4,
+        bounds=(-6.0, 10.0),
+        n_grid=401,
+    )
+    grid = res["grid"]
+    assert all(in_set == (p > 0.4) for _, p, in_set in grid)  # strict operator
+    at_gamma = [in_set for _, p, in_set in grid if np.isclose(p, 0.4)]
+    assert at_gamma, "expected the grid to include a p == gamma point"
+    assert not any(at_gamma)  # every p == gamma point excluded (strict)
+
+
+def test_invert_unbounded_when_gamma_below_granularity():
+    # p^f >= 1/(J+1) always (the treated ranks itself); gamma below that -> nothing is
+    # rejected -> the set is all of R (Firpo & Possebom fn 8).
+    pre_denoms = _oracle_pre_denoms()
+    res = _invert_sharp_null(
+        _ORACLE_TREATED, _ORACLE_PLACEBOS, _ORACLE_POST, pre_denoms, 0, "constant", 0.1, n_grid=10
+    )
+    assert res["status"] == "unbounded"
+    assert res["lower"] == -np.inf and res["upper"] == np.inf
+
+
+def test_invert_empty_set_when_family_cannot_fit():
+    # A constant treated effect cannot be matched by the LINEAR family; with a near-
+    # perfect pre-fit (tiny denom) the treated stays the most-deviant unit at every
+    # slope, so p == 1/(J+1) everywhere -> rejected at gamma > 1/(J+1) -> empty.
+    treated = _gp([1e-9, -1e-9, 1e-9], [2.0, 2.0, 2.0], _ORACLE_PRE, _ORACLE_POST)
+    units = {0: treated, **_ORACLE_PLACEBOS}
+    pre_denoms = {
+        u: _floored_pre_mspe(np.array([gp[p] for p in _ORACLE_PRE]), 1.0) for u, gp in units.items()
+    }
+    res = _invert_sharp_null(
+        treated, _ORACLE_PLACEBOS, _ORACLE_POST, pre_denoms, 0, "linear", 0.25, n_grid=60
+    )
+    assert res["status"] == "empty"
+    assert np.isnan(res["lower"]) and np.isnan(res["upper"])
+
+
+def test_invert_accepts_tails_when_center_is_rejected():
+    # Regression for the centered-bracket bug (reviewer M1): when the treated unit has a
+    # WORSE pre-fit than the placebos, its accepted region is in the TAILS, not around the
+    # point estimate, and the central band is REJECTED. The exact breakpoint inversion must
+    # return the unbounded, non-contiguous (two-tail) set — NOT "empty" (the old bug).
+    # Treated post gaps [0, 2] with pre-MSPE 100 (poor fit); 4 placebos post [1, 1] pre-MSPE 1.
+    pre, post = [0, 1], [2, 3]
+    treated = {0: 10.0, 1: -10.0, 2: 0.0, 3: 2.0}  # pre-MSPE=100 -> D=100; post gaps [0, 2]
+    placebos = {
+        f"p{k}": {0: 1.0, 1: -1.0, 2: 1.0, 3: 1.0} for k in range(4)
+    }  # pre-MSPE=1; post [1,1]
+    pden = {
+        u: _floored_pre_mspe(np.array([gp[p] for p in pre]), 1.0)
+        for u, gp in {0: treated, **placebos}.items()
+    }
+    assert pden[0] == pytest.approx(100.0) and pden["p0"] == pytest.approx(1.0)
+    res = _invert_sharp_null(treated, placebos, post, pden, 0, "constant", 0.25, n_grid=50)
+    assert res["status"] == "unbounded"  # was wrongly "empty" under the centered bracket
+    assert res["lower"] == -np.inf and res["upper"] == np.inf
+    assert res["contiguous"] is False  # central rejected band -> two disjoint accepted tails
+    # The point estimate (att = 1) is itself rejected; far-out values are accepted.
+    p_center, _, _ = _sharp_null_pvalue(treated, placebos, post, _constant_f_post(1.0, 2), pden, 0)
+    p_tail, _, _ = _sharp_null_pvalue(treated, placebos, post, _constant_f_post(50.0, 2), pden, 0)
+    assert p_center <= 0.25 < p_tail
+    # Under a user-bounded grid the same scenario is grid-limited "ran" but still flagged
+    # non-contiguous (accepted at both edges, rejected through the middle).
+    res_b = _invert_sharp_null(
+        treated, placebos, post, pden, 0, "constant", 0.25, bounds=(-50.0, 50.0), n_grid=201
+    )
+    assert res_b["status"] == "ran" and res_b["contiguous"] is False
+
+
+def test_invert_includes_accepted_breakpoint_singleton():
+    # Reviewer round-2 (M1/DT1): strict p>gamma membership + tie-counting >= means a placebo
+    # that EXACTLY ties the treated at a (tangent) breakpoint can push p above gamma THERE
+    # while both neighbouring open intervals are rejected -> an isolated accepted singleton
+    # the exact inversion must include (NOT report "empty"). Construct a placebo whose RMSPE
+    # ratio touches the treated's only at c=0; 3 others stay strictly below.
+    pre, post = [0, 1], [2, 3]
+    treated = {0: 1.0, 1: -1.0, 2: 1.0, 3: -1.0}  # post [1,-1], pre-MSPE 1 -> D=1
+    placebos = {"tie": {0: 2.0, 1: -2.0, 2: 2.0, 3: -2.0}}  # post [2,-2], pre-MSPE 4: ties at c=0
+    for k in range(3):
+        placebos[f"lo{k}"] = {0: 2.0, 1: -2.0, 2: 0.5, 3: -0.5}  # always strictly below treated
+    pden = {
+        u: _floored_pre_mspe(np.array([gp[p] for p in pre]), 1.0)
+        for u, gp in {0: treated, **placebos}.items()
+    }
+    # At c=0 the tie places p at 2/5; just off c=0 only the treated ranks (p=1/5).
+    p_at0, _, _ = _sharp_null_pvalue(treated, placebos, post, _constant_f_post(0.0, 2), pden, 0)
+    p_near, _, _ = _sharp_null_pvalue(treated, placebos, post, _constant_f_post(0.5, 2), pden, 0)
+    assert p_at0 == pytest.approx(0.4) and p_near == pytest.approx(0.2)
+    res = _invert_sharp_null(treated, placebos, post, pden, 0, "constant", 0.25, n_grid=20)
+    assert res["status"] == "ran"  # NOT "empty" -- the singleton is included
+    assert res["lower"] == pytest.approx(0.0) and res["upper"] == pytest.approx(0.0)
+    # the returned inspection grid reflects the non-empty singleton (one accepted row, not [])
+    assert len(res["grid"]) == 1
+    g_param, g_p, g_in = res["grid"][0]
+    assert g_param == pytest.approx(0.0) and g_p > 0.25 and g_in is True
+
+
+def test_linear_f_post_is_one_based_and_czero_equals_constant_zero():
+    assert np.allclose(_linear_f_post(1.0, 4), [1.0, 2.0, 3.0, 4.0])  # (t - T0), 1-based
+    pre_denoms = _oracle_pre_denoms()
+    p_lin0, _, _ = _sharp_null_pvalue(
+        _ORACLE_TREATED, _ORACLE_PLACEBOS, _ORACLE_POST, _linear_f_post(0.0, 3), pre_denoms, 0
+    )
+    p_con0, _, _ = _sharp_null_pvalue(
+        _ORACLE_TREATED, _ORACLE_PLACEBOS, _ORACLE_POST, _constant_f_post(0.0, 3), pre_denoms, 0
+    )
+    assert p_lin0 == pytest.approx(p_con0)
+
+
+def test_invert_monotone_in_gamma():
+    # A larger gamma rejects more -> a narrower (or equal) confidence set.
+    pre_denoms = _oracle_pre_denoms()
+
+    def width(g):
+        r = _invert_sharp_null(
+            _ORACLE_TREATED,
+            _ORACLE_PLACEBOS,
+            _ORACLE_POST,
+            pre_denoms,
+            0,
+            "constant",
+            g,
+            n_grid=120,
+        )
+        return (r["upper"] - r["lower"]) if r["status"] == "ran" else None
+
+    w_lo, w_hi = width(0.25), width(0.45)
+    assert w_lo is not None and w_hi is not None
+    assert w_lo >= w_hi - 1e-9
+
+
+# --- end-to-end (real fit): custom V skips the outer search for speed/determinism ---
+
+
+def _fit_with_placebos(n_donors=6, T=10, T0=6, effect=3.0, seed=0, run_placebo=True):
+    df, years, t0 = _make_panel(n_donors=n_donors, T=T, T0=T0, effect=effect, seed=seed)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = SyntheticControl(v_method="custom", custom_v=np.ones(T0), seed=seed).fit(
+            df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+        )
+        if run_placebo:
+            res.in_space_placebo()
+    return res, years, t0
+
+
+def _exact_combo_fit(effect=3.0, T=10, T0=6, n_donors=5):
+    """Deterministic panel where the treated is an EXACT convex combo of two donors.
+
+    The donors carry distinct sinusoidal idiosyncrasies, so no single donor is a convex
+    combination of the others (placebos fit poorly -> larger pre-denominators), while the
+    treated reproduces 0.5*d0 + 0.5*d1 (near-perfect pre-fit -> the smallest denominator).
+    The treated is therefore uniquely the most-deviant unit in the tails, so the constant
+    confidence set is BOUNDED ("ran") -- the end-to-end analogue of the helper oracle.
+    """
+    years = list(range(2000, 2000 + T))
+    t = np.arange(T, dtype=float)
+    donors = {
+        j: 10.0 + 2.0 * j + (0.3 + 0.1 * j) * t + (0.5 + 0.3 * j) * np.sin(t)
+        for j in range(n_donors)
+    }
+    treated = (0.5 * donors[0] + 0.5 * donors[1]).copy()
+    treated[T0:] += effect
+    rows = []
+    for j in range(n_donors):
+        for i in range(T):
+            rows.append({"unit": f"d{j}", "year": years[i], "y": float(donors[j][i]), "treated": 0})
+    for i in range(T):
+        rows.append(
+            {"unit": "treated", "year": years[i], "y": float(treated[i]), "treated": int(i >= T0)}
+        )
+    df = pd.DataFrame(rows)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = SyntheticControl(v_method="custom", custom_v=np.ones(T0), seed=0).fit(
+            df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+        )
+        res.in_space_placebo()
+    return res
+
+
+def test_test_sharp_null_zero_equals_placebo_p_value_end_to_end():
+    res, _, _ = _fit_with_placebos()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        s0 = res.test_sharp_null(0.0)
+    assert s0["p_value"] == pytest.approx(res.placebo_p_value)
+    assert s0["rmspe_f_treated"] == pytest.approx(res.rmspe_ratio)
+    assert s0["n_placebos"] == res.n_placebos
+
+
+def test_confidence_set_constant_contains_att_and_excludes_zero():
+    res = _exact_combo_fit(effect=3.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        grid = res.confidence_set(family="constant", gamma=0.25)
+    ecs = res.effect_confidence_set
+    assert ecs["status"] == "ran"
+    assert ecs["lower"] <= res.att <= ecs["upper"]  # point estimate inside the set
+    assert not (ecs["lower"] <= 0.0 <= ecs["upper"])  # a real +3 effect -> 0 excluded
+    assert list(grid.columns) == ["param", "p_value", "in_set"]
+    assert ecs["boundary"] == "strict" and ecs["parameter"] == "c"
+
+
+def test_test_sharp_null_array_path_matches_scalar_and_validates():
+    res, _, _ = _fit_with_placebos()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        s_scalar = res.test_sharp_null(3.0)
+        s_array = res.test_sharp_null(np.array([3.0, 3.0, 3.0, 3.0]))
+    assert s_array["p_value"] == pytest.approx(s_scalar["p_value"])
+    for bad in (
+        np.array([1.0, 2.0]),  # wrong length
+        np.array([[1.0, 2.0, 3.0, 4.0]]),  # 2-D
+        np.array([np.nan, 1.0, 1.0, 1.0]),  # non-finite
+    ):
+        with pytest.raises(ValueError):
+            res.test_sharp_null(bad)
+
+
+def test_confidence_set_conf_int_stays_nan():
+    res, _, _ = _fit_with_placebos()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.confidence_set(family="constant", gamma=0.25)
+    # The analytical fields stay NaN: this is a SEPARATE permutation object.
+    assert np.isnan(res.se) and np.isnan(res.p_value) and np.isnan(res.t_stat)
+    assert np.isnan(res.conf_int[0]) and np.isnan(res.conf_int[1])
+    assert res.effect_confidence_set is not None
+
+
+def test_confidence_set_to_dict_flattened_and_summary_renders():
+    res = _exact_combo_fit(effect=3.0)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.confidence_set(family="constant", gamma=0.25)
+    d = res.to_dict()
+    assert d["effect_ci_status"] == "ran"
+    assert d["effect_ci_family"] == "constant" and d["effect_ci_parameter"] == "c"
+    assert np.isnan(d["conf_int_lower"])  # analytical interval still NaN
+    assert np.isfinite(d["effect_ci_lower"]) and np.isfinite(d["effect_ci_upper"])
+    row = res.to_dataframe()  # stays a single row of scalars
+    assert len(row) == 1 and "effect_ci_lower" in row.columns
+    assert "Confidence set by test inversion" in res.summary()
+
+
+def test_confidence_set_linear_runs_and_sets_field():
+    res, _, _ = _fit_with_placebos()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        grid = res.confidence_set(family="linear", gamma=0.25)
+    ecs = res.effect_confidence_set
+    assert ecs["family"] == "linear" and ecs["parameter"] == "c_tilde"
+    assert ecs["status"] in ("ran", "empty", "unbounded")
+    assert list(grid.columns) == ["param", "p_value", "in_set"]
+
+
+def test_confidence_set_lazy_runs_in_space_placebo():
+    res, _, _ = _fit_with_placebos(run_placebo=False)
+    assert res._placebo_gaps is None  # placebo NOT run yet
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.confidence_set(family="constant", gamma=0.25)
+    assert res._placebo_gaps is not None  # lazily built
+    assert res.effect_confidence_set is not None
+
+
+def test_confidence_set_n_starts_ignored_with_warning_when_reference_exists():
+    res, _, _ = _fit_with_placebos(run_placebo=True)  # reference already built
+    with pytest.warns(UserWarning, match="n_starts is ignored"):
+        res.confidence_set(family="constant", gamma=0.25, n_starts=3)
+
+
+def test_get_confidence_set_df_requires_run():
+    res, _, _ = _fit_with_placebos()
+    with pytest.raises(ValueError, match="No confidence set"):
+        res.get_confidence_set_df()
+
+
+def test_confidence_set_too_few_donors_raises():
+    # One donor -> in_space_placebo cannot form a reference set -> CI / test raise.
+    df, years, T0 = _make_panel(n_donors=1, T=10, T0=6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = SyntheticControl(v_method="custom", custom_v=np.ones(T0), seed=0).fit(
+            df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+        )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError, match="reference set"):
+            res.confidence_set(family="constant", gamma=0.25)
+        with pytest.raises(ValueError, match="reference set"):
+            res.test_sharp_null(0.0)
+
+
+def test_confidence_set_unpickled_raises():
+    res, _, _ = _fit_with_placebos()
+    restored = pickle.loads(pickle.dumps(res))  # snapshot + placebo gaps dropped
+    with pytest.raises(ValueError):
+        restored.confidence_set(family="constant", gamma=0.25)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"family": "quadratic"},
+        {"gamma": 0.0},
+        {"gamma": 1.0},
+        {"n_grid": 1},
+        {"bounds": (1.0, 1.0)},
+        {"bounds": (2.0, 1.0)},
+        {"bounds": 5.0},  # scalar -> ValueError, not a bare TypeError from len()
+        {"bounds": (1.0,)},  # wrong length
+        {"bounds": (np.inf, 1.0)},  # non-finite
+    ],
+)
+def test_confidence_set_input_validation(kwargs):
+    res, _, _ = _fit_with_placebos()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError):
+            res.confidence_set(**kwargs)
+
+
+@pytest.mark.parametrize("bad", [0.0, 1.0, -0.1, 1.5])
+def test_test_sharp_null_gamma_validation(bad):
+    res, _, _ = _fit_with_placebos()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with pytest.raises(ValueError):
+            res.test_sharp_null(0.0, gamma=bad)
+
+
+@pytest.mark.slow
+def test_confidence_set_coverage_simulation():
+    # Behavioral coverage check: under a constant-effect DGP the (1 - gamma) confidence
+    # set should cover the true effect at roughly 1 - gamma. A looser inner tolerance keeps
+    # the refits converging cleanly; reps with ANY dropped placebo (n_failed > 0) are
+    # EXCLUDED from the coverage count so dropped placebos cannot bias it (M5), and we
+    # assert that the large majority of reps are clean (the settings are adequate).
+    # J = 9 -> attainable p in multiples of 1/10, gamma = 0.1.
+    gamma = 0.1
+    c_true = 2.0
+    reps = 100
+    clean = 0
+    covered = 0
+    for s in range(reps):
+        df, years, T0 = _make_panel(n_donors=9, T=10, T0=6, effect=c_true, seed=1000 + s)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = SyntheticControl(
+                v_method="custom", custom_v=np.ones(T0), seed=s, inner_min_decrease=1e-3
+            ).fit(
+                df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+            )
+            res.in_space_placebo()
+            if res.n_failed != 0:
+                continue  # exclude biased reps from the coverage count (M5)
+            clean += 1
+            res.confidence_set(family="constant", gamma=gamma)
+        ecs = res.effect_confidence_set
+        if ecs["status"] == "unbounded":
+            covered += 1  # an unbounded set trivially covers the truth
+        elif ecs["status"] == "ran" and ecs["lower"] <= c_true <= ecs["upper"]:
+            covered += 1
+    assert clean >= 0.8 * reps, f"only {clean}/{reps} reps converged cleanly"
+    coverage = covered / clean
+    # Permutation inference is finite-sample valid under exchangeability; allow a wide
+    # band (the convex-combo treated is not perfectly exchangeable with single donors).
+    assert coverage >= 0.70, f"coverage {coverage:.3f} too low (target ~{1 - gamma})"

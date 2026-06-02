@@ -132,10 +132,10 @@ A re-analysis of ETA terrorism on Basque Country GDP per capita (Abadie & Gardea
 - Built on the authors' `Synth` package (R / MATLAB / Stata) for the underlying SCM fit.
 
 **Requirements checklist** (features this paper adds beyond ADH 2010/2015; **PR-B** = the planned next implementation target, **deferred** = later):
-- [ ] (PR-B) Sharp-null `RMSPE^f` test (Eqs. 12–13) reusing the in-space placebo permutation — subtract the hypothesized `f(t)` from the post-period gaps and re-rank.
-- [ ] (PR-B) Confidence **interval** for a constant-in-time effect (Eqs. 15–16) by test inversion over a `c`-grid.
-- [ ] (PR-B) Confidence **set** for a linear-in-time effect (Eqs. 17–18) by test inversion over a `c̃`-grid.
-- [ ] (PR-B) Benchmark `(φ = 0, v = (1,…,1))` p-value (reuse `in_space_placebo`'s RMSPE-ratio) + a one-sided variant (Section 7).
+- [x] (PR-B) Sharp-null `RMSPE^f` test (Eqs. 12–13) reusing the in-space placebo permutation — subtract the hypothesized `f(t)` from the post-period gaps and re-rank. **Shipped:** `SyntheticControlResults.test_sharp_null(effect, gamma=...)`.
+- [x] (PR-B) Confidence **interval** for a constant-in-time effect (Eqs. 15–16) by test inversion over a `c`-grid. **Shipped:** `confidence_set(family="constant")`.
+- [x] (PR-B) Confidence **set** for a linear-in-time effect (Eqs. 17–18) by test inversion over a `c̃`-grid. **Shipped:** `confidence_set(family="linear")`.
+- [x] (PR-B) Benchmark `(φ = 0, v = (1,…,1))` p-value (reuse `in_space_placebo`'s RMSPE-ratio): shipped — `test_sharp_null(0)` is identically `placebo_p_value`. **One-sided variant (Section 7): still `[ ]` deferred** — §7 uses the signed-`t` statistic `θ³` from the deferred general-`θ` menu (Eq. 19), so it ships with that menu, not here.
 - [ ] (deferred) Sensitivity-analysis parametric weights `π_(j)(φ, v)` (Eqs. 7–9) + worst/best-case `φ̲`/`φ̄` robustness curve (Section 3).
 - [ ] (deferred) General test-statistic menu `θ¹`–`θ⁵` (Eq. 19, Section 5).
 - [ ] (deferred) Multiple-outcome FWER control (Eqs. 23–24) and multiple-treated-unit pooled confidence sets (Eqs. 25–26, Section 6).
