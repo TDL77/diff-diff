@@ -1273,3 +1273,67 @@ class TestHADDeviations:
                     }
                 )
         return pd.DataFrame(rows)
+
+    @staticmethod
+    def _zero_fraction_panel(n_zero: int, seed: int, G: int = 200) -> pd.DataFrame:
+        """continuous_at_zero 2-period panel with EXACTLY ``n_zero`` zero doses."""
+        rng = np.random.default_rng(seed)
+        d = rng.uniform(0.2, 1.0, G)
+        d[:n_zero] = 0.0
+        dy = 0.3 * d + 0.1 * rng.standard_normal(G)
+        units = np.repeat(np.arange(G), 2)
+        periods = np.tile([1, 2], G)
+        dose = np.column_stack([np.zeros(G), d]).ravel()
+        outcome = np.column_stack([np.zeros(G), dy]).ravel()
+        return pd.DataFrame({"unit": units, "period": periods, "dose": dose, "outcome": outcome})
+
+    def test_extensive_margin_warning_is_10pct_library_convention(self) -> None:
+        """Locks TODO L74: the extensive-margin warning is a 10% library convention.
+
+        The paper (de Chaisemartin et al. 2026, Section 2 / Assumption 3)
+        prescribes warning users with a positive untreated mass but gives NO
+        numeric cutoff, and explicitly RETAINS small untreated shares (Garrett
+        et al. 12/2954 ~ 0.4%, nominal coverage). The library picks a 10%
+        exactly-zero-dose fraction as the fire threshold — documented in
+        REGISTRY § HeterogeneousAdoptionDiD. This pins both the constant and
+        the fire/no-fire boundary so the convention cannot drift silently.
+        """
+        from diff_diff.had import _HAD_EXTENSIVE_MARGIN_ZERO_DOSE_FRAC
+
+        assert _HAD_EXTENSIVE_MARGIN_ZERO_DOSE_FRAC == 0.10
+
+        substr = "exactly-zero post-period dose"
+        # At/above 10% (20/200) -> fires.
+        with pytest.warns(UserWarning, match=substr):
+            HeterogeneousAdoptionDiD().fit(
+                self._zero_fraction_panel(20, seed=_BASE_SEED_DEVIATIONS + 10),
+                "outcome",
+                "dose",
+                "period",
+                "unit",
+            )
+        # Just below 10% (19/200 = 9.5%) -> does not fire.
+        with warnings.catch_warnings(record=True) as rec:
+            warnings.simplefilter("always")
+            HeterogeneousAdoptionDiD().fit(
+                self._zero_fraction_panel(19, seed=_BASE_SEED_DEVIATIONS + 11),
+                "outcome",
+                "dose",
+                "period",
+                "unit",
+            )
+        assert not any(substr in str(w.message) for w in rec)
+
+    def test_covariates_not_implemented_is_documented(self) -> None:
+        """Locks TODO L73: fit(covariates=...) raises NotImplementedError.
+
+        Covariate-adjusted HAD identification (de Chaisemartin et al. 2026,
+        Appendix B.1 / Theorem 6) is deferred; the explicit ``covariates=``
+        param raises NotImplementedError with the paper pointer rather than a
+        bare TypeError. Documented in REGISTRY § HeterogeneousAdoptionDiD.
+        """
+        panel = self._zero_fraction_panel(1, seed=_BASE_SEED_DEVIATIONS + 12)
+        with pytest.raises(NotImplementedError, match="Theorem 6"):
+            HeterogeneousAdoptionDiD().fit(
+                panel, "outcome", "dose", "period", "unit", covariates=["x1"]
+            )
