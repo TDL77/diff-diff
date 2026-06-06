@@ -1373,7 +1373,7 @@ class TestSDIDSurveyJackknifeFullDesign:
         # has PSUs {3, 4, 5} (n_h=3). No FPC → f_h=0 for both. Every
         # PSU-LOO is well-defined, so tau_loo_all has 3 + 3 = 6 entries
         # ordered as [s0 PSU 0, s0 PSU 1, s0 PSU 2, s1 PSU 3, s1 PSU 4, s1 PSU 5].
-        taus = np.asarray(result.placebo_effects, dtype=float)
+        taus = np.asarray(result.variance_effects, dtype=float)
         assert len(taus) == 6
         # Apply the Rust & Rao formula by hand. Y_scale rescaling is
         # applied uniformly to tau_loo_all inside fit(), so the formula
@@ -1520,7 +1520,7 @@ class TestSDIDSurveyJackknifeFullDesign:
         assert getattr(result, "_loo_granularity", None) == "unit"
         # Accessor returns a unit-indexed DataFrame with the expected
         # schema; positional join is well-defined on the pweight-only
-        # path because ``placebo_effects`` has length n_control + n_treated.
+        # path because ``variance_effects`` has length n_control + n_treated.
         df = result.get_loo_effects_df()
         assert len(df) == result.n_control + result.n_treated
         assert set(df.columns) == {"unit", "role", "att_loo", "delta_from_full"}

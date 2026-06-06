@@ -44,6 +44,7 @@
       ~SyntheticDiDResults.time_weights_array
       ~SyntheticDiDResults.treated_post_trajectory
       ~SyntheticDiDResults.treated_pre_trajectory
+      ~SyntheticDiDResults.variance_effects
       ~SyntheticDiDResults.variance_method
       ~SyntheticDiDResults.zeta_lambda
       ~SyntheticDiDResults.zeta_omega

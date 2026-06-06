@@ -486,9 +486,9 @@ class TestPlaceboSE:
         assert results.variance_method == "placebo"
 
         # Verify the formula: se = sqrt((r-1)/r) * sd(placebo_estimates)
-        if results.placebo_effects is not None:
-            r = len(results.placebo_effects)
-            expected_se = np.sqrt((r - 1) / r) * np.std(results.placebo_effects, ddof=1)
+        if results.variance_effects is not None:
+            r = len(results.variance_effects)
+            expected_se = np.sqrt((r - 1) / r) * np.std(results.variance_effects, ddof=1)
             assert abs(results.se - expected_se) < 1e-10
 
 
@@ -1245,8 +1245,8 @@ class TestJackknifeSE:
             unit="unit", time="period",
             post_periods=list(range(5, 8)),
         )
-        assert results.placebo_effects is not None
-        u = results.placebo_effects
+        assert results.variance_effects is not None
+        u = results.variance_effects
         n = len(u)
         u_bar = np.mean(u)
         expected_se = np.sqrt((n - 1) / n * np.sum((u - u_bar) ** 2))
@@ -1262,8 +1262,8 @@ class TestJackknifeSE:
             unit="unit", time="period",
             post_periods=list(range(5, 8)),
         )
-        assert results.placebo_effects is not None
-        assert len(results.placebo_effects) == n_co + n_tr
+        assert results.variance_effects is not None
+        assert len(results.variance_effects) == n_co + n_tr
 
     def test_jackknife_single_treated_nan(self):
         """Single treated unit -> NaN SE (matches R's NA)."""
@@ -1621,7 +1621,7 @@ class TestJackknifeSERParity:
             f"Python placebo SE {py_se} != R {r_se} (delta {py_se - r_se})"
         )
         # Per-draw τ regression: equal-SE doesn't imply equal sample, and
-        # the placebo τ vector is user-visible through ``placebo_effects``
+        # the placebo τ vector is user-visible through ``variance_effects``
         # and feeds the empirical placebo p-value (synthetic_did.py
         # around L1164-L1170). Compare elementwise so a permutation that
         # diverged at a single draw — but happened to leave sd() unchanged
@@ -1935,6 +1935,51 @@ class TestDeprecatedParams:
         """Default variance_method should be 'placebo' (matching R)."""
         sdid = SyntheticDiD()
         assert sdid.variance_method == "placebo"
+
+
+class TestVarianceEffectsRename:
+    """`placebo_effects` was renamed to `variance_effects`; the old name is a
+    deprecated read-only alias (removed in v4.0.0)."""
+
+    def test_placebo_effects_deprecated_alias(self):
+        """result.placebo_effects warns and returns the same array as
+        result.variance_effects; the alias is read-only."""
+        df = _make_panel(seed=42)
+        res = SyntheticDiD(variance_method="placebo", n_bootstrap=50, seed=1).fit(
+            df,
+            outcome="outcome",
+            treatment="treated",
+            unit="unit",
+            time="period",
+            post_periods=[5, 6, 7],
+        )
+        with pytest.warns(DeprecationWarning, match="placebo_effects is deprecated"):
+            aliased = res.placebo_effects
+        # Alias returns the identical object held by the renamed field.
+        assert aliased is res.variance_effects
+        # Read-only: assignment to the deprecated property raises.
+        with pytest.raises(AttributeError):
+            res.placebo_effects = aliased
+
+    def test_variance_effects_access_emits_no_warning(self):
+        """Normal use must not route through the deprecated alias: reading
+        variance_effects and calling get_loo_effects_df() (which reads the
+        field internally) must emit no DeprecationWarning."""
+        df = _make_panel(n_control=15, n_treated=3, seed=42)
+        res = SyntheticDiD(variance_method="jackknife", seed=42).fit(
+            df,
+            outcome="outcome",
+            treatment="treated",
+            unit="unit",
+            time="period",
+            post_periods=[5, 6, 7],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            assert res.variance_effects is not None
+            # get_loo_effects_df() reads the field internally; if it routed
+            # through the alias this would raise the escalated warning.
+            res.get_loo_effects_df()
 
 
 class TestNoiseLevelEdgeCases:
@@ -2529,18 +2574,18 @@ class TestLooEffectsDf:
         with pytest.raises(ValueError, match="variance_method='jackknife'"):
             res.get_loo_effects_df()
 
-    def test_positional_mapping_matches_placebo_effects(self):
-        """First n_control positions in placebo_effects map to control_units,
+    def test_positional_mapping_matches_variance_effects(self):
+        """First n_control positions in variance_effects map to control_units,
         next n_treated map to treated_units."""
         res = self._fit_jackknife()
-        pe = res.placebo_effects
+        pe = res.variance_effects
         ids = res._loo_unit_ids
         roles = res._loo_roles
         assert list(ids[: res.n_control]) == res._fit_snapshot.control_unit_ids
         assert list(ids[res.n_control :]) == res._fit_snapshot.treated_unit_ids
         assert roles[: res.n_control].count("control") == res.n_control
         assert roles[res.n_control :].count("treated") == res.n_treated
-        # The DataFrame values equal placebo_effects values (up to row permutation)
+        # The DataFrame values equal variance_effects values (up to row permutation)
         loo = res.get_loo_effects_df()
         assert np.allclose(
             sorted(loo["att_loo"].dropna().to_numpy()),
@@ -2919,6 +2964,24 @@ class TestSyntheticDiDResultsPickle:
             restored.synthetic_pre_trajectory, res.synthetic_pre_trajectory
         )
 
+    def test_legacy_pickle_state_maps_placebo_effects(self):
+        """A result pickled before the placebo_effects → variance_effects
+        rename (state carries the old key, no variance_effects) loads with the
+        draws under variance_effects and the deprecated alias still surfaces
+        them."""
+        res = self._fit(seed=109)  # jackknife → variance_effects populated
+        effects = np.asarray(res.variance_effects)
+        assert effects.size > 0
+        # Simulate a <=3.5.x pickle state: old field name, no variance_effects.
+        legacy_state = res.__getstate__()
+        legacy_state["placebo_effects"] = legacy_state.pop("variance_effects")
+        assert "variance_effects" not in legacy_state
+        restored = type(res).__new__(type(res))
+        restored.__setstate__(legacy_state)
+        assert np.allclose(np.asarray(restored.variance_effects), effects)
+        with pytest.warns(DeprecationWarning, match="placebo_effects is deprecated"):
+            assert np.allclose(np.asarray(restored.placebo_effects), effects)
+
     def test_in_time_placebo_raises_after_pickle(self):
         import pickle
 
@@ -3073,7 +3136,7 @@ class TestScaleEquivariance:
         se_rel = 1e-7 if variance_method == "placebo" else 1e-14
         assert r.se == pytest.approx(se0, rel=se_rel)
         assert r.p_value == pytest.approx(p0, rel=1e-14)
-        assert len(r.placebo_effects) == n0
+        assert len(r.variance_effects) == n0
 
     @pytest.mark.parametrize("variance_method", ["placebo", "bootstrap", "jackknife"])
     def test_scale_equivariance(self, variance_method, ci_params):
@@ -3088,7 +3151,7 @@ class TestScaleEquivariance:
             warnings.simplefilter("ignore", UserWarning)
             r0 = self._fit(data, variance_method, n_bootstrap=nb)
         att0, se0, p0 = r0.att, r0.se, r0.p_value
-        n0 = len(r0.placebo_effects)
+        n0 = len(r0.variance_effects)
         noise0 = r0.noise_level
         zeta_omega0 = r0.zeta_omega
 
@@ -3099,9 +3162,8 @@ class TestScaleEquivariance:
                 r = self._fit(scaled, variance_method, n_bootstrap=nb)
             # Variance-method success count must be identical; divergence
             # would shift the empirical p-value floor 1/(n+1).
-            assert len(r.placebo_effects) == n0, (
-                f"(a={a}, b={b}) yielded {len(r.placebo_effects)} effects, "
-                f"baseline had {n0}"
+            assert len(r.variance_effects) == n0, (
+                f"(a={a}, b={b}) yielded {len(r.variance_effects)} effects, " f"baseline had {n0}"
             )
             assert r.att / a == pytest.approx(att0, rel=1e-8), f"att failed at a={a}, b={b}"
             assert r.se / abs(a) == pytest.approx(se0, rel=1e-6), f"se failed at a={a}, b={b}"
@@ -3198,7 +3260,7 @@ class TestPValueSemantics:
     def test_placebo_p_value_uses_empirical_formula(self, ci_params):
         """Placebo p-value must equal max(mean(|draws| >= |att|), 1/(r+1))."""
         # Self-consistency check (reported p vs the empirical formula on the reported
-        # placebo_effects) — independent of the draw count, so ci_params scaling is safe.
+        # variance_effects) — independent of the draw count, so ci_params scaling is safe.
         df = _make_panel(seed=42)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", UserWarning)
@@ -3209,9 +3271,9 @@ class TestPValueSemantics:
                 unit="unit", time="period",
                 post_periods=[5, 6, 7],
             )
-        placebo_effects = np.asarray(r.placebo_effects)
-        empirical_p = float(np.mean(np.abs(placebo_effects) >= np.abs(r.att)))
-        expected_p = max(empirical_p, 1.0 / (len(placebo_effects) + 1))
+        variance_effects = np.asarray(r.variance_effects)
+        empirical_p = float(np.mean(np.abs(variance_effects) >= np.abs(r.att)))
+        expected_p = max(empirical_p, 1.0 / (len(variance_effects) + 1))
         assert abs(r.p_value - expected_p) < 1e-12, (
             f"placebo p_value={r.p_value} != empirical {expected_p}"
         )

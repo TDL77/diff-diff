@@ -1080,7 +1080,7 @@ class SyntheticDiD(DifferenceInDifferences):
                 min_decrease=min_decrease,
             )
             se = se_n * Y_scale
-            placebo_effects = np.asarray(bootstrap_estimates_n) * Y_scale
+            variance_effects = np.asarray(bootstrap_estimates_n) * Y_scale
             inference_method = "bootstrap"
         elif self.variance_method == "jackknife":
             if _jackknife_use_survey_path:
@@ -1142,7 +1142,7 @@ class SyntheticDiD(DifferenceInDifferences):
                     w_control=w_control,
                 )
             se = se_n * Y_scale
-            placebo_effects = np.asarray(jackknife_estimates_n) * Y_scale
+            variance_effects = np.asarray(jackknife_estimates_n) * Y_scale
             inference_method = "jackknife"
         else:
             # Use placebo-based variance (R's synthdid Algorithm 4).
@@ -1155,7 +1155,7 @@ class SyntheticDiD(DifferenceInDifferences):
                 # permutation degenerate to a global within-stratum
                 # permutation dispatched through the weighted-FW path.
                 assert w_control is not None
-                se_n, placebo_effects_n = self._placebo_variance_se_survey(
+                se_n, variance_effects_n = self._placebo_variance_se_survey(
                     Y_pre_control_n,
                     Y_post_control_n,
                     Y_pre_treated_mean_n,
@@ -1169,7 +1169,7 @@ class SyntheticDiD(DifferenceInDifferences):
                     w_control=w_control,
                 )
             else:
-                se_n, placebo_effects_n = self._placebo_variance_se(
+                se_n, variance_effects_n = self._placebo_variance_se(
                     Y_pre_control_n,
                     Y_post_control_n,
                     Y_pre_treated_mean_n,
@@ -1184,7 +1184,7 @@ class SyntheticDiD(DifferenceInDifferences):
                     init_lambda=time_weights,
                 )
             se = se_n * Y_scale
-            placebo_effects = np.asarray(placebo_effects_n) * Y_scale
+            variance_effects = np.asarray(variance_effects_n) * Y_scale
             inference_method = "placebo"
 
         # Compute test statistics
@@ -1195,10 +1195,10 @@ class SyntheticDiD(DifferenceInDifferences):
         # (sampling distribution, not null), and jackknife pseudo-values are not
         # null-distribution draws either. Both use the analytical p-value from
         # the bootstrap/jackknife SE.
-        if inference_method == "placebo" and len(placebo_effects) > 0 and np.isfinite(t_stat):
+        if inference_method == "placebo" and len(variance_effects) > 0 and np.isfinite(t_stat):
             p_value = max(
-                np.mean(np.abs(placebo_effects) >= np.abs(att)),
-                1.0 / (len(placebo_effects) + 1),
+                np.mean(np.abs(variance_effects) >= np.abs(att)),
+                1.0 / (len(variance_effects) + 1),
             )
         else:
             p_value = p_value_analytical
@@ -1209,12 +1209,12 @@ class SyntheticDiD(DifferenceInDifferences):
         unit_weights_dict = {unit_id: w for unit_id, w in zip(control_units, omega_eff)}
         time_weights_dict = {period: w for period, w in zip(pre_periods, time_weights)}
 
-        # Jackknife LOO ID/role arrays parallel to placebo_effects positions
+        # Jackknife LOO ID/role arrays parallel to variance_effects positions
         # (first n_control entries are control-LOO, next n_treated are treated-LOO;
         # see _jackknife_se docstring).
         loo_unit_ids: Optional[List[Any]]
         loo_roles: Optional[List[str]]
-        if inference_method == "jackknife" and len(placebo_effects) > 0:
+        if inference_method == "jackknife" and len(variance_effects) > 0:
             loo_unit_ids = list(control_units) + list(treated_units)
             loo_roles = ["control"] * len(control_units) + ["treated"] * len(treated_units)
         else:
@@ -1271,7 +1271,7 @@ class SyntheticDiD(DifferenceInDifferences):
             zeta_omega=zeta_omega,
             zeta_lambda=zeta_lambda,
             pre_treatment_fit=pre_fit_rmse,
-            placebo_effects=placebo_effects if len(placebo_effects) > 0 else None,
+            variance_effects=variance_effects if len(variance_effects) > 0 else None,
             n_bootstrap=self.n_bootstrap if inference_method == "bootstrap" else None,
             survey_metadata=survey_metadata,
             synthetic_pre_trajectory=synthetic_pre_trajectory,
