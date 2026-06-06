@@ -4,6 +4,7 @@ Results classes for difference-in-differences estimation.
 Provides statsmodels-style output with a more Pythonic interface.
 """
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1079,12 +1080,13 @@ class SyntheticDiDResults:
         Arkhangelsky et al. 2021 Algorithm 2 step 2, and R's default
         ``synthdid::vcov(method="bootstrap")``), ``"jackknife"``, or
         ``"placebo"``.
-    placebo_effects : np.ndarray, optional
+    variance_effects : np.ndarray, optional
         Method-specific per-iteration estimates: placebo treatment effects
         (for ``"placebo"``), bootstrap ATT estimates with re-estimated
         weights per draw (for ``"bootstrap"``), or leave-one-out estimates
         (for ``"jackknife"``). The ``variance_method`` field disambiguates
-        the contents.
+        the contents. (The deprecated read-only alias ``placebo_effects``
+        returns this array and is removed in v4.0.0.)
     synthetic_pre_trajectory : np.ndarray, optional
         Synthetic control trajectory in pre-treatment periods, shape
         ``(n_pre,)``. Equal to ``Y_pre_control @ omega_eff`` where
@@ -1122,7 +1124,7 @@ class SyntheticDiDResults:
     zeta_omega: Optional[float] = field(default=None)
     zeta_lambda: Optional[float] = field(default=None)
     pre_treatment_fit: Optional[float] = field(default=None)
-    placebo_effects: Optional[np.ndarray] = field(default=None)
+    variance_effects: Optional[np.ndarray] = field(default=None)
     n_bootstrap: Optional[int] = field(default=None)
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None)
@@ -1145,7 +1147,7 @@ class SyntheticDiDResults:
         # Plain attributes rather than dataclass fields so asdict()-style
         # recursion cannot serialize internal panel state.
         self._loo_unit_ids: Optional[List[Any]] = None
-        # Granularity of the `placebo_effects` LOO array: "unit" (non-
+        # Granularity of the `variance_effects` LOO array: "unit" (non-
         # survey + pweight-only jackknife), "psu" (full-design survey
         # jackknife), or None (non-jackknife variance methods). Governs
         # which accessors are well-defined. Set by `fit()` at result
@@ -1180,6 +1182,20 @@ class SyntheticDiDResults:
         state["_fit_snapshot"] = None
         return state
 
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        """Restore from pickle, migrating the legacy field name.
+
+        Results pickled before the ``placebo_effects`` → ``variance_effects``
+        rename (<= 3.5.x) carry the old key in their state; map it so the
+        stored variance draws survive and remain reachable through both
+        ``variance_effects`` and the deprecated ``placebo_effects`` alias.
+        Remove together with the alias in v4.0.0.
+        """
+        if "placebo_effects" in state and "variance_effects" not in state:
+            state = dict(state)
+            state["variance_effects"] = state.pop("placebo_effects")
+        self.__dict__.update(state)
+
     @property
     def coef_var(self) -> float:
         """Coefficient of variation: SE / abs(ATT). NaN when ATT is 0 or SE non-finite."""
@@ -1188,6 +1204,27 @@ class SyntheticDiDResults:
         if not np.isfinite(self.att) or self.att == 0:
             return np.nan
         return self.se / abs(self.att)
+
+    @property
+    def placebo_effects(self) -> Optional[np.ndarray]:
+        """Deprecated alias for :attr:`variance_effects` (removed in v4.0.0).
+
+        .. deprecated:: 3.6.0
+            Renamed to ``variance_effects`` because the array's contents are
+            method-specific (placebo effects, bootstrap ATT draws, or
+            leave-one-out estimates depending on ``variance_method``).
+        """
+        # `3.6.0` is the assumed next-minor (current is 3.5.1); confirm/resolve
+        # at bump-version time. The v4.0.0 removal target is fixed.
+        warnings.warn(
+            "SyntheticDiDResults.placebo_effects is deprecated; use "
+            "variance_effects instead. The array holds placebo effects, "
+            "bootstrap ATT draws, or leave-one-out estimates depending on "
+            "variance_method. Will be removed in v4.0.0.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.variance_effects
 
     def summary(self, alpha: Optional[float] = None) -> str:
         """
@@ -1388,7 +1425,7 @@ class SyntheticDiDResults:
         * full-design survey jackknife fits (strata / PSU / FPC set in
           ``SurveyDesign``) - the underlying replicates are PSU-level
           ``τ̂_{(h,j)}`` (Rust & Rao 1996), not unit-level. See
-          ``result.placebo_effects`` for the raw PSU-level replicate
+          ``result.variance_effects`` for the raw PSU-level replicate
           array and REGISTRY §SyntheticDiD "Note (survey + jackknife
           composition)" for the aggregation formula.
 
@@ -1424,7 +1461,7 @@ class SyntheticDiDResults:
             )
         # Survey-jackknife fits use PSU-level LOO (Rust & Rao 1996) with
         # stratum aggregation rather than unit-level LOO. The returned
-        # ``placebo_effects`` array in that path is a flat list of
+        # ``variance_effects`` array in that path is a flat list of
         # PSU-level τ̂_{(h,j)} replicates (variable length, ordered by
         # stratum then PSU), not a length-N unit-indexed array. Mapping
         # these onto the fit-time unit IDs would mislabel PSU replicates
@@ -1441,19 +1478,19 @@ class SyntheticDiDResults:
                 "stratum aggregation, Rust & Rao 1996); the underlying "
                 "replicates are PSU-level, not unit-level, so joining them "
                 "back to fit-time unit IDs is not well-defined. See "
-                "``result.placebo_effects`` for the raw PSU-level replicate "
+                "``result.variance_effects`` for the raw PSU-level replicate "
                 "array and ``docs/methodology/REGISTRY.md`` §SyntheticDiD "
                 '"Note (survey + jackknife composition)" for the '
                 "aggregation formula."
             )
-        if self._loo_unit_ids is None or self._loo_roles is None or self.placebo_effects is None:
+        if self._loo_unit_ids is None or self._loo_roles is None or self.variance_effects is None:
             raise ValueError(
                 "Leave-one-out estimates are unavailable (jackknife returned "
                 "NaN or an empty array). See prior warnings from fit() for the "
                 "cause (e.g., single treated unit, all weight on one control)."
             )
 
-        att_loo = np.asarray(self.placebo_effects, dtype=float)
+        att_loo = np.asarray(self.variance_effects, dtype=float)
         delta = att_loo - self.att
         df = pd.DataFrame(
             {

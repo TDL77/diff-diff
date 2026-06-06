@@ -2553,8 +2553,8 @@ class TestSyntheticDiD:
         )
 
         assert results.variance_method == "placebo"
-        assert results.placebo_effects is not None
-        assert len(results.placebo_effects) > 0
+        assert results.variance_effects is not None
+        assert len(results.variance_effects) > 0
         assert results.se > 0
 
     def test_bootstrap_inference(self, sdid_panel_data, ci_params):
