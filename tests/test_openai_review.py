@@ -9,6 +9,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -2434,6 +2435,127 @@ class TestWorkflowCommentPosting:
             assert signal in workflow_text, (
                 f"Expected rerun-set signal {signal!r} not found in workflow YAML"
             )
+
+
+class TestWorkflowCodexActionContract:
+    """Pin the load-bearing wiring of the AI-review workflow's Codex step so a
+    silent edit can't decouple the producer/consumer halves of the contract.
+
+    Covers the pieces NOT already guarded by ``TestWorkflowPromptHardening``
+    (wrapper/close-tag sanitization), ``TestWorkflowCommentPosting`` (rerun
+    gates), or ``TestWorkflowDoesNotExecutePRHeadCode`` (``sandbox:
+    read-only``):
+
+      - the action pin (``openai/codex-action@v1``) + its ``prompt-file`` input
+      - the compiled-prompt path agreeing between the build step (``PROMPT=``)
+        and the action input (``prompt-file:``)
+      - the ``final-message`` output flowing from the ``id:``-tagged Codex step
+        into the post-comment step
+      - the unified-diff exclude pathspecs (keep large data/notebook blobs out
+        of the model's input budget)
+      - the comment markers, and the invariant that the prev-review fetch
+        filter is a prefix shared by both the canonical and rerun markers (so
+        reruns and auto reviews are both refetched on the next run)
+
+    Tracks TODO.md "AI review CI: pin workflow contract via test".
+    """
+
+    @pytest.fixture
+    def workflow_text(self):
+        assert _SCRIPT_PATH is not None
+        repo_root = _SCRIPT_PATH.parent.parent.parent
+        wf = repo_root / ".github" / "workflows" / "ai_pr_review.yml"
+        if not wf.exists():
+            pytest.skip("workflow not found")
+        return wf.read_text()
+
+    # --- Action pin + prompt-file input ---
+
+    def test_run_codex_uses_pinned_action(self, workflow_text):
+        assert "uses: openai/codex-action@v1" in workflow_text, (
+            "the Run Codex step must invoke the pinned openai/codex-action@v1; "
+            "a floating tag or a different action silently changes the review "
+            "contract."
+        )
+
+    def test_run_codex_passes_prompt_file_input(self, workflow_text):
+        assert "prompt-file:" in workflow_text, (
+            "codex-action must be driven by `prompt-file:` — the compiled prompt "
+            "is built on disk and handed to the action by path."
+        )
+
+    def test_compiled_prompt_path_agrees_between_build_and_action(self, workflow_text):
+        """The build step writes the compiled prompt to ``PROMPT=<path>`` and
+        the action consumes it via ``prompt-file: <path>``. If the two drift,
+        the action reviews a stale/empty file with no error."""
+        consumer = re.search(r"prompt-file:\s*(\S+)", workflow_text)
+        producer = re.search(r"PROMPT=(\S+)", workflow_text)
+        assert consumer, "no `prompt-file:` input found on the Codex step"
+        assert producer, "no `PROMPT=<path>` assignment found in the build step"
+        assert consumer.group(1) == producer.group(1), (
+            f"compiled-prompt path mismatch: build writes {producer.group(1)!r} "
+            f"but the action reads {consumer.group(1)!r}"
+        )
+        assert consumer.group(1) == ".github/codex/prompts/pr_review_compiled.md"
+
+    # --- final-message output wiring ---
+
+    def test_final_message_output_wired_to_codex_step(self, workflow_text):
+        """The post-comment step reads ``steps.<id>.outputs.final-message``; the
+        Codex step must carry a matching ``id:`` or the reference resolves to
+        empty and every review posts a blank comment (silently)."""
+        ref = re.search(r"steps\.(\w+)\.outputs\.final-message", workflow_text)
+        assert ref, (
+            "post-comment step must read the review body from "
+            "steps.<codex-step>.outputs.final-message"
+        )
+        step_id = ref.group(1)
+        assert f"id: {step_id}" in workflow_text, (
+            f"final-message is read from steps.{step_id}.outputs but no step "
+            f"declares `id: {step_id}` — the output wiring is broken."
+        )
+
+    # --- diff-exclude pathspecs ---
+
+    def test_unified_diff_excludes_large_blobs(self, workflow_text):
+        """Real-data JSON/CSV and notebook ``.ipynb`` JSON are excluded from the
+        unified diff so they don't blow the model's input budget (they still
+        appear in ``--name-status``). Pin all three pathspecs."""
+        for pathspec in (
+            "':!benchmarks/data/real/*.json'",
+            "':!benchmarks/data/real/*.csv'",
+            "':!docs/tutorials/*.ipynb'",
+        ):
+            assert pathspec in workflow_text, (
+                f"unified-diff exclude pathspec {pathspec} missing — dropping it "
+                f"risks exceeding the model input limit on data/notebook-heavy PRs."
+            )
+
+    # --- comment markers ---
+
+    def test_comment_markers_present(self, workflow_text):
+        assert "<!-- ai-pr-review:codex:auto -->" in workflow_text, (
+            "canonical auto-review comment marker missing; the post-comment step "
+            "uses it to find-and-update the single canonical comment."
+        )
+        assert "<!-- ai-pr-review:codex:rerun:" in workflow_text, (
+            "rerun comment marker prefix missing; reruns must use a unique "
+            "per-run marker so prior reviews are never overwritten."
+        )
+
+    def test_prev_review_fetch_filter_is_prefix_of_markers(self, workflow_text):
+        """The 'fetch previous AI review' step filters comments by a marker
+        substring. That substring MUST be a prefix shared by both the canonical
+        and rerun markers, or prior reviews silently stop being refetched and
+        every run is framed as a fresh review."""
+        fetch_filter = "<!-- ai-pr-review:codex:"
+        assert f'includes("{fetch_filter}")' in workflow_text, (
+            "prev-review fetch step must filter comments by the shared "
+            f"{fetch_filter!r} marker prefix."
+        )
+        # Both markers the post-comment step can write start with that prefix.
+        assert "<!-- ai-pr-review:codex:auto -->".startswith(fetch_filter)
+        assert "<!-- ai-pr-review:codex:rerun:".startswith(fetch_filter)
 
 
 class TestBackendDetection:
