@@ -36,6 +36,21 @@ earlier pre-date and checks for a spurious gap before the true treatment date (t
 backdating placebo; ``placebo_att`` should be ~0). Both re-run the validated solver and
 leave the analytical inference fields NaN.
 
+**Confidence sets by test inversion (Firpo & Possebom 2018 §4, opt-in):**
+:meth:`~diff_diff.SyntheticControlResults.test_sharp_null` tests a sharp null
+``H_0: alpha_1t = f(t)`` (a scalar constant effect, or a post-period effect path) by
+re-ranking the stored in-space placebo gaps — no refits, and ``test_sharp_null(0)`` is
+identically ``placebo_p_value`` — and
+:meth:`~diff_diff.SyntheticControlResults.confidence_set` (``family="constant"`` or
+``"linear"``) inverts that test into a confidence set for the effect path: a
+constant-effect interval (Eqs. 15–16) or a linear-slope set (Eqs. 17–18), with the
+paper's strict ``p > gamma`` membership (Eq. 14), computed by exact piecewise-constant
+breakpoint inversion (or a fixed grid when ``bounds=`` is supplied). The set is
+summarized on ``effect_confidence_set`` and returned by
+:meth:`~diff_diff.SyntheticControlResults.get_confidence_set_df`; the analytical
+``conf_int`` stays NaN (this is a separate permutation set at level ``1 - gamma``,
+possibly a set / unbounded / non-contiguous).
+
 **Distinct from** :class:`~diff_diff.SyntheticDiD` (Arkhangelsky et al. 2021), which adds
 time weights and ridge regularization; classic SCM uses **donor weights only** plus the
 outer ``V`` search.
@@ -88,6 +103,9 @@ Results container for synthetic control estimation.
       ~SyntheticControlResults.in_time_placebo
       ~SyntheticControlResults.get_in_time_placebo_df
       ~SyntheticControlResults.get_in_time_placebo_gaps
+      ~SyntheticControlResults.test_sharp_null
+      ~SyntheticControlResults.confidence_set
+      ~SyntheticControlResults.get_confidence_set_df
       ~SyntheticControlResults.summary
       ~SyntheticControlResults.print_summary
       ~SyntheticControlResults.to_dict

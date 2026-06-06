@@ -2111,6 +2111,23 @@ class TestSCMNative:
         block = native["in_time_placebo"]
         assert block["status"] == "ran" and block["n_dates"] >= 1
 
+    def test_scm_native_confidence_set_not_run_stub(self, scm_fit):
+        # Firpo-Possebom test-inversion confidence set is opt-in, like the placebos.
+        res, _ = scm_fit
+        native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+        assert native["confidence_set"]["status"] == "not_run"
+
+    def test_scm_native_surfaces_confidence_set_after_optin_run(self, scm_fit):
+        res, _ = scm_fit
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res.confidence_set(family="constant", gamma=0.34)  # J=4 -> gamma > 1/(J+1)
+            native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+        block = native["confidence_set"]
+        assert block["status"] in ("ran", "empty", "unbounded")
+        assert block["family"] == "constant" and block["parameter"] == "c"
+        assert block["gamma"] == pytest.approx(0.34)
+
     def test_scm_does_not_call_honest_did(self, scm_fit):
         """HonestDiD sensitivity should NOT run on SCM (fit-based / native path)."""
         res, _ = scm_fit

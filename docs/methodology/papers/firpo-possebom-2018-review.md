@@ -5,13 +5,13 @@
 **PDF reviewed:** https://doi.org/10.1515/jci-2016-0026 (published *Journal of Causal Inference* version, open access; received 15 Nov 2016, revised 6 Aug 2018, accepted 11 Aug 2018, 26 pp). Per the project's PDFs-never-committed convention the local PDF is kept outside the repository; the published J. Causal Inference version (DOI 10.1515/jci-2016-0026) is the authoritative source. All equation, section, and footnote numbers below are pinned to that version.
 **Review date:** 2026-06-01
 
-> Scope note: this paper extends the **permutation / placebo inference** procedure of Abadie, Diamond & Hainmueller (the SCM benchmark) in two ways — (1) a **sensitivity analysis** that parametrically re-weights the placebo p-value away from the equal-weights benchmark, and (2) testing **any sharp null hypothesis** (not only "no effect whatsoever") via a modified RMSPE statistic, which it **inverts to construct confidence sets** for the treatment-effect path. It also generalizes to arbitrary test statistics, multiple outcomes (familywise error control), and multiple treated units (a pooled effect). This review is the **Step-1 fidelity artifact** for a forthcoming SCM **confidence-set / CI-by-test-inversion** implementation (PR-B) layered on the existing `SyntheticControl` estimator; the sensitivity-analysis and multiple-outcome / multiple-treated extensions are documented here but flagged **deferred**. The estimator itself (donor weights `W`, predictor importance `V`) is taken as given from ADH 2010/2015 — already implemented as `SyntheticControl` — and is recapped only as the paper frames it. Nothing here is sourced from outside this paper.
+> Scope note: this paper extends the **permutation / placebo inference** procedure of Abadie, Diamond & Hainmueller (the SCM benchmark) in two ways — (1) a **sensitivity analysis** that parametrically re-weights the placebo p-value away from the equal-weights benchmark, and (2) testing **any sharp null hypothesis** (not only "no effect whatsoever") via a modified RMSPE statistic, which it **inverts to construct confidence sets** for the treatment-effect path. It also generalizes to arbitrary test statistics, multiple outcomes (familywise error control), and multiple treated units (a pooled effect). This review is the **Step-1 fidelity artifact** for the SCM **confidence-set / CI-by-test-inversion** implementation (PR-B, **shipped** — `SyntheticControlResults.test_sharp_null()` / `confidence_set()`) layered on the existing `SyntheticControl` estimator; the sensitivity-analysis and multiple-outcome / multiple-treated extensions are documented here but flagged **deferred**. The estimator itself (donor weights `W`, predictor importance `V`) is taken as given from ADH 2010/2015 — already implemented as `SyntheticControl` — and is recapped only as the paper frames it. Nothing here is sourced from outside this paper.
 
 ---
 
 ## Methodology Registry Entry
 
-*Formatted to match docs/methodology/REGISTRY.md. This documents an **inference procedure on the existing `SyntheticControl` estimator**, not a new estimator — the `## SyntheticControl` heading mirrors `abadie-2021-review.md`. The REGISTRY implementation contract (`docs/methodology/REGISTRY.md` §SyntheticControl) is unchanged by this docs-only PR-A; PR-B will add the confidence-set methodology subsection and flip the relevant checklist items.*
+*Formatted to match docs/methodology/REGISTRY.md. This documents an **inference procedure on the existing `SyntheticControl` estimator**, not a new estimator — the `## SyntheticControl` heading mirrors `abadie-2021-review.md`. The REGISTRY implementation contract (`docs/methodology/REGISTRY.md` §SyntheticControl) was unchanged by the docs-only PR-A; PR-B (shipped) added the confidence-set methodology subsection there and flipped the relevant checklist items below.*
 
 ## SyntheticControl
 
@@ -132,10 +132,10 @@ A re-analysis of ETA terrorism on Basque Country GDP per capita (Abadie & Gardea
 - Built on the authors' `Synth` package (R / MATLAB / Stata) for the underlying SCM fit.
 
 **Requirements checklist** (features this paper adds beyond ADH 2010/2015; **PR-B** = the planned next implementation target, **deferred** = later):
-- [ ] (PR-B) Sharp-null `RMSPE^f` test (Eqs. 12–13) reusing the in-space placebo permutation — subtract the hypothesized `f(t)` from the post-period gaps and re-rank.
-- [ ] (PR-B) Confidence **interval** for a constant-in-time effect (Eqs. 15–16) by test inversion over a `c`-grid.
-- [ ] (PR-B) Confidence **set** for a linear-in-time effect (Eqs. 17–18) by test inversion over a `c̃`-grid.
-- [ ] (PR-B) Benchmark `(φ = 0, v = (1,…,1))` p-value (reuse `in_space_placebo`'s RMSPE-ratio) + a one-sided variant (Section 7).
+- [x] (PR-B) Sharp-null `RMSPE^f` test (Eqs. 12–13) reusing the in-space placebo permutation — subtract the hypothesized `f(t)` from the post-period gaps and re-rank. **Shipped:** `SyntheticControlResults.test_sharp_null(effect, gamma=...)`.
+- [x] (PR-B) Confidence **interval** for a constant-in-time effect (Eqs. 15–16) by test inversion over a `c`-grid. **Shipped:** `confidence_set(family="constant")`.
+- [x] (PR-B) Confidence **set** for a linear-in-time effect (Eqs. 17–18) by test inversion over a `c̃`-grid. **Shipped:** `confidence_set(family="linear")`.
+- [x] (PR-B) Benchmark `(φ = 0, v = (1,…,1))` p-value (reuse `in_space_placebo`'s RMSPE-ratio): shipped — `test_sharp_null(0)` is identically `placebo_p_value`. **One-sided variant (Section 7): still `[ ]` deferred** — §7 uses the signed-`t` statistic `θ³` from the deferred general-`θ` menu (Eq. 19), so it ships with that menu, not here.
 - [ ] (deferred) Sensitivity-analysis parametric weights `π_(j)(φ, v)` (Eqs. 7–9) + worst/best-case `φ̲`/`φ̄` robustness curve (Section 3).
 - [ ] (deferred) General test-statistic menu `θ¹`–`θ⁵` (Eq. 19, Section 5).
 - [ ] (deferred) Multiple-outcome FWER control (Eqs. 23–24) and multiple-treated-unit pooled confidence sets (Eqs. 25–26, Section 6).

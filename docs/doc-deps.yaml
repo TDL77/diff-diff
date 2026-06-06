@@ -635,6 +635,8 @@ sources:
       - path: docs/methodology/REGISTRY.md
         section: "SyntheticControl"
         type: methodology
+      - path: docs/methodology/papers/firpo-possebom-2018-review.md
+        type: methodology
       - path: docs/api/synthetic_control.rst
         type: api_reference
       - path: diff_diff/guides/llms-full.txt
