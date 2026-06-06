@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import numpy as np
 import pandas as pd
 from scipy import sparse, stats
-from scipy.sparse.linalg import spsolve
+from scipy.sparse.linalg import MatrixRankWarning, spsolve
 
 from diff_diff.imputation_bootstrap import ImputationDiDBootstrapMixin, _compute_target_weights
 from diff_diff.imputation_results import (  # noqa: F401 (re-export)
@@ -1327,71 +1327,31 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         """
         df_0 = df.loc[omega_0_mask]
         df_1 = df.loc[omega_1_mask]
-        n_0 = len(df_0)
-        n_1 = len(df_1)
 
         # ---- Compute v_it for treated observations ----
         v_treated = weights.copy()
 
         # ---- Compute v_it for untreated observations ----
-        if covariates is None or len(covariates) == 0:
-            # FE-only case: closed-form
-            # Build w_by_unit, w_by_time, w_total from the target weights
-            treated_units = df_1[unit].values
-            treated_times = df_1[time].values
-
-            w_by_unit: Dict[Any, float] = {}
-            for i_idx in range(n_1):
-                u = treated_units[i_idx]
-                w_by_unit[u] = w_by_unit.get(u, 0.0) + weights[i_idx]
-
-            w_by_time: Dict[Any, float] = {}
-            for i_idx in range(n_1):
-                t = treated_times[i_idx]
-                w_by_time[t] = w_by_time.get(t, 0.0) + weights[i_idx]
-
-            w_total = float(np.sum(weights))
-
-            untreated_units = df_0[unit].values
-            untreated_times = df_0[time].values
-
-            # Use survey-weighted sums for untreated denominators when present
-            if survey_weights_0 is not None:
-                sw0_series = pd.Series(survey_weights_0, index=df_0.index)
-                n0_by_unit = sw0_series.groupby(df_0[unit]).sum().to_dict()
-                n0_by_time = sw0_series.groupby(df_0[time]).sum().to_dict()
-                n0_denom = float(np.sum(survey_weights_0))
-            else:
-                n0_by_unit = df_0.groupby(unit).size().to_dict()
-                n0_by_time = df_0.groupby(time).size().to_dict()
-                n0_denom = n_0
-
-            v_untreated = np.zeros(n_0)
-
-            for j in range(n_0):
-                u = untreated_units[j]
-                t = untreated_times[j]
-                w_i = w_by_unit.get(u, 0.0)
-                w_t = w_by_time.get(t, 0.0)
-                n0_i = n0_by_unit.get(u, 1)
-                n0_t = n0_by_time.get(t, 1)
-                base_v = -(w_i / n0_i + w_t / n0_t - w_total / n0_denom)
-                # WLS projection requires per-obs survey weight factor
-                if survey_weights_0 is not None:
-                    base_v *= survey_weights_0[j]
-                v_untreated[j] = base_v
-        else:
-            v_untreated = self._compute_v_untreated_with_covariates(
-                df_0,
-                df_1,
-                unit,
-                time,
-                covariates,
-                weights,
-                delta_hat,
-                kept_cov_mask=kept_cov_mask,
-                survey_weights_0=survey_weights_0,
-            )
+        # Exact two-way-FE imputation projection
+        # v_untreated = -A_0 (A_0' [W] A_0)^{-1} A_1' w_treated  (Theorem 3 / the
+        # implied weights of Supplementary Proposition A3), used for BOTH the
+        # FE-only and the covariate case. The earlier FE-only closed form
+        # -(w_i/n0_i + w_t/n0_t - w/N_0) is exact only for a *balanced* untreated
+        # panel; Omega_0 is generically unbalanced in staggered designs (treated
+        # observations are removed), which biased the analytical SE downward
+        # (~27% on the parity panel). The projection matches R `didimputation`
+        # exactly -- see tests/test_methodology_imputation.py::TestImputationDiDParityR.
+        v_untreated = self._compute_v_untreated_with_covariates(
+            df_0,
+            df_1,
+            unit,
+            time,
+            covariates if covariates is not None else [],
+            weights,
+            delta_hat,
+            kept_cov_mask=kept_cov_mask,
+            survey_weights_0=survey_weights_0,
+        )
 
         # ---- Compute auxiliary model residuals (Equation 8) ----
         epsilon_treated = self._compute_auxiliary_residuals_treated(
@@ -1461,8 +1421,9 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
             Aggregation weights w_it for treated observations.
             Shape: (n_treated,), must sum to 1.
         survey_weights : np.ndarray, optional
-            Full-panel survey weights. When provided, untreated denominators
-            in v_it use survey-weighted sums instead of raw counts.
+            Full-panel survey weights. When provided, they enter the untreated
+            v_it WLS projection (weighted normal equations plus the left
+            per-observation weight factor) and the design-based variance path.
         resolved_survey : ResolvedSurveyDesign, optional
             When provided, uses design-based variance via
             ``compute_survey_if_variance()`` (supports strata, PSU, FPC).
@@ -1517,14 +1478,20 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         survey_weights_0: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
-        Compute v_it for untreated observations with covariates.
+        Compute the untreated observation weights v_it via the exact imputation
+        projection. This is the GENERAL path -- used for both the FE-only and the
+        covariate cases (an empty ``covariates`` list builds a pure two-way-FE
+        design). The name is retained for history; ``n_cov == 0`` is the FE-only
+        path.
 
-        Uses the projection: v_untreated = -A_0 (A_0'A_0)^{-1} A_1' w_treated
-        When survey_weights_0 is provided, uses weighted normal equations:
-        v_untreated = -A_0 (A_0' W A_0)^{-1} A_1' w_treated
+        Uses the projection: v_untreated = -A_0 (A_0'A_0)^{-1} A_1' w_treated.
+        When survey_weights_0 is provided, uses the weighted normal equations
+        v_untreated = -A_0 (A_0' W A_0)^{-1} A_1' w_treated, then multiplies the
+        result by the per-observation survey weight (the WLS projection's `W_0`).
 
         Uses scipy.sparse for FE dummy columns to reduce memory from O(N*(U+T))
-        to O(N) for the FE portion.
+        to O(N) for the FE portion. A singular A_0'A_0 (rank-deficient Omega_0)
+        falls back to a dense least-squares solve with a UserWarning.
         """
         # Exclude rank-deficient covariates from design matrices
         if kept_cov_mask is not None and not np.all(kept_cov_mask):
@@ -1542,22 +1509,26 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         n_units = len(all_units)
         n_times = len(all_times)
         n_cov = len(covariates)
-        n_fe_cols = (n_units - 1) + (n_times - 1)
+        # Two-way FE design = all unit dummies (their sum spans the intercept) +
+        # time dummies dropping the first (identification). Dropping the first
+        # unit dummy too -- with no intercept column -- would omit the baseline
+        # level dimension and project onto a space one rank short of the true
+        # two-way-FE span, biasing the imputation weights (and hence the SE).
+        n_fe_cols = n_units + (n_times - 1)
 
         def _build_A_sparse(df_sub, unit_vals, time_vals):
             n = len(df_sub)
 
-            # Unit dummies (drop first) — vectorized
+            # Unit dummies — keep ALL (together they span the intercept).
             u_indices = np.array([unit_to_idx[u] for u in unit_vals])
-            u_mask = u_indices > 0  # skip first unit (dropped)
-            u_rows = np.arange(n)[u_mask]
-            u_cols = u_indices[u_mask] - 1
+            u_rows = np.arange(n)
+            u_cols = u_indices
 
             # Time dummies (drop first) — vectorized
             t_indices = np.array([time_to_idx[t] for t in time_vals])
             t_mask = t_indices > 0
             t_rows = np.arange(n)[t_mask]
-            t_cols = (n_units - 1) + t_indices[t_mask] - 1
+            t_cols = n_units + (t_indices[t_mask] - 1)
 
             rows = np.concatenate([u_rows, t_rows])
             cols = np.concatenate([u_cols, t_cols])
@@ -1587,7 +1558,19 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         else:
             A0tA0_sparse = A_0.T @ A_0  # stays sparse
         try:
-            z = spsolve(A0tA0_sparse.tocsc(), A1_w)
+            with warnings.catch_warnings():
+                # On a singular A_0'A_0, SciPy's spsolve does NOT raise -- it emits
+                # a MatrixRankWarning and returns a non-finite (NaN) solution.
+                # Promote that warning to an error so the dense-lstsq fallback below
+                # actually triggers under production warning filters (not only under
+                # pytest's filter), instead of letting NaN v_it silently zero valid
+                # influence-function contributions downstream (np.nan_to_num).
+                warnings.filterwarnings("error", category=MatrixRankWarning)
+                z = spsolve(A0tA0_sparse.tocsc(), A1_w)
+            if not np.all(np.isfinite(z)):
+                # Defensive: a non-finite solution that slipped through without a
+                # MatrixRankWarning still routes to the fallback.
+                raise RuntimeError("spsolve returned a non-finite solution")
         except Exception as exc:
             # Fallback to dense lstsq if sparse solver fails (e.g., singular matrix).
             # Silent-failure audit axis C: emit a UserWarning on fallback instead
@@ -1624,10 +1607,26 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         v_treated: np.ndarray,
     ) -> np.ndarray:
         """
-        Compute v_it-weighted auxiliary residuals for treated obs (Equation 8).
+        Compute auxiliary residuals for treated obs (Theorem 3, Equation 8).
 
-        Computes v_it-weighted tau_tilde_g per Equation 8 of Borusyak et al. (2024):
-        tau_tilde_g = sum(v_it * tau_hat_it) / sum(v_it) within group g.
+        Implements the paper's *unit-clustered* group aggregator (Borusyak,
+        Jaravel & Spiess 2024, eq. 8, p. 3272), which minimizes the excess
+        variance of the conservative estimator under a within-group
+        constant-effect auxiliary model (Supplementary Appendix A.8):
+
+            tau_tilde_g = sum_i (sum_{t in G_g,i} v_it)(sum_{t in G_g,i} v_it * tau_hat_it)
+                          ----------------------------------------------------------------
+                                          sum_i (sum_{t in G_g,i} v_it)^2
+
+        i.e. for each unit i form the within-unit weight sum a_{i,g} and the
+        within-unit weighted-effect sum b_{i,g} over the unit's observations in
+        group g, then combine across units. At the default cohort x event-time
+        partition (<=1 obs/unit/group) this reduces to sum(v^2 * tau_hat) /
+        sum(v^2) -- the form the R `didimputation` package implements -- and
+        equals the naive observation-level mean sum(v * tau_hat) / sum(v) only
+        when within-group weights are uniform. Under coarser `cohort` / `horizon`
+        partitions (a unit contributes several observations to a group) or
+        non-uniform v_it (e.g. survey weights) the two genuinely differ.
 
         epsilon_tilde_it = Y_it - alpha_i - beta_t [- X'delta] - tau_tilde_g
         """
@@ -1644,7 +1643,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
 
         tau_hat = df_1[outcome].values - y_hat_0
 
-        # Partition Omega_1 and compute tau_tilde for each group
+        # Partition Omega_1 into groups G_g
         if self.aux_partition == "cohort_horizon":
             group_keys = list(zip(df_1[first_treat].values, df_1["_rel_time"].values))
         elif self.aux_partition == "cohort":
@@ -1654,28 +1653,51 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         else:
             group_keys = list(range(n_1))  # each obs is its own group
 
-        # Compute v_it-weighted average tau within each partition group (Equation 8)
-        # tau_tilde_g = sum(v_it * tau_hat_it) / sum(v_it) within group g
-        group_series = pd.Series(group_keys, index=df_1.index)
+        # Factorize group keys to integer codes (robust to tuple-valued keys).
+        group_codes = pd.factorize(pd.Series(group_keys), sort=False)[0]
+        gc_series = pd.Series(group_codes, index=df_1.index)
         tau_series = pd.Series(tau_hat, index=df_1.index)
-        v_series = pd.Series(v_treated, index=df_1.index)
 
-        weighted_tau_sum = (v_series * tau_series).groupby(group_series).sum()
-        weight_sum = v_series.groupby(group_series).sum()
-
-        # Guard: zero-weight groups -> their tau_tilde doesn't affect variance
-        # (v_it ~ 0 means these obs contribute nothing to the estimand)
-        # Use simple mean as fallback. This is common for event-study SE computation
-        # where weights target a specific horizon, making other partition groups zero.
-        zero_weight_groups = weight_sum.abs() < 1e-15
-        if zero_weight_groups.any():
-            simple_means = tau_series.groupby(group_series).mean()
-            tau_tilde_map = weighted_tau_sum / weight_sum
-            tau_tilde_map = tau_tilde_map.where(~zero_weight_groups, simple_means)
+        # Unit-clustered Equation 8. Only v_it != 0 observations contribute: a
+        # zero-weight row adds exactly 0 to both a_{i,g} and b_{i,g}, so dropping
+        # it is exact for finite tau_hat AND avoids letting an unimputable row
+        # (NaN tau_hat, which always carries v_it == 0 by construction in
+        # _compute_target_weights) poison its whole group via 0 * NaN = NaN. The
+        # previous observation-level pandas sum relied on skipna to drop them.
+        contrib = (v_treated != 0.0) & np.isfinite(tau_hat)
+        if contrib.any():
+            inner = pd.DataFrame(
+                {
+                    "g": group_codes[contrib],
+                    "u": df_1[unit].values[contrib],
+                    "v": v_treated[contrib],
+                    "vt": v_treated[contrib] * tau_hat[contrib],
+                }
+            )
+            # Per (group, unit): a_{i,g} = sum v_it, b_{i,g} = sum v_it * tau_hat
+            per_unit = inner.groupby(["g", "u"], sort=False).agg(a=("v", "sum"), b=("vt", "sum"))
+            # Per group: numerator sum_i a*b, denominator sum_i a^2
+            per_group = (
+                per_unit.assign(ab=per_unit["a"] * per_unit["b"], a2=per_unit["a"] ** 2)
+                .groupby(level="g")
+                .agg(num=("ab", "sum"), den=("a2", "sum"))
+            )
+            den_ok = per_group["den"].abs() >= 1e-15
+            tau_tilde_map = (per_group["num"] / per_group["den"]).where(den_ok)
         else:
-            tau_tilde_map = weighted_tau_sum / weight_sum
+            tau_tilde_map = pd.Series(dtype=float)
 
-        tau_tilde = group_series.map(tau_tilde_map).values
+        tau_tilde_per_obs = gc_series.map(tau_tilde_map)
+
+        # Groups with no contributing (v_it != 0, finite tau_hat) observations --
+        # e.g. off-target horizons in an event-study SE -- are a variance no-op
+        # (psi_g = sum_t v_it * eps_tilde_it = 0 there regardless of tau_tilde_g),
+        # so fall back to the unweighted group mean of tau_hat for a finite value.
+        if tau_tilde_per_obs.isna().any():
+            simple_means = tau_series.groupby(gc_series).mean()
+            tau_tilde_per_obs = tau_tilde_per_obs.fillna(gc_series.map(simple_means))
+
+        tau_tilde = tau_tilde_per_obs.values
 
         # Auxiliary residuals
         epsilon_treated = tau_hat - tau_tilde
@@ -1695,8 +1717,15 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         delta_hat: Optional[np.ndarray],
     ) -> np.ndarray:
         """Compute Step 1 residuals for untreated observations."""
-        alpha_i = df_0[unit].map(unit_fe).fillna(0.0).values
-        beta_t = df_0[time].map(time_fe).fillna(0.0).values
+        # Preserve NaN for any missing FE, symmetric with the treated path in
+        # _compute_auxiliary_residuals_treated. On valid data this is inert --
+        # every untreated observation's unit and period appear in the Step 1 FE
+        # dicts (the dicts are estimated FROM Omega_0) -- but it stops a missing
+        # FE from silently becoming a 0 residual, which would mask a rank-
+        # condition logic error. Any NaN is zeroed downstream in the variance
+        # product (np.nan_to_num), exactly like the treated path.
+        alpha_i = df_0[unit].map(unit_fe).values.astype(float)
+        beta_t = df_0[time].map(time_fe).values.astype(float)
         y_hat = grand_mean + alpha_i + beta_t
 
         if delta_hat is not None and covariates:

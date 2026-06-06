@@ -47,7 +47,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | CallawaySantAnna | `staggered.py` | `did::att_gt()` | **Complete** | 2026-01-24 |
 | SunAbraham | `sun_abraham.py` | `fixest::sunab()` | **Complete** | 2026-02-15 |
 | StackedDiD | `stacked_did.py` | `stacked-did-weights` (Wing-Freedman-Hollingsworth code) | **Complete** | 2026-02-19 |
-| ImputationDiD | `imputation.py` | `didimputation` | **In Progress** | — |
+| ImputationDiD | `imputation.py` | `didimputation` | **Complete** | 2026-06-06 |
 | TwoStageDiD | `two_stage.py` | `did2s` | **In Progress** | — |
 | WooldridgeDiD (ETWFE) | `wooldridge.py` | `etwfe` (R) / `jwdid` (Stata) | **Complete** | 2026-05-22 |
 | EfficientDiD | `efficient_did.py` | (no canonical R package) | **Complete** | 2026-06-01 |
@@ -539,22 +539,40 @@ and covariate-adjusted specifications.)
 | Field | Value |
 |-------|-------|
 | Module | `imputation.py`, `imputation_bootstrap.py` |
-| Primary Reference | Borusyak, Jaravel & Spiess (2024), *Revisiting Event-Study Designs: Robust and Efficient Estimation*, REStud 91(6) |
-| R Reference | `didimputation` |
-| Status | **In Progress** |
-| Last Review | — |
+| Primary Reference | Borusyak, K., Jaravel, X., & Spiess, J. (2024). Revisiting Event-Study Designs: Robust and Efficient Estimation. *Review of Economic Studies*, 91(6), 3253–3285. |
+| R Reference | `didimputation` (Kyle Butts, v0.5.0) |
+| Status | **Complete** |
+| Last Review | 2026-06-06 |
 
-**Documentation in place:**
-- REGISTRY.md section: `## ImputationDiD` (paper-direct equations, edge cases, three-step algorithm)
-- Implementation: 87 unit tests in `tests/test_imputation.py` (basic fit, event study, group aggregation, conservative variance, auxiliary partition, unidentified-estimand handling, balanced/unbalanced panels)
-- Bootstrap path: `imputation_bootstrap.py` with multiplier-weight resampling
-- Survey support: pweight + strata/PSU/FPC via TSL (Phase 6) with PSU-bootstrap path
+**Verified Components** (`tests/test_methodology_imputation.py`, paper-equation-numbered):
+- **Theorem 1 / 2 (eqs. 4-5):** 3-step imputation (Step 1 fit on Ω₀ only; impute Ŷ(0); weighted aggregate) recovers constant and heterogeneous-by-horizon ATTs; perturbing a treated outcome shifts the overall ATT by exactly δ/N₁ (proving treated obs never feed Step 1) — `TestB2024Theorem2Imputation`
+- **Theorem 3 / eqs. 6-8 (conservative clustered variance + unit-clustered Equation 8):** finite/positive SEs; the unit-clustered `τ̃_g = Σ_i a·b / Σ_i a²` aggregator hand-verified; NaN-`τ̂` co-group observation is a variance no-op — `TestB2024Theorem3Variance`, `TestB2024Eq8AuxiliaryAggregator`
+- **Proposition 5 (p. 3266):** no never-treated units ⇒ horizons `K ≥ H̄ = max(E_i)−min(E_i)` are NaN + warning; never-treated present ⇒ identified — `TestB2024Proposition5NoNeverTreated`
+- **Test 1 / eq. 9 + Proposition 9 (p. 3273-4):** robust pre-trend test on Ω₀ only (does not reject under parallel trends, rejects under a violation); the treatment-effect estimate is independent of the pre-trend request — `TestB2024Proposition9Test1`
+- **R parity vs `didimputation::did_imputation`:** overall + event-study ATT and SEs match on a fixed-seed staggered panel (observed |Δ| ~1e-7 ATT / ~1e-10 SE; the tests assert ATT `abs=1e-6`, SE `abs=1e-7` for cross-platform robustness) — `TestImputationDiDParityR` (goldens: `benchmarks/data/didimputation_golden.json`, generator: `benchmarks/R/generate_didimputation_golden.R`)
 
-**Outstanding for promotion:**
-- Dedicated `tests/test_methodology_imputation.py` with paper-equation-numbered Verified Components walk-through
-- R parity benchmark against `didimputation` (none on file)
-- Formal enumeration of deviations from `didimputation` (NaN inference, refused-to-estimate behavior for unidentified estimands per Proposition 5)
-- "Corrections Made" listing for any implementation fixes uncovered during the walk-through
+**Corrections Made** (PR-B, surfaced by the walk-through + R parity):
+- **Theorem 3 untreated `v_it` weights — exact projection.** The FE-only path used the *balanced* two-way closed form `-(w_i/n0_i + w_t/n0_t − w/N₀)`, which is wrong for the (always-unbalanced) Ω₀ in staggered designs — biasing **every covariate-free analytical SE downward (~27% on the parity panel)**. Replaced with the exact two-way-FE projection `-A₀(A₀'A₀)⁻¹A₁'w` (the same path the covariate case uses), and fixed the FE design to keep all unit dummies (the prior drop-first-unit-without-intercept design projected onto a space one rank short, a further ~1.6% bias). SEs now match `didimputation` (observed ~1e-10; test contract `abs=1e-7`).
+- **Auxiliary model (Equation 8) — unit-clustered form.** `_compute_auxiliary_residuals_treated` used the observation-level mean `Σ v·τ̂ / Σ v`; corrected to the paper's unit-clustered `Σ_i a·b / Σ_i a²`. Coincides with the old form under uniform within-group weights; differs for survey/heterogeneity estimands and the coarser `cohort` partition. NaN-safe masking of zero-weight rows.
+- **Untreated-residual hardening.** `_compute_residuals_untreated` now preserves NaN for missing FE (symmetric with the treated path) instead of a silent `fillna(0.0)` that could mask a rank-condition logic error (provably inert on valid data).
+
+**Deviations from the reference / library extensions** (see `REGISTRY.md` `## ImputationDiD`):
+- **Deviation from R:** `didimputation` computes the Equation 8 aggregator (`Σ v²τ̂/Σ v²`) at the cohort×event-time partition only (no partition control); at that partition it equals the unit-clustered Equation 8 = diff-diff's default `aux_partition="cohort_horizon"`. diff-diff additionally offers `aux_partition="cohort"`/`"horizon"` (validated by hand-calc, no R analogue).
+- Multiplier bootstrap on the Theorem-3 influence function (library extension, not in the paper).
+- Survey-design TSL variance on the influence function (library extension).
+- NaN inference for undefined statistics; Proposition-5 refuse-to-estimate (NaN + warning).
+- Leave-one-out variance refinement (Supplementary Appendix A.9) not implemented (finite-sample refinement; tracked as future work).
+
+**R Comparison Results** (`didimputation` v0.5.0, fixed-seed panel, `benchmarks/data/didimputation_golden.json`):
+
+| Quantity | Python | R | |Δ| |
+|----------|--------|---|-----|
+| Overall ATT | 2.04566790 | 2.04566803 | 1.3e-7 |
+| Overall SE | 0.02087938 | 0.02087938 | 9.3e-11 |
+| Event-study ATT (max) | — | — | 1.6e-7 |
+| Event-study SE (max) | — | — | 1.7e-10 |
+
+(Point-estimate Δ is iterative-FE convergence level; SE Δ is machine precision. These are reference-platform observations; the parity tests assert ATT `abs=1e-6`, SE `abs=1e-7` for cross-platform robustness.)
 
 ---
 
@@ -1429,7 +1447,7 @@ Promotion priority for the **In Progress** entries, ordered by what's blocked on
 **Substantive-review-blocked (still missing a methodology test file / R parity and a paper review):**
 
 1. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
-2. **ImputationDiD / TwoStageDiD** — natural pair (both single-treatment-effect-imputation methods). Each needs paper review, methodology file, R parity fixture against `didimputation` / `did2s`.
+2. **TwoStageDiD** — the remaining half of the imputation pair (ImputationDiD is now Complete, validated against `didimputation`). Needs a Gardner (2022) paper review, `tests/test_methodology_two_stage.py`, and an R parity fixture against `did2s`.
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
