@@ -2571,8 +2571,14 @@ class TestWorkflowCodexActionContract:
             f"final-message is read from steps.{ref.group(1)}.outputs but the "
             f"Codex step's id is {actual.group(1)!r} — the output wiring is broken."
         )
-        # ...and the JS body must actually consume that env var.
-        assert "process.env.CODEX_FINAL_MESSAGE" in post, (
+        # ...and the JS body must actually consume that env var — anchored to the
+        # live `const msg = (process.env.CODEX_FINAL_MESSAGE ...` assignment so a
+        # same-step JS comment with the literal can't satisfy it.
+        assert re.search(
+            r"^\s*const msg = \(process\.env\.CODEX_FINAL_MESSAGE\b",
+            post,
+            re.MULTILINE,
+        ), (
             "the post-comment script must read process.env.CODEX_FINAL_MESSAGE; "
             "otherwise the env wiring above is dead."
         )
