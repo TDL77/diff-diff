@@ -38,6 +38,14 @@ from diff_diff import (
     SyntheticControlResults,
     synthetic_control,
 )
+from diff_diff.conformal import (
+    _block_collapse,
+    _cwz_proxy_fit,
+    _cwz_pvalue,
+    _cwz_statistic,
+    _iid_perms,
+    _moving_block_perms,
+)
 from diff_diff.synthetic_control import (
     _constant_f_post,
     _floored_pre_mspe,
@@ -3538,3 +3546,527 @@ def test_confidence_set_coverage_simulation():
     # Permutation inference is finite-sample valid under exchangeability; allow a wide
     # band (the convex-combo treated is not perfectly exchangeable with single donors).
     assert coverage >= 0.70, f"coverage {coverage:.3f} too low (target ~{1 - gamma})"
+
+
+# ===========================================================================
+# CWZ conformal inference — pure-function oracle tests (Chernozhukov, Wüthrich
+# & Zhu 2021). These exercise diff_diff/conformal.py primitives directly (no
+# SyntheticControl fit), with hand-computed oracles + an independent brute-force
+# permutation re-implementation. See chernozhukov-wuthrich-zhu-2021-review.md.
+# ===========================================================================
+
+
+def _bruteforce_Sq(u, post_mask, q):
+    """Independent re-implementation of S_q(u) for oracle cross-checks (CWZ §2.2)."""
+    post = [abs(v) for v, m in zip(u, post_mask) if m]
+    tstar = len(post)
+    if tstar == 0:
+        return float("nan")
+    if q == float("inf"):
+        return max(post)
+    return (sum(p**q for p in post) / (tstar**0.5)) ** (1.0 / q)
+
+
+def test_cwz_statistic_matches_hand_computed_values():
+    # post window = last two slots, values 5 and 6; T*=2.
+    u = np.array([1.0, -2.0, 3.0, -4.0, 5.0, 6.0])
+    post_mask = np.array([False, False, False, False, True, True])
+    assert _cwz_statistic(u, post_mask, 1) == pytest.approx(11.0 / np.sqrt(2))
+    assert _cwz_statistic(u, post_mask, 2) == pytest.approx(np.sqrt((25.0 + 36.0) / np.sqrt(2)))
+    assert _cwz_statistic(u, post_mask, float("inf")) == pytest.approx(6.0)
+    # empty post window -> NaN
+    assert np.isnan(_cwz_statistic(u, np.zeros(6, dtype=bool), 1))
+
+
+def test_moving_block_perms_are_cyclic_shifts():
+    m = 5
+    perms = _moving_block_perms(m)
+    assert perms.shape == (m, m)
+    # row 0 = identity
+    assert np.array_equal(perms[0], np.arange(m))
+    # each row is a valid permutation and the documented cyclic shift (i+j) mod m
+    for j in range(m):
+        assert sorted(perms[j].tolist()) == list(range(m))
+        assert np.array_equal(perms[j], (np.arange(m) + j) % m)
+    # applying a shift reads the residual vector wrapped around
+    u = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
+    assert np.array_equal(u[perms[1]], np.array([20.0, 30.0, 40.0, 50.0, 10.0]))
+
+
+def test_iid_perms_exact_enumeration_and_random_sampling():
+    rng = np.random.default_rng(0)
+    # m! <= n_draws -> exact enumeration (4! = 24), identity present, all unique perms
+    exact = _iid_perms(4, n_draws=100, rng=rng)
+    assert exact.shape == (24, 4)
+    assert np.array_equal(exact[0], np.arange(4))
+    rows = {tuple(r) for r in exact.tolist()}
+    assert len(rows) == 24
+    for r in exact:
+        assert sorted(r.tolist()) == [0, 1, 2, 3]
+    # m! > n_draws -> random sampling, identity prepended, every row a valid permutation
+    sampled = _iid_perms(10, n_draws=50, rng=rng)
+    assert sampled.shape == (50, 10)
+    assert np.array_equal(sampled[0], np.arange(10))
+    for r in sampled:
+        assert sorted(r.tolist()) == list(range(10))
+
+
+def test_cwz_pvalue_brute_force_equivalence_moving_block():
+    # Independent brute-force permutation p-value must equal the production helper
+    # bit-for-bit (catches the calendar-order / fixed-post-mask bug class).
+    rng = np.random.default_rng(7)
+    T, n_post = 24, 3
+    u = rng.normal(size=T)
+    post_mask = np.zeros(T, dtype=bool)
+    post_mask[-n_post:] = True
+    for q in (1, 2, float("inf")):
+        perms = _moving_block_perms(T)
+        p, s_obs, n = _cwz_pvalue(u, post_mask, perms, q)
+        assert n == T
+        # brute force: recompute S from scratch for every shift, count >=
+        s_ref = _bruteforce_Sq(u.tolist(), post_mask.tolist(), q)
+        cnt = 0
+        for j in range(T):
+            up = u[perms[j]]
+            cnt += _bruteforce_Sq(up.tolist(), post_mask.tolist(), q) >= s_ref - 1e-12
+        assert p == pytest.approx(cnt / T)
+        assert s_obs == pytest.approx(s_ref)
+        # identity is in Pi -> p >= 1/|Pi|
+        assert p >= 1.0 / T - 1e-12
+
+
+def test_cwz_pvalue_iid_includes_identity_floor():
+    rng = np.random.default_rng(3)
+    T = 8
+    u = rng.normal(size=T)
+    post_mask = np.zeros(T, dtype=bool)
+    post_mask[-1] = True
+    perms = _iid_perms(T, n_draws=500, rng=rng)
+    p, _, n = _cwz_pvalue(u, post_mask, perms, 1)
+    assert p >= 1.0 / n - 1e-12
+
+
+def test_cwz_proxy_fit_matches_scipy_simplex_ls():
+    scipy_opt = pytest.importorskip("scipy.optimize")
+    rng = np.random.default_rng(1)
+    T, J = 30, 4
+    Y0 = rng.normal(size=(T, J))
+    y1 = Y0 @ np.array([0.5, 0.3, 0.2, 0.0]) + rng.normal(scale=0.05, size=T)
+    # min_decrease is the ABSOLUTE tolerance; the caller scales by a theta0-invariant
+    # outcome norm (mirrors how the Results methods pass it). A generous max_iter lets
+    # the Frank-Wolfe simplex solve grind its documented slow tail to convergence so the
+    # flag is True for this exact-comparison oracle (production uses warm-starts).
+    md = 1e-6 * float(np.linalg.norm(y1))
+    w, resid, conv = _cwz_proxy_fit(y1, Y0, max_iter=200000, min_decrease=md)
+    assert conv
+    # simplex constraint delivered by the solver (w >= 0, sum w = 1) — no extra normalization
+    assert w.min() >= -1e-9
+    assert w.sum() == pytest.approx(1.0, abs=1e-6)
+    assert np.allclose(resid, y1 - Y0 @ w)
+
+    def obj(v):
+        r = y1 - Y0 @ v
+        return float(r @ r)
+
+    cons = [{"type": "eq", "fun": lambda v: v.sum() - 1.0}]
+    best = None
+    for _ in range(8):
+        res = scipy_opt.minimize(
+            obj,
+            rng.dirichlet(np.ones(J)),
+            method="SLSQP",
+            bounds=[(0.0, 1.0)] * J,
+            constraints=cons,
+            options={"ftol": 1e-12, "maxiter": 500},
+        )
+        if best is None or res.fun < best.fun:
+            best = res
+    # FW reaches essentially the same convex optimum as SLSQP (the slow tail leaves a
+    # tiny residual gap, well under the inference-relevant scale).
+    assert obj(w) == pytest.approx(obj(best.x), abs=1e-3)
+    assert np.allclose(w, best.x, atol=1e-2)
+
+
+def test_cwz_proxy_fit_single_donor_is_degenerate():
+    y1 = np.array([1.0, 2.0, 3.0, 4.0])
+    Y0 = np.array([[0.5], [1.0], [1.5], [2.0]])
+    w, resid, conv = _cwz_proxy_fit(y1, Y0, max_iter=100, min_decrease=1e-6)
+    assert conv
+    assert np.array_equal(w, np.array([1.0]))
+    assert np.allclose(resid, y1 - Y0[:, 0])
+
+
+def test_block_collapse_averages_and_drops_leftover_pre_periods():
+    # T=9, n_pre=6, n_post=3 -> drop=0; pre blocks [0,1,2],[3,4,5]; post [6,7,8]
+    y1 = np.arange(9, dtype=float)
+    Y0 = np.column_stack([np.arange(9, dtype=float), np.arange(9, dtype=float) * 2.0])
+    y1b, Y0b, drop = _block_collapse(y1, Y0, n_pre=6, n_post=3)
+    assert drop == 0
+    assert np.allclose(y1b, [1.0, 4.0, 7.0])  # block means
+    assert np.allclose(Y0b[:, 0], [1.0, 4.0, 7.0])
+    assert np.allclose(Y0b[:, 1], [2.0, 8.0, 14.0])
+    # T=10, n_pre=7, n_post=3 -> drop earliest 1 pre-period; pre blocks [1,2,3],[4,5,6]; post [7,8,9]
+    y1 = np.arange(10, dtype=float)
+    Y0 = np.arange(10, dtype=float).reshape(-1, 1)
+    y1b, Y0b, drop = _block_collapse(y1, Y0, n_pre=7, n_post=3)
+    assert drop == 1
+    assert np.allclose(y1b, [2.0, 5.0, 8.0])
+
+
+# ===========================================================================
+# CWZ conformal inference — conformal_test (joint sharp-null) integration tests
+# ===========================================================================
+
+
+def _fit_for_conformal(n_donors=5, T=18, T0=14, effect=4.0, seed=2):
+    df, years, T0 = _make_panel(n_donors=n_donors, T=T, T0=T0, effect=effect, seed=seed)
+    res = SyntheticControl(**_FAST).fit(
+        df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+    )
+    return res
+
+
+def test_conformal_test_p_value_shape_and_moving_block_size():
+    res = _fit_for_conformal()
+    s = res.conformal_test(res.att, scheme="moving_block")
+    assert set(s.index) >= {"p_value", "S_observed", "q", "scheme", "n_perms", "n_post"}
+    assert 0.0 < s["p_value"] <= 1.0
+    assert s["p_value"] >= 1.0 / s["n_perms"] - 1e-12  # identity is in Pi
+    assert int(s["n_perms"]) == res.n_pre_periods + res.n_post_periods  # |Pi_->| = T
+    # near the point estimate the null is not rejected; far from it, p is small
+    p_near = res.conformal_test(res.att)["p_value"]
+    p_far = res.conformal_test(res.att + 1000.0)["p_value"]
+    assert p_near > p_far
+    assert p_far == pytest.approx(1.0 / int(s["n_perms"]))
+
+
+def test_conformal_test_detects_strong_effect_with_iid():
+    res = _fit_for_conformal(T=24, T0=18, effect=10.0)
+    # H0: no effect, with a strong true effect -> small permutation p (iid is sharper)
+    p0 = res.conformal_test(0.0, scheme="iid", n_iid=2000, seed=0)["p_value"]
+    p_true = res.conformal_test(res.att, scheme="iid", n_iid=2000, seed=0)["p_value"]
+    assert p0 < 0.1
+    assert p_true > p0
+
+
+def test_conformal_test_keeps_analytical_inference_nan():
+    res = _fit_for_conformal()
+    res.conformal_test(0.0)
+    assert_nan_inference(
+        {"se": res.se, "t_stat": res.t_stat, "p_value": res.p_value, "conf_int": res.conf_int}
+    )
+    assert not res.is_significant  # bound to the NaN analytical p_value, not the conformal one
+    assert res.conformal_inference["kind"] == "joint"
+
+
+def test_conformal_test_q_variants_run_and_inf_is_sup():
+    res = _fit_for_conformal()
+    for q in (1, 2, float("inf"), "inf"):
+        s = res.conformal_test(0.0, q=q)
+        assert 0.0 < s["p_value"] <= 1.0
+    # q=inf statistic is the sup of |residuals| over the post window
+    s_inf = res.conformal_test(0.0, q="inf")
+    assert s_inf["q"] == float("inf")
+
+
+def test_conformal_test_iid_reproducible_for_fixed_seed():
+    res = _fit_for_conformal()
+    a = res.conformal_test(0.0, scheme="iid", n_iid=1000, seed=7)["p_value"]
+    b = res.conformal_test(0.0, scheme="iid", n_iid=1000, seed=7)["p_value"]
+    assert a == b
+
+
+def test_conformal_test_validation_errors():
+    res = _fit_for_conformal()
+    with pytest.raises(ValueError, match="q must be"):
+        res.conformal_test(0.0, q=3)
+    with pytest.raises(ValueError, match="scheme must be"):
+        res.conformal_test(0.0, scheme="bogus")
+    with pytest.raises(ValueError, match="n_iid"):
+        res.conformal_test(0.0, scheme="iid", n_iid=0)
+    with pytest.raises(ValueError, match="post-treatment periods|effect path"):
+        res.conformal_test(np.array([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]))  # wrong length
+
+
+def test_conformal_test_unpickled_fails_closed():
+    res = _fit_for_conformal()
+    restored = pickle.loads(pickle.dumps(res))
+    with pytest.raises(ValueError, match="fit snapshot"):
+        restored.conformal_test(0.0)
+
+
+def test_conformal_test_single_donor_warns_degenerate():
+    df, years, T0 = _make_panel(n_donors=1, T=12, T0=9, effect=2.0, seed=1)
+    res = SyntheticControl(**_FAST).fit(
+        df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+    )
+    with pytest.warns(UserWarning, match="single donor"):
+        s = res.conformal_test(0.0)
+    assert 0.0 < s["p_value"] <= 1.0
+
+
+def test_conformal_test_warns_when_post_not_short_relative_to_pre():
+    # T* >= T0 -> validity caveat warning
+    df, years, T0 = _make_panel(n_donors=4, T=8, T0=3, effect=2.0, seed=5)
+    res = SyntheticControl(**_FAST).fit(
+        df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+    )
+    with pytest.warns(UserWarning, match="large pre-period"):
+        res.conformal_test(0.0)
+
+
+# ===========================================================================
+# CWZ conformal inference — conformal_average_effect (block-collapse CI) tests
+# ===========================================================================
+
+
+def test_conformal_average_effect_basic_iid():
+    res = _fit_for_conformal(n_donors=5, T=24, T0=20, effect=5.0, seed=3)  # T0=20, T*=4 -> 6 blocks
+    s = res.conformal_average_effect(alpha=0.1, scheme="iid", n_iid=2000, seed=0)
+    assert set(s.index) >= {"lower", "upper", "point_estimate", "status", "n_blocks"}
+    assert int(s["n_blocks"]) == 6
+    assert np.isfinite(s["point_estimate"])
+    assert s["status"] in {"ran", "grid_limited", "empty"}
+    if s["status"] != "empty":
+        assert s["lower"] <= s["upper"]
+    # separate permutation object — analytical inference stays NaN
+    assert np.isnan(res.conf_int[0]) and np.isnan(res.p_value)
+    assert res.conformal_inference["kind"] == "average"
+    assert res.get_conformal_grid_df().shape[0] == 200
+
+
+def test_conformal_average_effect_drops_leftover_pre_periods_with_warning():
+    res = _fit_for_conformal(n_donors=4, T=23, T0=19, effect=4.0, seed=4)  # T0=19, T*=4 -> drop 3
+    with pytest.warns(UserWarning, match="not a multiple of"):
+        s = res.conformal_average_effect(alpha=0.2, scheme="iid", n_iid=1000, seed=0)
+    assert int(s["n_dropped_pre"]) == 3
+    assert int(s["n_blocks"]) == 5  # (19-3)//4 pre-blocks + 1 post-block
+
+
+def test_conformal_average_effect_moving_block_granularity_warning():
+    res = _fit_for_conformal(n_donors=4, T=24, T0=20, effect=4.0, seed=6)  # 6 blocks
+    # moving-block: |Pi| = 6 blocks -> granularity 1/6 = 0.167 > alpha 0.1 -> unbounded
+    with pytest.warns(UserWarning, match="granularity"):
+        res.conformal_average_effect(alpha=0.1, scheme="moving_block")
+
+
+def test_conformal_average_effect_validation_errors():
+    res = _fit_for_conformal()
+    with pytest.raises(ValueError, match="alpha must be"):
+        res.conformal_average_effect(alpha=0.0)
+    with pytest.raises(ValueError, match="scheme must be"):
+        res.conformal_average_effect(scheme="x")
+    with pytest.raises(ValueError, match="n_grid"):
+        res.conformal_average_effect(n_grid=1)
+    with pytest.raises(ValueError, match="bounds must"):
+        res.conformal_average_effect(bounds=(5.0, 1.0))
+
+
+def test_conformal_average_effect_requires_T0_at_least_Tstar():
+    # T0 < T* -> cannot form a full pre-block
+    df, years, T0 = _make_panel(n_donors=4, T=9, T0=3, effect=2.0, seed=7)  # T0=3 < T*=6
+    res = SyntheticControl(**_FAST).fit(
+        df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+    )
+    with pytest.raises(ValueError, match="T0 >= T\\*"):
+        res.conformal_average_effect()
+
+
+def test_conformal_average_effect_explicit_bounds_grid_stays_within():
+    res = _fit_for_conformal(n_donors=5, T=24, T0=20, effect=5.0, seed=3)
+    res.conformal_average_effect(scheme="iid", n_iid=500, seed=0, bounds=(-2.0, 12.0), n_grid=50)
+    grid = res.get_conformal_grid_df()
+    assert grid["param"].min() >= -2.0 - 1e-9
+    assert grid["param"].max() <= 12.0 + 1e-9
+    assert len(grid) == 50
+
+
+def test_conformal_average_effect_get_grid_before_run_raises():
+    res = _fit_for_conformal()
+    with pytest.raises(ValueError, match="No conformal inversion grid"):
+        res.get_conformal_grid_df()
+
+
+@pytest.mark.slow
+def test_conformal_average_effect_coverage_simulation():
+    # The (1-alpha) average-effect CI should cover a known constant effect at ~ 1-alpha.
+    alpha = 0.2
+    c_true = 3.0
+    reps, covered, clean = 60, 0, 0
+    for rep in range(reps):
+        df, years, T0 = _make_panel(n_donors=5, T=20, T0=16, effect=c_true, seed=1000 + rep)
+        res = SyntheticControl(**_FAST).fit(
+            df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            s = res.conformal_average_effect(alpha=alpha, scheme="iid", n_iid=400, seed=rep)
+        clean += 1
+        if s["status"] in {"grid_limited"}:
+            covered += 1  # touches the grid edge -> conservatively counts as covering
+        elif s["status"] == "ran" and s["lower"] <= c_true <= s["upper"]:
+            covered += 1
+    coverage = covered / clean
+    assert coverage >= 0.70, f"coverage {coverage:.3f} below target ~{1 - alpha}"
+
+
+# ===========================================================================
+# CWZ conformal inference — conformal_confidence_intervals (pointwise) tests
+# ===========================================================================
+
+
+def test_conformal_confidence_intervals_shape_and_columns():
+    res = _fit_for_conformal(n_donors=6, T=22, T0=16, effect=6.0, seed=4)
+    ci = res.conformal_confidence_intervals(alpha=0.1, scheme="iid", n_iid=1000, seed=0)
+    assert list(ci["period"]) == list(res.post_periods)
+    assert set(ci.columns) >= {
+        "period",
+        "lower",
+        "upper",
+        "point_estimate",
+        "status",
+        "contiguous",
+        "n_grid_in_set",
+        "n_grid_nonconverged",
+    }
+    ok = ci["status"] != "empty"
+    assert (ci.loc[ok, "lower"] <= ci.loc[ok, "upper"]).all()
+    assert np.isnan(res.conf_int[0])  # analytical CI untouched
+    assert res.conformal_inference["kind"] == "pointwise"
+    grid = res.get_conformal_grid_df()
+    assert "period" in grid.columns
+    assert len(grid) == len(res.post_periods) * 100
+
+
+def test_conformal_confidence_intervals_recover_true_constant_effect():
+    # The pointwise CIs should bracket the known true effect for (almost) every period.
+    c_true = 6.0
+    res = _fit_for_conformal(n_donors=6, T=22, T0=16, effect=c_true, seed=4)
+    ci = res.conformal_confidence_intervals(alpha=0.1, scheme="iid", n_iid=1500, seed=1)
+    brackets = ((ci["lower"] <= c_true) & (c_true <= ci["upper"])).sum()
+    assert brackets >= len(ci) - 1  # allow at most one period to miss from noise
+
+
+def test_conformal_confidence_intervals_moving_block_is_usable():
+    # moving-block granularity = 1/(T0+1); with T0=16 that is 1/17 < alpha=0.1 -> usable
+    res = _fit_for_conformal(n_donors=6, T=22, T0=16, effect=6.0, seed=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ci = res.conformal_confidence_intervals(alpha=0.1, scheme="moving_block")
+    assert (ci["status"] == "ran").any()
+
+
+def test_conformal_confidence_intervals_validation_and_pickle():
+    res = _fit_for_conformal()
+    with pytest.raises(ValueError, match="alpha must be"):
+        res.conformal_confidence_intervals(alpha=1.5)
+    with pytest.raises(ValueError, match="scheme must be"):
+        res.conformal_confidence_intervals(scheme="x")
+    with pytest.raises(ValueError, match="n_iid"):
+        res.conformal_confidence_intervals(scheme="iid", n_iid=0)
+    with pytest.raises(ValueError, match="n_grid"):
+        res.conformal_confidence_intervals(n_grid=1)
+    with pytest.raises(ValueError, match="bounds must"):
+        res.conformal_confidence_intervals(bounds=(1.0,))
+    restored = pickle.loads(pickle.dumps(res))
+    with pytest.raises(ValueError, match="fit snapshot"):
+        restored.conformal_confidence_intervals()
+
+
+def test_conformal_confidence_intervals_explicit_bounds_applied_per_period():
+    res = _fit_for_conformal(n_donors=6, T=22, T0=16, effect=6.0, seed=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.conformal_confidence_intervals(
+            scheme="iid", n_iid=500, seed=0, bounds=(0.0, 12.0), n_grid=40
+        )
+    grid = res.get_conformal_grid_df()
+    assert grid["param"].min() >= -1e-9
+    assert grid["param"].max() <= 12.0 + 1e-9
+    # every period scanned the same fixed grid -> equal point counts
+    assert (grid.groupby("period").size() == 40).all()
+
+
+# ---- CWZ conformal: fail-closed edge cases (non-converged, unbounded, accessor) ----
+
+
+def test_conformal_ci_nonconverged_points_are_indeterminate_not_rejected(monkeypatch):
+    # A non-converged grid point must be treated as indeterminate (kept in the set),
+    # NOT rejected — excluding it would understate the interval width.
+    import diff_diff.conformal as cf
+
+    res = _fit_for_conformal(n_donors=6, T=22, T0=16, effect=6.0, seed=4)
+    real = cf._cwz_proxy_fit
+
+    def never_converge(*a, **k):
+        w, resid, _ = real(*a, **k)
+        return w, resid, False
+
+    monkeypatch.setattr(cf, "_cwz_proxy_fit", never_converge)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ci = res.conformal_confidence_intervals(
+            alpha=0.1, scheme="iid", n_iid=400, seed=0, n_grid=40
+        )
+    # every grid point indeterminate -> none rejected -> hull spans the grid, never "empty"
+    assert (ci["status"] != "empty").all()
+    assert (ci["n_grid_nonconverged"] == 40).all()
+    assert (ci["n_grid_in_set"] == 40).all()
+    grid = res.get_conformal_grid_df()
+    assert (~grid["converged"]).all()
+    assert grid["in_set"].all()
+
+
+def test_conformal_average_effect_unbounded_below_granularity():
+    # moving-block on 6 blocks -> |Pi|=6, 1/6 ~= 0.167 > alpha=0.1 -> unbounded set
+    res = _fit_for_conformal(n_donors=4, T=24, T0=20, effect=4.0, seed=6)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        s = res.conformal_average_effect(alpha=0.1, scheme="moving_block")
+    assert s["status"] == "unbounded"
+    assert s["lower"] == -np.inf and s["upper"] == np.inf
+    assert res.conformal_inference["status"] == "unbounded"
+
+
+def test_conformal_confidence_intervals_unbounded_below_granularity():
+    # moving-block pointwise -> |Pi|=T0+1=17, alpha=0.01 < 1/17 -> every period unbounded
+    res = _fit_for_conformal(n_donors=6, T=22, T0=16, effect=6.0, seed=4)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        ci = res.conformal_confidence_intervals(alpha=0.01, scheme="moving_block")
+    assert (ci["status"] == "unbounded").all()
+    assert (ci["lower"] == -np.inf).all() and (ci["upper"] == np.inf).all()
+    assert res.conformal_inference["n_unbounded"] == len(ci)
+
+
+def test_get_conformal_ci_df_accessor():
+    res = _fit_for_conformal()
+    with pytest.raises(ValueError, match="No pointwise conformal CIs"):
+        res.get_conformal_ci_df()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res.conformal_confidence_intervals(scheme="iid", n_iid=300, seed=0)
+    df = res.get_conformal_ci_df()
+    assert "period" in df.columns and len(df) == res.n_post_periods
+
+
+def test_conformal_average_effect_warns_when_post_not_short_relative_to_pre():
+    # T0 == T* (n_pre == n_post) -> large-T0 validity caveat warning
+    df, years, T0 = _make_panel(n_donors=5, T=8, T0=4, effect=3.0, seed=8)  # 4 pre, 4 post
+    res = SyntheticControl(**_FAST).fit(
+        df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+    )
+    with pytest.warns(UserWarning, match="large pre-period"):
+        res.conformal_average_effect(alpha=0.2, scheme="iid", n_iid=200, seed=0)
+
+
+def test_conformal_confidence_intervals_warn_small_pre_period():
+    # T0 == 1 -> each pointwise sub-series has a 1-period pre window -> validity caveat
+    df, years, T0 = _make_panel(n_donors=4, T=5, T0=1, effect=2.0, seed=9)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = SyntheticControl(**_FAST).fit(
+            df, "y", "treated", "unit", "year", post_periods=years[T0:], treated_unit="treated"
+        )
+    with pytest.warns(UserWarning, match="large pre-period"):
+        res.conformal_confidence_intervals(alpha=0.3, scheme="iid", n_iid=200, seed=0)

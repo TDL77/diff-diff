@@ -266,9 +266,12 @@ a library setting.
   under `estimator_native_diagnostics`. `SyntheticControlResults`
   routes parallel-trends to the `scm_fit` analogue (`pre_rmspe`,
   verdict `design_enforced_pt`) and surfaces `pre_rmspe`, donor-weight
-  concentration, the in-space placebo permutation p-value, and the
+  concentration, the in-space placebo permutation p-value, the
   ADH-2015 leave-one-out (`leave_one_out`) and in-time placebo
-  (`in_time_placebo`) blocks under `estimator_native_diagnostics` — each
+  (`in_time_placebo`) blocks, the Firpo-Possebom (2018) test-inversion
+  `confidence_set`, and the Chernozhukov-Wüthrich-Zhu (2021)
+  `conformal_inference` block (joint / pointwise / average) under
+  `estimator_native_diagnostics` — each
   is populated only when the caller has already run the corresponding
   opt-in method (DR never triggers a refit loop implicitly; otherwise a
   `status="not_run"` stub), and it omits HonestDiD-style `sensitivity`

@@ -51,6 +51,23 @@ summarized on ``effect_confidence_set`` and returned by
 ``conf_int`` stays NaN (this is a separate permutation set at level ``1 - gamma``,
 possibly a set / unbounded / non-contiguous).
 
+**Conformal inference (Chernozhukov-Wüthrich-Zhu 2021, opt-in).** Unlike the Firpo
+path (which re-ranks the cross-unit placebo gaps), the conformal layer fits its **own**
+time-permutation-invariant constrained-LS proxy (Eqs. 3–4, no ``V``-matrix) under the
+null on **all** periods and permutes residuals **over time** for the single treated
+unit. :meth:`~diff_diff.SyntheticControlResults.conformal_test` gives a joint sharp-null
+p-value for a hypothesized effect trajectory (Eqs. 1–2; statistic order ``q in {1, 2,
+inf}``); :meth:`~diff_diff.SyntheticControlResults.conformal_confidence_intervals` gives
+pointwise per-period confidence intervals by test inversion (Algorithm 1 — each period
+``t`` uses ``Z = (pre-periods, t)``, the other post-periods dropped); and
+:meth:`~diff_diff.SyntheticControlResults.conformal_average_effect` gives a confidence
+interval for the average post-period effect by collapsing into non-overlapping
+``T*``-blocks (Appendix A.1). ``scheme="moving_block"`` (default; valid under serial
+dependence) or ``"iid"`` (finer p-values). The most recent run is summarized on
+``conformal_inference`` and the inversion grid is on
+:meth:`~diff_diff.SyntheticControlResults.get_conformal_grid_df`; the analytical
+``conf_int`` stays NaN.
+
 **Distinct from** :class:`~diff_diff.SyntheticDiD` (Arkhangelsky et al. 2021), which adds
 time weights and ridge regularization; classic SCM uses **donor weights only** plus the
 outer ``V`` search.
@@ -106,6 +123,11 @@ Results container for synthetic control estimation.
       ~SyntheticControlResults.test_sharp_null
       ~SyntheticControlResults.confidence_set
       ~SyntheticControlResults.get_confidence_set_df
+      ~SyntheticControlResults.conformal_test
+      ~SyntheticControlResults.conformal_confidence_intervals
+      ~SyntheticControlResults.conformal_average_effect
+      ~SyntheticControlResults.get_conformal_grid_df
+      ~SyntheticControlResults.get_conformal_ci_df
       ~SyntheticControlResults.summary
       ~SyntheticControlResults.print_summary
       ~SyntheticControlResults.to_dict
