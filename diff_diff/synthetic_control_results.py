@@ -69,6 +69,51 @@ class _SyntheticControlFitSnapshot:
     v_cv_t0: Optional[int]
 
 
+def _validate_conformal_bounds(
+    bounds: Optional[Tuple[float, float]], n_grid: int
+) -> Optional[np.ndarray]:
+    """Validate an optional ``(lo, hi)`` conformal-CI grid; return the ``linspace`` grid (or None for auto)."""
+    if bounds is None:
+        return None
+    if (
+        not isinstance(bounds, (tuple, list, np.ndarray))
+        or len(bounds) != 2
+        or not all(isinstance(b, (int, float, np.integer, np.floating)) for b in bounds)
+        or not all(np.isfinite(float(b)) for b in bounds)
+    ):
+        raise ValueError(f"bounds must be a finite (lo, hi) pair, got {bounds!r}")
+    if float(bounds[1]) <= float(bounds[0]):
+        raise ValueError(f"bounds must satisfy hi > lo, got {bounds!r}")
+    return np.linspace(float(bounds[0]), float(bounds[1]), int(n_grid))
+
+
+def _warn_conformal_ci_status(res: Dict[str, Any], method_name: str) -> None:
+    """Emit the standard conformal-CI status warning (empty / grid-limited / non-contiguous)."""
+    status = res["status"]
+    if status == "empty":
+        warnings.warn(
+            f"{method_name}: confidence interval is empty (every value on the grid is "
+            "rejected at this alpha); endpoints are NaN.",
+            UserWarning,
+            stacklevel=3,
+        )
+    elif status == "grid_limited":
+        warnings.warn(
+            f"{method_name}: the accepted set touches a grid edge, so the interval may "
+            "extend beyond the scanned grid (grid-limited). Pass explicit bounds= / a wider "
+            "grid to widen it.",
+            UserWarning,
+            stacklevel=3,
+        )
+    elif not res["contiguous"]:
+        warnings.warn(
+            f"{method_name}: the accepted set is non-contiguous; [lower, upper] is the hull. "
+            "Inspect get_conformal_grid_df().",
+            UserWarning,
+            stacklevel=3,
+        )
+
+
 @dataclass
 class SyntheticControlResults:
     """
@@ -278,6 +323,19 @@ class SyntheticControlResults:
         # panel-derived, so it survives pickling by default (NOT nulled by __getstate__);
         # the public ``effect_confidence_set`` summary dataclass field likewise survives.
         self._confidence_set_df: Optional[pd.DataFrame] = None
+
+        # --- Chernozhukov-Wüthrich-Zhu (2021) conformal inference (opt-in, populated by ---
+        # --- conformal_test() / conformal_confidence_intervals() / conformal_average_effect()). ---
+        # The public ``conformal_inference`` summary dict + the small ``_conformal_ci_df``
+        # (pointwise CI table) and ``_conformal_grid_df`` (inversion grid) are NOT
+        # panel-derived, so they survive pickling (NOT nulled by __getstate__). The
+        # conformal layer reads the donor outcome panel from ``_fit_snapshot`` (already
+        # nulled on pickle), so an unpickled result fails closed in those methods. The
+        # analytical ``se``/``t_stat``/``p_value``/``conf_int`` stay NaN — the conformal
+        # p-value / CI is a separate permutation object (mirrors ``effect_confidence_set``).
+        self.conformal_inference: Optional[Dict[str, Any]] = None
+        self._conformal_ci_df: Optional[pd.DataFrame] = None
+        self._conformal_grid_df: Optional[pd.DataFrame] = None
 
     def __getstate__(self) -> Dict[str, Any]:
         """Exclude panel-derived internal state from pickling.
@@ -1821,3 +1879,571 @@ class SyntheticControlResults:
         if self._confidence_set_df is None:
             raise ValueError("No confidence set yet; call confidence_set() first.")
         return self._confidence_set_df.copy()
+
+    # =====================================================================
+    # Conformal inference (Chernozhukov-Wüthrich-Zhu 2021) — opt-in.
+    # A self-contained inference layer that fits its OWN permutation-invariant
+    # constrained-LS proxy (CWZ §2.3 eqs 3-4) under the null on all periods and
+    # permutes residuals OVER TIME for the single treated unit. Independent of the
+    # cross-unit in-space placebo (that is the Firpo path). The analytical
+    # se/t/p/ci stay NaN throughout. See diff_diff/conformal.py and the
+    # ## SyntheticControl section of docs/methodology/REGISTRY.md.
+    # =====================================================================
+
+    @staticmethod
+    def _coerce_q(q: Any) -> Any:
+        """Validate the ``S_q`` norm order — must be ``1``, ``2``, or ``inf``."""
+        from diff_diff.conformal import _INF
+
+        if isinstance(q, str):
+            if q.strip().lower() in ("inf", "infinity"):
+                return _INF
+            raise ValueError(f"q must be 1, 2, or inf, got {q!r}")
+        if q == _INF:
+            return _INF
+        try:
+            qf = float(q)
+        except (TypeError, ValueError):
+            raise ValueError(f"q must be 1, 2, or inf, got {q!r}")
+        if qf == _INF:
+            return _INF
+        if qf == 1.0:
+            return 1
+        if qf == 2.0:
+            return 2
+        raise ValueError(f"q must be 1, 2, or inf, got {q!r}")
+
+    def _conformal_panel(self) -> Tuple[np.ndarray, np.ndarray, int, int, float, List[Any]]:
+        """Extract the calendar-ordered (treated, donor) outcome panel for the CWZ layer.
+
+        Returns ``(y1, Y0, n_pre, n_post, pre_scale, donors)`` where ``y1`` ``(T,)`` /
+        ``Y0`` ``(T, J)`` are in strict calendar order (sorted pre-period prefix +
+        sorted post-period suffix — :attr:`pre_periods` / :attr:`post_periods` are
+        built that way in ``fit()``), so the moving-block cyclic shift respects time
+        adjacency. ``pre_scale`` is the θ0-invariant pre-window outcome norm used to
+        scale the proxy's convergence tolerance. Fails closed if the snapshot is
+        unavailable (unpickled result), the panel has non-finite cells, or there are
+        no donors / too few periods; warns on a single donor (degenerate proxy).
+        """
+        if self._fit_snapshot is None:
+            raise ValueError(
+                "conformal inference requires the fit snapshot on the results object. "
+                "This result appears to have been loaded from serialization (which "
+                "excludes the snapshot) or produced by an older estimator version. "
+                "Re-fit to enable conformal inference."
+            )
+        snap = self._fit_snapshot
+        donors = list(snap.donor_ids)
+        if len(donors) < 1:
+            raise ValueError("conformal inference requires at least one donor unit.")
+        pre = list(snap.pre_periods)
+        post = list(snap.post_periods)
+        n_pre, n_post = len(pre), len(post)
+        if n_pre + n_post < 2:
+            raise ValueError("conformal inference requires at least 2 time periods.")
+        if n_post < 1:
+            raise ValueError("conformal inference requires at least one post period.")
+        cal = pre + post  # calendar order
+        Y = snap.pivots[snap.outcome]
+        y1 = Y.loc[cal, snap.treated_id].to_numpy(dtype=float)
+        Y0 = Y.loc[cal, donors].to_numpy(dtype=float)
+        if not (np.all(np.isfinite(y1)) and np.all(np.isfinite(Y0))):
+            raise ValueError(
+                "conformal inference: the outcome panel has non-finite (NaN/inf) cells."
+            )
+        if len(donors) == 1:
+            warnings.warn(
+                "conformal inference with a single donor: the synthetic control is forced "
+                "to that donor (w=[1]), so the proxy is degenerate and the inference is not "
+                "meaningful. Provide >= 2 donors.",
+                UserWarning,
+                stacklevel=3,
+            )
+        pre_scale = max(float(np.linalg.norm(y1[:n_pre])), 1e-12)
+        return y1, Y0, n_pre, n_post, pre_scale, donors
+
+    def conformal_test(
+        self,
+        effect: Any,
+        *,
+        q: Any = 1,
+        scheme: str = "moving_block",
+        n_iid: int = 10000,
+        seed: Optional[int] = None,
+    ) -> pd.Series:
+        """Joint sharp-null conformal test ``H0: θ = effect`` (Chernozhukov-Wüthrich-Zhu 2021, §2.2).
+
+        Imputes the counterfactual treated outcomes under the null (subtracts the
+        hypothesized post-period effect path), fits the canonical CWZ constrained-LS
+        synthetic-control proxy on **all** periods under that null (eqs 3-4 — simplex
+        weights on raw outcomes, NO V-matrix; distinct from the headline ADH
+        V-matrix weights, as the exactness theory requires a time-permutation-invariant
+        proxy), and computes the permutation p-value (eq 2) of the statistic
+        ``S_q(û) = ((1/√T*)·Σ_{t>T0}|û_t|^q)^{1/q}`` by reshuffling residuals over
+        time. The proxy is fit ONCE (footnote 7); only residuals are permuted.
+
+        This is a SEPARATE permutation object from the analytical inference: ``se`` /
+        ``t_stat`` / ``p_value`` / ``conf_int`` / ``is_significant`` stay NaN.
+
+        Parameters
+        ----------
+        effect : float or array-like
+            The hypothesized post-period effect trajectory ``θ0``: a scalar (a
+            constant-in-time effect) or a length-``n_post_periods`` array aligned to
+            ``post_periods`` in calendar order.
+        q : {1, 2, inf}, default 1
+            The ``S_q`` norm order. ``1`` (robust to heavy tails — the paper's
+            application default), ``2`` (permanent effects), ``inf`` (= ``max|û_t|``,
+            large temporary effects).
+        scheme : {"moving_block", "iid"}, default "moving_block"
+            The permutation set. ``"moving_block"`` (``Π_→``, ``T`` cyclic shifts) is
+            valid under serially-dependent / stationary weakly-dependent errors
+            (Assumption 2.2) — the robust default; ``"iid"`` (``Π_all``, sampled) is
+            valid under i.i.d. errors (Assumption 2.1) and gives finer p-values.
+        n_iid : int, default 10000
+            Number of random permutations drawn for ``scheme="iid"`` (ignored for
+            moving-block, which is the exact ``T``-element set). Exact ``T!``
+            enumeration is used when ``T! <= n_iid``.
+        seed : int, optional
+            RNG seed for ``scheme="iid"`` sampling. Default uses the fit's seed.
+            Moving-block is deterministic.
+
+        Returns
+        -------
+        pandas.Series
+            ``p_value``, ``S_observed``, ``q``, ``scheme``, ``n_perms`` (``|Π|``),
+            ``n_post``, ``proxy_converged``.
+
+        Raises
+        ------
+        ValueError
+            If ``q`` / ``scheme`` / ``n_iid`` are invalid, ``effect`` has the wrong
+            shape / non-finite values, or the fit snapshot is unavailable.
+        """
+        from diff_diff.conformal import _INF, _make_perms, _single_null_pvalue
+
+        q = self._coerce_q(q)
+        if scheme not in ("moving_block", "iid"):
+            raise ValueError(f"scheme must be 'moving_block' or 'iid', got {scheme!r}")
+        if not isinstance(n_iid, (int, np.integer)) or n_iid < 1:
+            raise ValueError(f"n_iid must be a positive integer, got {n_iid!r}")
+        y1, Y0, n_pre, n_post, pre_scale, _ = self._conformal_panel()
+        f_post = self._coerce_effect_path(effect, n_post)
+        if n_post >= n_pre:
+            warnings.warn(
+                "CWZ conformal validity is driven by a large pre-period (T0) relative to "
+                f"a short post-period (T*); here T0={n_pre} <= T*={n_post}, so the "
+                "finite-sample size guarantee is weak. Interpret with caution.",
+                UserWarning,
+                stacklevel=2,
+            )
+        snap = self._fit_snapshot
+        assert snap is not None  # _conformal_panel already guarded
+        n_t = n_pre + n_post
+        post_mask = np.zeros(n_t, dtype=bool)
+        post_mask[n_pre:] = True
+        rng = np.random.default_rng(snap.seed if seed is None else seed)
+        perms = _make_perms(n_t, scheme, int(n_iid), rng)
+        res = _single_null_pvalue(
+            y1,
+            Y0,
+            post_mask,
+            f_post,
+            perms,
+            q,
+            max_iter=snap.inner_max_iter,
+            min_decrease=snap.inner_min_decrease * pre_scale,
+        )
+        if not res["converged"]:
+            warnings.warn(
+                "conformal proxy did not fully converge (Frank-Wolfe simplex solve hit "
+                "the iteration cap); the p-value uses a near-optimal proxy. Re-fit with a "
+                "larger inner_max_iter or a looser inner_min_decrease for a tighter solve.",
+                UserWarning,
+                stacklevel=2,
+            )
+        q_out: Any = float("inf") if q == _INF else int(q)
+        self.conformal_inference = {
+            "kind": "joint",
+            "scheme": scheme,
+            "q": q_out,
+            "alpha": None,
+            "n_perms": int(res["n_perms"]),
+            "n_post": int(n_post),
+            "joint_p_value": float(res["p_value"]),
+            "proxy_converged": bool(res["converged"]),
+            "status": "ran",
+        }
+        return pd.Series(
+            {
+                "p_value": float(res["p_value"]),
+                "S_observed": float(res["s_observed"]),
+                "q": q_out,
+                "scheme": scheme,
+                "n_perms": int(res["n_perms"]),
+                "n_post": int(n_post),
+                "proxy_converged": bool(res["converged"]),
+            }
+        )
+
+    def conformal_average_effect(
+        self,
+        *,
+        alpha: float = 0.1,
+        scheme: str = "moving_block",
+        n_iid: int = 10000,
+        bounds: Optional[Tuple[float, float]] = None,
+        n_grid: int = 200,
+        seed: Optional[int] = None,
+    ) -> pd.Series:
+        """Confidence interval for the AVERAGE post-period effect (Chernozhukov-Wüthrich-Zhu 2021, Appendix A.1).
+
+        Tests ``H0: T*^{-1}·Σ_{t>T0} θ_t = θ̄0`` by **collapsing** the panel into
+        non-overlapping ``T*``-blocks (each a per-unit block average), fitting the CWZ
+        proxy on the collapsed series, and permuting the **block** residuals — the
+        ``T/T*``-block analog of :meth:`conformal_test` (a single post-block). The CI
+        is every ``θ̄0`` not rejected at level ``alpha`` (test inversion). The earliest
+        ``T0 mod T*`` pre-periods are dropped so the pre-block count is integral (the
+        paper assumes ``T/T*`` integer).
+
+        Because the effective sample is only ``T/T*`` blocks, the moving-block
+        permutation set has just ``T/T*`` elements (p-value granularity ``T*/T``);
+        pass ``scheme="iid"`` for a finer set (``(T/T*)!`` block permutations) when the
+        block count is small. Analytical ``se`` / ``conf_int`` stay NaN.
+
+        Parameters
+        ----------
+        alpha : float, default 0.1
+            The confidence level is ``1 − alpha``; membership is ``p^θ̄0 > alpha``.
+        scheme : {"moving_block", "iid"}, default "moving_block"
+            Permutation set over the collapsed blocks.
+        n_iid : int, default 10000
+            Random block-permutation draws for ``scheme="iid"`` (exact ``(T/T*)!``
+            enumeration when it fits).
+        bounds : (float, float), optional
+            Fixed ``(lo, hi)`` grid for ``θ̄0``. Default None auto-centres the grid on
+            the average-effect point estimate (membership outside the grid is not
+            certified — flagged via ``status="grid_limited"``).
+        n_grid : int, default 200
+            Number of grid points (>= 2).
+        seed : int, optional
+            RNG seed for ``scheme="iid"``. Default uses the fit's seed.
+
+        Returns
+        -------
+        pandas.Series
+            ``lower``, ``upper``, ``point_estimate`` (the average-effect estimate),
+            ``status`` (``"ran"``/``"grid_limited"``/``"empty"``/``"unbounded"``), ``contiguous``,
+            ``n_perms``, ``n_blocks``, ``n_dropped_pre``, ``n_grid_nonconverged``.
+
+        Raises
+        ------
+        ValueError
+            If ``alpha`` / ``scheme`` / ``n_iid`` / ``n_grid`` / ``bounds`` are invalid,
+            ``T0 < T*`` (no full pre-block), or the fit snapshot is unavailable.
+        """
+        from diff_diff.conformal import _block_collapse, _invert_single_post, _make_perms
+
+        if scheme not in ("moving_block", "iid"):
+            raise ValueError(f"scheme must be 'moving_block' or 'iid', got {scheme!r}")
+        if not isinstance(n_iid, (int, np.integer)) or n_iid < 1:
+            raise ValueError(f"n_iid must be a positive integer, got {n_iid!r}")
+        if not (0.0 < float(alpha) < 1.0):
+            raise ValueError(f"alpha must be in (0, 1), got {alpha!r}")
+        if not isinstance(n_grid, (int, np.integer)) or n_grid < 2:
+            raise ValueError(f"n_grid must be an integer >= 2, got {n_grid!r}")
+        grid = _validate_conformal_bounds(bounds, int(n_grid))
+        y1, Y0, n_pre, n_post, _, _ = self._conformal_panel()
+        if n_pre < n_post:
+            raise ValueError(
+                f"conformal_average_effect requires T0 >= T* to form at least one full "
+                f"pre-block, got T0={n_pre} < T*={n_post}."
+            )
+        if n_post >= n_pre:
+            warnings.warn(
+                "CWZ conformal validity is driven by a large pre-period (T0) relative to "
+                f"a short post-period (T*); here T0={n_pre} <= T*={n_post}, so the "
+                "finite-sample size guarantee is weak. Interpret with caution.",
+                UserWarning,
+                stacklevel=2,
+            )
+        y1b, Y0b, n_dropped = _block_collapse(y1, Y0, n_pre, n_post)
+        if n_dropped:
+            warnings.warn(
+                f"conformal_average_effect: T0={n_pre} is not a multiple of T*={n_post}; "
+                f"dropping the earliest {n_dropped} pre-period(s) to form integral T*-blocks "
+                "(CWZ Appendix A.1).",
+                UserWarning,
+                stacklevel=2,
+            )
+        n_blocks = int(y1b.shape[0])
+        snap = self._fit_snapshot
+        assert snap is not None
+        rng = np.random.default_rng(snap.seed if seed is None else seed)
+        perms = _make_perms(n_blocks, scheme, int(n_iid), rng)
+        n_perms = int(perms.shape[0])
+        if float(alpha) < 1.0 / n_perms:
+            warnings.warn(
+                f"alpha={alpha:.3g} is below the permutation granularity 1/|Pi|=1/{n_perms} "
+                f"(the average effect collapses to {n_blocks} blocks), so no value is ever "
+                "rejected and the interval is the whole grid (unbounded). Use scheme='iid' "
+                "for a finer block-permutation set or a larger alpha.",
+                UserWarning,
+                stacklevel=2,
+            )
+        block_scale = max(float(np.linalg.norm(y1b[: n_blocks - 1])), 1e-12)
+        res = _invert_single_post(
+            y1b,
+            Y0b,
+            n_blocks - 1,
+            float(alpha),
+            perms,
+            max_iter=snap.inner_max_iter,
+            min_decrease=snap.inner_min_decrease * block_scale,
+            grid=grid,
+            n_grid=int(n_grid),
+        )
+        _warn_conformal_ci_status(res, "conformal_average_effect")
+        self.conformal_inference = {
+            "kind": "average",
+            "scheme": scheme,
+            "alpha": float(alpha),
+            "n_perms": n_perms,
+            "n_post": int(n_post),
+            "n_blocks": n_blocks,
+            "n_dropped_pre": int(n_dropped),
+            "lower": float(res["lower"]),
+            "upper": float(res["upper"]),
+            "point_estimate": float(res["point_estimate"]),
+            "contiguous": bool(res["contiguous"]),
+            "status": res["status"],
+        }
+        self._conformal_grid_df = pd.DataFrame(
+            res["grid"], columns=["param", "p_value", "in_set", "converged"]
+        )
+        return pd.Series(
+            {
+                "lower": float(res["lower"]),
+                "upper": float(res["upper"]),
+                "point_estimate": float(res["point_estimate"]),
+                "status": res["status"],
+                "contiguous": bool(res["contiguous"]),
+                "n_perms": n_perms,
+                "n_blocks": n_blocks,
+                "n_dropped_pre": int(n_dropped),
+                "n_grid_nonconverged": int(res["n_nonconverged"]),
+            }
+        )
+
+    def get_conformal_grid_df(self) -> pd.DataFrame:
+        """Get the conformal test-inversion grid table (see :meth:`conformal_average_effect` / :meth:`conformal_confidence_intervals`).
+
+        Columns: ``param`` (the grid value), ``p_value`` (``p^param``), ``in_set``
+        (``= not (converged and p_value <= alpha)`` — a non-converged grid point is
+        indeterminate and stays in the set, so ``in_set`` can be ``True`` even when the
+        displayed ``p_value`` is not ``> alpha``), and ``converged`` (the proxy
+        Frank-Wolfe convergence flag for that grid point). For pointwise CIs the table is
+        the concatenation across post periods (with a ``period`` column). A
+        granularity-``unbounded`` interval (``alpha < 1/|Π|``) short-circuits and returns
+        an EMPTY grid. Survives pickling. Raises if no conformal inversion has been run.
+
+        Returns
+        -------
+        pandas.DataFrame
+        """
+        if self._conformal_grid_df is None:
+            raise ValueError(
+                "No conformal inversion grid yet; call conformal_average_effect() or "
+                "conformal_confidence_intervals() first."
+            )
+        return self._conformal_grid_df.copy()
+
+    def conformal_confidence_intervals(
+        self,
+        *,
+        alpha: float = 0.1,
+        scheme: str = "moving_block",
+        n_iid: int = 10000,
+        bounds: Optional[Tuple[float, float]] = None,
+        n_grid: int = 100,
+        seed: Optional[int] = None,
+    ) -> pd.DataFrame:
+        """Pointwise per-period conformal confidence intervals (Chernozhukov-Wüthrich-Zhu 2021, Algorithm 1).
+
+        For each post period ``t``, inverts a conformal test of ``H0: θ_t = c`` over a
+        grid of ``c``. Per the paper (§2.2), each per-period test uses the data
+        ``Z = (Z_1, …, Z_{T0}, Z_t)`` — the ``T0`` pre-periods PLUS only period ``t``,
+        with the **other post-periods dropped** — so it is a clean single-post-period
+        (``T*=1``) conformal test on the ``(T0+1)``-length sub-series: impute
+        ``Y_{1t} − c``, refit the CWZ proxy on the sub-series, permute the residuals,
+        and keep ``c`` iff ``p^c > alpha``. (Because ``T*=1`` here, the ``S_q`` order
+        ``q`` is inert — ``S_q = |û_t|`` for every ``q`` — so it is not a parameter.)
+        The analytical ``conf_int`` stays ``(NaN, NaN)`` — this is a separate
+        permutation object.
+
+        Parameters
+        ----------
+        alpha : float, default 0.1
+            The confidence level is ``1 − alpha``; membership is ``p^c > alpha``.
+        scheme : {"moving_block", "iid"}, default "moving_block"
+            Permutation set over the ``(T0+1)``-length sub-series.
+        n_iid : int, default 10000
+            Random permutation draws for ``scheme="iid"``.
+        bounds : (float, float), optional
+            A single fixed ``(lo, hi)`` grid applied to EVERY period. Default None
+            auto-centres a per-period grid on that period's point estimate (membership
+            outside the grid is not certified — flagged ``status="grid_limited"``).
+        n_grid : int, default 100
+            Grid points per period (>= 2).
+        seed : int, optional
+            RNG seed for ``scheme="iid"``. Default uses the fit's seed.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per post period: ``period``, ``lower``, ``upper``,
+            ``point_estimate``, ``status`` (``"ran"``/``"grid_limited"``/``"empty"``/``"unbounded"``),
+            ``contiguous``, ``n_grid_in_set``, ``n_grid_nonconverged``. The full
+            per-period inversion grid is on :meth:`get_conformal_grid_df`.
+
+        Raises
+        ------
+        ValueError
+            If ``alpha`` / ``scheme`` / ``n_iid`` / ``n_grid`` / ``bounds`` are invalid
+            or the fit snapshot is unavailable.
+        """
+        from diff_diff.conformal import _invert_single_post, _make_perms
+
+        if scheme not in ("moving_block", "iid"):
+            raise ValueError(f"scheme must be 'moving_block' or 'iid', got {scheme!r}")
+        if not isinstance(n_iid, (int, np.integer)) or n_iid < 1:
+            raise ValueError(f"n_iid must be a positive integer, got {n_iid!r}")
+        if not (0.0 < float(alpha) < 1.0):
+            raise ValueError(f"alpha must be in (0, 1), got {alpha!r}")
+        if not isinstance(n_grid, (int, np.integer)) or n_grid < 2:
+            raise ValueError(f"n_grid must be an integer >= 2, got {n_grid!r}")
+        grid_template = _validate_conformal_bounds(bounds, int(n_grid))
+        y1, Y0, n_pre, n_post, pre_scale, _ = self._conformal_panel()
+        if n_pre <= 1:
+            warnings.warn(
+                "CWZ conformal validity is driven by a large pre-period (T0); each pointwise "
+                f"CI fits its proxy on a (T0+1)-length sub-series and here T0={n_pre} <= 1, so "
+                "the finite-sample size guarantee is weak. Interpret with caution.",
+                UserWarning,
+                stacklevel=2,
+            )
+        snap = self._fit_snapshot
+        assert snap is not None
+        post_periods = list(snap.post_periods)
+        m = n_pre + 1  # sub-series length (T0 pre + the single tested period)
+        rng = np.random.default_rng(snap.seed if seed is None else seed)
+        perms = _make_perms(m, scheme, int(n_iid), rng)
+        n_perms = int(perms.shape[0])
+        if float(alpha) < 1.0 / n_perms:
+            warnings.warn(
+                f"alpha={alpha:.3g} is below the permutation granularity 1/|Pi|=1/{n_perms}, "
+                "so no value is ever rejected and every per-period interval is the whole grid "
+                "(unbounded). Use scheme='iid' for a finer set or a larger alpha.",
+                UserWarning,
+                stacklevel=2,
+            )
+        md = snap.inner_min_decrease * pre_scale  # pre window is theta0-invariant
+        ci_rows: List[Dict[str, Any]] = []
+        grid_rows: List[Dict[str, Any]] = []
+        statuses: List[str] = []
+        any_noncontig = False
+        for k, period in enumerate(post_periods):
+            sub_idx = list(range(n_pre)) + [n_pre + k]
+            res = _invert_single_post(
+                y1[sub_idx],
+                Y0[sub_idx],
+                m - 1,
+                float(alpha),
+                perms,
+                max_iter=snap.inner_max_iter,
+                min_decrease=md,
+                grid=grid_template,
+                n_grid=int(n_grid),
+            )
+            ci_rows.append(
+                {
+                    "period": period,
+                    "lower": float(res["lower"]),
+                    "upper": float(res["upper"]),
+                    "point_estimate": float(res["point_estimate"]),
+                    "status": res["status"],
+                    "contiguous": bool(res["contiguous"]),
+                    "n_grid_in_set": int(res["n_in_set"]),
+                    "n_grid_nonconverged": int(res["n_nonconverged"]),
+                }
+            )
+            statuses.append(res["status"])
+            any_noncontig = any_noncontig or not res["contiguous"]
+            for theta, p, in_set, conv in res["grid"]:
+                grid_rows.append(
+                    {
+                        "period": period,
+                        "param": theta,
+                        "p_value": p,
+                        "in_set": in_set,
+                        "converged": conv,
+                    }
+                )
+        n_empty = statuses.count("empty")
+        n_gl = statuses.count("grid_limited")
+        n_unbounded = statuses.count("unbounded")
+        if n_empty or n_gl or n_unbounded or any_noncontig:
+            warnings.warn(
+                "conformal_confidence_intervals: "
+                f"{n_empty} period(s) empty, {n_gl} grid-limited (CI may extend beyond the "
+                f"scanned grid — pass bounds= / widen n_grid), {n_unbounded} unbounded"
+                + (", some non-contiguous (hull reported)" if any_noncontig else "")
+                + ". Inspect get_conformal_grid_df().",
+                UserWarning,
+                stacklevel=2,
+            )
+        self._conformal_ci_df = pd.DataFrame(
+            ci_rows,
+            columns=[
+                "period",
+                "lower",
+                "upper",
+                "point_estimate",
+                "status",
+                "contiguous",
+                "n_grid_in_set",
+                "n_grid_nonconverged",
+            ],
+        )
+        self._conformal_grid_df = pd.DataFrame(
+            grid_rows, columns=["period", "param", "p_value", "in_set", "converged"]
+        )
+        self.conformal_inference = {
+            "kind": "pointwise",
+            "scheme": scheme,
+            "alpha": float(alpha),
+            "n_perms": n_perms,
+            "n_post": int(n_post),
+            "n_grid_limited": int(n_gl),
+            "n_empty": int(n_empty),
+            "n_unbounded": int(n_unbounded),
+            "status": "ran",
+        }
+        return self._conformal_ci_df.copy()
+
+    def get_conformal_ci_df(self) -> pd.DataFrame:
+        """Get the pointwise per-period conformal CI table (see :meth:`conformal_confidence_intervals`).
+
+        One row per post period: ``period``, ``lower``, ``upper``, ``point_estimate``,
+        ``status``, ``contiguous``, ``n_grid_in_set``, ``n_grid_nonconverged``. Survives
+        pickling. Raises if :meth:`conformal_confidence_intervals` has not been run.
+
+        Returns
+        -------
+        pandas.DataFrame
+        """
+        if self._conformal_ci_df is None:
+            raise ValueError(
+                "No pointwise conformal CIs yet; call conformal_confidence_intervals() first."
+            )
+        return self._conformal_ci_df.copy()

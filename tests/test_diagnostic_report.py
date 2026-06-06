@@ -2128,6 +2128,36 @@ class TestSCMNative:
         assert block["family"] == "constant" and block["parameter"] == "c"
         assert block["gamma"] == pytest.approx(0.34)
 
+    def test_scm_native_conformal_not_run_stub(self, scm_fit):
+        # CWZ (2021) conformal inference is opt-in, like the placebos / confidence set.
+        res, _ = scm_fit
+        native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+        assert native["conformal_inference"]["status"] == "not_run"
+
+    def test_scm_native_surfaces_conformal_after_optin_run(self, scm_fit):
+        res, _ = scm_fit
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res.conformal_test(0.0, scheme="moving_block")
+            native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+        block = native["conformal_inference"]
+        assert block["status"] == "ran"
+        assert block["kind"] == "joint"
+        assert block["scheme"] == "moving_block"
+        assert 0.0 < block["p_value"] <= 1.0
+
+    def test_scm_native_surfaces_pointwise_unbounded_count(self, scm_fit):
+        # moving-block pointwise -> |Pi|=T0+1=7; alpha=0.05 < 1/7 -> every period unbounded.
+        # The native block must surface n_unbounded so consumers see the granularity state.
+        res, _ = scm_fit
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res.conformal_confidence_intervals(alpha=0.05, scheme="moving_block")
+            native = DiagnosticReport(res).to_dict()["estimator_native_diagnostics"]
+        block = native["conformal_inference"]
+        assert block["kind"] == "pointwise"
+        assert block["n_unbounded"] == res.n_post_periods
+
     def test_scm_does_not_call_honest_did(self, scm_fit):
         """HonestDiD sensitivity should NOT run on SCM (fit-based / native path)."""
         res, _ = scm_fit

@@ -617,6 +617,8 @@ sources:
         type: methodology
       - path: docs/methodology/papers/firpo-possebom-2018-review.md
         type: methodology
+      - path: docs/methodology/papers/chernozhukov-wuthrich-zhu-2021-review.md
+        type: methodology
       - path: docs/api/synthetic_control.rst
         type: api_reference
       - path: README.md
@@ -639,11 +641,24 @@ sources:
         type: methodology
       - path: docs/methodology/papers/firpo-possebom-2018-review.md
         type: methodology
+      - path: docs/methodology/papers/chernozhukov-wuthrich-zhu-2021-review.md
+        type: methodology
       - path: docs/api/synthetic_control.rst
         type: api_reference
       - path: diff_diff/guides/llms-full.txt
         section: "SyntheticControlResults"
         type: user_guide
+
+  diff_diff/conformal.py:
+    drift_risk: medium
+    docs:
+      - path: docs/methodology/REGISTRY.md
+        section: "SyntheticControl"
+        type: methodology
+      - path: docs/methodology/papers/chernozhukov-wuthrich-zhu-2021-review.md
+        type: methodology
+      - path: docs/api/synthetic_control.rst
+        type: api_reference
 
   # ── HonestDiD ───────��──────────────────────────────────────────────
 

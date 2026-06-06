@@ -2501,6 +2501,54 @@ class DiagnosticReport:
                     "placebo reference set)."
                 ),
             }
+
+        # CWZ (2021) conformal inference: opt-in, surfaced once the user has run one of
+        # conformal_test() / conformal_average_effect() / conformal_confidence_intervals().
+        # A SEPARATE permutation object — it fits its OWN permutation-invariant proxy under
+        # the null on all periods and permutes residuals over time (independent of the
+        # in-space placebo). The analytical conf_int / p_value stay NaN.
+        ci_summary = getattr(r, "conformal_inference", None)
+        if ci_summary is not None:
+            kind = ci_summary.get("kind")
+            block = {
+                "status": ci_summary.get("status"),
+                "kind": kind,
+                "scheme": ci_summary.get("scheme"),
+                "n_perms": _to_python_scalar(ci_summary.get("n_perms")),
+                "n_post": _to_python_scalar(ci_summary.get("n_post")),
+            }
+            if kind == "joint":
+                block["q"] = ci_summary.get("q")
+                block["p_value"] = _to_python_float(ci_summary.get("joint_p_value"))
+                block["proxy_converged"] = bool(ci_summary.get("proxy_converged"))
+            elif kind == "average":
+                _lo, _hi = ci_summary.get("lower"), ci_summary.get("upper")
+                block["alpha"] = _to_python_float(ci_summary.get("alpha"))
+                block["lower"] = (
+                    float(_lo) if isinstance(_lo, (int, float)) and np.isfinite(_lo) else None
+                )
+                block["upper"] = (
+                    float(_hi) if isinstance(_hi, (int, float)) and np.isfinite(_hi) else None
+                )
+                block["point_estimate"] = _to_python_float(ci_summary.get("point_estimate"))
+                block["contiguous"] = bool(ci_summary.get("contiguous"))
+                block["n_blocks"] = _to_python_scalar(ci_summary.get("n_blocks"))
+            elif kind == "pointwise":
+                block["alpha"] = _to_python_float(ci_summary.get("alpha"))
+                block["n_grid_limited"] = _to_python_scalar(ci_summary.get("n_grid_limited"))
+                block["n_empty"] = _to_python_scalar(ci_summary.get("n_empty"))
+                block["n_unbounded"] = _to_python_scalar(ci_summary.get("n_unbounded"))
+            out["conformal_inference"] = block
+        else:
+            out["conformal_inference"] = {
+                "status": "not_run",
+                "reason": (
+                    "Call results.conformal_test() / conformal_confidence_intervals() / "
+                    "conformal_average_effect() for CWZ (2021) conformal inference (opt-in; "
+                    "fits its own permutation-invariant proxy under the null, permutes "
+                    "residuals over time)."
+                ),
+            }
         return out
 
     # -- Heterogeneity helpers --------------------------------------------
