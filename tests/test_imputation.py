@@ -832,9 +832,14 @@ class TestImputationVariance:
             first_treat="first_treat",
         )
 
-        # Coarser partition should give >= SE (approximately)
-        # Allow small tolerance for numerical issues
-        assert results_coarse.overall_se >= results_fine.overall_se * 0.95
+        # Coarser partition pools more observations per group, so the
+        # conservative auxiliary model imposes equality over a larger set and the
+        # SE is >= the finer-partition SE. Tightened from the old 0.95 fudge: the
+        # unit-clustered Eq. 8 aggregator preserves the ordering exactly (a broken
+        # ordering would be a methodology finding, not a tolerance to relax).
+        # Meaningful coarse>fine divergence under non-uniform weights is covered
+        # in tests/test_methodology_imputation.py.
+        assert results_coarse.overall_se >= results_fine.overall_se - 1e-9
 
     def test_invalid_aux_partition(self):
         """Test that invalid aux_partition raises ValueError."""
