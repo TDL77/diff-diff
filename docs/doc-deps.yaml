@@ -224,6 +224,8 @@ sources:
       - path: docs/methodology/REGISTRY.md
         section: "ImputationDiD"
         type: methodology
+      - path: docs/methodology/papers/borusyak-jaravel-spiess-2024-review.md
+        type: methodology
       - path: docs/api/imputation.rst
         type: api_reference
       - path: docs/tutorials/11_imputation_did.ipynb
