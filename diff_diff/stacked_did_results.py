@@ -107,6 +107,16 @@ class StackedDiDResults:
     n_clusters: Optional[int] = None
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None)
+    # --- Covariate balancing (CBWSDID, Ustyuzhanin 2026) ---
+    # balance: "none" (default, plain weighted stacked DID) or "entropy". When
+    # "entropy", `covariates` lists the balanced columns and `balance_diagnostics`
+    # maps each sub-experiment a to {n_treated, n_control, effective_control_mass
+    # (Ñ^C_a), ess, max_imbalance_pre, max_imbalance_post, balance_solver}. When
+    # balancing, `stacked_data` carries `_b_sa` (raw design weights) and the
+    # `_Q_weight` column holds the composed final weights W_sa.
+    balance: str = "none"
+    covariates: Optional[List[str]] = None
+    balance_diagnostics: Optional[Dict[Any, Dict[str, Any]]] = field(default=None)
 
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property

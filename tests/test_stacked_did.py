@@ -1715,3 +1715,224 @@ class TestStackedDiDVcovType:
         assert any(
             "at unit_subexp" in line for line in variance_lines
         ), f"cluster='unit_subexp' should render in label: {variance_lines}"
+
+
+# =============================================================================
+# Covariate balancing (CBWSDID, Ustyuzhanin 2026)
+# =============================================================================
+
+
+def _balance_panel(
+    seed=5,
+    *,
+    hetero_x=True,
+    n_per=20,
+    n_never=60,
+    const_x=False,
+    treated_x_mean=0.7,
+    infeasible=False,
+):
+    """Staggered panel with a covariate x; treated cohorts optionally selected on x."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    uid = 0
+    for ft, n in [(4, n_per), (5, n_per), (6, n_per), (np.inf, n_never)]:
+        treated = np.isfinite(ft)
+        if const_x:
+            xm, xs = 1.0, 0.0
+        elif infeasible and treated:
+            xm, xs = 12.0, 0.1  # treated x far outside the control hull
+        else:
+            xm, xs = (treated_x_mean if (treated and hetero_x) else 0.0), 1.0
+        for _ in range(n):
+            uid += 1
+            x = xm + xs * rng.normal()
+            alpha = rng.normal()
+            slope = 0.3 * x + rng.normal(0, 0.02)
+            for t in range(1, 11):
+                y = (
+                    alpha
+                    + slope * t
+                    + rng.normal(0, 0.04)
+                    + (2.0 if (treated and t >= ft) else 0.0)
+                )
+                rows.append((uid, t, ft if treated else 0, x, y))
+    return pd.DataFrame(rows, columns=["unit", "time", "first_treat", "x", "y"])
+
+
+def _cb_fit(df, **kw):
+    params = dict(
+        kappa_pre=2,
+        kappa_post=2,
+        weighting="aggregate",
+        clean_control="never_treated",
+        cluster="unit",
+    )
+    params.update(
+        {k: v for k, v in kw.items() if k in ("weighting", "balance", "cluster", "vcov_type")}
+    )
+    est = StackedDiD(**params)
+    return est.fit(
+        df,
+        outcome="y",
+        unit="unit",
+        time="time",
+        first_treat="first_treat",
+        aggregate=kw.get("aggregate", "event_study"),
+        covariates=kw.get("covariates"),
+        survey_design=kw.get("survey_design"),
+        population=kw.get("population"),
+    )
+
+
+class TestStackedDiDCovariateBalance:
+    """CBWSDID covariate-balancing path on StackedDiD."""
+
+    # ---- validation + scope guards ----
+    def test_invalid_balance_value_raises(self):
+        with pytest.raises(ValueError, match="balance must be"):
+            StackedDiD(balance="match")
+
+    def test_set_params_revalidates_balance(self):
+        est = StackedDiD()
+        with pytest.raises(ValueError, match="balance must be"):
+            est.set_params(balance="ipw")
+
+    def test_balance_without_covariates_raises(self):
+        df = _balance_panel()
+        with pytest.raises(ValueError, match="requires a non-empty covariates"):
+            _cb_fit(df, balance="entropy", covariates=None)
+
+    def test_covariates_without_balance_raises(self):
+        df = _balance_panel()
+        with pytest.raises(ValueError, match="balance='none'"):
+            _cb_fit(df, balance="none", covariates=["x"])
+
+    def test_balance_with_population_weighting_raises(self):
+        df = _balance_panel()
+        df["pop"] = 1.0
+        with pytest.raises(NotImplementedError, match="weighting='aggregate'"):
+            _cb_fit(
+                df, balance="entropy", covariates=["x"], weighting="population", population="pop"
+            )
+
+    def test_missing_covariate_column_raises(self):
+        df = _balance_panel()
+        with pytest.raises(ValueError, match="not found in data"):
+            _cb_fit(df, balance="entropy", covariates=["nonexistent"])
+
+    def test_infeasible_cohort_raises_named(self):
+        df = _balance_panel(infeasible=True)
+        with pytest.raises(ValueError, match="balancing failed for cohort"):
+            _cb_fit(df, balance="entropy", covariates=["x"])
+
+    # ---- correctness / properties ----
+    def test_balance_constraint_satisfied(self):
+        df = _balance_panel(seed=2)
+        res = _cb_fit(df, balance="entropy", covariates=["x"])
+        assert res.balance == "entropy"
+        assert res.covariates == ["x"]
+        assert res.balance_diagnostics is not None
+        for a, d in res.balance_diagnostics.items():
+            # entropy balancing achieves exact first-moment balance
+            assert d["max_imbalance_post"] < 1e-7
+            assert d["max_imbalance_pre"] > d["max_imbalance_post"]
+        # stacked_data carries the raw design weights
+        assert "_b_sa" in res.stacked_data.columns
+
+    def test_constant_covariate_reduces_to_plain_stacked(self):
+        # constant covariate -> uniform entropy weights -> identical to plain StackedDiD
+        df = _balance_panel(seed=4, const_x=True)
+        cb = _cb_fit(df, balance="entropy", covariates=["x"])
+        plain = _cb_fit(df, balance="none")
+        for h in plain.event_study_effects:
+            if plain.event_study_effects[h]["n_obs"] > 0:
+                assert (
+                    abs(
+                        cb.event_study_effects[h]["effect"] - plain.event_study_effects[h]["effect"]
+                    )
+                    < 1e-6
+                )
+
+    def test_covariate_scale_invariance(self):
+        # entropy balancing is invariant to covariate rescaling: x vs 2*x give the
+        # same weights and hence the same estimate.
+        df = _balance_panel(seed=6)
+        df["x2"] = 2.0 * df["x"]
+        a = _cb_fit(df, balance="entropy", covariates=["x"])
+        b = _cb_fit(df, balance="entropy", covariates=["x2"])
+        assert abs(a.overall_att - b.overall_att) < 1e-8
+
+    def test_balance_on_default_aggregate_mode(self):
+        # balancing must work on the overall-ATT (aggregate=None) path, not only
+        # event_study (the BM-DOF machinery branches on aggregate).
+        df = _balance_panel(seed=8)
+        res = _cb_fit(df, balance="entropy", covariates=["x"], aggregate=None)
+        assert np.isfinite(res.overall_att)
+        assert res.balance == "entropy"
+
+    # ---- sklearn surface ----
+    def test_get_params_includes_balance_and_clone(self):
+        est = StackedDiD(balance="entropy")
+        assert est.get_params()["balance"] == "entropy"
+        clone = StackedDiD(**est.get_params())  # round-trip
+        assert clone.balance == "entropy"
+
+    def test_convenience_function_threads_covariates(self):
+        df = _balance_panel(seed=9)
+        res = stacked_did(
+            df,
+            "y",
+            "unit",
+            "time",
+            "first_treat",
+            kappa_pre=2,
+            kappa_post=2,
+            aggregate="event_study",
+            clean_control="never_treated",
+            balance="entropy",
+            covariates=["x"],
+        )
+        assert res.balance == "entropy"
+        assert res.covariates == ["x"]
+
+    def test_ragged_event_window_raises(self):
+        # balance="entropy" requires balanced event windows: on a ragged panel (a unit
+        # missing a non-reference event-time row) the unit-count corrector and the
+        # observation-count aggregate Q diverge, so fail closed. balance="none" still
+        # supports the unbalanced panel.
+        df = _balance_panel(seed=10, const_x=True)
+        u = int(df.loc[df["first_treat"] == 4, "unit"].iloc[0])
+        drop = (df["unit"] == u) & (df["time"] == 5)  # a post-period row (keeps t=a-1 ref)
+        dfr = df[~drop].reset_index(drop=True)
+        with pytest.raises(ValueError, match="balanced event windows"):
+            _cb_fit(dfr, balance="entropy", covariates=["x"])
+        assert np.isfinite(_cb_fit(dfr, balance="none").overall_att)
+
+    def test_zero_row_eligible_control_raises(self):
+        # An eligible (never-treated) control with ZERO rows in a cohort's window is
+        # silently dropped by _build_sub_experiment — the count-only guard misses it,
+        # the exact-coverage guard catches it (missing_units).
+        df = _balance_panel(seed=11, const_x=True)
+        u = int(df.loc[df["first_treat"] == 0, "unit"].iloc[0])  # a never-treated unit
+        drop = (df["unit"] == u) & (df["time"].between(2, 6))  # cohort-4 window [2,6]
+        dfz = df[~drop].reset_index(drop=True)
+        with pytest.raises(ValueError, match="balanced event windows"):
+            _cb_fit(dfz, balance="entropy", covariates=["x"])
+
+    def test_duplicate_and_missing_event_time_raises(self):
+        # A unit with a duplicated event time AND a missing one nets the expected row
+        # count, bypassing a count-only guard; the exact-coverage guard catches the
+        # duplicate (unit, event_time).
+        df = _balance_panel(seed=12, const_x=True)
+        u = int(df.loc[df["first_treat"] == 4, "unit"].iloc[0])
+        dupe = df[(df["unit"] == u) & (df["time"] == 3)]  # event_time -1 for cohort 4
+        df2 = df[~((df["unit"] == u) & (df["time"] == 5))]  # drop event_time +1
+        dfd = pd.concat([df2, dupe], ignore_index=True)  # same row count, ragged coverage
+        with pytest.raises(ValueError, match="balanced event windows"):
+            _cb_fit(dfd, balance="entropy", covariates=["x"])
+
+    def test_string_covariate_raises_typeerror(self):
+        df = _balance_panel(seed=13, const_x=True)
+        with pytest.raises(TypeError, match="must be a list"):
+            _cb_fit(df, balance="entropy", covariates="x")

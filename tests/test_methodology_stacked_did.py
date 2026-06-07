@@ -27,11 +27,13 @@ import json
 import os
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.optimize import brentq
 from scipy.stats import t as t_dist
 
 from diff_diff import StackedDiD
+from diff_diff.balancing import entropy_balance
 from diff_diff.prep_dgp import generate_staggered_data
 
 _GOLDEN_PATH = os.path.join(
@@ -667,3 +669,348 @@ class TestStackedDiDParityRVariants:
             rtol=1e-6,
             err_msg="sample_share hc2_bm overall BM DOF must match R Wald_test(HTZ)",
         )
+
+
+# =============================================================================
+# CBWSDID covariate balancing (Ustyuzhanin 2026) — estimand validation.
+# Self-contained (no R golden needed): the closed-form paper formula is the
+# primary, R-independent estimand anchor (productionized validation spike).
+# =============================================================================
+
+_CB_KP = 2
+_CB_KPOST = 2
+
+
+def _cbwsdid_panel(
+    seed,
+    *,
+    hetero=False,
+    n_per_cohort=25,
+    n_never=100,
+    cohorts=(4, 5, 6),
+    n_periods=10,
+    trend_gamma=0.5,
+    te0=2.0,
+    te_gamma=1.0,
+    noise=0.03,
+):
+    """Staggered panel where untreated trends depend (linearly) on covariate x and
+    treated cohorts are selected on x (so UNCONDITIONAL parallel trends fails). With
+    hetero=True the effect is heterogeneous in x (tau_i = te0 + te_gamma*x_i)."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    uid = 0
+    specs = [(c, n_per_cohort) for c in cohorts] + [(np.inf, n_never)]
+    for ft, n in specs:
+        x_mean = 0.8 if np.isfinite(ft) else 0.0  # selection on x
+        for _ in range(n):
+            uid += 1
+            x = rng.normal(x_mean, 1.0)
+            alpha = rng.normal()
+            slope = trend_gamma * x + rng.normal(0, 0.02)  # x-driven untreated trend
+            for t in range(1, n_periods + 1):
+                y0 = alpha + slope * t + rng.normal(0, noise)
+                te = (
+                    (te0 + (te_gamma * x if hetero else 0.0))
+                    if (np.isfinite(ft) and t >= ft)
+                    else 0.0
+                )
+                rows.append((uid, t, ft if np.isfinite(ft) else 0, x, y0 + te))
+    return pd.DataFrame(rows, columns=["unit", "time", "first_treat", "x", "y"])
+
+
+def _closed_form_cbwsdid(df, omega, kp, kpost):
+    """DID^CBWSDID_e = Σ_a (N^D_a/N^D_Ω)(Δ̄^D_{a,e} − Δ̄^{C,b}_{a,e}), computed
+    independently with never-treated controls and entropy-balanced b_sa."""
+    ftmap = df.drop_duplicates("unit").set_index("unit")["first_treat"].replace(0, np.inf)
+    ylook = df.set_index(["unit", "time"])["y"].to_dict()
+    xlook = df.drop_duplicates("unit").set_index("unit")["x"].to_dict()
+    never = ftmap[~np.isfinite(ftmap)].index.tolist()
+    event_times = [h for h in range(-kp, kpost + 1) if h != -1]
+    omega = sorted(omega)
+    ND = {a: int((ftmap == a).sum()) for a in omega}
+    ND_Om = sum(ND.values())
+    out = {}
+    for h in event_times:
+        acc = 0.0
+        for a in omega:
+            treated = ftmap[ftmap == a].index.tolist()
+            Xc = np.array([[xlook[u]] for u in never])
+            target = np.array([np.mean([xlook[u] for u in treated])])
+            # Use the SAME tol the estimator uses internally so the entropy weights
+            # are identical (the solver stops at the same iterate) — then the closed
+            # form matches the fitted regression to WLS-algebra precision.
+            b, _ = entropy_balance(Xc, target, tol=1e-8)
+            mt = float(np.mean([ylook[(u, a + h)] - ylook[(u, a - 1)] for u in treated]))
+            dyc = np.array([ylook[(u, a + h)] - ylook[(u, a - 1)] for u in never])
+            acc += (ND[a] / ND_Om) * (mt - float(b @ dyc))
+        out[h] = acc
+    return out
+
+
+class TestCBWSDIDCovariateBalance:
+    """CBWSDID estimand validation (Ustyuzhanin 2026)."""
+
+    def _fit(self, df, balance="entropy"):
+        est = StackedDiD(
+            kappa_pre=_CB_KP,
+            kappa_post=_CB_KPOST,
+            weighting="aggregate",
+            clean_control="never_treated",
+            cluster="unit",
+            balance=balance,
+        )
+        return est.fit(
+            df,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="event_study",
+            covariates=["x"] if balance != "none" else None,
+        )
+
+    def test_matches_closed_form_paper_formula(self):
+        # PRIMARY anchor: fitted CBWSDID event-study coefs == the closed-form paper
+        # formula (Ustyuzhanin 2026 §3.1) to machine precision. Pins the effective-
+        # mass W_sa composition end-to-end without R.
+        df = _cbwsdid_panel(seed=11)
+        res = self._fit(df)
+        fitted = {
+            h: res.event_study_effects[h]["effect"]
+            for h in res.event_study_effects
+            if res.event_study_effects[h]["n_obs"] > 0
+        }
+        closed = _closed_form_cbwsdid(df, res.groups, _CB_KP, _CB_KPOST)
+        assert set(fitted) == {h for h in closed}
+        for h in fitted:
+            assert abs(fitted[h] - closed[h]) < 1e-8, (h, fitted[h], closed[h])
+
+    def test_estimand_integrity_under_heterogeneity(self):
+        # The failure mode of the abandoned regression-adjustment attempt: with
+        # heterogeneous effects (tau_i = te0 + te_gamma*x_i) AND x-confounded untreated
+        # trends, control REWEIGHTING (CBWSDID) recovers the treated-average ATT while
+        # plain StackedDiD is biased. Assert BOTH directions so the test proves the
+        # mechanism, not just no-exception.
+        df = _cbwsdid_panel(seed=7, hetero=True, te0=2.0, te_gamma=1.0)
+        units = df.drop_duplicates("unit").copy()
+        units["ft"] = units["first_treat"].replace(0, np.inf)
+        treated_x_mean = units.loc[np.isfinite(units["ft"]), "x"].mean()
+        true_att = 2.0 + 1.0 * treated_x_mean  # treated-average ATT
+
+        cb = self._fit(df, balance="entropy").overall_att
+        plain = self._fit(df, balance="none").overall_att
+
+        assert abs(cb - true_att) < 0.15, f"CBWSDID should recover {true_att:.3f}, got {cb:.3f}"
+        assert abs(plain - true_att) > 0.3, f"plain StackedDiD should be biased, got {plain:.3f}"
+        assert abs(cb - true_att) < abs(plain - true_att)
+
+    def test_balanced_covariate_reduces_to_plain_stacked(self):
+        # When the covariate is independent of treatment (already balanced), entropy
+        # weights are ~uniform and CBWSDID ≈ plain weighted stacked DID.
+        rng = np.random.default_rng(3)
+        rows = []
+        uid = 0
+        for ft, n in [(4, 25), (5, 25), (6, 25), (np.inf, 100)]:
+            for _ in range(n):
+                uid += 1
+                x = rng.normal()  # SAME distribution for treated and control
+                alpha = rng.normal()
+                for t in range(1, 11):
+                    y = (
+                        alpha
+                        + 0.1 * t
+                        + rng.normal(0, 0.05)
+                        + (2.0 if (np.isfinite(ft) and t >= ft) else 0.0)
+                    )
+                    rows.append((uid, t, ft if np.isfinite(ft) else 0, x, y))
+        df = pd.DataFrame(rows, columns=["unit", "time", "first_treat", "x", "y"])
+        cb = self._fit(df, balance="entropy").overall_att
+        plain = self._fit(df, balance="none").overall_att
+        assert abs(cb - plain) < 0.05
+        assert abs(cb - 2.0) < 0.1
+
+
+def _spread_panel(seed=21, n_per=15, n_never=50):
+    """Cohorts spread out so not-yet-treated control SETS (and counts N^C_a) DIFFER
+    across sub-experiments — required to distinguish the effective-mass corrective
+    from a naive b*Q multiply (they coincide when every cohort shares one control set)."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    uid = 0
+    for ft, n in [(4, n_per), (8, n_per), (12, n_per), (np.inf, n_never)]:
+        treated = np.isfinite(ft)
+        xm = 0.6 if treated else 0.0
+        for _ in range(n):
+            uid += 1
+            x = rng.normal(xm, 1.0)
+            alpha = rng.normal()
+            slope = 0.3 * x + rng.normal(0, 0.02)
+            for t in range(1, 17):
+                y = (
+                    alpha
+                    + slope * t
+                    + rng.normal(0, 0.03)
+                    + (2.0 if (treated and t >= ft) else 0.0)
+                )
+                rows.append((uid, t, ft if treated else 0, x, y))
+    return pd.DataFrame(rows, columns=["unit", "time", "first_treat", "x", "y"])
+
+
+def _closed_form_from_result(df, res, kp, kpost, *, naive=False):
+    """Closed-form CBWSDID using the estimator's OWN per-sub-experiment control sets
+    (robust to clean_control mode) and independently-solved entropy weights. With
+    naive=True, aggregate the control means with the WRONG raw-count corrective
+    weights ∝ (N^D_a/N^D_Ω)(Ñ^C_a/N^C_a) instead of the effective-mass ∝ (N^D_a/N^D_Ω)."""
+    sd = res.stacked_data
+    ylook = df.set_index(["unit", "time"])["y"].to_dict()
+    xlook = df.drop_duplicates("unit").set_index("unit")["x"].to_dict()
+    event_times = [h for h in range(-kp, kpost + 1) if h != -1]
+    omega = sorted(res.groups)
+    members = {}
+    ND = {}
+    NC = {}
+    NtC = {}
+    bmap = {}
+    for a in omega:
+        sub = sd[sd["_sub_exp"] == a]
+        treated = list(pd.unique(sub.loc[sub["_D_sa"] == 1, "unit"]))
+        controls = list(pd.unique(sub.loc[sub["_D_sa"] == 0, "unit"]))
+        members[a] = (treated, controls)
+        ND[a] = len(treated)
+        NC[a] = len(controls)
+        Xc = np.array([[xlook[u]] for u in controls])
+        target = np.array([np.mean([xlook[u] for u in treated])])
+        b, _ = entropy_balance(Xc, target, tol=1e-8)
+        bmap[a] = b
+        NtC[a] = float(np.sum(b))
+    ND_Om = sum(ND.values())
+    out = {}
+    for h in event_times:
+        treated_side = 0.0
+        # control side aggregated with effective-mass (correct) or raw-count (naive) weights
+        cnum = 0.0
+        cden = 0.0
+        for a in omega:
+            treated, controls = members[a]
+            mt = float(np.mean([ylook[(u, a + h)] - ylook[(u, a - 1)] for u in treated]))
+            dyc = np.array([ylook[(u, a + h)] - ylook[(u, a - 1)] for u in controls])
+            mcb = float(bmap[a] @ dyc)
+            share = ND[a] / ND_Om
+            treated_side += share * mt
+            w_a = share * (NtC[a] / NC[a]) if naive else share
+            cnum += w_a * mcb
+            cden += w_a
+        out[h] = treated_side - cnum / cden
+    return out
+
+
+class TestCBWSDIDEffectiveMass:
+    """The effective-mass corrective is load-bearing (vs a naive b*Q multiply)."""
+
+    KP = KPOST = 2
+
+    def _fit(self, df):
+        est = StackedDiD(
+            kappa_pre=self.KP,
+            kappa_post=self.KPOST,
+            weighting="aggregate",
+            clean_control="not_yet_treated",
+            cluster="unit",
+            balance="entropy",
+        )
+        return est.fit(
+            df,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="event_study",
+            covariates=["x"],
+        )
+
+    def test_anchor_and_effective_mass_is_load_bearing(self):
+        df = _spread_panel()
+        res = self._fit(df)
+        fitted = {
+            h: res.event_study_effects[h]["effect"]
+            for h in res.event_study_effects
+            if res.event_study_effects[h]["n_obs"] > 0
+        }
+        # control counts genuinely vary across cohorts (else the test is vacuous)
+        ncs = {a: d["n_control"] for a, d in res.balance_diagnostics.items()}
+        assert len(set(ncs.values())) > 1, f"need varying N^C_a, got {ncs}"
+
+        effective = _closed_form_from_result(df, res, self.KP, self.KPOST, naive=False)
+        naive = _closed_form_from_result(df, res, self.KP, self.KPOST, naive=True)
+        for h in fitted:
+            # (1) fitted == effective-mass closed form (discriminating anchor)
+            assert abs(fitted[h] - effective[h]) < 1e-8, (h, fitted[h], effective[h])
+        # (2) effective-mass differs MATERIALLY from the naive b*Q aggregation
+        max_gap = max(abs(effective[h] - naive[h]) for h in fitted)
+        assert max_gap > 1e-3, f"effective-mass vs naive gap too small ({max_gap:.2e})"
+        # (3) the estimator did NOT implement the naive form
+        for h in fitted:
+            assert abs(fitted[h] - naive[h]) > 1e-4
+
+
+_CBWSDID_GOLDEN = os.path.join(
+    os.path.dirname(__file__), "..", "benchmarks", "data", "cbwsdid_golden.json"
+)
+_CBWSDID_PANEL = os.path.join(
+    os.path.dirname(__file__), "..", "benchmarks", "data", "cbwsdid_balance_panel.csv"
+)
+
+
+@pytest.mark.skipif(
+    not os.path.exists(_CBWSDID_GOLDEN),
+    reason="cbwsdid_golden.json not generated; run Rscript benchmarks/R/generate_cbwsdid_golden.R",
+)
+class TestCBWSDIDRParity:
+    """Cross-language parity against the reference R package `cbwsdid` (Ustyuzhanin 2026).
+
+    The committed golden holds dynamic event-study ATTs from
+    ``cbwsdid(design='absorbing', refinement.method='weightit', method='ebal',
+    covs.formula=~x)`` on ``benchmarks/data/cbwsdid_balance_panel.csv``.
+    ``StackedDiD(balance='entropy', covariates=['x'])`` — with an INDEPENDENT
+    entropy-balancing solver (custom Newton vs WeightIt's ebal) and the effective-mass
+    ``W_sa`` composition — reproduces them to ~3e-7 (the residual is the cross-solver
+    balancing tolerance); asserted at 1e-5. Regenerate the golden with
+    ``Rscript benchmarks/R/generate_cbwsdid_golden.R`` (requires
+    ``remotes::install_github('vadvu/cbwsdid')``).
+    """
+
+    def test_dynamic_atts_match_r_cbwsdid(self):
+        with open(_CBWSDID_GOLDEN) as f:
+            g = json.load(f)
+        df = pd.read_csv(_CBWSDID_PANEL)
+        res = StackedDiD(
+            kappa_pre=2,
+            kappa_post=2,
+            weighting="aggregate",
+            clean_control="not_yet_treated",
+            cluster="unit",
+            balance="entropy",
+        ).fit(
+            df,
+            outcome="y",
+            unit="unit",
+            time="time",
+            first_treat="first_treat",
+            aggregate="event_study",
+            covariates=["x"],
+        )
+        for et, r_est, r_se in zip(
+            g["dynamic"]["event_time"], g["dynamic"]["estimate"], g["dynamic"]["std_error"]
+        ):
+            py = res.event_study_effects[et]["effect"]
+            assert abs(py - r_est) < 1e-5, f"event {et}: python {py} vs R cbwsdid {r_est}"
+            # SEs also agree (conditional-on-weights cluster-robust); the ~0.2-0.5%
+            # gap is the small-sample correction (diff-diff CR1S vs cbwsdid's vcov).
+            py_se = res.event_study_effects[et]["se"]
+            np.testing.assert_allclose(
+                py_se,
+                r_se,
+                rtol=0.02,
+                err_msg=f"event {et}: python SE {py_se} vs R cbwsdid SE {r_se}",
+            )

@@ -220,6 +220,14 @@ Multi-Period and Staggered Adoption
 
 - **Wing, C., Freedman, S. M., & Hollingsworth, A. (2024).** "Stacked Difference-in-Differences." *NBER Working Paper* 32054. https://www.nber.org/papers/w32054
 
+- **Ustyuzhanin, V. (2026).** "Covariate-Balanced Weighted Stacked Difference-in-Differences." *arXiv preprint* arXiv:2604.02293v1. https://arxiv.org/abs/2604.02293
+
+  Primary source for ``StackedDiD``'s covariate-balancing path (the ``balance="entropy"`` parameter). Adds a within-sub-experiment design stage — nonnegative control design weights ``b_{sa}`` — that composes with the Wing et al. (2024) corrective weights via the effective control mass into the final stacked weights ``W_{sa}``, so untreated counterfactual trends are estimated under *conditional* parallel trends while the treated-cohort weights (and hence the trimmed-aggregate-ATT estimand) are unchanged.
+
+- **Hainmueller, J. (2012).** "Entropy Balancing for Causal Effects: A Multivariate Reweighting Method to Produce Balanced Samples in Observational Studies." *Political Analysis*, 20(1), 25-46. https://doi.org/10.1093/pan/mpr025
+
+  Foundational source for entropy balancing. ``StackedDiD(balance="entropy")`` implements this within-sub-experiment reweighting: nonnegative control weights that exactly match the treated covariate means while minimizing the Kullback-Leibler divergence from uniform.
+
 - **Chen, X., Sant'Anna, P. H. C., & Xie, H. (2025).** "Efficient Difference-in-Differences and Event Study Estimators." *arXiv preprint* arXiv:2506.17729v1. https://arxiv.org/abs/2506.17729v1 (also Cowles Foundation Discussion Paper No. 2470).
 
   Primary source for the optimal-weighting / PT-All / PT-Post efficient DiD implemented in our ``EfficientDiD`` class.
