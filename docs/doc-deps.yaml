@@ -252,6 +252,8 @@ sources:
       - path: docs/methodology/REGISTRY.md
         section: "TwoStageDiD"
         type: methodology
+      - path: docs/methodology/papers/gardner-2022-review.md
+        type: methodology
       - path: docs/api/two_stage.rst
         type: api_reference
       - path: docs/tutorials/12_two_stage_did.ipynb

@@ -25,9 +25,10 @@ class TwoStageBootstrapResults:
     Results from TwoStageDiD bootstrap inference.
 
     Bootstrap uses multiplier bootstrap on the GMM influence function,
-    consistent with other library estimators. The R `did2s` package uses
-    block bootstrap by default; multiplier bootstrap is asymptotically
-    equivalent.
+    consistent with other library estimators. The R `did2s` package defaults
+    to analytical corrected clustered SEs (``bootstrap = FALSE``); its optional
+    block bootstrap (``bootstrap = TRUE``) and this multiplier bootstrap are
+    asymptotically equivalent.
 
     Attributes
     ----------

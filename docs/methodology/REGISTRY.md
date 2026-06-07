@@ -1395,20 +1395,20 @@ Point estimates are identical to ImputationDiD (Borusyak et al. 2024). The two-s
 The variance accounts for first-stage estimation error propagating into Stage 2, following the GMM framework:
 
 ```
-V(tau_hat) = (D'D)^{-1} * Bread * (D'D)^{-1}
+V(tau_hat) = (D'D)^{-1} * Meat * (D'D)^{-1}     [(D'D)^{-1} = GLOBAL GMM bread (Jacobian inverse)]
 
-Bread = sum_c ( sum_{i in c} psi_i )( sum_{i in c} psi_i )'
+Meat = sum_c ( sum_{i in c} psi_i )( sum_{i in c} psi_i )'   [score outer-product, clustered at unit]
 ```
 
 where `psi_i` is the stacked influence function for unit i across all its observations, combining the Stage 2 score and the Stage 1 correction term.
 
-**Note on Equation 6 discrepancy:** The paper's Equation 6 uses a per-cluster inverse `(D_c'D_c)^{-1}` when forming the influence function contribution. The R `did2s` implementation and our code use the GLOBAL inverse `(D'D)^{-1}` following standard GMM theory (Newey & McFadden 1994). We follow the R implementation, which is consistent with standard GMM sandwich variance estimation.
+**Variance is faithful to the paper (global Jacobian inverse).** Gardner (2022) §3.3 derives the variance by reading the two stages as a joint GMM estimator (Hansen 1982) and applying Newey & McFadden (1994) Theorem 6.1: `v` is the last element of `E[∂f/∂(λ,γ,β)]^{-1} E[ff'] E[∂f/∂(λ,γ,β)]^{-1'}` — the **global** Jacobian inverse (the `(D'D)^{-1}` bread above), with the score outer-product `E[ff']` clustered at the unit per the reference Stata GMM `vce(cluster id)` (Appendix B). Our global `(D'D)^{-1}` bread + unit-clustered meat **matches** this and the R `did2s` implementation; there is **no** per-cluster inverse. (Equation (6) in the paper is the *event-study regression specification*, not a variance formula — an earlier "Equation 6 per-cluster inverse `(D_c'D_c)^{-1}`" note was a misattribution, corrected per `docs/methodology/papers/gardner-2022-review.md`.)
 
 **No finite-sample adjustments:** The variance estimator uses the raw asymptotic sandwich without degrees-of-freedom corrections (no HC1-style `n/(n-k)` adjustment). This matches the R `did2s` implementation.
 
 *Bootstrap:*
 
-Our implementation uses multiplier bootstrap on the GMM influence function: cluster-level `psi` sums are pre-computed, then perturbed with multiplier weights (Rademacher by default; configurable via `bootstrap_weights` parameter to use Mammen or Webb weights, matching CallawaySantAnna). The R `did2s` package defaults to block bootstrap (resampling clusters with replacement). Both approaches are asymptotically valid; the multiplier bootstrap is computationally cheaper and consistent with the CallawaySantAnna/ImputationDiD bootstrap patterns in this library.
+Our implementation uses multiplier bootstrap on the GMM influence function: cluster-level `psi` sums are pre-computed, then perturbed with multiplier weights (Rademacher by default; configurable via `bootstrap_weights` parameter to use Mammen or Webb weights, matching CallawaySantAnna). The R `did2s` package **defaults to analytical corrected clustered SEs** (`bootstrap = FALSE`, the same GMM sandwich); its block bootstrap is *optional* (`bootstrap = TRUE`, resampling clusters with replacement). All approaches are asymptotically valid; the multiplier bootstrap is computationally cheaper and consistent with the CallawaySantAnna/ImputationDiD bootstrap patterns in this library.
 
 *Edge cases:*
 - **Always-treated units:** Units treated in all observed periods have no untreated observations for Stage 1 FE estimation. These are excluded with a warning listing the affected unit IDs. Their treated observations do NOT contribute to Stage 2.
@@ -1416,7 +1416,7 @@ Our implementation uses multiplier bootstrap on the GMM influence function: clus
 - **NaN y_tilde handling:** When Stage 1 FE are unidentified for some observations, the residualized outcome `y_tilde` is NaN. These observations are zeroed out (excluded) from the Stage 2 regression and variance computation, matching the treatment of unimputable observations in ImputationDiD.
 - **NaN inference for undefined statistics:** t_stat uses NaN when SE is non-finite or zero; p_value and CI also NaN. Matches CallawaySantAnna/ImputationDiD NaN convention.
 - **Event study aggregation:** Horizon-specific effects use the same two-stage procedure with horizon indicator dummies in Stage 2. Unidentified horizons (e.g., long-run effects without never-treated units, per Proposition 5 of Borusyak et al. 2024) produce NaN.
-- **Pre-period event study coefficients (`pretrends=True`):** When enabled, the Stage 2 design matrix `X_2` includes pre-period relative-time dummies. Pre-period observations have `y_tilde = Step 1 residual` by construction. The GMM sandwich variance accounts for Stage 1 estimation error (Gardner 2022, Theorem 1). Only affects event study aggregation; overall ATT unchanged.
+- **Pre-period event study coefficients (`pretrends=True`):** When enabled, the Stage 2 design matrix `X_2` includes pre-period relative-time dummies. Pre-period observations have `y_tilde = Step 1 residual` by construction. The GMM sandwich variance accounts for Stage 1 estimation error (Gardner 2022 §3.3; Newey-McFadden 1994, Theorem 6.1 — the paper has no numbered theorems). Only affects event study aggregation; overall ATT unchanged.
 - **balance_e with no qualifying cohorts:** If no cohorts have sufficient pre/post coverage for the requested `balance_e`, a warning is emitted and event study results contain only the reference period.
 - **No never-treated units (Proposition 5):** When there are no never-treated units and multiple treatment cohorts, horizons h >= h_bar (where h_bar = max(groups) - min(groups)) are unidentified per Proposition 5 of Borusyak et al. (2024). These produce NaN inference with n_obs > 0 (treated observations exist but counterfactual is unidentified) and a warning listing affected horizons. Matches ImputationDiD behavior. Proposition 5 applies to event study horizons only, not cohort aggregation — a cohort whose treated obs all fall at Prop 5 horizons naturally gets n_obs=0 in group effects because all its y_tilde values are NaN.
 - **Zero-observation horizons after filtering:** When `balance_e` or NaN `y_tilde` filtering results in zero observations for some non-Prop-5 event study horizons, those horizons produce NaN for all inference fields (effect, SE, t-stat, p-value, CI) with n_obs=0.
@@ -1436,7 +1436,7 @@ Our implementation uses multiplier bootstrap on the GMM influence function: clus
 - [x] Stage 2: Regress residualized outcomes on treatment indicators
 - [x] Point estimates match ImputationDiD
 - [x] GMM sandwich variance (Newey & McFadden 1994 Theorem 6.1)
-- [x] Global `(D'D)^{-1}` in variance (matches R `did2s`, not paper Eq. 6)
+- [x] Global `(D'D)^{-1}` in variance (faithful to Gardner §3.3 / Newey-McFadden GMM sandwich; matches R `did2s`)
 - [x] No finite-sample adjustment (raw asymptotic sandwich)
 - [x] Always-treated units excluded with warning
 - [x] Multiplier bootstrap on GMM influence function
