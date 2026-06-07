@@ -816,6 +816,7 @@ StackedDiD(
     anticipation: int = 0,
     rank_deficient_action: str = "warn",
     vcov_type: str = "hc1",                   # {"hc1","hc2_bm"}; classical/hc2 rejected (intrinsically clustered), conley deferred. survey_design=... requires hc1
+    balance: str = "none",                    # {"none","entropy"}; "entropy" = CBWSDID covariate balancing (Ustyuzhanin 2026), requires fit(covariates=[...]) + weighting="aggregate", no survey_design
 )
 ```
 
@@ -832,6 +833,7 @@ stacked.fit(
     first_treat: str,
     aggregate: str = None,         # None, "simple", or "event_study"
     population: str = None,        # Required when weighting="population"
+    covariates: list[str] = None,  # Columns to balance (requires balance="entropy"); values read at t=a-1-anticipation; balanced windows only
 ) -> StackedDiDResults
 ```
 

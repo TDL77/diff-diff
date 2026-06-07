@@ -125,5 +125,5 @@ Comparison with Other Staggered Estimators
      - Full stacked dataset accessible
      - Group-time effects accessible
    * - Covariates
-     - Not yet supported
+     - Entropy balancing via ``balance="entropy"`` + ``fit(covariates=...)`` (CBWSDID, Ustyuzhanin 2026); requires ``weighting="aggregate"`` + balanced windows, no ``survey_design``
      - Supported (OR, IPW, DR)

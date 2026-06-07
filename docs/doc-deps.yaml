@@ -529,6 +529,15 @@ sources:
 
   # ── StackedDiD (stacked_did group) ─────────────────────────────────
 
+  diff_diff/balancing.py:
+    drift_risk: medium
+    docs:
+      - path: docs/methodology/REGISTRY.md
+        section: "StackedDiD (Covariate balancing / CBWSDID)"
+        type: methodology
+      - path: docs/references.rst
+        type: user_guide
+
   diff_diff/stacked_did.py:
     drift_risk: medium
     docs:

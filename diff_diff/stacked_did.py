@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from diff_diff.balancing import BalanceError, entropy_balance
 from diff_diff.linalg import solve_ols
 from diff_diff.stacked_did_results import StackedDiDResults  # noqa: F401 (re-export)
 from diff_diff.utils import safe_inference
@@ -114,6 +115,23 @@ class StackedDiD:
         raised — the survey Taylor-series linearization (or replicate-weight
         refit) variance overrides the analytical sandwich. Use the default
         ``vcov_type="hc1"`` for survey designs.
+    balance : {"none", "entropy"}, default="none"
+        Within-sub-experiment covariate balancing (Covariate-Balanced Weighted
+        Stacked DID; Ustyuzhanin 2026). With ``"entropy"`` and a ``fit(...,
+        covariates=[...])`` list, each clean-control group is reweighted by
+        entropy balancing (Hainmueller 2012) so its covariate means match the
+        treated cohort's (measured at the last pre-treatment period), and the
+        resulting design weights ``b_sa`` are composed with the Wing corrective
+        weights via the effective control mass into the final stacked weights
+        ``W_sa``. This is **control-only reweighting**, so it preserves the
+        trimmed-aggregate-ATT estimand (it changes only how untreated trends are
+        estimated, not the treated-cohort weights); at ``b_sa=1`` it reduces to
+        the paper's unit-count weighted stacked DID, equal to
+        ``weighting="aggregate"`` on balanced event windows. v1 requires
+        ``weighting="aggregate"`` and **balanced event windows** (ragged windows
+        raise a ``ValueError``), and does not support ``survey_design=``;
+        matching-based balancing and the repeated-treatment extension are out of
+        scope. Default ``"none"`` reproduces plain weighted stacked DID.
 
     Attributes
     ----------
@@ -165,6 +183,7 @@ class StackedDiD:
         anticipation: int = 0,
         rank_deficient_action: str = "warn",
         vcov_type: str = "hc1",
+        balance: str = "none",
     ):
         if weighting not in ("aggregate", "population", "sample_share"):
             raise ValueError(
@@ -186,6 +205,7 @@ class StackedDiD:
         # vcov_type validation (Phase 1b 2/8: thread through StackedDiD).
         # Factored into _validate_vcov_type so set_params() can re-validate.
         self._validate_vcov_type(vcov_type)
+        self._validate_balance(balance)
 
         self.kappa_pre = kappa_pre
         self.kappa_post = kappa_post
@@ -196,6 +216,7 @@ class StackedDiD:
         self.anticipation = anticipation
         self.rank_deficient_action = rank_deficient_action
         self.vcov_type = vcov_type
+        self.balance = balance
 
         self.is_fitted_ = False
         self.results_: Optional[StackedDiDResults] = None
@@ -235,6 +256,20 @@ class StackedDiD:
                 "'hc2_bm' (CR2 Bell-McCaffrey)."
             )
 
+    @staticmethod
+    def _validate_balance(balance: str) -> None:
+        """Validate the covariate-balancing method (CBWSDID, Ustyuzhanin 2026).
+
+        Called from __init__ AND set_params (mirrors _validate_vcov_type) so
+        sklearn-style mutation hits the estimator-level guard. v1 supports only
+        entropy balancing; matching-based balancing and IPW are out of scope
+        (see docs/methodology/REGISTRY.md StackedDiD)."""
+        if balance not in ("none", "entropy"):
+            raise ValueError(
+                f"balance must be 'none' or 'entropy', got '{balance}'. "
+                "Matching-based balancing and IPW are out of scope for v1."
+            )
+
     def fit(
         self,
         data: pd.DataFrame,
@@ -245,6 +280,7 @@ class StackedDiD:
         aggregate: Optional[str] = None,
         population: Optional[str] = None,
         survey_design=None,
+        covariates: Optional[List[str]] = None,
     ) -> StackedDiDResults:
         """
         Fit the stacked DiD estimator.
@@ -275,6 +311,14 @@ class StackedDiD:
             Survey design specification for design-based inference. When
             provided, uses Taylor Series Linearization for variance
             estimation and applies sampling weights to the regression.
+        covariates : list of str, optional
+            Covariate column names to balance the clean controls toward the
+            treated cohort (requires ``balance="entropy"``; see the constructor
+            ``balance`` parameter). Values are read at the last pre-treatment
+            period ``t = a-1-anticipation`` per sub-experiment, so balancing uses
+            only pre-treatment information (Assumption 4). Raises ``ValueError``
+            if ``balance="none"`` (or vice versa), if a name is absent from
+            ``data``, or if a cohort cannot be balanced (infeasible).
 
         Returns
         -------
@@ -308,6 +352,44 @@ class StackedDiD:
 
         if self.weighting == "population" and population is None:
             raise ValueError("population column must be specified when weighting='population'")
+
+        # ---- Covariate balancing (CBWSDID, Ustyuzhanin 2026) validation + guards ----
+        if isinstance(covariates, str):
+            raise TypeError(
+                "covariates must be a list of column names, not a string (got "
+                f"{covariates!r}). Use covariates=[{covariates!r}]."
+            )
+        balancing = self.balance != "none"
+        if balancing and not covariates:
+            raise ValueError(
+                "balance='entropy' requires a non-empty covariates= list (the "
+                "columns to balance the clean controls toward the treated cohort). "
+                "Use balance='none' for unrefined weighted stacked DID."
+            )
+        if covariates and not balancing:
+            raise ValueError(
+                "covariates= was provided but balance='none'. Set balance='entropy' "
+                "to enable covariate balancing, or drop covariates=."
+            )
+        if balancing:
+            assert covariates is not None  # guaranteed by the cross-validation above
+            # Deduplicate (repeated columns are redundant moments) while preserving order.
+            covariates = list(dict.fromkeys(covariates))
+            if self.weighting != "aggregate":
+                raise NotImplementedError(
+                    f"balance='entropy' is only supported with weighting='aggregate' "
+                    f"(got weighting='{self.weighting}'); the CBWSDID corrective weight "
+                    "uses the Wing aggregate (treated-share) form. v1 scope."
+                )
+            if survey_design is not None:
+                raise NotImplementedError(
+                    "balance='entropy' with survey_design= is not supported in v1 "
+                    "(design-weight + survey-weight composition is out of scope). "
+                    "Drop survey_design= or set balance='none'."
+                )
+            missing_cov = [c for c in covariates if c not in data.columns]
+            if missing_cov:
+                raise ValueError(f"covariates not found in data columns: {missing_cov}")
 
         # ---- Resolve survey design ----
         from diff_diff.survey import (
@@ -431,6 +513,17 @@ class StackedDiD:
 
         # ---- Compute Q-weights ----
         stacked_df = self._compute_q_weights(stacked_df, unit, population)
+
+        # ---- Covariate balancing: design weights b_sa -> effective-mass W_sa ----
+        # When balancing, this OVERWRITES `_Q_weight` with the CBWSDID final weights
+        # W_sa (paper §3.1) so the existing WLS path downstream consumes them
+        # transparently; the raw design weights are preserved in `_b_sa`.
+        balance_diagnostics: Optional[Dict[Any, Dict[str, Any]]] = None
+        if balancing:
+            assert covariates is not None  # narrowed by the cross-validation above
+            stacked_df, balance_diagnostics = self._compute_balancing_weights(
+                stacked_df, df, unit, time, first_treat, covariates
+            )
 
         # ---- Count units ----
         treated_units = stacked_df.loc[stacked_df["_D_sa"] == 1, unit].unique()
@@ -845,6 +938,9 @@ class StackedDiD:
             cluster_name=self.cluster,
             n_clusters=int(np.unique(cluster_ids).size),
             survey_metadata=survey_metadata,
+            balance=self.balance,
+            covariates=list(covariates) if balancing else None,
+            balance_diagnostics=balance_diagnostics,
         )
 
         self.is_fitted_ = True
@@ -1188,6 +1284,174 @@ class StackedDiD:
         return stacked_df
 
     # =========================================================================
+    # Covariate balancing (CBWSDID, Ustyuzhanin 2026)
+    # =========================================================================
+
+    def _compute_balancing_weights(
+        self,
+        stacked_df: pd.DataFrame,
+        df: pd.DataFrame,
+        unit: str,
+        time: str,
+        first_treat: str,
+        covariates: List[str],
+    ) -> Tuple[pd.DataFrame, Dict[Any, Dict[str, Any]]]:
+        """Compute CBWSDID covariate-balancing weights (Ustyuzhanin 2026, §3.1).
+
+        For each sub-experiment ``a``, balance the clean controls' covariate means —
+        measured at the last pre-treatment period ``t = a-1-anticipation`` from the
+        SOURCE data, so the design weights use only pre-treatment information
+        (Assumption 4) — toward the treated-cohort means via entropy balancing,
+        yielding nonnegative design weights ``b_sa`` (treated keep ``b=1``). Then
+        compose the final stacked weights with the EFFECTIVE control mass
+        ``Ñ^C_a = Σ_{s∈C_a} b_sa``::
+
+            W_sa = b_sa · (N^D_a / N^D_Ω) / (Ñ^C_a / Ñ^C_Ω)   for s ∈ C_a
+            W_sa = 1                                          for s ∈ D_a
+
+        A naive ``b_sa · Q_aggregate`` multiply is **not** equivalent: it aggregates the
+        cohort control means with weights ∝ (N^D_a/N^D_Ω)·(Ñ^C_a/N^C_a) instead of the
+        required ∝ (N^D_a/N^D_Ω), biasing the estimate unless ``b_sa`` is uniform.
+
+        Overwrites ``_Q_weight`` with W_sa (so the downstream WLS consumes it
+        transparently) and records the raw design weights in ``_b_sa``. Fail-closed:
+        raises a cohort-named ``ValueError`` if a cohort's balance is infeasible —
+        dropping the cohort would silently shift the estimand to an overlap-trimmed ATT.
+        """
+        balance_tol = 1e-8
+        sub_exps = list(pd.unique(stacked_df["_sub_exp"]))
+
+        b_lookup: Dict[Tuple[Any, Any], float] = {}
+        N_D: Dict[Any, float] = {}
+        Nt_C: Dict[Any, float] = {}
+        diagnostics: Dict[Any, Dict[str, Any]] = {}
+
+        # Balanced event windows are required: the paper's unit-count corrective and
+        # diff-diff's observation-count "aggregate" Q-weights coincide only when every
+        # unit is observed at every event time. On ragged windows they diverge (the
+        # count-convention is unresolved — out of scope for v1), so fail closed rather
+        # than silently producing unit-count estimates that differ from balance="none".
+        # The check validates exact (unit x event_time) coverage, not just row counts:
+        # it catches (a) eligible units with zero rows in the window (silently dropped
+        # by _build_sub_experiment, so invisible to a count), (b) wrong row counts, and
+        # (c) duplicate (unit, event_time) rows that a count-only check would let pass
+        # alongside a compensating missing row.
+        expected_events = list(range(-self.kappa_pre - self.anticipation, self.kappa_post + 1))
+        n_expected = len(expected_events)
+        ft_by_unit = df.drop_duplicates(subset=[unit]).set_index(unit)[first_treat]
+
+        def _expected_units(a_val: Any) -> set:
+            treated = set(ft_by_unit[ft_by_unit == a_val].index)
+            if self.clean_control == "not_yet_treated":
+                controls = set(ft_by_unit[ft_by_unit > a_val + self.kappa_post].index)
+            elif self.clean_control == "strict":
+                controls = set(
+                    ft_by_unit[ft_by_unit > a_val + self.kappa_post + self.kappa_pre].index
+                )
+            else:  # never_treated
+                controls = set(ft_by_unit[np.isinf(ft_by_unit)].index)
+            return treated | controls
+
+        for a in sub_exps:
+            sub = stacked_df[stacked_df["_sub_exp"] == a]
+            counts = sub.groupby(unit).size()
+            present_units = set(counts.index)
+            missing_eligible = _expected_units(a) - present_units  # zero-row eligible units
+            wrong_count = set(counts[counts != n_expected].index)
+            dup_mask = sub.duplicated(subset=[unit, "_event_time"], keep=False)
+            dup_units = set(sub.loc[dup_mask, unit].unique())
+            bad = missing_eligible | wrong_count | dup_units
+            if bad:
+                raise ValueError(
+                    f"balance='entropy' requires balanced event windows, but cohort a={a} "
+                    f"has {len(bad)} treated/clean-control unit(s) without exact coverage of "
+                    f"the {n_expected} event times {expected_events} (zero-row, missing/extra, "
+                    f"or duplicated (unit, event_time) rows; e.g. {list(bad)[:3]}). Covariate "
+                    "balancing on unbalanced/ragged panels is out of scope for v1 because the "
+                    "paper's unit-count corrective and diff-diff's observation-count "
+                    "'aggregate' Q-weights diverge off balanced panels. Use balance='none', or "
+                    "restrict to a balanced window."
+                )
+            treated_units = list(pd.unique(sub.loc[sub["_D_sa"] == 1, unit]))
+            control_units = list(pd.unique(sub.loc[sub["_D_sa"] == 0, unit]))
+
+            ref_time = a - 1 - self.anticipation
+            pre = df.loc[df[time] == ref_time].drop_duplicates(subset=[unit]).set_index(unit)
+            missing_units = [u for u in treated_units + control_units if u not in pre.index]
+            if missing_units:
+                raise ValueError(
+                    f"Covariate balancing for cohort a={a}: {len(missing_units)} unit(s) "
+                    f"have no observation at the pre-treatment reference period "
+                    f"t={ref_time} (e.g. {missing_units[:3]}). Balancing requires the "
+                    "covariate values at t=a-1-anticipation for every treated and "
+                    "clean-control unit."
+                )
+            Xt = pre.loc[treated_units, covariates].to_numpy(dtype=np.float64)
+            Xc = pre.loc[control_units, covariates].to_numpy(dtype=np.float64)
+            if not (np.all(np.isfinite(Xt)) and np.all(np.isfinite(Xc))):
+                raise ValueError(
+                    f"Covariate balancing for cohort a={a}: covariates contain NaN/inf at "
+                    f"t={ref_time}. Balancing requires finite covariate values."
+                )
+
+            target = Xt.mean(axis=0)
+            pre_imbalance = float(np.max(np.abs(Xc.mean(axis=0) - target)))
+            try:
+                b_control, info = entropy_balance(Xc, target, tol=balance_tol)
+            except BalanceError as exc:
+                worst = covariates[int(np.argmax(np.abs(exc.residuals)))]
+                raise ValueError(
+                    f"Covariate balancing failed for cohort a={a}: could not match the "
+                    f"treated covariate means (worst covariate '{worst}', residual "
+                    f"{exc.max_residual:.3e}). The treated cohort's covariate profile lies "
+                    "outside the clean-control support (infeasible). Remove this cohort, "
+                    "reduce the covariate set, or use balance='none'."
+                ) from exc
+
+            for u in treated_units:
+                b_lookup[(a, u)] = 1.0
+            for u, b in zip(control_units, b_control):
+                b_lookup[(a, u)] = float(b)
+            N_D[a] = float(len(treated_units))
+            Nt_C[a] = float(np.sum(b_control))
+
+            ess = float(info["ess"])
+            if ess < max(2.0, 0.05 * len(control_units)):
+                warnings.warn(
+                    f"Covariate balancing for cohort a={a} produced highly concentrated "
+                    f"control weights (effective sample size {ess:.1f} of "
+                    f"{len(control_units)} controls); estimates for this cohort may be "
+                    "unstable.",
+                    UserWarning,
+                    stacklevel=3,
+                )
+            diagnostics[a] = {
+                "n_treated": int(len(treated_units)),
+                "n_control": int(len(control_units)),
+                "effective_control_mass": Nt_C[a],
+                "ess": ess,
+                "max_imbalance_pre": pre_imbalance,
+                "max_imbalance_post": float(info["max_residual"]),
+                "balance_solver": info["solver"],
+            }
+
+        N_D_Omega = sum(N_D.values())
+        Nt_C_Omega = sum(Nt_C.values())
+        corr = {a: (N_D[a] / N_D_Omega) / (Nt_C[a] / Nt_C_Omega) for a in sub_exps}
+
+        sub_vals = stacked_df["_sub_exp"].to_numpy()
+        unit_vals = stacked_df[unit].to_numpy()
+        d_vals = stacked_df["_D_sa"].to_numpy()
+        b_vals = np.array([b_lookup[(sub_vals[i], unit_vals[i])] for i in range(len(stacked_df))])
+        corr_vals = np.array([corr[a] for a in sub_vals])
+        W = np.where(d_vals == 0, b_vals * corr_vals, 1.0)
+
+        stacked_df = stacked_df.copy()
+        stacked_df["_b_sa"] = b_vals
+        stacked_df["_Q_weight"] = W
+        return stacked_df, diagnostics
+
+    # =========================================================================
     # sklearn-compatible interface
     # =========================================================================
 
@@ -1203,6 +1467,7 @@ class StackedDiD:
             "anticipation": self.anticipation,
             "rank_deficient_action": self.rank_deficient_action,
             "vcov_type": self.vcov_type,
+            "balance": self.balance,
         }
 
     def set_params(self, **params: Any) -> "StackedDiD":
@@ -1217,6 +1482,8 @@ class StackedDiD:
         # error surface as __init__ applies.
         if "vcov_type" in params:
             self._validate_vcov_type(params["vcov_type"])
+        if "balance" in params:
+            self._validate_balance(params["balance"])
         for key, value in params.items():
             if hasattr(self, key):
                 setattr(self, key, value)
@@ -1252,6 +1519,7 @@ def stacked_did(
     aggregate: Optional[str] = None,
     population: Optional[str] = None,
     survey_design=None,
+    covariates: Optional[List[str]] = None,
     **kwargs: Any,
 ) -> StackedDiDResults:
     """
@@ -1281,8 +1549,13 @@ def stacked_did(
         Population column for weighting="population".
     survey_design : SurveyDesign, optional
         Survey design specification for design-based inference.
+    covariates : list of str, optional
+        Covariate columns to balance the clean controls toward the treated
+        cohort (pass ``balance="entropy"`` via ``**kwargs`` to enable). See
+        ``StackedDiD.fit``.
     **kwargs
-        Additional keyword arguments passed to StackedDiD constructor.
+        Additional keyword arguments passed to StackedDiD constructor
+        (e.g. ``balance="entropy"``, ``weighting``, ``cluster``, ``vcov_type``).
 
     Returns
     -------
@@ -1308,4 +1581,5 @@ def stacked_did(
         aggregate=aggregate,
         population=population,
         survey_design=survey_design,
+        covariates=covariates,
     )

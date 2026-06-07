@@ -719,3 +719,54 @@ class TestLLMsFullHADCoverage:
                         f"Assumption 7 is pre-trends (step 2, only "
                         f"covered on the event-study path). Line: {line!r}"
                     )
+
+
+class TestLLMsFullStackedDiDCoverage:
+    """Pin the StackedDiD section of llms-full.txt to the real API.
+
+    Adding a public parameter (here: balance= on __init__, covariates= on fit())
+    requires updating diff_diff/guides/llms-full.txt — these tests catch drift.
+    """
+
+    def _stacked_section(self):
+        text = get_llm_guide("full")
+        start = text.index("### StackedDiD")
+        nxt = text.index("\n### ", start + 1)
+        return text[start:nxt]
+
+    def test_llms_full_has_stacked_section(self):
+        assert "### StackedDiD" in get_llm_guide("full")
+
+    def test_llms_full_stacked_constructor_signature_matches_real_api(self):
+        import inspect
+
+        from diff_diff import StackedDiD
+
+        sig_params = set(inspect.signature(StackedDiD.__init__).parameters)
+        sig_params.discard("self")
+        section = self._stacked_section()
+        block_start = section.index("StackedDiD(")
+        block_end = section.index("\n)", block_start)
+        ctor_block = section[block_start:block_end]
+        for param in sig_params:
+            assert f"{param}:" in ctor_block or f"{param} " in ctor_block, (
+                f"StackedDiD constructor block in llms-full.txt is missing the real "
+                f"public parameter {param!r} (adding a public param requires updating "
+                f"the guide)."
+            )
+
+    def test_llms_full_stacked_fit_documents_covariates(self):
+        import inspect
+
+        from diff_diff import StackedDiD
+
+        assert "covariates" in inspect.signature(StackedDiD.fit).parameters
+        section = self._stacked_section()
+        fit_start = section.index("stacked.fit(")
+        fit_block = section[fit_start : section.index("\n)", fit_start)]
+        assert "covariates" in fit_block, (
+            "StackedDiD.fit() exposes covariates= but the llms-full.txt fit() block "
+            "does not document it."
+        )
+        # balance= must be documented somewhere in the section (constructor param)
+        assert "balance" in section

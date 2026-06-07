@@ -1538,6 +1538,30 @@ The paper text states a stricter bound (T_min + 1) but the R code by the co-auth
 - [x] Survey design support (Phase 3): Q-weights compose multiplicatively with survey weights; TSL vcov on composed weights; survey design columns propagated through sub-experiments. Replicate weights supported via estimator-level refit with Q-weight composition (see Replicate Weight Variance section).
 - **Note:** Survey weights compose multiplicatively with Q-weights for StackedDiD; only `weight_type="pweight"` (default) is supported — `fweight` and `aweight` are rejected because Q-weight composition changes weight semantics (non-integer for fweight, non-inverse-variance for aweight)
 
+### Covariate balancing (CBWSDID)
+
+**Primary source:** Ustyuzhanin, V. (2026). Covariate-Balanced Weighted Stacked Difference-in-Differences. arXiv:2604.02293v1. https://arxiv.org/abs/2604.02293 (in-repo paper review: `docs/methodology/papers/ustyuzhanin-2026-review.md`). Within-sub-experiment refinement via **entropy balancing** (Hainmueller 2012).
+
+Optional `balance="entropy"` (constructor) + `fit(..., covariates=[...])` adds a within-sub-experiment design stage that reweights the clean controls toward the treated cohort under **conditional** parallel trends, before the Wing et al. (2024) corrective aggregation.
+
+*Design weights (Ustyuzhanin 2026 §3.1):*
+For each sub-experiment `a`, entropy balancing produces nonnegative control weights `b_{sa}` matching the treated covariate means (covariates read at the last pre-treatment period `t = a-1-anticipation`; treated keep `b=1`). The final stacked weights compose `b_{sa}` with the corrective factor via the **effective control mass** `Ñ^C_a = Σ_{s∈C_a} b_{sa}`:
+
+    W_{sa} = b_{sa} · (N^D_a / N^D_Ω) / (Ñ^C_a / Ñ^C_Ω)    for s ∈ C_a
+    W_{sa} = 1                                            for s ∈ D_a
+
+The pooled estimator is `DID^{CBWSDID}_e = Σ_a (N^D_a/N^D_Ω)(Δ̄^D_{a,e} − Δ̄^{C,b}_{a,e})`, recovered by the existing Q-weighted WLS when `W_{sa}` is injected. **Estimand preservation:** because only controls are reweighted (treated cohorts and their shares `N^D_a/N^D_Ω` are unchanged), the target remains the trimmed aggregate ATT `θ^e_κ` — the refinement changes only how untreated trends are estimated. At `b_{sa}=1` this reduces to the paper's **unit-count** weighted stacked DID, which equals `StackedDiD(weighting="aggregate")` on **balanced** event windows (where unit and observation counts coincide). Validated end-to-end by `tests/test_methodology_stacked_did.py::TestCBWSDIDCovariateBalance` (closed-form `DID^{CBWSDID}_e` anchor at 1e-8), `::TestCBWSDIDEffectiveMass` (effective-mass corrector is load-bearing vs a naive `b·Q` multiply), and `::TestCBWSDIDRParity` (cross-language parity vs the R `cbwsdid` package, `refinement.method="weightit"` / `method="ebal"`, at 1e-5 — golden in `benchmarks/data/cbwsdid_golden.json`, regenerate via `benchmarks/R/generate_cbwsdid_golden.R`).
+
+- **Note:** The effective-mass `W_{sa}` is computed directly from cohort unit-counts + `Ñ^C_a` (a naive `b_{sa}·Q_aggregate` multiply is NOT equivalent — it aggregates control means with weights ∝ `(N^D_a/N^D_Ω)(Ñ^C_a/N^C_a)` instead of the required `∝ (N^D_a/N^D_Ω)`, biased unless `b` is uniform).
+- **Note:** Inference is conditional-on-the-estimated-weights cluster-robust (the existing `hc1`/`hc2_bm` path with `W_{sa}` as the WLS weights) — the paper's default. The paper's weight-re-estimating bootstrap is NOT implemented in v1 (deliberate scope; entropy balancing is smooth so the Abadie–Imbens (2008) nonsmooth-matching bootstrap caveat does not apply). `cluster` is orthogonal to `b_{sa}` (weights conditioned-on); default `unit` matches the paper.
+- **Note:** v1 scope — only `balance="entropy"` with `weighting="aggregate"`. `balance` + `population`/`sample_share` and `balance` + `survey_design=` raise `NotImplementedError`; matching-based balancing and the repeated `0→1/1→0` episode extension are out of scope.
+
+*Covariate-balancing edge cases:*
+- Infeasible cohort (treated covariate mean outside the clean-control hull → entropy balancing cannot match the moments): **fail-closed** `ValueError` naming the cohort and worst covariate — NOT silently dropped (dropping a cohort would shift the estimand to an overlap-trimmed ATT, Ustyuzhanin 2026 §3.1).
+- Degenerate design weights (`Ñ^C_a → 0` / highly concentrated weights): low effective sample size → `UserWarning` with the per-cohort diagnostic.
+- Missing pre-treatment row, or covariate absent / `balance`↔`covariates` mismatch: `ValueError` at `fit()`.
+- **Ragged / unbalanced event windows** (a unit not observed at every event time in a sub-experiment): **fail-closed `ValueError`** — `balance="entropy"` requires balanced windows. The paper assumes balanced event windows; off them the unit-count corrector and the observation-count `aggregate` Q diverge (the count-convention is unresolved, deferred). `balance="none"` continues to support unbalanced panels via observation-count Q.
+
 ---
 
 ## WooldridgeDiD (ETWFE)
