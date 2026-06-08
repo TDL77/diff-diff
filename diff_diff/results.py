@@ -1209,13 +1209,11 @@ class SyntheticDiDResults:
     def placebo_effects(self) -> Optional[np.ndarray]:
         """Deprecated alias for :attr:`variance_effects` (removed in v4.0.0).
 
-        .. deprecated:: 3.6.0
+        .. deprecated:: 3.5.2
             Renamed to ``variance_effects`` because the array's contents are
             method-specific (placebo effects, bootstrap ATT draws, or
             leave-one-out estimates depending on ``variance_method``).
         """
-        # `3.6.0` is the assumed next-minor (current is 3.5.1); confirm/resolve
-        # at bump-version time. The v4.0.0 removal target is fixed.
         warnings.warn(
             "SyntheticDiDResults.placebo_effects is deprecated; use "
             "variance_effects instead. The array holds placebo effects, "
