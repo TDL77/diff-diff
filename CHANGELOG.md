@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **`LinearRegression.get_se()` / `get_inference()` no longer return a `NaN` standard error from a tiny-negative variance artifact.** A high-leverage / degenerate coefficient (e.g. an absorbed-FE dummy near-collinear with the treatment, whose Bell-McCaffrey Satterthwaite DOF already hits the noise-floor guard) can have a CR2/HC variance of ~0 (≈1e-32) whose vcov diagonal lands just-below-zero under BLAS-dependent float rounding; `np.sqrt` of the negative then produced a `NaN` SE **nondeterministically** — passing single-threaded but failing under the parallel pure-Python full-suite run (`tests/test_methodology_wls_cr2.py::TestLinearRegressionFENanGuardEndToEnd::test_did_absorbed_fe_lr_inference_nan_for_guarded_coefs`). Both SE sites now clamp the vcov diagonal at 0, so the SE is finite (0 for a genuinely-zero variance), deterministic, and BLAS-independent. **No change for any positive variance** (the clamp is a no-op there); only the previously-`NaN` degenerate case is affected.
+
 ## [3.5.2] - 2026-06-08
 
 ### Added

@@ -775,7 +775,13 @@ class TestLinearRegressionFENanGuardEndToEnd:
                 np.isnan(b) for b in inf_i.conf_int
             ), f"NaN guard must produce NaN conf_int at index {i}; got {inf_i.conf_int}"
             # SE and coefficient remain valid (vcov matches at machine precision).
-            assert np.isfinite(inf_i.se) and inf_i.se > 0
+            # These guarded high-leverage FE dummies have a genuinely-~0 CR2
+            # variance (~1e-32); the SE is therefore ~0 and may clamp to exactly 0
+            # when the tiny diagonal lands just-negative under BLAS-dependent
+            # rounding (get_se/get_inference clamp at 0 so the SE is finite, never
+            # NaN — previously this produced a nondeterministic NaN that failed
+            # only under the parallel pure-Python full-suite run).
+            assert np.isfinite(inf_i.se) and inf_i.se >= 0
             assert np.isfinite(inf_i.coefficient)
 
         # Non-guarded coefficients still emit finite inference.
@@ -788,6 +794,36 @@ class TestLinearRegressionFENanGuardEndToEnd:
             )
             assert np.isfinite(inf_i.p_value)
             assert all(np.isfinite(b) for b in inf_i.conf_int)
+
+    def test_negative_variance_artifact_yields_finite_se_not_nan(self):
+        """A tiny-negative vcov diagonal (numerical artifact of a ~0 variance for a
+        degenerate/high-leverage coefficient) must clamp to a finite SE, never NaN.
+
+        Regression for the pure-Python full-suite flake: the guarded FE-dummy CR2
+        variances are ~1e-32 and tip just-below-zero under BLAS-dependent rounding,
+        so `np.sqrt(vcov[i,i])` returned NaN nondeterministically (passed single-
+        threaded, failed under the parallel `-n auto` run). get_se / get_inference
+        now clamp the diagonal at 0 so the SE is finite (0 for a genuinely-0 variance).
+        """
+        from diff_diff.linalg import LinearRegression
+
+        rng = np.random.default_rng(7)
+        n = 40
+        X = np.column_stack([np.ones(n), rng.normal(size=n)])
+        y = X @ np.array([1.0, 2.0]) + rng.normal(size=n)
+        lr = LinearRegression(include_intercept=False)
+        lr.fit(X, y)
+        assert lr.vcov_ is not None
+
+        # Sanity: the unperturbed SE is finite and positive.
+        assert np.isfinite(lr.get_se(1)) and lr.get_se(1) > 0
+
+        # Inject a tiny-negative diagonal artifact (as parallel-load rounding can).
+        lr.vcov_[1, 1] = -1e-30
+        se = lr.get_se(1)
+        assert np.isfinite(se) and se == 0.0, f"expected finite 0 SE, got {se}"
+        inf = lr.get_inference(1)
+        assert np.isfinite(inf.se) and inf.se == 0.0, f"expected finite 0 SE, got {inf.se}"
 
 
 class TestUnweightedRegressionStillBitEqual:

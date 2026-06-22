@@ -3865,7 +3865,13 @@ class LinearRegression:
         """
         self._check_fitted()
         assert self.vcov_ is not None
-        return float(np.sqrt(self.vcov_[index, index]))
+        # Clamp a tiny-negative variance artifact at 0 before sqrt. A high-leverage
+        # / degenerate coefficient (e.g. an absorbed-FE dummy near-collinear with the
+        # treatment) can have a CR2/HC variance of ~0 that lands just below zero under
+        # BLAS-dependent float rounding; without the clamp `np.sqrt` returns NaN
+        # nondeterministically (passes single-threaded, fails under parallel test
+        # load). The SE is then finite — 0 for a genuinely-zero variance.
+        return float(np.sqrt(max(float(self.vcov_[index, index]), 0.0)))
 
     def get_inference(
         self,
@@ -3908,7 +3914,8 @@ class LinearRegression:
         assert self.vcov_ is not None
 
         coef = float(self.coefficients_[index])
-        se = float(np.sqrt(self.vcov_[index, index]))
+        # See get_se: clamp a tiny-negative variance artifact at 0 so SE is finite, not NaN.
+        se = float(np.sqrt(max(float(self.vcov_[index, index]), 0.0)))
 
         # Use instance alpha if not provided
         effective_alpha = alpha if alpha is not None else self.alpha

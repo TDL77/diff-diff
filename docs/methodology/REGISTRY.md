@@ -186,6 +186,13 @@ where V is the VCV sub-matrix for post-treatment δ_e coefficients.
   DiD panel sizes (n ≤ few thousand); tracked in `TODO.md` under Performance for
   a follow-up that plumbs the contrast DOF through the existing CR2 vcov path or
   shares precomputes.
+- **Note:** `LinearRegression.get_se()` / `get_inference()` clamp the vcov diagonal at 0
+  before `sqrt`. A high-leverage / degenerate coefficient (an absorbed-FE dummy
+  near-collinear with the treatment, whose Satterthwaite DOF already hits the noise-floor
+  guard) has a CR2/HC variance of ~0 (≈1e-32) that can land just-below-zero under
+  BLAS-dependent rounding; the clamp keeps the SE finite (0 for a genuinely-zero variance)
+  and deterministic across BLAS implementations, never `NaN`. No effect on any positive
+  variance. Regression: `tests/test_methodology_wls_cr2.py::TestLinearRegressionFENanGuardEndToEnd`.
 - Optional: Wild cluster bootstrap (complex for multi-coefficient testing;
   requires joint bootstrap distribution)
 - Degrees of freedom adjusted for absorbed fixed effects
