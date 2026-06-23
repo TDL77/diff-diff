@@ -109,6 +109,7 @@ Quick Links
    tutorials/15_efficient_did
    tutorials/16_survey_did
    tutorials/16_wooldridge_etwfe
+   tutorials/25_synthetic_control_policy
 
 .. toctree::
    :maxdepth: 1

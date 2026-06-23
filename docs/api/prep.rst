@@ -128,6 +128,38 @@ Example
        time="period", treatment="treatment",
    )
 
+generate_synthetic_control_data
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Generate a **single-treated-unit** panel for synthetic control demos. A factor model
+places the treated unit's *noiseless* trajectory in the span of the donor trajectories
+(so a synthetic control reproduces it closely — the observed fit is approximate under
+the added transitory/predictor noise) and injects a known ramping or constant treatment
+effect. Use this with :class:`~diff_diff.SyntheticControl`.
+
+.. autofunction:: diff_diff.generate_synthetic_control_data
+
+Example
+^^^^^^^
+
+.. code-block:: python
+
+   from diff_diff import generate_synthetic_control_data, SyntheticControl
+
+   data = generate_synthetic_control_data(
+       n_donors=10,
+       n_pre=20,
+       n_post=4,
+       effect_type="ramp",
+       seed=0,
+   )
+
+   res = SyntheticControl(n_starts=1, seed=0).fit(
+       data, outcome="outcome", treatment="treatment",
+       unit="unit", time="period", predictors=["x1", "x2", "x3"],
+   )
+   print(round(res.att, 2), round(res.pre_rmspe, 2))
+
 Indicator Creation
 ------------------
 

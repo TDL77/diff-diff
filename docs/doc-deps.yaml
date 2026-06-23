@@ -643,6 +643,8 @@ sources:
       - path: diff_diff/guides/llms.txt
         section: "Estimators"
         type: user_guide
+      - path: docs/tutorials/25_synthetic_control_policy.ipynb
+        type: tutorial
 
   diff_diff/synthetic_control_results.py:
     drift_risk: low
@@ -659,6 +661,8 @@ sources:
       - path: diff_diff/guides/llms-full.txt
         section: "SyntheticControlResults"
         type: user_guide
+      - path: docs/tutorials/25_synthetic_control_policy.ipynb
+        type: tutorial
 
   diff_diff/conformal.py:
     drift_risk: medium
@@ -670,6 +674,8 @@ sources:
         type: methodology
       - path: docs/api/synthetic_control.rst
         type: api_reference
+      - path: docs/tutorials/25_synthetic_control_policy.ipynb
+        type: tutorial
 
   # ── HonestDiD ───────��──────────────────────────────────────────────
 
@@ -917,6 +923,8 @@ sources:
         type: user_guide
       - path: docs/practitioner_decision_tree.rst
         type: user_guide
+      - path: docs/tutorials/25_synthetic_control_policy.ipynb
+        type: tutorial
 
   diff_diff/datasets.py:
     drift_risk: low
