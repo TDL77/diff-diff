@@ -1393,6 +1393,14 @@ class TestEstimatorCoverage:
                 data_generator_kwargs={"group_frac": 0.1, "partition_frac": 0.1},
             )
 
+    def test_ddd_panel_viable_min_n_validates_split(self):
+        """The viable-floor helper rejects out-of-range fractions with the DGP's
+        clear message (not a misleading n_range/bracketing error)."""
+        with pytest.raises(ValueError, match=r"group_frac must be in \(0, 1\)"):
+            _ddd_panel_viable_min_n(0.0, 0.5)
+        with pytest.raises(ValueError, match=r"partition_frac must be in \(0, 1\)"):
+            _ddd_panel_viable_min_n(0.5, 1.0)
+
     @pytest.mark.slow
     def test_ddd_mde(self):
         """simulate_mde works for TripleDifference."""

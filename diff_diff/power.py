@@ -696,10 +696,21 @@ def _ddd_panel_viable_min_n(
     skewed splits (e.g. 0.1/0.1) need more units before every cell is non-empty,
     so the sample-size search must bracket above this value (the registry
     documents group_frac/partition_frac as data_generator_kwargs overrides)."""
+    # Validate up front (matching generate_ddd_panel_data) so an out-of-range
+    # split raises the same clear message here — before the bracketing logic can
+    # surface a misleading "n_range below the minimum" error downstream.
+    if not (0.0 < group_frac < 1.0):
+        raise ValueError(f"group_frac must be in (0, 1); got {group_frac}.")
+    if not (0.0 < partition_frac < 1.0):
+        raise ValueError(f"partition_frac must be in (0, 1); got {partition_frac}.")
     for n in range(4, search_max + 1):
         if _ddd_panel_cells_populated(n, group_frac, partition_frac):
             return max(floor, n)
-    return max(floor, search_max)
+    raise ValueError(
+        f"No panel-DDD sample size <= {search_max} populates all four "
+        f"(group, partition) cells for group_frac={group_frac}, "
+        f"partition_frac={partition_frac}; move the split closer to 0.5."
+    )
 
 
 def _check_ddd_dgp_compat(
