@@ -267,6 +267,29 @@ def _ddd_dgp_kwargs(
     )
 
 
+def _ddd_panel_dgp_kwargs(
+    n_units: int,
+    n_periods: int,
+    treatment_effect: float,
+    treatment_fraction: float,
+    treatment_period: int,
+    sigma: float,
+) -> Dict[str, Any]:
+    # Panel DDD DGP (n_periods > 2). `n_units` maps directly (no 8-cell //8
+    # rounding). `treatment_fraction` is intentionally NOT mapped — DDD is a
+    # balanced factorial, so group_frac/partition_frac are left at the DGP
+    # default 0.5. Omitting group_frac/partition_frac here also keeps them out
+    # of the _PROTECTED_DGP_KEYS collision check, so a user can still override
+    # the group/partition split via data_generator_kwargs.
+    return dict(
+        n_units=n_units,
+        n_periods=n_periods,
+        treatment_period=treatment_period,
+        treatment_effect=treatment_effect,
+        noise_sd=sigma,
+    )
+
+
 # -- Fit kwargs builders ------------------------------------------------------
 
 
@@ -318,6 +341,19 @@ def _ddd_fit_kwargs(
     treatment_period: int,
 ) -> Dict[str, Any]:
     return dict(outcome="outcome", group="group", partition="partition", time="time")
+
+
+def _ddd_panel_fit_kwargs(
+    data: pd.DataFrame,
+    n_units: int,
+    n_periods: int,
+    treatment_period: int,
+) -> Dict[str, Any]:
+    # Panel DDD: time="post" is generate_ddd_panel_data's derived binary
+    # pre/post indicator (vs the cross-sectional "time"). Clustering is NOT a
+    # fit kwarg — it resolves from the estimator's cluster="unit" attribute
+    # against the DGP's "unit" column.
+    return dict(outcome="outcome", group="group", partition="partition", time="post")
 
 
 def _trop_fit_kwargs(
@@ -686,6 +722,55 @@ def _check_ddd_dgp_compat(
         )
 
 
+def _check_ddd_panel_dgp_compat(
+    estimator: Any,
+    treatment_fraction: float,
+    data_generator_kwargs: Optional[Dict[str, Any]],
+) -> None:
+    """Compat checks for the panel DDD power path (``n_periods > 2``).
+
+    Unlike the cross-sectional ``_check_ddd_dgp_compat``, ``n_periods`` and
+    ``treatment_period`` are honored here (no warning). ``treatment_fraction``
+    is still inert (the panel DGP is a balanced 2×2×2). The key addition is the
+    clustering caveat: ``generate_ddd_panel_data`` has within-unit serial
+    correlation, so unclustered SEs overstate power.
+    """
+    overrides = data_generator_kwargs or {}
+    if "n_per_cell" in overrides:
+        raise ValueError(
+            "data_generator_kwargs contains 'n_per_cell', a cross-sectional "
+            "generate_ddd_data parameter. The panel DDD power path "
+            "(n_periods > 2) uses generate_ddd_panel_data, which sizes the panel "
+            "by n_units directly. Control the design via n_units and the "
+            "group_frac / partition_frac data_generator_kwargs instead."
+        )
+
+    if treatment_fraction != 0.5:
+        warnings.warn(
+            f"treatment_fraction={treatment_fraction} is ignored for "
+            f"TripleDifference power: generate_ddd_panel_data uses a balanced "
+            f"2×2×2 design (group_frac=partition_frac=0.5). Pass group_frac / "
+            f"partition_frac via data_generator_kwargs to vary the split.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    # The panel DGP hard-names its unit column "unit", and TripleDifference
+    # resolves clustering from `self.cluster` against a same-named data column,
+    # so on this auto-DGP path the only correct value is the literal "unit" —
+    # this is NOT a general clustering check.
+    if getattr(estimator, "cluster", None) != "unit":
+        warnings.warn(
+            "TripleDifference power on the panel DGP (n_periods > 2) has "
+            "within-unit serial correlation, so unclustered standard errors are "
+            "anti-conservative and overstate power. Construct the estimator as "
+            'TripleDifference(cluster="unit") so the reported power reflects '
+            "cluster-robust (Liang-Zeger CR1) inference.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
 def _check_sdid_placebo_data(
     data: pd.DataFrame,
     estimator: Any,
@@ -831,6 +916,28 @@ def _get_registry() -> Dict[str, _EstimatorProfile]:
         ),
     }
     return _ESTIMATOR_REGISTRY
+
+
+def _ddd_panel_profile() -> "_EstimatorProfile":
+    """Profile for panel DDD power simulations (n_periods > 2).
+
+    Routes TripleDifference power analysis to ``generate_ddd_panel_data``
+    (which honors ``n_periods``/``treatment_period``) instead of the
+    cross-sectional 2x2x2 ``generate_ddd_data``. See ``simulate_power``.
+    """
+    from diff_diff.prep import generate_ddd_panel_data
+
+    # min_n=16 is intentionally lower than the cross-sectional DDD min_n=64
+    # (which counts 8 cells x n_per_cell); the panel DGP maps n_units directly
+    # and only requires n_units >= 4, so 16 gives >=1 unit per (group,partition)
+    # cell with margin.
+    return _EstimatorProfile(
+        default_dgp=generate_ddd_panel_data,
+        dgp_kwargs_builder=_ddd_panel_dgp_kwargs,
+        fit_kwargs_builder=_ddd_panel_fit_kwargs,
+        result_extractor=_extract_simple,
+        min_n=16,
+    )
 
 
 @dataclass
@@ -2007,6 +2114,21 @@ def simulate_power(
     use_custom_dgp = data_generator is not None
     use_survey_dgp = survey_config is not None
 
+    # Route DDD power to the panel DGP when n_periods > 2. The cross-sectional
+    # 2x2x2 generate_ddd_data ignores n_periods; generate_ddd_panel_data honors
+    # it. Swapping the profile here (before the collision check and the DDD
+    # compat warnings) makes every downstream consumer (dgp_kwargs_builder,
+    # default_dgp, fit_kwargs_builder, result_extractor, min_n) use the panel
+    # variant automatically.
+    use_ddd_panel = (
+        estimator_name == "TripleDifference"
+        and n_periods > 2
+        and not use_custom_dgp
+        and not use_survey_dgp
+    )
+    if use_ddd_panel:
+        profile = _ddd_panel_profile()
+
     # --- Survey config validation ---
     if use_survey_dgp:
         assert survey_config is not None  # for type narrowing
@@ -2161,7 +2283,13 @@ def simulate_power(
             )
 
     # Warn if DDD design inputs are silently ignored
-    if estimator_name == "TripleDifference" and not use_custom_dgp:
+    if use_ddd_panel:
+        # Panel path honors n_periods/treatment_period; n_units maps directly
+        # (no //8 rounding). Different compat surface than the cross-sectional
+        # 2x2x2 design.
+        _check_ddd_panel_dgp_compat(estimator, treatment_fraction, data_generator_kwargs)
+        effective_n_units = None
+    elif estimator_name == "TripleDifference" and not use_custom_dgp:
         _check_ddd_dgp_compat(
             n_units,
             n_periods,
@@ -2707,8 +2835,10 @@ def simulate_mde(
     estimator_name = type(estimator).__name__
     search_path: List[Dict[str, float]] = []
 
-    # Compute effective N for DDD (N is fixed throughout MDE search)
-    if estimator_name == "TripleDifference" and data_generator is None:
+    # Compute effective N for DDD (N is fixed throughout MDE search). Only the
+    # cross-sectional 2x2x2 DGP (n_periods <= 2) rounds n_units to a multiple of
+    # 8; the panel DGP (n_periods > 2) maps n_units directly, so report None.
+    if estimator_name == "TripleDifference" and data_generator is None and n_periods <= 2:
         effective_n_units = _ddd_effective_n(n_units, data_generator_kwargs)
     else:
         effective_n_units = None
@@ -2925,15 +3055,24 @@ def simulate_sample_size(
     estimator_name = type(estimator).__name__
     search_path: List[Dict[str, float]] = []
 
-    # Determine min_n from registry
+    # Determine min_n from registry. DDD splits cross-sectional (n_periods <= 2,
+    # 2x2x2 factorial) from panel (n_periods > 2, generate_ddd_panel_data).
     registry = _get_registry()
     profile = registry.get(estimator_name)
-    min_n = profile.min_n if profile is not None else 20
+    is_ddd = estimator_name == "TripleDifference" and data_generator is None
+    is_ddd_panel = is_ddd and n_periods > 2
+    if is_ddd_panel:
+        min_n = _ddd_panel_profile().min_n
+    else:
+        min_n = profile.min_n if profile is not None else 20
 
-    # DDD grid snapping: bisection candidates must be multiples of 8
-    is_ddd_grid = estimator_name == "TripleDifference" and data_generator is None
+    # Grid snapping: the cross-sectional 2x2x2 DDD DGP rounds n_units to a
+    # multiple of 8, so bisection candidates must snap to that grid. The panel
+    # DGP maps n_units directly → continuous (step-1) search like every other
+    # estimator.
+    is_ddd_grid = is_ddd and not is_ddd_panel
     grid_step = 8 if is_ddd_grid else 1
-    convergence_threshold = grid_step + 1  # 9 for DDD, 2 for others
+    convergence_threshold = grid_step + 1  # 9 for cross-sectional DDD, 2 otherwise
 
     if is_ddd_grid and data_generator_kwargs and "n_per_cell" in data_generator_kwargs:
         raise ValueError(
@@ -2991,7 +3130,9 @@ def simulate_sample_size(
             )
 
     # --- Bracket ---
-    abs_min = 16 if is_ddd_grid else 4
+    # Both DDD paths (cross-sectional and panel) want a >=16 floor so the 8
+    # G×P×T cells are populated with margin; everything else floors at 4.
+    abs_min = 16 if is_ddd else 4
     if survey_config is not None:
         abs_min = max(abs_min, survey_config.min_viable_n)
     if n_range is not None:
