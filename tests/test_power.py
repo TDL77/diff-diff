@@ -38,6 +38,7 @@ from diff_diff.power import (
     _basic_fit_kwargs,
     _ddd_dgp_kwargs,
     _ddd_fit_kwargs,
+    _ddd_panel_viable_min_n,
     _extract_multiperiod,
     _extract_simple,
     _extract_staggered,
@@ -1110,13 +1111,13 @@ class TestEstimatorCoverage:
         self._assert_valid_result(result, "TripleDifference")
 
     def test_ddd_warns_ignored_params(self):
-        """TripleDifference warns when simulation params don't match DDD design."""
-        with pytest.warns(UserWarning, match="n_periods=6 is ignored"):
+        """Cross-sectional DDD (n_periods<=2) warns when params don't match the design."""
+        with pytest.warns(UserWarning, match="treatment_fraction=0.3 is ignored"):
             simulate_power(
                 TripleDifference(),
                 n_units=80,
-                n_periods=6,
-                treatment_period=3,
+                n_periods=2,
+                treatment_period=1,
                 treatment_fraction=0.3,
                 n_simulations=2,
                 seed=42,
@@ -1191,13 +1192,14 @@ class TestEstimatorCoverage:
             )
 
     def test_ddd_no_warn_n_per_cell_override(self):
-        """n_per_cell override suppresses rounding warning but not ignored-param warnings."""
-        with pytest.warns(UserWarning, match="n_periods=6 is ignored"):
+        """Cross-sectional: n_per_cell suppresses the rounding warning but not ignored-param warnings."""
+        with pytest.warns(UserWarning, match="treatment_fraction=0.3 is ignored"):
             simulate_power(
                 TripleDifference(),
                 n_units=80,
-                n_periods=6,
+                n_periods=2,
                 treatment_period=1,
+                treatment_fraction=0.3,
                 data_generator_kwargs=dict(n_per_cell=10),
                 n_simulations=2,
                 seed=42,
@@ -1249,6 +1251,155 @@ class TestEstimatorCoverage:
         assert result.effective_n_units is None
         assert result.to_dict()["effective_n_units"] is None
         assert "Effective sample size" not in result.summary()
+
+    # --- Panel DDD routing (n_periods > 2 → generate_ddd_panel_data) ---
+
+    def test_ddd_panel_routing(self):
+        """n_periods>2 routes DDD power to the panel DGP and honors n_periods."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = simulate_power(
+                TripleDifference(cluster="unit"),
+                n_units=80,
+                n_periods=6,
+                treatment_period=3,
+                treatment_fraction=0.5,
+                n_simulations=10,
+                seed=42,
+                progress=False,
+            )
+        self._assert_valid_result(result, "TripleDifference")
+        # Panel path honors n_periods/treatment_period (no "ignored" warning),
+        # and cluster="unit" suppresses the clustering caveat.
+        msgs = [str(w.message) for w in caught if issubclass(w.category, UserWarning)]
+        assert not any("ignored" in m for m in msgs), msgs
+        assert not any("overstate power" in m for m in msgs), msgs
+
+    def test_ddd_panel_warns_without_cluster(self):
+        """Panel DDD power warns when the estimator lacks cluster='unit'."""
+        with pytest.warns(UserWarning, match="overstate power"):
+            simulate_power(
+                TripleDifference(),
+                n_units=80,
+                n_periods=6,
+                treatment_period=3,
+                treatment_fraction=0.5,
+                n_simulations=5,
+                seed=42,
+                progress=False,
+            )
+
+    def test_ddd_panel_no_warn_with_cluster(self):
+        """No warning on the panel path with cluster='unit' and a balanced split."""
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            simulate_power(
+                TripleDifference(cluster="unit"),
+                n_units=80,
+                n_periods=6,
+                treatment_period=3,
+                treatment_fraction=0.5,
+                n_simulations=2,
+                seed=42,
+                progress=False,
+            )
+
+    def test_ddd_panel_rejects_n_per_cell(self):
+        """n_per_cell is cross-sectional-only; the panel path rejects it clearly."""
+        with pytest.raises(ValueError, match="n_per_cell"):
+            simulate_power(
+                TripleDifference(cluster="unit"),
+                n_units=80,
+                n_periods=6,
+                treatment_period=3,
+                data_generator_kwargs=dict(n_per_cell=10),
+                n_simulations=2,
+                seed=42,
+                progress=False,
+            )
+
+    @pytest.mark.slow
+    def test_ddd_panel_mde(self):
+        """simulate_mde routes to the panel DGP for n_periods>2 (effective_n_units=None)."""
+        result = simulate_mde(
+            TripleDifference(cluster="unit"),
+            n_units=80,
+            n_periods=6,
+            treatment_period=3,
+            n_simulations=5,
+            effect_range=(0.5, 5.0),
+            seed=42,
+            progress=False,
+        )
+        assert isinstance(result, SimulationMDEResults)
+        assert result.mde > 0
+        assert result.effective_n_units is None
+
+    @pytest.mark.slow
+    def test_ddd_panel_sample_size(self):
+        """simulate_sample_size uses a continuous (step-1) search on the panel path."""
+        result = simulate_sample_size(
+            TripleDifference(cluster="unit"),
+            n_periods=6,
+            treatment_period=3,
+            treatment_effect=1.0,
+            n_simulations=10,
+            n_range=(20, 160),
+            seed=3,
+            progress=False,
+        )
+        assert isinstance(result, SimulationSampleSizeResults)
+        assert result.required_n > 0
+        # Panel path is NOT snapped to the cross-sectional multiple-of-8 grid:
+        # the bisection must be able to explore non-multiples of 8.
+        assert result.search_path
+        assert any(
+            int(step["n_units"]) % 8 != 0 for step in result.search_path
+        ), "panel sample-size search should explore non-multiples of 8 (step-1 grid)"
+
+    @pytest.mark.slow
+    def test_ddd_panel_sample_size_unbalanced_split(self):
+        """Unbalanced group_frac/partition_frac override raises the panel floor so
+        the search never probes an infeasible (empty-cell) n."""
+        result = simulate_sample_size(
+            TripleDifference(cluster="unit"),
+            n_periods=6,
+            treatment_period=3,
+            treatment_effect=2.0,
+            n_simulations=8,
+            seed=1,
+            progress=False,
+            data_generator_kwargs={"group_frac": 0.1, "partition_frac": 0.1},
+        )
+        assert isinstance(result, SimulationSampleSizeResults)
+        assert result.required_n > 0
+        # Every probed n must populate all 4 (group, partition) cells (>= the
+        # split-aware viable floor); none should hit the infeasible n=16 default.
+        viable_floor = _ddd_panel_viable_min_n(0.1, 0.1)
+        assert viable_floor > 16  # skewed split needs more than the balanced floor
+        assert all(int(step["n_units"]) >= viable_floor for step in result.search_path)
+
+    def test_ddd_panel_sample_size_low_n_range_raises(self):
+        """An n_range whose upper bound is below the split-aware viable floor raises clearly."""
+        with pytest.raises(ValueError, match="below the minimum panel-DDD"):
+            simulate_sample_size(
+                TripleDifference(cluster="unit"),
+                n_periods=6,
+                treatment_period=3,
+                n_range=(8, 20),
+                n_simulations=2,
+                seed=1,
+                progress=False,
+                data_generator_kwargs={"group_frac": 0.1, "partition_frac": 0.1},
+            )
+
+    def test_ddd_panel_viable_min_n_validates_split(self):
+        """The viable-floor helper rejects out-of-range fractions with the DGP's
+        clear message (not a misleading n_range/bracketing error)."""
+        with pytest.raises(ValueError, match=r"group_frac must be in \(0, 1\)"):
+            _ddd_panel_viable_min_n(0.0, 0.5)
+        with pytest.raises(ValueError, match=r"partition_frac must be in \(0, 1\)"):
+            _ddd_panel_viable_min_n(0.5, 1.0)
 
     @pytest.mark.slow
     def test_ddd_mde(self):
@@ -2104,11 +2255,15 @@ class TestDGPKeyCollisions:
         )
 
     def test_allow_n_per_cell_override(self):
-        """n_per_cell is not a protected key — no collision for DDD."""
-        # Should not raise (n_per_cell is in DDD builder output but not
-        # in _PROTECTED_DGP_KEYS, so 3-way intersection is empty)
+        """n_per_cell is not a protected key — no collision for cross-sectional DDD."""
+        # Should not raise (n_per_cell is in the cross-sectional DDD builder
+        # output but not in _PROTECTED_DGP_KEYS, so 3-way intersection is empty).
+        # n_periods=2 pins the cross-sectional path; on the panel path
+        # (n_periods > 2) n_per_cell is rejected (see test_ddd_panel_rejects_n_per_cell).
         simulate_power(
             TripleDifference(),
+            n_periods=2,
+            treatment_period=1,
             n_simulations=2,
             seed=42,
             progress=False,
