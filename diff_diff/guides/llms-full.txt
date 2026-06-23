@@ -1956,6 +1956,7 @@ from diff_diff import (
     generate_factor_data,
     generate_ddd_data,
     generate_continuous_did_data,
+    generate_synthetic_control_data,
 )
 
 # Basic 2x2 DiD data
@@ -1985,6 +1986,11 @@ data = generate_ddd_data(n_per_cell=100, treatment_effect=2.0, seed=42)
 # Continuous dose data
 data = generate_continuous_did_data(n_units=500, n_periods=4,
                                     att_function="linear", att_slope=2.0, seed=42)
+
+# Single-treated-unit panel for synthetic control (noiseless treated path in the
+# donor convex hull; ramping or constant effect). Use with SyntheticControl.
+data = generate_synthetic_control_data(n_donors=20, n_pre=60, n_post=5,
+                                       effect_type="ramp", seed=0)
 ```
 
 ## Real-World Datasets

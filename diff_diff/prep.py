@@ -28,6 +28,7 @@ from diff_diff.prep_dgp import (  # noqa: F401
     generate_staggered_data,
     generate_staggered_ddd_data,
     generate_survey_did_data,
+    generate_synthetic_control_data,
 )
 from diff_diff.survey import (
     ResolvedSurveyDesign,

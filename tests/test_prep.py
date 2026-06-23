@@ -1040,6 +1040,182 @@ class TestGenerateFactorData:
             generate_factor_data(n_units=10, n_treated=0)
 
 
+class TestGenerateSyntheticControlData:
+    """Tests for generate_synthetic_control_data function."""
+
+    def test_basic_generation(self):
+        """Shape and exact column set (incl. predictor columns)."""
+        from diff_diff.prep import generate_synthetic_control_data
+
+        data = generate_synthetic_control_data(
+            n_donors=10, n_pre=12, n_post=4, n_predictors=3, seed=42
+        )
+        assert len(data) == (10 + 1) * (12 + 4)  # (donors + treated) x periods
+        assert set(data.columns) == {
+            "unit",
+            "period",
+            "outcome",
+            "treatment",
+            "treat",
+            "true_effect",
+            "x1",
+            "x2",
+            "x3",
+        }
+
+    def test_single_treated_unit(self):
+        """Exactly one ever-treated unit (unit 0)."""
+        from diff_diff.prep import generate_synthetic_control_data
+
+        data = generate_synthetic_control_data(n_donors=15, seed=42)
+        ever_treated = data.groupby("unit")["treat"].first()
+        assert ever_treated.sum() == 1
+        assert ever_treated.loc[0] == 1  # treated unit is id 0
+
+    def test_treatment_absorbing_treated_post_only(self):
+        """treatment==1 only for the treated unit in post periods."""
+        from diff_diff.prep import generate_synthetic_control_data
+
+        data = generate_synthetic_control_data(n_donors=8, n_pre=10, n_post=4, seed=1)
+        treated_rows = data[data["treatment"] == 1]
+        assert (treated_rows["unit"] == 0).all()
+        assert (treated_rows["period"] >= 10).all()
+        # Donors are never treated; treated unit's pre periods are untreated.
+        assert (data[data["unit"] != 0]["treatment"] == 0).all()
+        assert (data[(data["unit"] == 0) & (data["period"] < 10)]["treatment"] == 0).all()
+
+    def test_ramp_effect_increases(self):
+        """Ramp effect strictly increases across post periods; pre/donor are zero."""
+        from diff_diff.prep import generate_synthetic_control_data
+
+        data = generate_synthetic_control_data(
+            n_donors=8,
+            n_pre=10,
+            n_post=5,
+            effect_type="ramp",
+            treatment_effect=5.0,
+            effect_growth=1.0,
+            seed=1,
+        )
+        post_eff = (
+            data[(data["unit"] == 0) & (data["period"] >= 10)]
+            .sort_values("period")["true_effect"]
+            .to_numpy()
+        )
+        assert np.allclose(post_eff, [5.0, 6.0, 7.0, 8.0, 9.0])
+        assert np.all(np.diff(post_eff) > 0)
+        # true_effect is zero everywhere else.
+        assert (data[data["treatment"] == 0]["true_effect"] == 0).all()
+
+    def test_constant_effect_flat(self):
+        """Constant effect is flat across post periods."""
+        from diff_diff.prep import generate_synthetic_control_data
+
+        data = generate_synthetic_control_data(
+            n_donors=8,
+            n_pre=10,
+            n_post=5,
+            effect_type="constant",
+            treatment_effect=4.0,
+            seed=1,
+        )
+        post_eff = data[(data["unit"] == 0) & (data["period"] >= 10)]["true_effect"]
+        assert (post_eff == 4.0).all()
+
+    def test_reproducibility(self):
+        """Seed produces reproducible data."""
+        from diff_diff.prep import generate_synthetic_control_data
+
+        data1 = generate_synthetic_control_data(seed=123)
+        data2 = generate_synthetic_control_data(seed=123)
+        pd.testing.assert_frame_equal(data1, data2)
+
+    def test_treated_in_hull_recovers_effect(self):
+        """The treated unit's latent trajectory is in the donor hull, so on noisy
+        observed data a synthetic control achieves a small (approximate) pre-period
+        RMSPE and recovers the average effect (loose tolerance). The exact-hull
+        property is pinned separately by ``test_noiseless_outcome_path_in_hull``."""
+        from diff_diff import SyntheticControl
+        from diff_diff.prep import generate_synthetic_control_data
+
+        data = generate_synthetic_control_data(
+            n_donors=15,
+            n_pre=20,
+            n_post=4,
+            effect_type="constant",
+            treatment_effect=5.0,
+            noise_sd=0.4,
+            seed=0,
+        )
+        res = SyntheticControl(
+            n_starts=1,
+            inner_min_decrease=1e-3,
+            optimizer_options={"maxiter": 50},
+            seed=0,
+        ).fit(
+            data,
+            outcome="outcome",
+            treatment="treatment",
+            unit="unit",
+            time="period",
+            predictors=["x1", "x2", "x3"],
+        )
+        # Good pre-fit (treated reproducible from donors) and recovered effect.
+        assert res.pre_rmspe < 2.0
+        assert abs(res.att - 5.0) < 2.0
+
+    def test_noiseless_outcome_path_in_hull(self):
+        """At zero noise the treated unit's outcome path IS an exact convex combination
+        of the donor paths (it lies in the donor convex hull), so a synthetic control
+        matching the pre-period outcome path reproduces it to ~zero pre-RMSPE — orders
+        of magnitude below the noisy case. Pins the *noiseless* in-hull claim the
+        docstring/tutorial make (the observed fit on noisy data is only approximate)."""
+        from diff_diff import SyntheticControl
+        from diff_diff.prep import generate_synthetic_control_data
+
+        data = generate_synthetic_control_data(
+            n_donors=12,
+            n_pre=20,
+            n_post=4,
+            effect_type="constant",
+            treatment_effect=5.0,
+            noise_sd=0.0,
+            predictor_noise_sd=0.0,
+            seed=0,
+        )
+        # Match on the full pre-period outcome path (no predictors=): the path itself is
+        # the exact convex combination, so the simplex fit is (near-)exact.
+        res = SyntheticControl(
+            n_starts=1,
+            inner_min_decrease=1e-4,
+            optimizer_options={"maxiter": 50},
+            seed=0,
+        ).fit(data, outcome="outcome", treatment="treatment", unit="unit", time="period")
+        assert res.pre_rmspe < 0.05, f"noiseless pre_rmspe={res.pre_rmspe:.4f} not ~0"
+        assert abs(res.att - 5.0) < 0.5
+
+    def test_invalid_arguments(self):
+        """Each validation guard raises ValueError with an informative message."""
+        from diff_diff.prep import generate_synthetic_control_data
+
+        with pytest.raises(ValueError, match="n_donors"):
+            generate_synthetic_control_data(n_donors=1)
+        with pytest.raises(ValueError, match="n_pre"):
+            generate_synthetic_control_data(n_pre=0)
+        with pytest.raises(ValueError, match="n_post"):
+            generate_synthetic_control_data(n_post=0)
+        with pytest.raises(ValueError, match="n_factors"):
+            generate_synthetic_control_data(n_factors=0)
+        with pytest.raises(ValueError, match="n_predictors"):
+            generate_synthetic_control_data(n_predictors=-1)
+        with pytest.raises(ValueError, match="n_convex_donors"):
+            generate_synthetic_control_data(n_donors=5, n_convex_donors=6)
+        with pytest.raises(ValueError, match="effect_type"):
+            generate_synthetic_control_data(effect_type="quadratic")
+        with pytest.raises(ValueError, match="factor_persistence"):
+            generate_synthetic_control_data(factor_persistence=1.5)
+
+
 class TestGenerateDddData:
     """Tests for generate_ddd_data function."""
 

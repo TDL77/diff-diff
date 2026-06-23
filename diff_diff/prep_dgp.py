@@ -466,6 +466,223 @@ def generate_factor_data(
     return pd.DataFrame(records)
 
 
+def generate_synthetic_control_data(
+    n_donors: int = 20,
+    n_pre: int = 24,
+    n_post: int = 6,
+    n_factors: int = 3,
+    n_predictors: int = 3,
+    treatment_effect: float = 5.0,
+    effect_type: str = "ramp",
+    effect_growth: float = 1.0,
+    factor_strength: float = 1.0,
+    factor_persistence: float = 0.9,
+    n_convex_donors: int = 4,
+    baseline: float = 50.0,
+    unit_baseline_sd: float = 5.0,
+    time_trend: float = 0.5,
+    predictor_noise_sd: float = 0.5,
+    noise_sd: float = 1.0,
+    seed: Optional[int] = None,
+) -> pd.DataFrame:
+    """
+    Generate a single-treated-unit panel for synthetic control (ADH) demos.
+
+    Creates a factor-model panel with ONE treated unit (``unit == 0``) and
+    ``n_donors`` never-treated donors, designed so the treated unit's underlying
+    (noiseless) trajectory lies in the span of the donor trajectories — so a synthetic
+    control can reproduce it closely. The DGP:
+
+        Y_it = b_i + beta_t + factor_strength * (Lambda_i . F_t) + tau_it + eps_it
+
+    where ``F_t`` is a persistent (AR(1)) latent factor path, ``Lambda_i`` are
+    nonnegative factor loadings, ``b_i`` is a unit baseline, ``beta_t`` is a common
+    calendar time effect, ``tau_it`` is the treatment effect (treated unit, post
+    periods only), and ``eps_it ~ N(0, noise_sd)``.
+
+    The treated unit's loadings and baseline are an exact convex combination of
+    ``n_convex_donors`` donors (Dirichlet weights), so in the **noiseless** limit the
+    treated unit's outcome path is itself that convex combination of donor paths — it
+    lies in the donor convex hull and a synthetic control reproduces it exactly. With
+    nonzero ``noise_sd`` / ``predictor_noise_sd`` the observed data is only
+    *approximately* in-hull, so a fitted synthetic control achieves a small (not
+    exactly zero) pre-period RMSPE. Note that the generating weights are NOT identified
+    by the estimator: many donor combinations reproduce the treated pre-period path
+    equally well, so a fitted synthetic control recovers the counterfactual outcome path
+    (and ATT), not this specific weight vector.
+
+    Unlike :func:`generate_factor_data` (which *shifts* treated loadings to create
+    confounding for TROP), this generator keeps the treated unit reproducible from
+    donors, which is what classic synthetic control requires.
+
+    Parameters
+    ----------
+    n_donors : int, default=20
+        Number of never-treated donor units. The in-space placebo p-value floor is
+        ``1 / (n_donors + 1)``; larger pools give finer permutation p-values.
+    n_pre : int, default=24
+        Number of pre-treatment periods.
+    n_post : int, default=6
+        Number of post-treatment periods.
+    n_factors : int, default=3
+        Number of latent factors driving the common time structure.
+    n_predictors : int, default=3
+        Number of time-invariant predictor covariates (each a noisy linear map of
+        the unit's loading vector). Pass these as ``predictors=`` to
+        :class:`~diff_diff.SyntheticControl` to exercise the V-search; otherwise
+        the fit defaults to pre-period outcomes and these columns are unused.
+    treatment_effect : float, default=5.0
+        Base treatment effect on the treated unit in post periods. Under
+        ``effect_type="ramp"`` this is the first post-period effect.
+    effect_type : str, default="ramp"
+        ``"ramp"`` (effect grows by ``effect_growth`` each post period) or
+        ``"constant"`` (effect fixed at ``treatment_effect``).
+    effect_growth : float, default=1.0
+        Per-post-period increment under ``effect_type="ramp"`` (ignored otherwise).
+    factor_strength : float, default=1.0
+        Scaling on the interactive (loading . factor) component.
+    factor_persistence : float, default=0.9
+        AR(1) coefficient on the latent factors in ``[0, 1]``: ``0`` gives i.i.d.
+        factors, ``1`` a random walk. Serial dependence is what makes the
+        moving-block conformal scheme meaningful.
+    n_convex_donors : int, default=4
+        Number of donors whose convex combination defines the treated unit (must be
+        in ``[1, n_donors]``).
+    baseline : float, default=50.0
+        Mean unit baseline (e.g. a per-capita outcome level).
+    unit_baseline_sd : float, default=5.0
+        Standard deviation of donor baselines.
+    time_trend : float, default=0.5
+        Slope of the common calendar time effect ``beta_t = time_trend * t`` (a
+        common trend is matched by any convex combination, so it preserves in-hull
+        existence). Set to ``0.0`` for no trend.
+    predictor_noise_sd : float, default=0.5
+        Noise added to each predictor covariate.
+    noise_sd : float, default=1.0
+        Standard deviation of idiosyncratic outcome noise.
+    seed : int, optional
+        Random seed for reproducibility.
+
+    Returns
+    -------
+    pd.DataFrame
+        Long-format balanced panel with columns:
+
+        - ``unit``: unit identifier (``0`` is the treated unit; ``1..n_donors`` donors)
+        - ``period``: time period (``0..n_pre-1`` pre, ``n_pre..`` post)
+        - ``outcome``: outcome variable
+        - ``treatment``: absorbing 0/1 indicator (1 only for the treated unit in
+          post periods) — :meth:`SyntheticControl.fit` infers the treated unit and
+          post periods from this column
+        - ``treat``: unit-level ever-treated flag
+        - ``true_effect``: the true treatment effect for this observation
+        - ``x1 .. x{n_predictors}``: predictor covariates
+
+    Examples
+    --------
+    Generate a ramped-effect panel and fit a synthetic control:
+
+    >>> from diff_diff import generate_synthetic_control_data, SyntheticControl
+    >>> data = generate_synthetic_control_data(seed=42)
+    >>> res = SyntheticControl(seed=42).fit(
+    ...     data, outcome="outcome", treatment="treatment",
+    ...     unit="unit", time="period", predictors=["x1", "x2", "x3"])
+    >>> round(res.att, 1) > 0  # post-period gap recovers the injected effect
+    True
+    """
+    if n_donors < 2:
+        raise ValueError(f"n_donors ({n_donors}) must be at least 2")
+    if n_pre < 1:
+        raise ValueError(f"n_pre ({n_pre}) must be at least 1")
+    if n_post < 1:
+        raise ValueError(f"n_post ({n_post}) must be at least 1")
+    if n_factors < 1:
+        raise ValueError(f"n_factors ({n_factors}) must be at least 1")
+    if n_predictors < 0:
+        raise ValueError(f"n_predictors ({n_predictors}) must be non-negative")
+    if n_convex_donors < 1 or n_convex_donors > n_donors:
+        raise ValueError(f"n_convex_donors ({n_convex_donors}) must be in [1, n_donors={n_donors}]")
+    if effect_type not in ("ramp", "constant"):
+        raise ValueError(f"effect_type ({effect_type!r}) must be 'ramp' or 'constant'")
+    if not (0.0 <= factor_persistence <= 1.0):
+        raise ValueError(f"factor_persistence ({factor_persistence}) must be in [0, 1]")
+
+    rng = np.random.default_rng(seed)
+
+    n_periods = n_pre + n_post
+    n_units = n_donors + 1  # unit 0 is treated, 1..n_donors are donors
+
+    # Persistent latent factors F: (n_periods, n_factors). AR(1): rho=1 -> random
+    # walk, rho=0 -> i.i.d. The synthetic control removes this common structure, so
+    # the post-fit residuals stay stationary regardless of persistence.
+    F = np.empty((n_periods, n_factors))
+    F[0] = rng.normal(0, 1, n_factors)
+    for t in range(1, n_periods):
+        F[t] = factor_persistence * F[t - 1] + rng.normal(0, 1, n_factors)
+
+    # Donor loadings (nonnegative so a convex combination is well-defined) and
+    # baselines.
+    lambda_donor = np.abs(rng.normal(0, 1, (n_factors, n_donors)))
+    b_donor = rng.normal(baseline, unit_baseline_sd, n_donors)
+
+    # Treated unit = exact convex combination of n_convex_donors donors (in-hull).
+    convex_idx = rng.choice(n_donors, size=n_convex_donors, replace=False)
+    w_star = np.zeros(n_donors)
+    w_star[convex_idx] = rng.dirichlet(np.ones(n_convex_donors))
+    lambda_treated = lambda_donor @ w_star
+    b_treated = float(b_donor @ w_star)
+
+    # Stack: column 0 = treated, columns 1.. = donors.
+    loadings = np.column_stack([lambda_treated, lambda_donor])  # (n_factors, n_units)
+    baselines = np.concatenate([[b_treated], b_donor])  # (n_units,)
+
+    # Time-invariant predictors: each PRIMARILY proxies one distinct latent factor
+    # (diagonal-dominant map) plus a small cross-factor mix and noise. Distinct
+    # proxies give each predictor complementary signal, so the V-search spreads
+    # weight across them instead of leaning on a single redundant column.
+    pred_map = 0.25 * rng.normal(0, 1, (n_predictors, n_factors))
+    for h in range(n_predictors):
+        pred_map[h, h % n_factors] += 1.0
+    predictors = pred_map @ loadings + rng.normal(
+        0, predictor_noise_sd, (n_predictors, n_units)
+    )  # (n_predictors, n_units)
+
+    # Common calendar time effect (matched by any convex combination since sum w=1).
+    beta = time_trend * np.arange(n_periods)
+
+    records = []
+    for i in range(n_units):
+        is_treated_unit = i == 0
+        for t in range(n_periods):
+            post = t >= n_pre
+            y = baselines[i] + beta[t] + factor_strength * (loadings[:, i] @ F[t])
+
+            effect = 0.0
+            if is_treated_unit and post:
+                k = t - n_pre  # post-period index, 0-based
+                if effect_type == "ramp":
+                    effect = treatment_effect + effect_growth * k
+                else:
+                    effect = treatment_effect
+                y += effect
+
+            y += rng.normal(0, noise_sd)
+
+            row = {
+                "unit": i,
+                "period": t,
+                "outcome": y,
+                "treatment": int(is_treated_unit and post),
+                "treat": int(is_treated_unit),
+                "true_effect": effect,
+            }
+            for h in range(n_predictors):
+                row[f"x{h + 1}"] = predictors[h, i]
+            records.append(row)
+
+    return pd.DataFrame(records)
+
+
 def generate_ddd_data(
     n_per_cell: int = 100,
     treatment_effect: float = 2.0,
