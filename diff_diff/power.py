@@ -672,6 +672,36 @@ def _ddd_effective_n(
     return eff if eff != n_units else None
 
 
+def _ddd_panel_cells_populated(n: int, group_frac: float, partition_frac: float) -> bool:
+    """Whether ``generate_ddd_panel_data`` would populate all 4 (group,partition)
+    cells at ``n`` units. Mirrors the rounded stratified allocation + non-empty
+    validation in ``prep_dgp.generate_ddd_panel_data`` (kept in lockstep)."""
+    if n < 4:
+        return False
+    n_g1 = int(round(n * group_frac))
+    n_g0 = n - n_g1
+    n_p1_g0 = int(round(n_g0 * partition_frac))
+    n_p1_g1 = int(round(n_g1 * partition_frac))
+    cells = (n_g0 - n_p1_g0, n_p1_g0, n_g1 - n_p1_g1, n_p1_g1)
+    return min(cells) >= 1
+
+
+def _ddd_panel_viable_min_n(
+    group_frac: float, partition_frac: float, floor: int = 16, search_max: int = 100000
+) -> int:
+    """Smallest ``n_units`` for which ``generate_ddd_panel_data`` populates all
+    four (group,partition) cells under the given split, floored at ``floor``.
+
+    For the balanced default (0.5/0.5) this is 4, so the result is ``floor``;
+    skewed splits (e.g. 0.1/0.1) need more units before every cell is non-empty,
+    so the sample-size search must bracket above this value (the registry
+    documents group_frac/partition_frac as data_generator_kwargs overrides)."""
+    for n in range(4, search_max + 1):
+        if _ddd_panel_cells_populated(n, group_frac, partition_frac):
+            return max(floor, n)
+    return max(floor, search_max)
+
+
 def _check_ddd_dgp_compat(
     n_units: int,
     n_periods: int,
@@ -3062,7 +3092,16 @@ def simulate_sample_size(
     is_ddd = estimator_name == "TripleDifference" and data_generator is None
     is_ddd_panel = is_ddd and n_periods > 2
     if is_ddd_panel:
-        min_n = _ddd_panel_profile().min_n
+        # The panel DGP requires every (group,partition) cell non-empty, which
+        # for a skewed group_frac/partition_frac override needs more than the
+        # default 16-unit floor. Bracket above the viable minimum so the search
+        # never probes an infeasible n (which would raise in the DGP).
+        _ddd_overrides = data_generator_kwargs or {}
+        min_n = _ddd_panel_viable_min_n(
+            _ddd_overrides.get("group_frac", 0.5),
+            _ddd_overrides.get("partition_frac", 0.5),
+            floor=_ddd_panel_profile().min_n,
+        )
     else:
         min_n = profile.min_n if profile is not None else 20
 
@@ -3130,11 +3169,25 @@ def simulate_sample_size(
             )
 
     # --- Bracket ---
-    # Both DDD paths (cross-sectional and panel) want a >=16 floor so the 8
-    # G×P×T cells are populated with margin; everything else floors at 4.
-    abs_min = 16 if is_ddd else 4
+    # Cross-sectional DDD wants a >=16 floor so the 8 G×P×T cells are populated;
+    # the panel path uses its split-aware viable floor (min_n above, which is
+    # >=16 and higher for skewed group_frac/partition_frac); everything else
+    # floors at 4.
+    if is_ddd_panel:
+        abs_min = min_n
+    elif is_ddd:
+        abs_min = 16
+    else:
+        abs_min = 4
     if survey_config is not None:
         abs_min = max(abs_min, survey_config.min_viable_n)
+    if is_ddd_panel and n_range is not None and n_range[1] < abs_min:
+        raise ValueError(
+            f"n_range upper bound ({n_range[1]}) is below the minimum panel-DDD "
+            f"sample size ({abs_min}) needed to populate all (group, partition) "
+            f"cells for group_frac/partition_frac. Raise the upper bound or move "
+            f"the split closer to 0.5."
+        )
     if n_range is not None:
         lo, hi = _snap_n(n_range[0], "up", floor=abs_min), _snap_n(
             n_range[1], "down", floor=abs_min

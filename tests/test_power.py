@@ -38,6 +38,7 @@ from diff_diff.power import (
     _basic_fit_kwargs,
     _ddd_dgp_kwargs,
     _ddd_fit_kwargs,
+    _ddd_panel_viable_min_n,
     _extract_multiperiod,
     _extract_simple,
     _extract_staggered,
@@ -1355,6 +1356,42 @@ class TestEstimatorCoverage:
         assert any(
             int(step["n_units"]) % 8 != 0 for step in result.search_path
         ), "panel sample-size search should explore non-multiples of 8 (step-1 grid)"
+
+    @pytest.mark.slow
+    def test_ddd_panel_sample_size_unbalanced_split(self):
+        """Unbalanced group_frac/partition_frac override raises the panel floor so
+        the search never probes an infeasible (empty-cell) n."""
+        result = simulate_sample_size(
+            TripleDifference(cluster="unit"),
+            n_periods=6,
+            treatment_period=3,
+            treatment_effect=2.0,
+            n_simulations=8,
+            seed=1,
+            progress=False,
+            data_generator_kwargs={"group_frac": 0.1, "partition_frac": 0.1},
+        )
+        assert isinstance(result, SimulationSampleSizeResults)
+        assert result.required_n > 0
+        # Every probed n must populate all 4 (group, partition) cells (>= the
+        # split-aware viable floor); none should hit the infeasible n=16 default.
+        viable_floor = _ddd_panel_viable_min_n(0.1, 0.1)
+        assert viable_floor > 16  # skewed split needs more than the balanced floor
+        assert all(int(step["n_units"]) >= viable_floor for step in result.search_path)
+
+    def test_ddd_panel_sample_size_low_n_range_raises(self):
+        """An n_range whose upper bound is below the split-aware viable floor raises clearly."""
+        with pytest.raises(ValueError, match="below the minimum panel-DDD"):
+            simulate_sample_size(
+                TripleDifference(cluster="unit"),
+                n_periods=6,
+                treatment_period=3,
+                n_range=(8, 20),
+                n_simulations=2,
+                seed=1,
+                progress=False,
+                data_generator_kwargs={"group_frac": 0.1, "partition_frac": 0.1},
+            )
 
     @pytest.mark.slow
     def test_ddd_mde(self):
