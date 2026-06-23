@@ -588,14 +588,14 @@ and covariate-adjusted specifications.)
 
 **Documentation in place:**
 - REGISTRY.md section: `## TwoStageDiD` (Stage 1 unit+time FE on untreated, Stage 2 OLS on residualized outcomes, GMM sandwich variance per Newey-McFadden Theorem 6.1)
+- Paper review: `docs/methodology/papers/gardner-2022-review.md` (PR-A — eq./section-numbered review of arXiv:2207.05943; corrected a fabricated Eq. 6 variance deviation, see "Documented alignment" below)
 - Implementation: 76 unit tests in `tests/test_two_stage.py` (matches ImputationDiD point estimates, R `did2s` global `(D'D)^{-1}` variance, always-treated unit exclusion, multiplier bootstrap)
-- Documented R alignment: uses global `(D'D)^{-1}` matching `did2s` (not paper Eq. 6)
+- Documented alignment: variance = global `(D'D)^{-1}` GMM sandwich (Newey-McFadden Theorem 6.1, Gardner §3.3) — **faithful to both the paper and `did2s`**. Gardner eq. (6) is the *event-study regression spec*, not a variance formula; the earlier "matches `did2s`, not paper Eq. 6" / "Newey-McFadden sandwich vs paper's Eq. 6 deviation" framing was a misattribution, corrected in PR-A across `REGISTRY.md` + the paper review.
 
 **Outstanding for promotion:**
 - Dedicated `tests/test_methodology_two_stage.py` with paper-equation-numbered Verified Components walk-through
 - R parity benchmark fixture against `did2s` (none on file)
-- Documented deviation: Newey-McFadden Theorem 6.1 sandwich vs paper's Eq. 6 (already noted in REGISTRY but not formalized in this tracker)
-- "Corrections Made" listing
+- "Corrections Made" listing + flip Status → Complete (PR-B)
 
 ---
 
@@ -1444,10 +1444,10 @@ more graceful handling of edge cases while still signaling invalid inference to 
 
 Promotion priority for the **In Progress** entries, ordered by what's blocked on substantive review work (top of list = needs review next) vs. consolidation pass (bottom of list = mostly tracker walk-through):
 
-**Substantive-review-blocked (still missing a methodology test file / R parity and a paper review):**
+**Substantive-review-blocked (each still missing one or more of: a methodology test file, R parity, or a paper review):**
 
 1. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
-2. **TwoStageDiD** — the remaining half of the imputation pair (ImputationDiD is now Complete, validated against `didimputation`). Needs a Gardner (2022) paper review, `tests/test_methodology_two_stage.py`, and an R parity fixture against `did2s`.
+2. **TwoStageDiD** — the remaining half of the imputation pair (ImputationDiD is now Complete, validated against `didimputation`). Gardner (2022) paper review **landed** (`docs/methodology/papers/gardner-2022-review.md`, PR-A); still needs `tests/test_methodology_two_stage.py` and an R parity fixture against `did2s` to flip to Complete (PR-B).
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
