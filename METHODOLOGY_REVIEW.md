@@ -48,7 +48,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | SunAbraham | `sun_abraham.py` | `fixest::sunab()` | **Complete** | 2026-02-15 |
 | StackedDiD | `stacked_did.py` | `stacked-did-weights` (Wing-Freedman-Hollingsworth code) | **Complete** | 2026-02-19 |
 | ImputationDiD | `imputation.py` | `didimputation` | **Complete** | 2026-06-06 |
-| TwoStageDiD | `two_stage.py` | `did2s` | **In Progress** | — |
+| TwoStageDiD | `two_stage.py` | `did2s` | **Complete** | 2026-06-23 |
 | WooldridgeDiD (ETWFE) | `wooldridge.py` | `etwfe` (R) / `jwdid` (Stata) | **Complete** | 2026-05-22 |
 | EfficientDiD | `efficient_did.py` | (no canonical R package) | **Complete** | 2026-06-01 |
 
@@ -583,19 +583,36 @@ and covariate-adjusted specifications.)
 | Module | `two_stage.py`, `two_stage_bootstrap.py` |
 | Primary Reference | Gardner (2022), *Two-stage differences in differences*, arXiv:2207.05943 |
 | R Reference | `did2s` |
-| Status | **In Progress** |
-| Last Review | — |
+| Status | **Complete** |
+| Last Review | 2026-06-23 |
 
-**Documentation in place:**
-- REGISTRY.md section: `## TwoStageDiD` (Stage 1 unit+time FE on untreated, Stage 2 OLS on residualized outcomes, GMM sandwich variance per Newey-McFadden Theorem 6.1)
-- Paper review: `docs/methodology/papers/gardner-2022-review.md` (PR-A — eq./section-numbered review of arXiv:2207.05943; corrected a fabricated Eq. 6 variance deviation, see "Documented alignment" below)
-- Implementation: 76 unit tests in `tests/test_two_stage.py` (matches ImputationDiD point estimates, R `did2s` global `(D'D)^{-1}` variance, always-treated unit exclusion, multiplier bootstrap)
-- Documented alignment: variance = global `(D'D)^{-1}` GMM sandwich (Newey-McFadden Theorem 6.1, Gardner §3.3) — **faithful to both the paper and `did2s`**. Gardner eq. (6) is the *event-study regression spec*, not a variance formula; the earlier "matches `did2s`, not paper Eq. 6" / "Newey-McFadden sandwich vs paper's Eq. 6 deviation" framing was a misattribution, corrected in PR-A across `REGISTRY.md` + the paper review.
+**Verified Components** (`tests/test_methodology_two_stage.py`, paper-section/equation-numbered):
+- **§3, eqs. (4)/(6) — the two-stage procedure:** Stage 1 unit+time FE on the untreated set Ω₀, Stage 2 on the residualized outcome recovers the constant overall ATT (eq. 4) and heterogeneous-by-horizon effects (Step 2′ / eq. 6); perturbing a treated outcome shifts the overall ATT by exactly δ/N_treated (treated obs never feed Stage 1); coincides with `ImputationDiD` to 1e-10; the live `covariates=` (fn. 9 in-both-stages) path recovers the ATT under a treatment-confounded covariate — `TestGardner2022Section3TwoStageProcedure`
+- **§3.3 + Appendix B — joint-GMM Newey-McFadden Thm 6.1 variance:** finite/positive SEs; the first-stage correction `γ̂'c_g` makes the GMM SE strictly exceed the no-first-stage floor; a fixed-seed SE regression-pin locks the global-inverse + no-FSA convention; `cluster=None` clusters at the unit; a rank-deficient Ω₀ warns and falls back to dense lstsq; `pretrends=True` leads have finite SEs — `TestGardner2022Section33GMMVariance`
+- **fn. 19 + Proposition 5 (Borusyak et al. 2024):** always-treated units dropped with a warning (treated-unit count falls exactly); no never-treated ⇒ horizons h ≥ h̄ NaN with n_obs>0 + warning; `balance_e` with no qualifying cohort warns + reference-period-only; zero-obs cohorts NaN — `TestGardner2022Identification`
+- **Library extensions:** multiplier bootstrap on the GMM influence function; `vcov_type ∈ {classical, hc2, hc2_bm}` rejected (no cross-stage hat matrix) — `TestGardner2022LibraryDeviations`
+- **R parity vs `did2s::did2s` (v1.2.1):** overall + event-study ATT and SEs match on a fixed-seed staggered panel (analytical corrected clustered SE, `bootstrap=FALSE`); tests assert ATT `abs=1e-6`, SE `abs=1e-7` — `TestTwoStageDiDParityR` (goldens: `benchmarks/data/did2s_golden.json`, generator: `benchmarks/R/generate_did2s_golden.R`)
 
-**Outstanding for promotion:**
-- Dedicated `tests/test_methodology_two_stage.py` with paper-equation-numbered Verified Components walk-through
-- R parity benchmark fixture against `did2s` (none on file)
-- "Corrections Made" listing + flip Status → Complete (PR-B)
+**Corrections Made** (PR-B, surfaced by the `did2s` R parity):
+- **Exact Stage-1 residuals in the GMM variance.** `_compute_gmm_variance` derived its residuals from the *iterative* alternating-projection FE (`_iterative_fe`, ~1e-7 convergence on unbalanced Ω₀) while computing `gamma_hat` exactly — leaving the analytical SE ~1% off the exact sandwich. The variance now re-solves the Stage-1 FE **exactly** (sparse OLS, reusing the `gamma_hat` factorization); the reported `overall_att` still uses the iterative FE (twin-equivalence preserved at 1e-10). Unidentified-FE obs (rank-deficient / Prop-5) fall back to the iterative residual.
+- **Intercept added to `_build_fe_design`.** The prior `[unit_1.., time_1..]` layout (drop first unit + first time, **no intercept**) did not span the constant / grand mean; the exact residual is first-order sensitive to it. Added an intercept column → standard full-rank two-way FE (matches fixest / `did2s`). Same-class fix as ImputationDiD's PR-B FE-design correction. SE now matches `did2s` to ~1e-9.
+
+**Deviations from the reference / library extensions** (see `REGISTRY.md` `## TwoStageDiD`):
+- **Deviation from R:** the `did2s` analytical GMM sandwich uses **no finite-sample multiplier** (meat `= S'S`); the rendered `CR1` label carries no Stata `(n-1)/(n-p)` or `G/(G-1)` factor (matches `did2s`; same FSA-free convention as ImputationDiD's Theorem-3 variance).
+- Multiplier bootstrap on the GMM influence function (library extension; Gardner prescribes analytical GMM SEs only; `did2s` defaults `bootstrap=FALSE`).
+- ⚠️ Paper-permitted but **not exposed**: the Eq. (5) P̄-period-average estimand and the fn. 8 full-sample first-stage variant (tracked in `TODO.md`).
+- `vcov_type` narrowed to the GMM sandwich (`{classical, hc2, hc2_bm}` rejected); `vcov_type="conley"` deferred (TODO).
+
+**R Comparison Results** (`did2s` v1.2.1, fixed-seed panel, `benchmarks/data/did2s_golden.json`):
+
+| Quantity | Python | R | |Δ| |
+|----------|--------|---|-----|
+| Overall ATT | 2.04566790 | 2.04566803 | 1.3e-7 |
+| Overall SE | 0.02813225 | 0.02813225 | 1.0e-9 |
+| Event-study ATT (max) | — | — | 1.6e-7 |
+| Event-study SE (max) | — | — | 3.7e-10 |
+
+(Point-estimate Δ is iterative-FE convergence level; SE Δ is machine precision after the exact Stage-1 re-solve. The parity tests assert ATT `abs=1e-6`, SE `abs=1e-7` for cross-platform robustness.)
 
 ---
 
@@ -1447,7 +1464,6 @@ Promotion priority for the **In Progress** entries, ordered by what's blocked on
 **Substantive-review-blocked (each still missing one or more of: a methodology test file, R parity, or a paper review):**
 
 1. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
-2. **TwoStageDiD** — the remaining half of the imputation pair (ImputationDiD is now Complete, validated against `didimputation`). Gardner (2022) paper review **landed** (`docs/methodology/papers/gardner-2022-review.md`, PR-A); still needs `tests/test_methodology_two_stage.py` and an R parity fixture against `did2s` to flip to Complete (PR-B).
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 

@@ -2430,8 +2430,6 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         att = float(coef[0])
 
         # GMM sandwich variance
-        eps_2 = y_tilde - np.dot(X_2, coef)  # Stage 2 residuals
-
         V = self._compute_gmm_variance(
             df=df,
             unit=unit,
@@ -2443,7 +2441,6 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             delta_hat=delta_hat,
             kept_cov_mask=kept_cov_mask,
             X_2=X_2,
-            eps_2=eps_2,
             cluster_ids=df[cluster_var].values,
             survey_weights=survey_weights,
             resolved_survey=resolved_survey,
@@ -2601,7 +2598,6 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             weights=survey_weights,
             weight_type=survey_weight_type,
         )
-        eps_2 = y_tilde - np.dot(X_2, coef)
 
         # GMM variance for full coefficient vector
         V = self._compute_gmm_variance(
@@ -2615,7 +2611,6 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             delta_hat=delta_hat,
             kept_cov_mask=kept_cov_mask,
             X_2=X_2,
-            eps_2=eps_2,
             cluster_ids=df[cluster_var].values,
             survey_weights=survey_weights,
             resolved_survey=resolved_survey,
@@ -2727,7 +2722,6 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             weights=survey_weights,
             weight_type=survey_weight_type,
         )
-        eps_2 = y_tilde - np.dot(X_2, coef)
 
         # GMM variance
         V = self._compute_gmm_variance(
@@ -2741,7 +2735,6 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
             delta_hat=delta_hat,
             kept_cov_mask=kept_cov_mask,
             X_2=X_2,
-            eps_2=eps_2,
             cluster_ids=df[cluster_var].values,
             survey_weights=survey_weights,
             resolved_survey=resolved_survey,
@@ -2832,7 +2825,6 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         delta_hat: Optional[np.ndarray],
         kept_cov_mask: Optional[np.ndarray],
         X_2: np.ndarray,
-        eps_2: np.ndarray,
         cluster_ids: np.ndarray,
         survey_weights: Optional[np.ndarray] = None,
         resolved_survey=None,
@@ -2865,9 +2857,9 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         Parameters
         ----------
         X_2 : np.ndarray, shape (n, k)
-            Stage 2 design matrix (treatment indicators).
-        eps_2 : np.ndarray, shape (n,)
-            Stage 2 residuals.
+            Stage 2 design matrix (treatment indicators). The Stage-2 residual
+            ``eps_2`` is re-solved internally from the *exact* Stage-1 residuals
+            (see the exact-residual note below), so it is not a parameter.
         cluster_ids : np.ndarray, shape (n,)
             Cluster identifiers, fit-sample length. Used for the per-cluster
             stage-1 / stage-2 score aggregation (OLS path).
@@ -2923,9 +2915,17 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
 
         # eps_10 = Y - X_10 @ gamma_hat
         # Untreated: stage 1 residual (Y - fitted). Treated: Y (X_10 rows = 0).
-        # Reconstruct Y from y_tilde: Y = y_tilde + fitted_stage1
+        # Reconstruct Y from y_tilde: Y = y_tilde + fitted_stage1. Because
+        # y_tilde = Y - fitted_1, the iterative FE in fitted_1 cancel exactly, so
+        # y_vals == Y (independent of the iterative solver's tolerance).
         alpha_i = df[unit].map(unit_fe).values
         beta_t = df[time].map(time_fe).values
+        # Identification mask: obs whose unit AND time FE are both identified by the
+        # untreated Stage-1 fit. Rank-deficient / Proposition-5 obs (NaN FE) keep the
+        # iterative-residual behavior; only identified obs get the exact residuals.
+        identified = np.isfinite(np.asarray(alpha_i, dtype=float)) & np.isfinite(
+            np.asarray(beta_t, dtype=float)
+        )
         alpha_i = np.where(pd.isna(alpha_i), 0.0, alpha_i).astype(float)
         beta_t = np.where(pd.isna(beta_t), 0.0, beta_t).astype(float)
         fitted_1 = alpha_i + beta_t
@@ -2937,21 +2937,22 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
 
         y_tilde = df["_y_tilde"].values
         y_vals = y_tilde + fitted_1  # reconstruct Y
+        y_vals_clean = np.nan_to_num(y_vals, nan=0.0)
 
-        # eps_10: for untreated, stage 1 residual; for treated, Y_i (since X_10 rows = 0)
-        eps_10 = np.empty(n)
         omega_0 = omega_0_mask.values
-        eps_10[omega_0] = y_vals[omega_0] - fitted_1[omega_0]  # Stage 1 residual
-        eps_10[~omega_0] = y_vals[~omega_0]  # x_{10i} = 0, so eps_10 = Y
 
         # 1. gamma_hat = (X'_{10} W X_{10})^{-1} (X'_1 W X_2)  [p x k]
-        # With survey weights, both cross-products need W
+        # With survey weights, both cross-products need W. We reuse the SAME
+        # factorization of (X'_{10} W X_{10}) to also solve the exact Stage-1 FE
+        # coefficients theta_exact (see exact-residual note below).
         if survey_weights is not None:
             XtWX_10 = X_10_sparse.T @ X_10_sparse.multiply(survey_weights[:, None])
             Xt1_WX2 = X_1_sparse.T @ (X_2 * survey_weights[:, None])
+            rhs_fe = X_10_sparse.T @ (survey_weights * y_vals_clean)
         else:
             XtWX_10 = X_10_sparse.T @ X_10_sparse  # (p x p) sparse
             Xt1_WX2 = X_1_sparse.T @ X_2  # (p x k) dense
+            rhs_fe = X_10_sparse.T @ y_vals_clean  # (p,) X'_{10} W Y
 
         try:
             solve_XtX = sparse_factorized(XtWX_10.tocsc())
@@ -2961,6 +2962,7 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                 gamma_hat = np.column_stack(
                     [solve_XtX(Xt1_WX2[:, j]) for j in range(Xt1_WX2.shape[1])]
                 )
+            theta_exact = np.asarray(solve_XtX(np.asarray(rhs_fe).ravel())).ravel()
         except RuntimeError as exc:
             # Singular matrix — fall back to dense least-squares. Silent-failure
             # audit axis C: emit a UserWarning on fallback instead of swallowing.
@@ -2973,9 +2975,32 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
                 UserWarning,
                 stacklevel=2,
             )
-            gamma_hat = np.linalg.lstsq(XtWX_10.toarray(), Xt1_WX2, rcond=None)[0]
+            XtWX_10_dense = XtWX_10.toarray()
+            gamma_hat = np.linalg.lstsq(XtWX_10_dense, Xt1_WX2, rcond=None)[0]
             if gamma_hat.ndim == 1:
                 gamma_hat = gamma_hat.reshape(-1, 1)
+            theta_exact = np.linalg.lstsq(XtWX_10_dense, np.asarray(rhs_fe).ravel(), rcond=None)[0]
+
+        # Exact Stage-1 / Stage-2 residuals. The point-estimate path uses the
+        # iterative alternating-projection FE solver (`_iterative_fe`), which
+        # converges only to ~1e-7 on unbalanced untreated panels; that error is
+        # negligible for the ATT but perturbs the variance by ~1% relative to the
+        # analytical GMM sandwich. The variance therefore re-solves the Stage-1 FE
+        # EXACTLY using the sparse normal equations already factorized for gamma_hat
+        # (theta_exact), matching R `did2s` to ~1e-7 and mirroring ImputationDiD's
+        # exact-sparse variance path. The shared `_exact_gmm_residuals` helper is
+        # used by BOTH this analytical path and the multiplier bootstrap
+        # (`_compute_cluster_S_scores`) so the influence function is single-sourced.
+        eps_10, eps_2 = self._exact_gmm_residuals(
+            X_1_sparse,
+            theta_exact,
+            y_vals_clean,
+            identified,
+            omega_0,
+            y_tilde,
+            X_2,
+            survey_weights,
+        )
 
         # 2. Per-cluster Stage 1 scores: c_g = sum_{i in g} w_i * x_{10i} * eps_{10i}
         # Only untreated obs have non-zero X_10 rows
@@ -3186,8 +3211,13 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         """
         Build sparse FE design matrices X_1 (all obs) and X_10 (untreated rows only).
 
-        Column layout: [unit_0, ..., unit_{U-2}, time_0, ..., time_{T-2}, cov_1, ..., cov_C]
-        (Drop first unit and first time for identification.)
+        Column layout: [intercept, unit_1, ..., unit_{U-1}, time_1, ..., time_{T-1},
+        cov_1, ..., cov_C] (drop first unit and first time for identification, with an
+        intercept). The intercept makes the column space span the constant (the grand
+        mean); the prior intercept-free layout silently omitted the grand mean from the
+        FE span, which biased the GMM-sandwich residuals when re-solved exactly. With
+        the intercept this is the standard full-rank two-way FE (matches fixest / R
+        ``did2s``).
 
         X_10 is identical to X_1 except that rows for treated observations are zeroed out.
 
@@ -3210,30 +3240,38 @@ class TwoStageDiD(TwoStageDiDBootstrapMixin):
         n_units = len(all_units)
         n_times = len(all_times)
         n_cov = len(covariates) if covariates else 0
-        n_fe_cols = (n_units - 1) + (n_times - 1)
+        # [intercept, unit_1..unit_{U-1}, time_1..time_{T-1}] — the intercept (col 0)
+        # makes the column space span the constant / grand mean (see docstring).
+        n_fe_cols = 1 + (n_units - 1) + (n_times - 1)
 
         def _build_rows(mask=None):
             """Build sparse matrix for given observation mask."""
-            # Unit dummies (drop first)
+            all_rows = np.arange(n)
+
+            # Intercept (col 0): 1 for every (masked) row.
+            i_rows = all_rows if mask is None else all_rows[mask]
+            i_cols = np.zeros(len(i_rows), dtype=int)
+
+            # Unit dummies (drop first) at cols 1..n_units-1
             u_indices = np.array([unit_to_idx[u] for u in unit_vals])
             u_mask = u_indices > 0
             if mask is not None:
                 u_mask = u_mask & mask
 
-            u_rows = np.arange(n)[u_mask]
-            u_cols = u_indices[u_mask] - 1
+            u_rows = all_rows[u_mask]
+            u_cols = u_indices[u_mask]  # 1..n_units-1 (intercept occupies col 0)
 
-            # Time dummies (drop first)
+            # Time dummies (drop first) at cols n_units..n_units+n_times-2
             t_indices = np.array([time_to_idx[t] for t in time_vals])
             t_mask = t_indices > 0
             if mask is not None:
                 t_mask = t_mask & mask
 
-            t_rows = np.arange(n)[t_mask]
-            t_cols = (n_units - 1) + t_indices[t_mask] - 1
+            t_rows = all_rows[t_mask]
+            t_cols = n_units + t_indices[t_mask] - 1
 
-            rows = np.concatenate([u_rows, t_rows])
-            cols = np.concatenate([u_cols, t_cols])
+            rows = np.concatenate([i_rows, u_rows, t_rows])
+            cols = np.concatenate([i_cols, u_cols, t_cols])
             data = np.ones(len(rows))
 
             A_fe = sparse.csr_matrix((data, (rows, cols)), shape=(n, n_fe_cols))

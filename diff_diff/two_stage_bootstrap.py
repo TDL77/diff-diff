@@ -22,7 +22,6 @@ from diff_diff.bootstrap_utils import (
 from diff_diff.bootstrap_utils import (
     generate_survey_multiplier_weights_batch as _generate_survey_multiplier_weights_batch,
 )
-from diff_diff.linalg import solve_ols
 from diff_diff.two_stage_results import TwoStageBootstrapResults
 
 # Maximum number of elements before falling back to per-column sparse aggregation.
@@ -63,6 +62,66 @@ class TwoStageDiDBootstrapMixin:
             s2_by_cluster: np.ndarray,
         ) -> np.ndarray: ...
 
+    @staticmethod
+    def _exact_gmm_residuals(
+        X_1_sparse,
+        theta_exact: np.ndarray,
+        y_vals_clean: np.ndarray,
+        identified: np.ndarray,
+        omega_0: np.ndarray,
+        y_tilde: np.ndarray,
+        X_2: np.ndarray,
+        survey_weights: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Exact Stage-1 / Stage-2 residuals for the GMM influence function.
+
+        Given the EXACT Stage-1 FE coefficients ``theta_exact`` (solved from the
+        same ``(X'_{10} W X_{10})`` factorization used for ``gamma_hat``), return the
+        exact Stage-1 residual ``eps_10`` (untreated rows) and the exact Stage-2
+        residual ``eps_2``. **Shared** by the analytical GMM variance
+        (``TwoStageDiD._compute_gmm_variance``) and the multiplier bootstrap
+        (``_compute_cluster_S_scores``) so both build the per-cluster influence
+        score ``S_g = gamma_hat' c_g - X'_{2g} eps_{2g}`` from the same exact
+        residuals. The iterative alternating-projection FE used for the point
+        estimate is only ~1e-7-accurate on unbalanced untreated panels, which
+        perturbs the variance ~1% relative to the analytical sandwich; obs whose FE
+        are unidentified (rank-deficient / Proposition-5) fall back to the iterative
+        residual ``y_tilde`` so those edge cases are unchanged.
+        """
+        n = X_1_sparse.shape[0]
+        fitted_exact = np.asarray(X_1_sparse @ theta_exact).ravel()
+        y_tilde_exact = y_vals_clean - fitted_exact
+        use_exact = identified & np.isfinite(y_tilde_exact)
+        y_tilde_use = np.where(use_exact, y_tilde_exact, y_tilde)
+        eps_10 = np.empty(n)
+        eps_10[omega_0] = y_tilde_use[omega_0]  # exact Stage-1 residual (untreated)
+        eps_10[~omega_0] = y_vals_clean[~omega_0]  # x_{10i} = 0, so value is inert
+        # Exact Stage-2 residual: re-solve delta on the exact residualized outcome
+        # (X_2 already has NaN-y_tilde rows zeroed by the caller, so masked obs
+        # contribute nothing to the normal equations).
+        y_tilde_s2 = np.where(np.isfinite(y_tilde_use), y_tilde_use, 0.0)
+        if survey_weights is not None:
+            XtWX2 = X_2.T @ (X_2 * survey_weights[:, None])
+            XtWy2 = X_2.T @ (survey_weights * y_tilde_s2)
+        else:
+            XtWX2 = X_2.T @ X_2
+            XtWy2 = X_2.T @ y_tilde_s2
+        try:
+            delta_2 = np.linalg.solve(XtWX2, XtWy2)
+        except np.linalg.LinAlgError:
+            # Silent-failure audit convention: warn before the dense fallback.
+            warnings.warn(
+                "TwoStageDiD GMM sandwich: Stage-2 design (X'_2 W X_2) is "
+                "singular; falling back to dense lstsq for the exact-residual "
+                "re-solve. This may indicate collinear treatment/horizon "
+                "indicators and SE estimates may be less reliable.",
+                UserWarning,
+                stacklevel=2,
+            )
+            delta_2 = np.linalg.lstsq(XtWX2, XtWy2, rcond=None)[0]
+        eps_2 = y_tilde_s2 - X_2 @ delta_2
+        return eps_10, eps_2
+
     def _compute_cluster_S_scores(
         self,
         df: pd.DataFrame,
@@ -75,7 +134,6 @@ class TwoStageDiDBootstrapMixin:
         delta_hat: Optional[np.ndarray],
         kept_cov_mask: Optional[np.ndarray],
         X_2: np.ndarray,
-        eps_2: np.ndarray,
         cluster_ids: np.ndarray,
         survey_weights: Optional[np.ndarray] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -91,7 +149,6 @@ class TwoStageDiDBootstrapMixin:
         unique_clusters : np.ndarray
             Unique cluster identifiers.
         """
-        n = len(df)
         k = X_2.shape[1]
 
         cov_list = covariates
@@ -103,9 +160,14 @@ class TwoStageDiDBootstrapMixin:
         )
         p = X_1_sparse.shape[1]
 
-        # Reconstruct Y and compute eps_10
+        # Reconstruct Y = y_tilde + fitted_1 (the iterative FE cancel, so y_vals == Y).
         alpha_i = df[unit].map(unit_fe).values
         beta_t = df[time].map(time_fe).values
+        # Obs whose unit AND time FE are both identified by the untreated Stage-1
+        # fit; unidentified obs fall back to the iterative residual in the helper.
+        identified = np.isfinite(np.asarray(alpha_i, dtype=float)) & np.isfinite(
+            np.asarray(beta_t, dtype=float)
+        )
         alpha_i = np.where(pd.isna(alpha_i), 0.0, alpha_i).astype(float)
         beta_t = np.where(pd.isna(beta_t), 0.0, beta_t).astype(float)
         fitted_1 = alpha_i + beta_t
@@ -116,20 +178,20 @@ class TwoStageDiDBootstrapMixin:
                 fitted_1 = fitted_1 + np.dot(df[cov_list].values, delta_hat)
 
         y_tilde = df["_y_tilde"].values
-        y_vals = y_tilde + fitted_1
-
-        eps_10 = np.empty(n)
+        y_vals_clean = np.nan_to_num(y_tilde + fitted_1, nan=0.0)
         omega_0 = omega_0_mask.values
-        eps_10[omega_0] = y_vals[omega_0] - fitted_1[omega_0]
-        eps_10[~omega_0] = y_vals[~omega_0]
 
-        # gamma_hat — with survey weights, both cross-products need W
+        # gamma_hat — with survey weights, both cross-products need W. The same
+        # (X'_{10} W X_{10}) factorization also yields the EXACT Stage-1 FE
+        # coefficients theta_exact for the exact-residual helper below.
         if survey_weights is not None:
             XtX_10 = X_10_sparse.T @ X_10_sparse.multiply(survey_weights[:, None])
             Xt1_X2 = X_1_sparse.T @ (X_2 * survey_weights[:, None])
+            rhs_fe = X_10_sparse.T @ (survey_weights * y_vals_clean)
         else:
             XtX_10 = X_10_sparse.T @ X_10_sparse
             Xt1_X2 = X_1_sparse.T @ X_2
+            rhs_fe = X_10_sparse.T @ y_vals_clean
 
         try:
             solve_XtX = sparse_factorized(XtX_10.tocsc())
@@ -139,6 +201,7 @@ class TwoStageDiDBootstrapMixin:
                 gamma_hat = np.column_stack(
                     [solve_XtX(Xt1_X2[:, j]) for j in range(Xt1_X2.shape[1])]
                 )
+            theta_exact = np.asarray(solve_XtX(np.asarray(rhs_fe).ravel())).ravel()
         except RuntimeError as exc:
             # Silent-failure audit axis C: emit a UserWarning on fallback instead
             # of swallowing the error.
@@ -150,9 +213,25 @@ class TwoStageDiDBootstrapMixin:
                 UserWarning,
                 stacklevel=2,
             )
-            gamma_hat = np.linalg.lstsq(XtX_10.toarray(), Xt1_X2, rcond=None)[0]
+            XtX_10_dense = XtX_10.toarray()
+            gamma_hat = np.linalg.lstsq(XtX_10_dense, Xt1_X2, rcond=None)[0]
             if gamma_hat.ndim == 1:
                 gamma_hat = gamma_hat.reshape(-1, 1)
+            theta_exact = np.linalg.lstsq(XtX_10_dense, np.asarray(rhs_fe).ravel(), rcond=None)[0]
+
+        # Exact Stage-1 / Stage-2 residuals (shared with the analytical variance) so
+        # the bootstrap influence function uses the same exact residuals as
+        # _compute_gmm_variance (not the ~1e-7 iterative residualized outcome).
+        eps_10, eps_2 = self._exact_gmm_residuals(
+            X_1_sparse,
+            theta_exact,
+            y_vals_clean,
+            identified,
+            omega_0,
+            y_tilde,
+            X_2,
+            survey_weights,
+        )
 
         # Per-cluster aggregation — survey weights multiply eps_10 before sparse multiply
         if survey_weights is not None:
@@ -307,10 +386,8 @@ class TwoStageDiDBootstrapMixin:
 
         # Extract survey weights for S-score computation and Stage-2 WLS
         survey_weights: Optional[np.ndarray] = None
-        survey_weight_type: str = "pweight"
         if resolved_survey is not None:
             survey_weights = resolved_survey.weights
-            survey_weight_type = resolved_survey.weight_type
 
         # Handle NaN y_tilde (from unidentified FEs) — matches _stage2_static logic
         nan_mask = ~np.isfinite(y_tilde)
@@ -326,14 +403,6 @@ class TwoStageDiDBootstrapMixin:
             return None
 
         X_2_static = D.reshape(-1, 1)
-        coef_static = solve_ols(
-            X_2_static,
-            y_tilde,
-            return_vcov=False,
-            weights=survey_weights,
-            weight_type=survey_weight_type,
-        )[0]
-        eps_2_static = y_tilde - np.dot(X_2_static, coef_static)
 
         S_static, bread_static, unique_clusters = self._compute_cluster_S_scores(
             df=df,
@@ -346,7 +415,6 @@ class TwoStageDiDBootstrapMixin:
             delta_hat=delta_hat,
             kept_cov_mask=kept_cov_mask,
             X_2=X_2_static,
-            eps_2=eps_2_static,
             cluster_ids=cluster_ids,
             survey_weights=survey_weights,
         )
@@ -485,15 +553,6 @@ class TwoStageDiDBootstrapMixin:
                         if h_int in horizon_to_col:
                             X_2_es[i, horizon_to_col[h_int]] = 1.0
 
-                coef_es = solve_ols(
-                    X_2_es,
-                    y_tilde,
-                    return_vcov=False,
-                    weights=survey_weights,
-                    weight_type=survey_weight_type,
-                )[0]
-                eps_2_es = y_tilde - np.dot(X_2_es, coef_es)
-
                 S_es, bread_es, _ = self._compute_cluster_S_scores(
                     df=df,
                     unit=unit,
@@ -505,7 +564,6 @@ class TwoStageDiDBootstrapMixin:
                     delta_hat=delta_hat,
                     kept_cov_mask=kept_cov_mask,
                     X_2=X_2_es,
-                    eps_2=eps_2_es,
                     cluster_ids=cluster_ids,
                     survey_weights=survey_weights,
                 )
@@ -556,15 +614,6 @@ class TwoStageDiDBootstrapMixin:
                     if g in group_to_col:
                         X_2_grp[i, group_to_col[g]] = 1.0
 
-            coef_grp = solve_ols(
-                X_2_grp,
-                y_tilde,
-                return_vcov=False,
-                weights=survey_weights,
-                weight_type=survey_weight_type,
-            )[0]
-            eps_2_grp = y_tilde - np.dot(X_2_grp, coef_grp)
-
             S_grp, bread_grp, _ = self._compute_cluster_S_scores(
                 df=df,
                 unit=unit,
@@ -576,7 +625,6 @@ class TwoStageDiDBootstrapMixin:
                 delta_hat=delta_hat,
                 kept_cov_mask=kept_cov_mask,
                 X_2=X_2_grp,
-                eps_2=eps_2_grp,
                 cluster_ids=cluster_ids,
                 survey_weights=survey_weights,
             )
