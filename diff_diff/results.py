@@ -136,6 +136,7 @@ class DiDResults:
     inference_method: str = field(default="analytical")
     n_bootstrap: Optional[int] = field(default=None)
     n_clusters: Optional[int] = field(default=None)
+    p_val_type: Optional[str] = field(default=None)
     bootstrap_distribution: Optional[np.ndarray] = field(default=None, repr=False)
     # Survey design metadata (SurveyMetadata instance from diff_diff.survey)
     survey_metadata: Optional[Any] = field(default=None)
@@ -210,6 +211,8 @@ class DiDResults:
                 lines.append(f"{'Bootstrap replications:':<25} {self.n_bootstrap:>10}")
             if self.n_clusters is not None:
                 lines.append(f"{'Number of clusters:':<25} {self.n_clusters:>10}")
+            if self.p_val_type is not None:
+                lines.append(f"{'Test type:':<25} {self.p_val_type:>10}")
 
         # Add variance family label (vcov_type) only when inference was analytical
         # AND no survey design is in play. For wild-bootstrap the reported SE/CI
@@ -301,6 +304,8 @@ class DiDResults:
             result["n_bootstrap"] = self.n_bootstrap
         if self.n_clusters is not None:
             result["n_clusters"] = self.n_clusters
+        if self.p_val_type is not None:
+            result["p_val_type"] = self.p_val_type
         if self.survey_metadata is not None:
             sm = self.survey_metadata
             result["weight_type"] = sm.weight_type

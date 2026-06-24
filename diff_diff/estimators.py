@@ -101,9 +101,9 @@ class DifferenceInDifferences:
         (recommended for <10 clusters), or "mammen" (skewness correction).
     p_val_type : str, default="two-tailed"
         Shape of the wild cluster bootstrap test (mirrors
-        ``fwildclusterboot::boottest``): "two-tailed" (symmetric test on
-        ``|t|``, symmetric inverted CI) or "equal-tailed" (each tail at
-        ``alpha/2``, equal-tailed CI). Only used when
+        ``fwildclusterboot::boottest``): "two-tailed" (test on ``|t|``,
+        two-tailed inverted CI — which may be asymmetric) or "equal-tailed"
+        (each tail at ``alpha/2``, equal-tailed CI). Only used when
         ``inference="wild_bootstrap"``.
     seed : int, optional
         Random seed for reproducibility when using bootstrap inference.
@@ -708,10 +708,12 @@ class DifferenceInDifferences:
         inference_method = "analytical"
         n_bootstrap_used = None
         n_clusters_used = None
+        p_val_type_used = None
         if self._bootstrap_results is not None:
             inference_method = "wild_bootstrap"
             n_bootstrap_used = self._bootstrap_results.n_bootstrap
             n_clusters_used = self._bootstrap_results.n_clusters
+            p_val_type_used = self._bootstrap_results.p_val_type
 
         # Store results
         self.results_ = DiDResults(
@@ -732,6 +734,7 @@ class DifferenceInDifferences:
             inference_method=inference_method,
             n_bootstrap=n_bootstrap_used,
             n_clusters=n_clusters_used,
+            p_val_type=p_val_type_used,
             survey_metadata=survey_metadata,
             # Report the family that actually produced the SE, which may be
             # the remapped "hc1" (CR1) under the legacy alias path, not the

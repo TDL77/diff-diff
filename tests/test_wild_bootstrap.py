@@ -1174,3 +1174,77 @@ class TestWildBootstrapParityR:
         assert res.p_value == pytest.approx(golden["equal_tailed"]["p_val"], abs=1e-9)
         assert res.ci_lower == pytest.approx(lo, abs=5e-4)
         assert res.ci_upper == pytest.approx(hi, abs=5e-4)
+
+
+# =============================================================================
+# Floor / low-effective-draw consistency + p_val_type result propagation
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    "n_clusters, n_bootstrap, att, seed",
+    [
+        (6, 9, 3.0, 1),  # RNG path, 9 draws -> floor 1/10 = 0.10 > alpha
+        (4, 999, 4.0, 2),  # enumerated 2**4 = 16 draws -> floor 1/17 ~= 0.059 > alpha
+    ],
+)
+def test_low_draw_floor_preserves_consistency(n_clusters, n_bootstrap, att, seed):
+    """With very few effective draws the p-value floor 1/(n_valid+1) can exceed
+    alpha; the floor must NOT then flip a bootstrap-significant result (0 outside
+    the inverted CI) to non-significant. The verdict must always match the CI.
+    """
+    import warnings
+
+    df = _make_clustered(n_clusters, att, seed)
+    did = DifferenceInDifferences(
+        cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_bootstrap, seed=seed
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # few-cluster warning
+        res = did.fit(df, outcome="outcome", treatment="treated", time="post")
+    lower, upper = res.conf_int
+    zero_in_ci = lower <= 0.0 <= upper
+    rejects = res.p_value < did.alpha
+    # The exact bug the reviewer flagged: p >= alpha while the CI excludes 0.
+    assert zero_in_ci != rejects, (
+        f"p/CI inconsistent at G={n_clusters}, B={n_bootstrap}: "
+        f"p={res.p_value}, CI=[{lower}, {upper}]"
+    )
+
+
+def test_p_val_type_surfaced_on_results():
+    """p_val_type is carried on WildBootstrapResults and the high-level DiD
+    result (None for analytical inference), and appears in summary()/to_dict()."""
+    df = _make_clustered(20, 0.6, seed=5)
+    for ptype in ("two-tailed", "equal-tailed"):
+        res = DifferenceInDifferences(
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=999, seed=5, p_val_type=ptype
+        ).fit(df, outcome="outcome", treatment="treated", time="post")
+        assert res.p_val_type == ptype
+        assert res.to_dict()["p_val_type"] == ptype
+        assert "Test type:" in res.summary()
+    # Analytical inference does not set p_val_type.
+    res_a = DifferenceInDifferences(cluster="cluster").fit(
+        df, outcome="outcome", treatment="treated", time="post"
+    )
+    assert res_a.p_val_type is None
+
+
+def test_wild_bootstrap_results_carries_p_val_type():
+    """The low-level WildBootstrapResults dataclass exposes p_val_type."""
+    df = _make_clustered(20, 0.6, seed=5)
+    X = np.column_stack([np.ones(len(df)), df.treated, df.post, df.treated * df.post])
+    y = df.outcome.to_numpy()
+    beta = np.linalg.lstsq(X, y, rcond=None)[0]
+    res = wild_bootstrap_se(
+        X,
+        y,
+        y - X @ beta,
+        df.cluster.to_numpy(),
+        coefficient_index=3,
+        n_bootstrap=999,
+        seed=5,
+        p_val_type="equal-tailed",
+    )
+    assert res.p_val_type == "equal-tailed"
+    assert "equal-tailed" in res.summary()

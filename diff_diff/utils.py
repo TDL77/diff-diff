@@ -444,6 +444,8 @@ class WildBootstrapResults:
         Type of bootstrap weights used ("rademacher", "webb", or "mammen").
     alpha : float
         Significance level used for confidence interval.
+    p_val_type : str
+        Test shape used ("two-tailed" or "equal-tailed").
     bootstrap_distribution : np.ndarray, optional
         Bootstrap distribution of the studentized statistic ``t*`` evaluated at
         the null (if requested).
@@ -464,6 +466,7 @@ class WildBootstrapResults:
     n_bootstrap: int
     weight_type: str
     alpha: float = 0.05
+    p_val_type: str = "two-tailed"
     bootstrap_distribution: Optional[np.ndarray] = field(default=None, repr=False)
 
     def summary(self) -> str:
@@ -478,6 +481,7 @@ class WildBootstrapResults:
             f"Number of clusters:  {self.n_clusters}",
             f"Bootstrap reps:      {self.n_bootstrap}",
             f"Weight type:         {self.weight_type}",
+            f"Test type:           {self.p_val_type}",
         ]
         return "\n".join(lines)
 
@@ -687,7 +691,8 @@ def wild_bootstrap_se(
         ``t*`` (evaluated at the null) in the results.
     p_val_type : str, default="two-tailed"
         Shape of the test (mirrors ``boottest``'s ``p_val_type``):
-        - "two-tailed": symmetric test on ``|t*|``; symmetric CI by inversion.
+        - "two-tailed": test on ``|t*|``; two-tailed CI by inversion (the
+          interval need not be symmetric about the estimate).
         - "equal-tailed": each tail tested at ``alpha/2``; equal-tailed CI.
 
     Returns
@@ -771,6 +776,7 @@ def wild_bootstrap_se(
             n_bootstrap=n_bootstrap,
             weight_type=weight_type,
             alpha=alpha,
+            p_val_type=p_val_type,
             bootstrap_distribution=None,
         )
 
@@ -862,17 +868,24 @@ def wild_bootstrap_se(
     def _frac_lt(vals: np.ndarray, thresh: float) -> float:
         return float(np.mean(vals < thresh - 1e-9 * max(1.0, abs(thresh))))
 
-    # p-value at the test null (two-tailed on |t*|, or equal-tailed), floored at
-    # 1/(n_valid+1) to avoid an exact zero (a deliberate, documented departure
-    # from boottest, which can report p == 0; the floor never changes a
-    # significance verdict and leaves the inverted CI untouched).
+    # p-value at the test null (two-tailed on |t*|, or equal-tailed).
     if p_val_type == "two-tailed":
-        p_value = _frac_gt(np.abs(t_star_valid), abs(t0))
+        raw_p = _frac_gt(np.abs(t_star_valid), abs(t0))
     else:
         p_low = _frac_lt(t_star_valid, t0)
         p_up = _frac_gt(t_star_valid, t0)
-        p_value = 2.0 * min(p_low, p_up)
-    p_value = float(min(1.0, max(p_value, 1.0 / (n_valid + 1))))
+        raw_p = 2.0 * min(p_low, p_up)
+    # Floor the reported p-value to avoid an exact zero (a documented departure
+    # from boottest, which can report p == 0) — but NEVER let the floor reach
+    # the significance level. With very few valid draws 1/(n_valid+1) can exceed
+    # alpha, and flooring there would flip a bootstrap-significant result (0
+    # outside the inverted CI) to "non-significant", re-creating the very
+    # p-vs-CI contradiction this estimator fixes. When the floor would cross
+    # alpha we report the raw p-value (which is < alpha in exactly those cases),
+    # so the significance verdict always agrees with the inverted CI.
+    floor = 1.0 / (n_valid + 1)
+    p_value = max(raw_p, floor) if floor < alpha else raw_p
+    p_value = float(min(1.0, p_value))
 
     # ---- Confidence interval by test inversion ------------------------------
     # The CI is the set of nulls r not rejected at level alpha. The relevant
@@ -942,6 +955,7 @@ def wild_bootstrap_se(
         n_bootstrap=n_boot_eff,
         weight_type=weight_type,
         alpha=alpha,
+        p_val_type=p_val_type,
         bootstrap_distribution=t_star_valid if return_distribution else None,
     )
 

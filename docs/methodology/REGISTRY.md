@@ -132,9 +132,12 @@ independent full-refit enumeration in `tests/test_wild_bootstrap.py::test_wcr_ma
   analytical Wald statistic `τ̂/se_a`, while `p_value` and `conf_int` come from the bootstrap test
   inversion. This is intentional (it is exactly the boottest convention) and is not a deviation.
 - **Deviation from R:** the p-value is floored at `1/(n_valid+1)` to avoid reporting an exact
-  `0` (which boottest can return under full enumeration of a strong effect). The floor only
-  engages well inside the rejection region, so it never changes a significance verdict and leaves
-  the inverted CI untouched.
+  `0` (which boottest can return under full enumeration of a strong effect) — but the floor is
+  applied **only when `1/(n_valid+1) < alpha`**. With very few valid draws the floor can exceed
+  `alpha`; applying it there would lift a bootstrap-significant p (0 outside the inverted CI) to
+  "non-significant", contradicting the CI, so in that regime the raw p (which boottest also
+  reports, possibly 0) is returned. The significance verdict therefore always matches the inverted
+  CI (`0 ∈ CI ⟺ p ≥ alpha`).
 
 ---
 
