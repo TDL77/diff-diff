@@ -2623,6 +2623,22 @@ def _compute_robust_vcov_numpy(
     # ------------------------------------------------------------------
     assert vcov_type == "hc1"
 
+    # Cluster-robust validity check FIRST: a cluster-robust request with fewer
+    # than 2 clusters is invalid and must raise the documented error — this has
+    # to precede the saturated-design guard below so a 1-cluster *saturated* fit
+    # still raises rather than being masked by the NaN return. (Mirrors the
+    # effective-cluster count computed in the cluster branch, including the
+    # zero-total-weight exclusion.)
+    if cluster_ids is not None:
+        n_clusters_check = len(np.unique(cluster_ids))
+        if weights is not None and weight_type != "fweight" and np.any(weights == 0):
+            cluster_weight_sums = pd.Series(weights).groupby(cluster_ids).sum()
+            n_clusters_check = int((cluster_weight_sums > 0).sum())
+        if n_clusters_check < 2:
+            raise ValueError(
+                f"Need at least 2 clusters for cluster-robust SEs, got {n_clusters_check}"
+            )
+
     # Saturated design (no residual degrees of freedom): both the HC1 adjustment
     # n_eff/(n_eff-k) and the CR1 adjustment (n_eff-1)/(n_eff-k) divide by
     # (n_eff - k), which is zero when the design exactly determines y. Return a
