@@ -99,6 +99,12 @@ class DifferenceInDifferences:
     bootstrap_weights : str, default="rademacher"
         Type of bootstrap weights: "rademacher" (standard), "webb"
         (recommended for <10 clusters), or "mammen" (skewness correction).
+    p_val_type : str, default="two-tailed"
+        Shape of the wild cluster bootstrap test (mirrors
+        ``fwildclusterboot::boottest``): "two-tailed" (symmetric test on
+        ``|t|``, symmetric inverted CI) or "equal-tailed" (each tail at
+        ``alpha/2``, equal-tailed CI). Only used when
+        ``inference="wild_bootstrap"``.
     seed : int, optional
         Random seed for reproducibility when using bootstrap inference.
         If None (default), results will vary between runs.
@@ -181,6 +187,7 @@ class DifferenceInDifferences:
         inference: str = "analytical",
         n_bootstrap: int = 999,
         bootstrap_weights: str = "rademacher",
+        p_val_type: str = "two-tailed",
         seed: Optional[int] = None,
         rank_deficient_action: str = "warn",
         conley_coords: Optional[Tuple[str, str]] = None,
@@ -208,6 +215,9 @@ class DifferenceInDifferences:
         self.inference = inference
         self.n_bootstrap = n_bootstrap
         self.bootstrap_weights = bootstrap_weights
+        # Test shape for wild cluster bootstrap (mirrors fwildclusterboot's
+        # p_val_type): "two-tailed" (default) or "equal-tailed".
+        self.p_val_type = p_val_type
         self.seed = seed
         self.rank_deficient_action = rank_deficient_action
         # Conley spatial-HAC parameters; column names (NOT array values) for
@@ -804,6 +814,7 @@ class DifferenceInDifferences:
             alpha=self.alpha,
             seed=self.seed,
             return_distribution=False,
+            p_val_type=self.p_val_type,
         )
         self._bootstrap_results = bootstrap_results
 
@@ -994,6 +1005,7 @@ class DifferenceInDifferences:
             "inference": self.inference,
             "n_bootstrap": self.n_bootstrap,
             "bootstrap_weights": self.bootstrap_weights,
+            "p_val_type": self.p_val_type,
             "seed": self.seed,
             "rank_deficient_action": self.rank_deficient_action,
             "conley_coords": self.conley_coords,
@@ -1319,6 +1331,9 @@ class MultiPeriodDiD(DifferenceInDifferences):
         # the analytical-fallback warning first would produce contradictory
         # guidance on the same call (warn "falling back" + raise "not
         # supported"). The Conley raise takes precedence. Codex CI R11 P3.
+        # NOTE: ``p_val_type`` is inherited from DifferenceInDifferences but is
+        # inert here — MultiPeriodDiD has no wild-bootstrap path (it falls back
+        # to analytical inference below), so the parameter has no effect.
         effective_inference = self.inference
         if self.inference == "wild_bootstrap" and self.vcov_type != "conley":
             warnings.warn(

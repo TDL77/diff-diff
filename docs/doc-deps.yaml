@@ -865,6 +865,10 @@ sources:
       - path: docs/methodology/REGISTRY.md
         section: "Inference, safe_inference NaN gating"
         type: methodology
+      - path: docs/methodology/REGISTRY.md
+        section: "Wild cluster bootstrap (WCR)"
+        type: methodology
+        note: "wild_bootstrap_se: WCR null-imposition, enumeration, test-inversion CI, fwildclusterboot parity"
       - path: docs/practitioner_getting_started.rst
         section: "Step 4: Check Whether the Result Is Trustworthy"
         type: user_guide

@@ -90,6 +90,52 @@ where τ is the ATT.
 - [x] Wild bootstrap supports Rademacher, Mammen, Webb weight distributions
 - [x] Formula interface parses `y ~ treated * post` correctly
 
+### Wild cluster bootstrap (WCR)
+
+`inference="wild_bootstrap"` (with `cluster=`) runs the **Wild Cluster Restricted (WCR)**
+bootstrap of Cameron, Gelbach & Miller (2008), matching the defaults of R's
+`fwildclusterboot::boottest` (Roodman, MacKinnon, Nielsen & Webb 2019). Implemented in
+`diff_diff.utils.wild_bootstrap_se`; used by `DifferenceInDifferences` and (inherited)
+`TwoWayFixedEffects`. (`MultiPeriodDiD` does **not** support it — it falls back to analytical
+inference and the inherited `p_val_type` is inert there.)
+
+*Algorithm (test of H₀: τ = r, default r = 0):*
+1. **Impose the null** by dropping the interaction column and re-fitting the reduced model;
+   the restricted residuals are `ũ(r) = M₋ⱼ y − r·M₋ⱼ xⱼ` (linear in `r`, where `M₋ⱼ` is the
+   annihilator of the design without column `j`). Rank-deficient nuisance columns are dropped
+   via `solve_ols` so the identified ATT (and the bootstrap) stay finite.
+2. **Cluster sign-vectors** `w_g`: for Rademacher weights with few clusters the full set of
+   `2**n_clusters` sign-vectors is **enumerated** (deterministic) when `2**(n_clusters-1) ≤
+   n_bootstrap` — the same full-enumeration trigger boottest uses; otherwise signs are sampled
+   (`seed`-reproducible). Webb/Mammen always sample (the sign-flip symmetry is Rademacher-specific).
+3. **Bootstrap statistic** `t*(r) = (β*ⱼ − r) / se*`, where each draw refits the full design on
+   `y* = (y − ũ(r)) + ũ(r)·w` and `se*` is the CR1 cluster-robust SE of `β*ⱼ`. The observed
+   statistic is `t₀ = (τ̂ − r)/se_a` with the analytical CR1 SE `se_a`.
+4. **p-value:** two-tailed `mean(|t*| > |t₀|)` or equal-tailed `2·min(mean(t*<t₀), mean(t*>t₀))`
+   — strict `>`, matching boottest (the all-(+1)/all-(−1) enumerated draws reproduce ±t₀ and are
+   excluded as boundary ties). Floored at `1/(n_valid+1)` (see Deviation below).
+5. **Confidence interval by test inversion:** the set of nulls `r` not rejected at `alpha`,
+   located by outward bracketing + bisection on the (monotone, step) rejection frequency. The CI
+   is therefore exactly consistent with the p-value (`0 ∈ CI ⟺ p ≥ alpha`) and may be asymmetric.
+6. The reported `se` is `se_a` (analytical CR1); `p_val_type ∈ {"two-tailed" (default),
+   "equal-tailed"}`. CR1 uses the standard `(G/(G−1))((N−1)/(N−k))` correction, which cancels in
+   `|t*|` vs `|t₀|` so it affects only the reported SE, not the p-value or CI.
+
+*Verification — R parity:* validated against `fwildclusterboot::boottest()` defaults on a fixed
+few-cluster golden (`benchmarks/R/generate_wild_cluster_boot_golden.R` →
+`benchmarks/data/wild_cluster_boot_golden.json`), enumerated and deterministic on both sides. The
+bootstrap t-distribution matches R to ~6e-14; `se`, `t₀`, and the (interior) p-value match exactly;
+the inverted CI matches to ~1e-4 (bisection vs boottest's grid search). Also pinned against an
+independent full-refit enumeration in `tests/test_wild_bootstrap.py::test_wcr_matches_independent_bruteforce`.
+
+- **Note:** The reported quantities mix inference families *by design*: `t_stat_original` is the
+  analytical Wald statistic `τ̂/se_a`, while `p_value` and `conf_int` come from the bootstrap test
+  inversion. This is intentional (it is exactly the boottest convention) and is not a deviation.
+- **Deviation from R:** the p-value is floored at `1/(n_valid+1)` to avoid reporting an exact
+  `0` (which boottest can return under full enumeration of a strong effect). The floor only
+  engages well inside the rejection region, so it never changes a significance verdict and leaves
+  the inverted CI untouched.
+
 ---
 
 ## MultiPeriodDiD

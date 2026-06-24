@@ -4,6 +4,9 @@ Tests for Wild Cluster Bootstrap functionality.
 Tests the wild_bootstrap_se() function and its integration with DiD estimators.
 """
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -277,8 +280,11 @@ class TestWildBootstrapSE:
             X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=123
         )
 
-        # Should be different (not exactly equal)
-        assert results1.se != results2.se
+        # With 10 clusters and n_boot < 2**9, signs are sampled (not enumerated),
+        # so different seeds draw different bootstrap samples. The reported `se`
+        # is the analytical CR1 SE (seed-independent by construction); it is the
+        # inverted CI that reflects the random draws, so assert the CI differs.
+        assert (results1.ci_lower, results1.ci_upper) != (results2.ci_lower, results2.ci_upper)
 
     def test_different_weight_types(self, ols_components, ci_params):
         """Test all weight types produce valid results."""
@@ -524,7 +530,7 @@ class TestWildBootstrapResults:
         summary = results.summary()
 
         assert "Wild Cluster Bootstrap Results" in summary
-        assert "Bootstrap SE:" in summary
+        assert "Cluster-robust SE:" in summary
         assert "Bootstrap p-value:" in summary
         assert "Number of clusters:" in summary
 
@@ -707,8 +713,14 @@ class TestFewClustersEdgeCases:
 
         lower, upper = results.conf_int
         assert lower < upper
-        # CI should contain the point estimate
-        assert lower < results.att < upper
+        # The CI is obtained by inverting the bootstrap test, so it need NOT be
+        # centered on (or even contain) the point estimate under inversion with
+        # very few clusters. The load-bearing guarantee is internal consistency
+        # between the test and the interval: 0 lies outside the CI iff the
+        # bootstrap p-value rejects at alpha.
+        zero_in_ci = lower <= 0.0 <= upper
+        rejects = results.p_value < did.alpha
+        assert zero_in_ci != rejects
 
 
 # =============================================================================
@@ -739,128 +751,426 @@ class TestWildBootstrapDegenerateAllNaN:
         y = X @ np.array([1.0, 0.5]) + rng.normal(scale=0.1, size=n)
         return X, y, cluster_ids
 
-    def test_degenerate_n_valid_zero_returns_all_nan(self, monkeypatch):
-        """When every bootstrap draw is singular, se / t_stat / p_value / CI
-        are all NaN (full inference quadruple moves together).
+    def test_degenerate_nan_restricted_fit_returns_all_nan(self, monkeypatch):
+        """When the restricted residualization yields non-finite values (so
+        every bootstrap statistic is NaN, n_valid == 0), se / t_stat / p_value /
+        CI are all NaN together — the full inference quadruple moves as a unit
+        (feedback_bootstrap_nan_on_invalid_contract).
         """
         from diff_diff import utils as utils_mod
+        from tests.conftest import assert_nan_inference
 
         X, y, cluster_ids = self._make_ols_components()
         orig_solve = utils_mod._solve_ols_linalg
-        call_count = {"n": 0}
 
         def fake_solve(X_, y_, cluster_ids=None, return_vcov=True, return_fitted=False, **kw):
-            call_count["n"] += 1
-            # Calls 1 (original) and 2 (restricted) succeed normally.
-            if call_count["n"] <= 2:
-                return orig_solve(
-                    X_,
-                    y_,
-                    cluster_ids=cluster_ids,
-                    return_vcov=return_vcov,
-                    return_fitted=return_fitted,
-                    **kw,
-                )
-            # Bootstrap draws: force a singular vcov so se_star == 0.
-            coefs, residuals, _ = orig_solve(
-                X_,
-                y_,
-                cluster_ids=cluster_ids,
-                return_vcov=True,
-                **kw,
-            )
-            singular_vcov = np.zeros((X_.shape[1], X_.shape[1]))
+            # The original cluster-robust fit (return_fitted=False) passes
+            # through. The two restricted residualization fits ask for fitted
+            # values (return_fitted=True) — poison those with NaN so the
+            # restricted residuals, and hence every bootstrap t*, become
+            # non-finite (n_valid == 0).
             if return_fitted:
-                return coefs, residuals, X_ @ coefs, singular_vcov
-            return coefs, residuals, singular_vcov
+                n_, k_ = X_.shape[0], X_.shape[1]
+                return np.zeros(k_), np.zeros(n_), np.full(n_, np.nan), None
+            return orig_solve(X_, y_, cluster_ids=cluster_ids, return_vcov=return_vcov, **kw)
 
         monkeypatch.setattr(utils_mod, "_solve_ols_linalg", fake_solve)
-        # Compute residuals on the original design (needed for the helper signature).
-        from diff_diff.linalg import solve_ols as _solve_orig
-
-        coefs0, residuals0, _ = _solve_orig(X, y, cluster_ids=cluster_ids)
         results = utils_mod.wild_bootstrap_se(
             X=X,
             y=y,
-            residuals=residuals0,
+            residuals=y - y.mean(),
             cluster_ids=cluster_ids,
             coefficient_index=1,
             n_bootstrap=20,
             seed=1,
         )
-        # All five user-surface fields must be NaN together.
-        assert np.isnan(results.se), f"se should be NaN, got {results.se}"
-        assert np.isnan(results.t_stat_original), (
-            f"t_stat_original should be NaN under degenerate bootstrap "
-            f"(analytical t-stat must not surface alongside NaN se), "
-            f"got {results.t_stat_original}"
+        assert_nan_inference(
+            {
+                "se": results.se,
+                "t_stat": results.t_stat_original,
+                "p_value": results.p_value,
+                "conf_int": (results.ci_lower, results.ci_upper),
+            }
         )
-        assert np.isnan(results.p_value), f"p_value should be NaN, got {results.p_value}"
-        assert np.isnan(results.ci_lower), f"ci_lower should be NaN, got {results.ci_lower}"
-        assert np.isnan(results.ci_upper), f"ci_upper should be NaN, got {results.ci_upper}"
 
-    def test_degenerate_single_valid_draw_returns_all_nan(self, monkeypatch):
-        """When exactly one bootstrap draw is finite (insufficient for
-        ddof=1 std), the full inference tuple is NaN — we don't return a
-        finite percentile CI on a single-point sample with NaN se.
+    def test_degenerate_nonfinite_analytical_se_returns_all_nan(self, monkeypatch):
+        """When the analytical cluster-robust SE of the coefficient is
+        non-finite (e.g. an unidentified / rank-deficient estimand), no
+        bootstrap is attempted and the full inference quadruple is NaN.
         """
         from diff_diff import utils as utils_mod
+        from tests.conftest import assert_nan_inference
 
         X, y, cluster_ids = self._make_ols_components()
         orig_solve = utils_mod._solve_ols_linalg
-        call_count = {"n": 0}
 
         def fake_solve(X_, y_, cluster_ids=None, return_vcov=True, return_fitted=False, **kw):
-            call_count["n"] += 1
-            if call_count["n"] <= 2:
-                return orig_solve(
-                    X_,
-                    y_,
-                    cluster_ids=cluster_ids,
-                    return_vcov=return_vcov,
-                    return_fitted=return_fitted,
-                    **kw,
+            # Poison the variance of the coefficient of interest on the original
+            # cluster-robust fit (cluster_ids set, vcov requested, no fitted).
+            if cluster_ids is not None and return_vcov and not return_fitted:
+                coefs, residuals, vcov = orig_solve(
+                    X_, y_, cluster_ids=cluster_ids, return_vcov=True, **kw
                 )
-            # Bootstrap calls start at index 3. Let the FIRST bootstrap draw
-            # (call_count == 3) succeed; force every subsequent draw to be
-            # singular. n_valid ends at exactly 1.
-            if call_count["n"] == 3:
-                return orig_solve(
-                    X_,
-                    y_,
-                    cluster_ids=cluster_ids,
-                    return_vcov=return_vcov,
-                    return_fitted=return_fitted,
-                    **kw,
-                )
-            coefs, residuals, _ = orig_solve(
+                vcov = np.array(vcov, dtype=float)
+                vcov[1, 1] = np.nan
+                return coefs, residuals, vcov
+            return orig_solve(
                 X_,
                 y_,
                 cluster_ids=cluster_ids,
-                return_vcov=True,
+                return_vcov=return_vcov,
+                return_fitted=return_fitted,
                 **kw,
             )
-            singular_vcov = np.zeros((X_.shape[1], X_.shape[1]))
-            if return_fitted:
-                return coefs, residuals, X_ @ coefs, singular_vcov
-            return coefs, residuals, singular_vcov
 
         monkeypatch.setattr(utils_mod, "_solve_ols_linalg", fake_solve)
-        # Compute residuals on the original design (needed for the helper signature).
-        from diff_diff.linalg import solve_ols as _solve_orig
-
-        coefs0, residuals0, _ = _solve_orig(X, y, cluster_ids=cluster_ids)
         results = utils_mod.wild_bootstrap_se(
             X=X,
             y=y,
-            residuals=residuals0,
+            residuals=y - y.mean(),
             cluster_ids=cluster_ids,
             coefficient_index=1,
             n_bootstrap=20,
             seed=1,
         )
-        assert np.isnan(results.se)
-        assert np.isnan(results.t_stat_original)
-        assert np.isnan(results.p_value)
-        assert np.isnan(results.ci_lower)
-        assert np.isnan(results.ci_upper)
+        assert_nan_inference(
+            {
+                "se": results.se,
+                "t_stat": results.t_stat_original,
+                "p_value": results.p_value,
+                "conf_int": (results.ci_lower, results.ci_upper),
+            }
+        )
+
+
+# =============================================================================
+# Correctness & consistency (regression tests for issue #543)
+# =============================================================================
+
+
+def _make_clustered(n_clusters, att, seed, obs_per_cluster=10):
+    """Clustered 2x2 DiD data with a known true ATT (cluster-level treatment)."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for c in range(n_clusters):
+        is_treated = c < n_clusters // 2
+        cluster_effect = rng.normal(0, 2)
+        for _ in range(obs_per_cluster):
+            for period in (0, 1):
+                y = 10.0 + cluster_effect
+                if period == 1:
+                    y += 3.0
+                if is_treated and period == 1:
+                    y += att
+                y += rng.normal(0, 0.5)
+                rows.append(
+                    {"cluster": c, "treated": int(is_treated), "post": period, "outcome": y}
+                )
+    return pd.DataFrame(rows)
+
+
+class TestWildBootstrapCorrectness:
+    """Regression tests for the WCR null-imposition fix (issue #543).
+
+    The original bug never imposed the null, so the bootstrap t* distribution
+    was centered on the estimate instead of 0 and the p-value was ~0.5-0.86
+    regardless of significance, contradicting a CI that (coincidentally)
+    excluded 0. These tests pin the corrected behaviour: a strong true effect
+    is significant, and the p-value and CI are always mutually consistent.
+    """
+
+    def test_strong_effect_is_significant(self, clustered_did_data, ci_params):
+        """A strong true effect (ATT=3, 10 clusters) must be significant.
+
+        On the buggy implementation this returned p ~= 0.85 (non-significant)
+        while the CI excluded 0 — the exact #543 contradiction.
+        """
+        n_boot = ci_params.bootstrap(999, min_n=99)
+        did = DifferenceInDifferences(
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=42
+        )
+        res = did.fit(clustered_did_data, outcome="outcome", treatment="treated", time="post")
+        lower, upper = res.conf_int
+        assert res.p_value < 0.05, f"strong effect should be significant, got p={res.p_value}"
+        assert not (lower <= 0.0 <= upper), "CI should exclude 0 for a strong effect"
+
+    def test_p_value_ci_consistency(self, ci_params):
+        """0 outside the CI iff the bootstrap p-value rejects at alpha, across a
+        range of effect sizes / seeds (the property the bug violated)."""
+        n_boot = ci_params.bootstrap(999, min_n=99)
+        for att, seed in [(0.0, 1), (0.2, 2), (0.5, 3), (2.5, 4)]:
+            df = _make_clustered(20, att, seed)
+            did = DifferenceInDifferences(
+                cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=seed
+            )
+            res = did.fit(df, outcome="outcome", treatment="treated", time="post")
+            lower, upper = res.conf_int
+            zero_in_ci = lower <= 0.0 <= upper
+            rejects = res.p_value < did.alpha
+            assert zero_in_ci != rejects, (
+                f"inconsistent p/CI at att={att}, seed={seed}: "
+                f"p={res.p_value}, CI=[{lower}, {upper}]"
+            )
+
+    def test_true_null_not_significant(self, ci_params):
+        """Under a true null (ATT=0) the test should not reject (p not tiny,
+        0 inside the CI)."""
+        n_boot = ci_params.bootstrap(999, min_n=99)
+        df = _make_clustered(20, 0.0, seed=7)
+        did = DifferenceInDifferences(
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=7
+        )
+        res = did.fit(df, outcome="outcome", treatment="treated", time="post")
+        lower, upper = res.conf_int
+        assert res.p_value > 0.05
+        assert lower <= 0.0 <= upper
+
+    def test_enumeration_is_deterministic(self):
+        """With few clusters (Rademacher), the full sign-vector set is
+        enumerated, so results are independent of the seed and n_bootstrap is
+        reported as 2**n_clusters."""
+        df = _make_clustered(6, 2.5, seed=1)  # 6 clusters -> 2**5 = 32 <= 999 -> enumerate
+        r1 = DifferenceInDifferences(
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=999, seed=1
+        ).fit(df, outcome="outcome", treatment="treated", time="post")
+        r2 = DifferenceInDifferences(
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=999, seed=999
+        ).fit(df, outcome="outcome", treatment="treated", time="post")
+        assert r1.n_bootstrap == 2**6
+        assert r1.p_value == r2.p_value
+        assert r1.conf_int == r2.conf_int
+
+    def test_se_matches_analytical_cluster_robust(self, clustered_did_data, ci_params):
+        """The reported wild-bootstrap SE is the analytical cluster-robust (CR1)
+        SE — identical to the analytical cluster-robust fit."""
+        n_boot = ci_params.bootstrap(199, min_n=49)
+        analytical = DifferenceInDifferences(cluster="cluster").fit(
+            clustered_did_data, outcome="outcome", treatment="treated", time="post"
+        )
+        boot = DifferenceInDifferences(
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=42
+        ).fit(clustered_did_data, outcome="outcome", treatment="treated", time="post")
+        assert boot.se == pytest.approx(analytical.se, rel=1e-10)
+
+    def test_many_clusters_ci_comparable_to_analytical(self, ci_params):
+        """With many clusters the inverted wild CI is comparable to the
+        analytical cluster-robust CI (not wildly different, as the old
+        percentile-of-coefficients CI could be)."""
+        n_boot = ci_params.bootstrap(999, min_n=199)
+        df = _make_clustered(30, 1.0, seed=11)
+        analytical = DifferenceInDifferences(cluster="cluster").fit(
+            df, outcome="outcome", treatment="treated", time="post"
+        )
+        boot = DifferenceInDifferences(
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_boot, seed=11
+        ).fit(df, outcome="outcome", treatment="treated", time="post")
+        a_half = (analytical.conf_int[1] - analytical.conf_int[0]) / 2
+        b_half = (boot.conf_int[1] - boot.conf_int[0]) / 2
+        assert 0.7 < (b_half / a_half) < 1.5
+
+    def test_equal_tailed_consistent(self, ci_params):
+        """Equal-tailed p_val_type yields a valid, internally consistent CI."""
+        n_boot = ci_params.bootstrap(999, min_n=99)
+        df = _make_clustered(20, 0.6, seed=5)
+        res = DifferenceInDifferences(
+            cluster="cluster",
+            inference="wild_bootstrap",
+            n_bootstrap=n_boot,
+            seed=5,
+            p_val_type="equal-tailed",
+        ).fit(df, outcome="outcome", treatment="treated", time="post")
+        lower, upper = res.conf_int
+        assert lower < upper
+        assert (not (lower <= 0.0 <= upper)) == (res.p_value < 0.05)
+
+    def test_p_val_type_round_trips_in_params(self):
+        """p_val_type is exposed via get_params / set_params and round-trips."""
+        est = DifferenceInDifferences(
+            cluster="cluster", inference="wild_bootstrap", p_val_type="equal-tailed"
+        )
+        params = est.get_params()
+        assert params["p_val_type"] == "equal-tailed"
+        clone = DifferenceInDifferences(**params)
+        assert clone.p_val_type == "equal-tailed"
+        clone.set_params(p_val_type="two-tailed")
+        assert clone.p_val_type == "two-tailed"
+
+    def test_invalid_p_val_type_raises(self, ols_components):
+        """An unrecognized p_val_type raises ValueError."""
+        X, y, residuals, cluster_ids = ols_components
+        with pytest.raises(ValueError, match="p_val_type must be one of"):
+            wild_bootstrap_se(X, y, residuals, cluster_ids, coefficient_index=3, p_val_type="bogus")
+
+
+# =============================================================================
+# Cross-check: independent brute-force WCR == production (== fwildclusterboot)
+# =============================================================================
+
+
+def _brute_force_wcr_refit(X, y, cluster_ids, coef_index, null=0.0):
+    """Independent textbook WCR bootstrap, computed separately from the
+    production fast-form path.
+
+    Imposes the null by dropping the coefficient's column, enumerates ALL
+    ``2**G`` Rademacher sign-vectors, does a FULL OLS refit per draw, forms the
+    CR1 cluster-robust SE, and counts strict exceedances ``|t*| > |t0|``. This
+    is the same WCR statistic ``fwildclusterboot::boottest`` computes — the two
+    were verified to agree on the bootstrap t-distribution to ~6e-14 — so a
+    match here certifies R-parity without requiring R at test time.
+
+    Returns ``(t0, se_a, p_raw)`` where ``p_raw(r)`` is the two-tailed bootstrap
+    p-value at null ``r`` (unfloored).
+    """
+    from itertools import product
+
+    uniq = np.unique(cluster_ids)
+    G = len(uniq)
+    n, k = X.shape
+    cidx = [np.where(cluster_ids == c)[0] for c in uniq]
+    corr = (G / (G - 1)) * ((n - 1) / (n - k))
+    XtX_inv = np.linalg.inv(X.T @ X)
+    a = X @ XtX_inv[:, coef_index]
+
+    def cr1(resid):
+        return np.sqrt(corr * sum((a[idx] @ resid[idx]) ** 2 for idx in cidx))
+
+    b = XtX_inv @ X.T @ y
+    se_a = cr1(y - X @ b)
+    t0 = (b[coef_index] - null) / se_a
+    Xr = np.delete(X, coef_index, axis=1)
+    Pr = Xr @ np.linalg.inv(Xr.T @ Xr) @ Xr.T
+    cl_pos = {c: i for i, c in enumerate(uniq)}
+    cl_of = np.array([cl_pos[c] for c in cluster_ids])
+    signs = np.array(list(product([-1.0, 1.0], repeat=G)))
+
+    def p_raw(r):
+        yr = y - X[:, coef_index] * r
+        u = yr - Pr @ yr
+        fit = (Pr @ yr) + X[:, coef_index] * r  # restricted fitted in original-y space
+        tb = []
+        for w in signs:
+            ystar = fit + u * w[cl_of]
+            bs = XtX_inv @ X.T @ ystar
+            tb.append((bs[coef_index] - r) / cr1(ystar - X @ bs))
+        tb = np.array(tb)
+        t0r = (b[coef_index] - r) / se_a
+        return float(np.mean(np.abs(tb) > abs(t0r) + 1e-9 * max(1.0, abs(t0r))))
+
+    return t0, se_a, p_raw
+
+
+def test_wcr_matches_independent_bruteforce():
+    """Production WCR == independent full-refit enumeration (== boottest).
+
+    A 6-cluster, noisy design gives an interior (non-floored) bootstrap p-value
+    so the exact p, SE, t-stat, and inverted CI can all be checked against the
+    independent reference.
+    """
+    rng = np.random.default_rng(3)
+    rows = []
+    for c in range(6):
+        is_treated = c < 3
+        cluster_effect = rng.normal(0, 1.5)
+        for _ in range(8):
+            for period in (0, 1):
+                y = 4.0 + cluster_effect + 1.0 * period
+                if is_treated and period == 1:
+                    y += 0.3  # weak effect + heavy noise -> interior p
+                y += rng.normal(0, 4.0)
+                rows.append(
+                    {"cluster": c, "treated": int(is_treated), "post": period, "outcome": y}
+                )
+    df = pd.DataFrame(rows)
+    X = np.column_stack([np.ones(len(df)), df.treated, df.post, df.treated * df.post])
+    y = df.outcome.to_numpy()
+    cl = df.cluster.to_numpy()
+    j = 3
+    beta = np.linalg.lstsq(X, y, rcond=None)[0]
+
+    res = wild_bootstrap_se(X, y, y - X @ beta, cl, coefficient_index=j, n_bootstrap=999, seed=3)
+    t0, se_a, p_raw = _brute_force_wcr_refit(X, y, cl, j)
+
+    # Core statistic: exact agreement with the independent reference.
+    assert res.t_stat_original == pytest.approx(t0, rel=1e-9)
+    assert res.se == pytest.approx(se_a, rel=1e-9)
+    assert res.p_value == pytest.approx(p_raw(0.0), abs=1e-9)  # interior p -> floor inactive
+
+    # CI by test inversion: the brute-force p-value at the production endpoints
+    # sits at the alpha crossing (granular to ~1/2**G with full enumeration).
+    assert abs(p_raw(res.ci_lower) - 0.05) <= 2.0 / 2**6
+    assert abs(p_raw(res.ci_upper) - 0.05) <= 2.0 / 2**6
+
+
+# =============================================================================
+# R parity — fwildclusterboot::boottest (skip-guarded golden)
+# =============================================================================
+#
+# Pins wild_bootstrap_se against R `fwildclusterboot::boottest()` on a fixed
+# few-cluster golden (G=6, fully enumerated -> deterministic both sides).
+# Regenerate with `Rscript benchmarks/R/generate_wild_cluster_boot_golden.R`.
+# R is NOT required at test time; the golden JSON is checked in.
+
+_WCB_GOLDEN = Path(__file__).parent.parent / "benchmarks" / "data" / "wild_cluster_boot_golden.json"
+_WCB_DATA = Path(__file__).parent.parent / "benchmarks" / "data" / "wild_cluster_boot_test_data.csv"
+_WCB_AVAILABLE = _WCB_GOLDEN.is_file() and _WCB_DATA.is_file()
+
+
+@pytest.mark.skipif(not _WCB_AVAILABLE, reason="fwildclusterboot golden fixture not present")
+class TestWildBootstrapParityR:
+    """Cross-language parity with R fwildclusterboot::boottest (WCR defaults)."""
+
+    @pytest.fixture
+    def golden(self):
+        with _WCB_GOLDEN.open() as f:
+            return json.load(f)
+
+    @pytest.fixture
+    def design(self):
+        df = pd.read_csv(_WCB_DATA)
+        X = np.column_stack([np.ones(len(df)), df.treated, df.post, df.treated * df.post])
+        return X, df.y.to_numpy(), df.cluster.to_numpy()
+
+    def _fit(self, design, p_val_type):
+        X, y, cl = design
+        beta = np.linalg.lstsq(X, y, rcond=None)[0]
+        return wild_bootstrap_se(
+            X,
+            y,
+            y - X @ beta,
+            cl,
+            coefficient_index=3,
+            n_bootstrap=99999,
+            weight_type="rademacher",
+            seed=1,
+            p_val_type=p_val_type,
+        )
+
+    def test_se_matches_r(self, golden, design):
+        # Reported SE is the analytical CR1 clustered SE (== feols se()).
+        assert self._fit(design, "two-tailed").se == pytest.approx(golden["se_cr1"], abs=1e-6)
+
+    def test_tstat_matches_r(self, golden, design):
+        assert self._fit(design, "two-tailed").t_stat_original == pytest.approx(
+            golden["two_tailed"]["t_stat"], abs=1e-6
+        )
+
+    def test_two_tailed_p_value_matches_r(self, golden, design):
+        # Interior p (by construction) -> the 1/(B+1) floor is inactive, so the
+        # WCR p-value matches boottest's strict-exceedance count exactly.
+        assert self._fit(design, "two-tailed").p_value == pytest.approx(
+            golden["two_tailed"]["p_val"], abs=1e-9
+        )
+
+    def test_two_tailed_ci_matches_r(self, golden, design):
+        res = self._fit(design, "two-tailed")
+        lo, hi = golden["two_tailed"]["conf_int"]
+        # Inversion convention differs (bisection vs boottest's grid); agree ~1e-4.
+        assert res.ci_lower == pytest.approx(lo, abs=5e-4)
+        assert res.ci_upper == pytest.approx(hi, abs=5e-4)
+
+    def test_equal_tailed_matches_r(self, golden, design):
+        res = self._fit(design, "equal-tailed")
+        lo, hi = golden["equal_tailed"]["conf_int"]
+        assert res.p_value == pytest.approx(golden["equal_tailed"]["p_val"], abs=1e-9)
+        assert res.ci_lower == pytest.approx(lo, abs=5e-4)
+        assert res.ci_upper == pytest.approx(hi, abs=5e-4)

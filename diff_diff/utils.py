@@ -10,9 +10,6 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-from diff_diff.linalg import compute_robust_vcov as _compute_robust_vcov_linalg
-from diff_diff.linalg import solve_ols as _solve_ols_linalg
-
 # Import Rust backend if available (from _backend to avoid circular imports)
 from diff_diff._backend import (
     HAS_RUST_BACKEND,
@@ -25,6 +22,8 @@ from diff_diff._backend import (
     _rust_sc_weight_fw_weighted,
     _rust_sc_weight_fw_weighted_with_convergence,
 )
+from diff_diff.linalg import compute_robust_vcov as _compute_robust_vcov_linalg
+from diff_diff.linalg import solve_ols as _solve_ols_linalg
 
 # Numerical constants for optimization algorithms
 _OPTIMIZATION_MAX_ITER = 1000  # Maximum iterations for weight optimization
@@ -426,15 +425,17 @@ class WildBootstrapResults:
     Attributes
     ----------
     se : float
-        Bootstrap standard error of the coefficient.
+        Analytical cluster-robust (CR1) standard error of the coefficient. The
+        wild bootstrap studentizes the test with this SE; it is not a rescaled
+        bootstrap dispersion.
     p_value : float
-        Bootstrap p-value (two-sided).
+        Wild cluster bootstrap p-value (two-tailed or equal-tailed).
     t_stat_original : float
-        Original t-statistic from the data.
+        Studentized statistic of the original estimate, ``(coef - null) / se``.
     ci_lower : float
-        Lower bound of the confidence interval.
+        Lower bound of the confidence interval (by test inversion).
     ci_upper : float
-        Upper bound of the confidence interval.
+        Upper bound of the confidence interval (by test inversion).
     n_clusters : int
         Number of clusters in the data.
     n_bootstrap : int
@@ -444,7 +445,8 @@ class WildBootstrapResults:
     alpha : float
         Significance level used for confidence interval.
     bootstrap_distribution : np.ndarray, optional
-        Full bootstrap distribution of coefficients (if requested).
+        Bootstrap distribution of the studentized statistic ``t*`` evaluated at
+        the null (if requested).
 
     References
     ----------
@@ -469,9 +471,9 @@ class WildBootstrapResults:
         lines = [
             "Wild Cluster Bootstrap Results",
             "=" * 40,
-            f"Bootstrap SE:        {self.se:.6f}",
+            f"Cluster-robust SE:   {self.se:.6f}",
             f"Bootstrap p-value:   {self.p_value:.4f}",
-            f"Original t-stat:     {self.t_stat_original:.4f}",
+            f"Studentized t-stat:  {self.t_stat_original:.4f}",
             f"CI ({int((1-self.alpha)*100)}%):           [{self.ci_lower:.6f}, {self.ci_upper:.6f}]",
             f"Number of clusters:  {self.n_clusters}",
             f"Bootstrap reps:      {self.n_bootstrap}",
@@ -585,6 +587,40 @@ def _generate_mammen_weights(n_clusters: int, rng: np.random.Generator) -> np.nd
     return np.asarray(rng.choice([val1, val2], size=n_clusters, p=[p1, 1 - p1]))
 
 
+def _wild_weight_matrix(
+    n_clusters: int,
+    n_bootstrap: int,
+    weight_type: str,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """Build the ``(B, n_clusters)`` matrix of cluster-level bootstrap weights.
+
+    For Rademacher weights with few clusters the full set of ``2**n_clusters``
+    sign-vectors is enumerated (deterministic) when that does not exceed
+    ``n_bootstrap`` — i.e. when ``2**(n_clusters-1) <= n_bootstrap``, matching the
+    full-enumeration trigger of ``fwildclusterboot::boottest`` and removing RNG
+    dependence in the few-cluster regime where the wild bootstrap matters most.
+    Otherwise ``n_bootstrap`` weight vectors are sampled. Webb/Mammen always
+    sample: the sign-flip enumeration symmetry is Rademacher-specific (Mammen is
+    asymmetric, Webb is a 6-point law).
+    """
+    if weight_type == "rademacher" and n_clusters <= 20 and 2 ** (n_clusters - 1) <= n_bootstrap:
+        n_enum = 2**n_clusters
+        bits = (np.arange(n_enum)[:, None] >> np.arange(n_clusters)) & 1
+        return np.where(bits == 1, 1.0, -1.0)
+
+    generators = {
+        "rademacher": _generate_rademacher_weights,
+        "webb": _generate_webb_weights,
+        "mammen": _generate_mammen_weights,
+    }
+    generate = generators[weight_type]
+    weights = np.empty((n_bootstrap, n_clusters))
+    for b in range(n_bootstrap):
+        weights[b] = generate(n_clusters, rng)
+    return weights
+
+
 def wild_bootstrap_se(
     X: np.ndarray,
     y: np.ndarray,
@@ -597,14 +633,26 @@ def wild_bootstrap_se(
     alpha: float = 0.05,
     seed: Optional[int] = None,
     return_distribution: bool = False,
+    p_val_type: str = "two-tailed",
 ) -> WildBootstrapResults:
     """
     Compute wild cluster bootstrap standard errors and p-values.
 
-    Implements the Wild Cluster Residual (WCR) bootstrap procedure from
-    Cameron, Gelbach, and Miller (2008). Uses the restricted residuals
-    approach (imposing H0: coefficient = null_hypothesis) for more accurate
-    p-value computation.
+    Implements the Wild Cluster Restricted (WCR) bootstrap of Cameron, Gelbach,
+    and Miller (2008), matching the defaults of R's ``fwildclusterboot::boottest``
+    (Roodman, MacKinnon, Nielsen & Webb 2019): the null ``H0: coefficient =
+    null_hypothesis`` is genuinely imposed by re-estimating the model with the
+    coefficient's column dropped, the bootstrap DGP resamples the *restricted*
+    residuals, and the confidence interval is obtained by **inverting the
+    bootstrap test** (the set of null values not rejected at level ``alpha``) so
+    that the p-value and CI are mutually consistent (``0 in CI`` iff
+    ``p >= alpha``). For Rademacher weights with few clusters the full set of
+    ``2**n_clusters`` sign-vectors is enumerated (deterministic) when that does
+    not exceed ``n_bootstrap``; otherwise signs are sampled.
+
+    The reported ``se`` is the analytical cluster-robust (CR1) standard error of
+    the original estimate — the studentized bootstrap drives the p-value and CI,
+    not a re-scaled bootstrap dispersion.
 
     Parameters
     ----------
@@ -635,7 +683,12 @@ def wild_bootstrap_se(
         Random seed for reproducibility. If None (default), results
         will vary between runs.
     return_distribution : bool, default=False
-        If True, include full bootstrap distribution in results.
+        If True, include the bootstrap distribution of the studentized statistic
+        ``t*`` (evaluated at the null) in the results.
+    p_val_type : str, default="two-tailed"
+        Shape of the test (mirrors ``boottest``'s ``p_val_type``):
+        - "two-tailed": symmetric test on ``|t*|``; symmetric CI by inversion.
+        - "equal-tailed": each tail tested at ``alpha/2``; equal-tailed CI.
 
     Returns
     -------
@@ -680,6 +733,9 @@ def wild_bootstrap_se(
     valid_weight_types = ["rademacher", "webb", "mammen"]
     if weight_type not in valid_weight_types:
         raise ValueError(f"weight_type must be one of {valid_weight_types}, got '{weight_type}'")
+    valid_p_val_types = ["two-tailed", "equal-tailed"]
+    if p_val_type not in valid_p_val_types:
+        raise ValueError(f"p_val_type must be one of {valid_p_val_types}, got '{p_val_type}'")
 
     unique_clusters = np.unique(cluster_ids)
     n_clusters = len(unique_clusters)
@@ -689,140 +745,204 @@ def wild_bootstrap_se(
 
     if n_clusters < 5:
         warnings.warn(
-            f"Only {n_clusters} clusters detected. Wild bootstrap inference may be "
-            "unreliable with fewer than 5 clusters. Consider using Webb weights "
-            "(weight_type='webb') for improved finite-sample properties.",
+            f"Only {n_clusters} clusters detected. Wild cluster bootstrap inference may be "
+            "unreliable with fewer than 5 clusters. With Rademacher weights the full set of "
+            f"{2 ** n_clusters} sign-vectors is enumerated exactly when it does not exceed "
+            "n_bootstrap; Webb weights (weight_type='webb') improve finite-sample behaviour "
+            "but are sampled, not enumerated.",
             UserWarning,
         )
 
-    # Initialize RNG
     rng = np.random.default_rng(seed)
-
-    # Select weight generator
-    weight_generators = {
-        "rademacher": _generate_rademacher_weights,
-        "webb": _generate_webb_weights,
-        "mammen": _generate_mammen_weights,
-    }
-    generate_weights = weight_generators[weight_type]
-
     n = X.shape[0]
 
-    # Step 1: Compute original coefficient and cluster-robust SE
-    beta_hat, _, vcov_original = _solve_ols_linalg(X, y, cluster_ids=cluster_ids, return_vcov=True)
-    original_coef = beta_hat[coefficient_index]
-    assert vcov_original is not None
-    se_original = np.sqrt(vcov_original[coefficient_index, coefficient_index])
-    t_stat_original = (original_coef - null_hypothesis) / se_original
-
-    # Step 2: Impose null hypothesis (restricted estimation)
-    # Create restricted y: y_restricted = y - X[:, coef_index] * null_hypothesis
-    # This imposes the null that the coefficient equals null_hypothesis
-    y_restricted = y - X[:, coefficient_index] * null_hypothesis
-
-    # Fit restricted model (but we need to drop the column for the restricted coef)
-    # Actually, for WCR bootstrap we keep all columns but impose the null via residuals
-    # Re-estimate with the restricted dependent variable.
-    #
-    # Use return_fitted=True so we get NaN-safe fitted values from the kept
-    # columns when solve_ols drops rank-deficient nuisance columns. Without
-    # this, building y_star via `X @ beta_restricted` would propagate NaN
-    # through every observation whenever a nuisance column was dropped
-    # (e.g. always-treated unit dummy collinear with treated*post on the
-    # full-dummy TWFE HC2/HC2-BM path), poisoning the entire bootstrap loop
-    # despite the ATT being analytically identified.
-    beta_restricted, residuals_restricted, fitted_restricted, _ = _solve_ols_linalg(
-        X, y_restricted, return_vcov=False, return_fitted=True
-    )
-
-    # Create cluster-to-observation mapping for efficiency
-    cluster_map = {c: np.where(cluster_ids == c)[0] for c in unique_clusters}
-    cluster_indices = [cluster_map[c] for c in unique_clusters]
-
-    # Step 3: Bootstrap loop
-    # Use NaN for invalid draws (singular bootstrap SE) and filter at the
-    # p-value step, rather than coercing to t*=0 which biases the p-value
-    # toward small values (since |0| < |t_original| counts as "non-rejection"
-    # only when the original t is large).
-    bootstrap_t_stats = np.full(n_bootstrap, np.nan)
-    bootstrap_coefs = np.full(n_bootstrap, np.nan)
-
-    for b in range(n_bootstrap):
-        # Generate cluster-level weights
-        cluster_weights = generate_weights(n_clusters, rng)
-
-        # Map cluster weights to observations
-        obs_weights = np.zeros(n)
-        for g, indices in enumerate(cluster_indices):
-            obs_weights[indices] = cluster_weights[g]
-
-        # Construct bootstrap sample: y* = fitted_restricted + e_restricted * weights
-        # (fitted_restricted comes from solve_ols's kept-columns reconstruction,
-        # so it's NaN-safe even when beta_restricted has NaN on dropped columns)
-        y_star = fitted_restricted + residuals_restricted * obs_weights
-
-        # Estimate bootstrap coefficients with cluster-robust SE
-        beta_star, residuals_star, vcov_star = _solve_ols_linalg(
-            X, y_star, cluster_ids=cluster_ids, return_vcov=True
+    def _degenerate() -> WildBootstrapResults:
+        # All-or-nothing NaN contract (feedback_bootstrap_nan_on_invalid_contract):
+        # when the original fit or the bootstrap is degenerate, NaN the entire
+        # (se, t_stat, p_value, ci) inference family together rather than mixing
+        # analytical and bootstrap quantities on the same coefficient.
+        return WildBootstrapResults(
+            se=float("nan"),
+            p_value=float("nan"),
+            t_stat_original=float("nan"),
+            ci_lower=float("nan"),
+            ci_upper=float("nan"),
+            n_clusters=n_clusters,
+            n_bootstrap=n_bootstrap,
+            weight_type=weight_type,
+            alpha=alpha,
+            bootstrap_distribution=None,
         )
-        bootstrap_coefs[b] = beta_star[coefficient_index]
-        assert vcov_star is not None
-        se_star = np.sqrt(vcov_star[coefficient_index, coefficient_index])
 
-        # Compute bootstrap t-statistic (under null hypothesis); invalid
-        # draws (singular SE) leave the NaN sentinel for filtering below.
-        if se_star > 0 and np.isfinite(beta_star[coefficient_index]):
-            bootstrap_t_stats[b] = (beta_star[coefficient_index] - null_hypothesis) / se_star
+    # Step 1: original fit. Establishes the analytical cluster-robust (CR1) SE
+    # that studentizes the test, and the set of identified (kept) columns so the
+    # bootstrap stays rank-robust (e.g. an always-treated unit dummy collinear
+    # with treated*post on the full-dummy TWFE path: solve_ols drops the nuisance
+    # column and reports it as NaN, while the identified ATT is retained).
+    beta_hat, _, vcov_original = _solve_ols_linalg(X, y, cluster_ids=cluster_ids, return_vcov=True)
+    original_coef = float(beta_hat[coefficient_index])
+    if vcov_original is None:
+        return _degenerate()
+    se_a = float(np.sqrt(vcov_original[coefficient_index, coefficient_index]))
+    if not np.isfinite(original_coef) or not np.isfinite(se_a) or se_a <= 0:
+        return _degenerate()
 
-    # Step 4: Compute bootstrap inference from VALID (finite) draws only.
-    #
-    # All-or-nothing NaN contract (per feedback_bootstrap_nan_on_invalid_contract):
-    # when bootstrap output is degenerate (fewer than 2 finite t-stats or
-    # 2 finite coefs), return NaN across the full inference surface (se,
-    # p_value, both CI endpoints, AND the surfaced t_stat_original). The
-    # original analytical t_stat is still computed in step 1 for diagnostic
-    # use but is NOT propagated to the user-facing result when bootstrap
-    # is degenerate — surfacing it alongside NaN se/p/CI would mix
-    # analytical and bootstrap inference families on the same coefficient.
-    finite_mask = np.isfinite(bootstrap_t_stats)
-    n_valid = int(finite_mask.sum())
-    valid_coefs = bootstrap_coefs[np.isfinite(bootstrap_coefs)]
+    kept = np.isfinite(beta_hat)
+    if not bool(kept[coefficient_index]):
+        return _degenerate()
+    X_eff = X[:, kept]
+    j_eff = int(np.sum(kept[:coefficient_index]))  # position of the coef among kept columns
+    k_eff = X_eff.shape[1]
 
-    lower_percentile = alpha / 2 * 100
-    upper_percentile = (1 - alpha / 2) * 100
+    # Projections on the (full-rank) effective design.
+    XtX_inv = np.linalg.inv(X_eff.T @ X_eff)
+    a_vec = X_eff @ XtX_inv[:, j_eff]  # influence of each obs on beta_j: beta*_j = a_vec . y*
+    proj = XtX_inv @ X_eff.T  # (k_eff, n) OLS projection onto coefficients
 
-    if n_valid >= 2 and valid_coefs.size >= 2:
-        p_value = float(np.mean(np.abs(bootstrap_t_stats[finite_mask]) >= np.abs(t_stat_original)))
-        # Ensure p-value is at least 1/(n_valid+1) to avoid exact zero.
-        p_value = float(max(p_value, 1 / (n_valid + 1)))
-        se_bootstrap = float(np.std(valid_coefs, ddof=1))
-        ci_lower = float(np.percentile(valid_coefs, lower_percentile))
-        ci_upper = float(np.percentile(valid_coefs, upper_percentile))
-        surfaced_t_stat = t_stat_original
+    # Restricted residualization imposing H0: regress y and x_j on X_eff \ {col j}.
+    # The restricted residuals u(r) = M_{-j} y - r * M_{-j} x_j are linear in the
+    # candidate null r, so the whole test can be re-evaluated at any r cheaply.
+    xj = X_eff[:, j_eff]
+    X_reduced = np.delete(X_eff, j_eff, axis=1)
+    _, _, fit_y_red, _ = _solve_ols_linalg(X_reduced, y, return_vcov=False, return_fitted=True)
+    _, _, fit_xj_red, _ = _solve_ols_linalg(X_reduced, xj, return_vcov=False, return_fitted=True)
+    m_y = y - fit_y_red
+    m_xj = xj - fit_xj_red
+
+    # CR1 small-sample correction. NOTE: this constant cancels in |t*| vs |t0|
+    # (it scales se* and se_a identically), so it affects only the reported SE,
+    # not the p-value or CI. Kept for fidelity with the analytical CR1 SE.
+    corr = (n_clusters / (n_clusters - 1)) * ((n - 1) / (n - k_eff))
+
+    # Cluster membership: indicator matrix C (G, n) for fast per-cluster score sums.
+    cluster_pos = {c: i for i, c in enumerate(unique_clusters)}
+    cl_idx = np.array([cluster_pos[c] for c in cluster_ids])
+    cluster_indicator = np.zeros((n_clusters, n))
+    cluster_indicator[cl_idx, np.arange(n)] = 1.0
+
+    # Fixed bootstrap weights, held constant across the whole test inversion so
+    # that p(r) is a stable (monotone, step) function amenable to root-finding.
+    weights = _wild_weight_matrix(n_clusters, n_bootstrap, weight_type, rng)
+    n_boot_eff = int(weights.shape[0])
+    weights_obs = weights[:, cl_idx]  # (B, n)
+
+    def _t_star(r: float) -> np.ndarray:
+        """Studentized bootstrap statistics t*(r) under H0: beta_j = r."""
+        u_r = m_y - r * m_xj  # restricted residuals at r (n,)
+        # WCR DGP: y* = fitted_restricted + u_r * w = (y - u_r) + u_r * w_obs.
+        y_star = y[None, :] - u_r[None, :] * (1.0 - weights_obs)  # (B, n)
+        beta_j_star = y_star @ a_vec  # (B,)
+        coef_full = proj @ y_star.T  # (k_eff, B)
+        resid_star = y_star.T - X_eff @ coef_full  # (n, B) bootstrap residuals
+        scores = cluster_indicator @ (a_vec[:, None] * resid_star)  # (G, B) per-cluster scores
+        se_star = np.sqrt(corr * np.sum(scores**2, axis=0))  # (B,)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            t = (beta_j_star - r) / se_star
+        t[~(se_star > 0)] = np.nan
+        return t
+
+    t_star = _t_star(null_hypothesis)
+    finite = np.isfinite(t_star)
+    n_valid = int(finite.sum())
+    if n_valid < 2:
+        return _degenerate()
+    t_star_valid = t_star[finite]
+    t0 = (original_coef - null_hypothesis) / se_a
+
+    # Strict-inequality tail counts, matching fwildclusterboot/boottest: a
+    # bootstrap statistic is counted only if it *exceeds* the observed one. In
+    # the fully-enumerated few-cluster case the all-(+1) / all-(-1) sign-vectors
+    # reproduce t* = +/- t0 exactly (the observed draw and its mirror); strict
+    # ">" excludes those boundary ties, as boottest does. The small relative
+    # guard (~1e-9) makes the exclusion robust to floating-point noise from the
+    # fast-form path so a true tie never sneaks in as a strict exceedance.
+    def _frac_gt(vals: np.ndarray, thresh: float) -> float:
+        return float(np.mean(vals > thresh + 1e-9 * max(1.0, abs(thresh))))
+
+    def _frac_lt(vals: np.ndarray, thresh: float) -> float:
+        return float(np.mean(vals < thresh - 1e-9 * max(1.0, abs(thresh))))
+
+    # p-value at the test null (two-tailed on |t*|, or equal-tailed), floored at
+    # 1/(n_valid+1) to avoid an exact zero (a deliberate, documented departure
+    # from boottest, which can report p == 0; the floor never changes a
+    # significance verdict and leaves the inverted CI untouched).
+    if p_val_type == "two-tailed":
+        p_value = _frac_gt(np.abs(t_star_valid), abs(t0))
     else:
-        # Degenerate bootstrap (insufficient valid draws): NaN-out the
-        # entire inference tuple. Downstream consumers (estimator-level
-        # `_run_wild_bootstrap_inference`) map these fields directly onto
-        # the result object; this guarantees the (se, t_stat, p_value, ci)
-        # quadruple moves together rather than reporting analytical t_stat
-        # with NaN se.
-        p_value = float("nan")
-        se_bootstrap = float("nan")
-        ci_lower = float("nan")
-        ci_upper = float("nan")
-        surfaced_t_stat = float("nan")
+        p_low = _frac_lt(t_star_valid, t0)
+        p_up = _frac_gt(t_star_valid, t0)
+        p_value = 2.0 * min(p_low, p_up)
+    p_value = float(min(1.0, max(p_value, 1.0 / (n_valid + 1))))
+
+    # ---- Confidence interval by test inversion ------------------------------
+    # The CI is the set of nulls r not rejected at level alpha. The relevant
+    # rejection frequency is monotonically decreasing as r moves away from the
+    # point estimate, so each endpoint is found by outward bracketing + plain
+    # bisection — robust to the step-function nature of a finite bootstrap
+    # (unlike brentq, which assumes a continuous sign change).
+    def _reject_two_tailed(r: float) -> float:
+        t = _t_star(r)
+        t = t[np.isfinite(t)]
+        if t.size < 2:
+            return 0.0
+        t0_r = (original_coef - r) / se_a
+        return _frac_gt(np.abs(t), abs(t0_r))
+
+    def _tail_freq(r: float, upper: bool) -> float:
+        t = _t_star(r)
+        t = t[np.isfinite(t)]
+        if t.size < 2:
+            return 0.0
+        t0_r = (original_coef - r) / se_a
+        return _frac_gt(t, t0_r) if upper else _frac_lt(t, t0_r)
+
+    def _bisect(f: Any, level: float, direction: int) -> float:
+        # f(center) >= level; search outward (direction -1 lower, +1 upper) for
+        # the crossing f(r) = level (f decreasing in |r - center|), then bisect.
+        center = original_coef
+        scale = se_a if se_a > 0 else 1.0
+        step = scale
+        hi = center + direction * step
+        bracketed = False
+        for _ in range(64):
+            if f(hi) < level:
+                bracketed = True
+                break
+            step *= 2.0
+            hi = center + direction * step
+        if not bracketed:
+            return float("nan")  # CI unbounded on this side (weak identification)
+        lo = center  # f(lo) >= level, f(hi) < level
+        for _ in range(100):
+            mid = 0.5 * (lo + hi)
+            if f(mid) >= level:
+                lo = mid
+            else:
+                hi = mid
+            if abs(hi - lo) <= 1e-10 * max(1.0, abs(center)):
+                break
+        return 0.5 * (lo + hi)
+
+    if p_val_type == "two-tailed":
+        ci_lower = _bisect(_reject_two_tailed, alpha, -1)
+        ci_upper = _bisect(_reject_two_tailed, alpha, +1)
+    else:
+        # equal-tailed: lower endpoint where the upper-tail frequency hits
+        # alpha/2; upper endpoint where the lower-tail frequency hits alpha/2.
+        ci_lower = _bisect(lambda r: _tail_freq(r, True), alpha / 2.0, -1)
+        ci_upper = _bisect(lambda r: _tail_freq(r, False), alpha / 2.0, +1)
 
     return WildBootstrapResults(
-        se=se_bootstrap,
+        se=se_a,
         p_value=p_value,
-        t_stat_original=surfaced_t_stat,
-        ci_lower=ci_lower,
-        ci_upper=ci_upper,
+        t_stat_original=t0,
+        ci_lower=float(ci_lower),
+        ci_upper=float(ci_upper),
         n_clusters=n_clusters,
-        n_bootstrap=n_bootstrap,
+        n_bootstrap=n_boot_eff,
         weight_type=weight_type,
         alpha=alpha,
-        bootstrap_distribution=bootstrap_coefs if return_distribution else None,
+        bootstrap_distribution=t_star_valid if return_distribution else None,
     )
 
 
