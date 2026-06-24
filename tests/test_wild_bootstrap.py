@@ -263,9 +263,13 @@ class TestWildBootstrapSE:
             X, y, residuals, cluster_ids, coefficient_index=3, n_bootstrap=n_boot, seed=42
         )
 
-        assert results1.se == results2.se
+        # The reported `se` is the analytical cluster-robust (CR1) SE and the CI
+        # is from test inversion; both are reproducible only up to the
+        # bit-reproducibility of the underlying (possibly threaded BLAS / Rust)
+        # cluster-vcov solve (~1e-13). The p-value is count-based and exact.
+        assert results1.se == pytest.approx(results2.se, rel=1e-9)
         assert results1.p_value == results2.p_value
-        assert results1.ci_lower == results2.ci_lower
+        assert results1.ci_lower == pytest.approx(results2.ci_lower, rel=1e-9)
 
     def test_different_seeds_different_results(self, ols_components, ci_params):
         """Test different seeds give different results."""
@@ -406,7 +410,9 @@ class TestEstimatorIntegration:
 
         results2 = did2.fit(clustered_did_data, outcome="outcome", treatment="treated", time="post")
 
-        assert results1.se == results2.se
+        # se = analytical CR1 SE (reproducible up to the cluster-vcov solve's
+        # bit-reproducibility, ~1e-13 on threaded BLAS / Rust); p-value is exact.
+        assert results1.se == pytest.approx(results2.se, rel=1e-9)
         assert results1.p_value == results2.p_value
 
     def test_did_analytical_vs_bootstrap_att_same(self, clustered_did_data, ci_params):
@@ -938,7 +944,9 @@ class TestWildBootstrapCorrectness:
         ).fit(df, outcome="outcome", treatment="treated", time="post")
         assert r1.n_bootstrap == 2**6
         assert r1.p_value == r2.p_value
-        assert r1.conf_int == r2.conf_int
+        # CI is reproducible up to the cluster-vcov solve's bit-reproducibility
+        # (~1e-13 on threaded BLAS / Rust); seed-independence is the point.
+        assert r1.conf_int == pytest.approx(r2.conf_int, rel=1e-9)
 
     def test_se_matches_analytical_cluster_robust(self, clustered_did_data, ci_params):
         """The reported wild-bootstrap SE is the analytical cluster-robust (CR1)
@@ -1397,7 +1405,9 @@ def test_enumeration_trigger_matches_boottest_boundary():
     at_b = _make_clustered_g10(1024, seed=7)
     assert at_a.n_bootstrap == 2**10
     assert at_a.p_value == at_b.p_value
-    assert at_a.conf_int == at_b.conf_int
+    # Seed-independent up to the cluster-vcov solve's bit-reproducibility
+    # (~1e-13 on threaded BLAS / Rust); far below the sampled-draw scale (~1e-2).
+    assert at_a.conf_int == pytest.approx(at_b.conf_int, rel=1e-9)
 
 
 def test_single_regressor_design_does_not_crash():

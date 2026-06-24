@@ -701,6 +701,7 @@ def wild_bootstrap_se(
         ``t*`` (evaluated at the null) in the results.
     p_val_type : str, default="two-tailed"
         Shape of the test (mirrors ``boottest``'s ``p_val_type``):
+
         - "two-tailed": test on ``|t*|``; two-tailed CI by inversion (the
           interval need not be symmetric about the estimate).
         - "equal-tailed": each tail tested at ``alpha/2``; equal-tailed CI.
