@@ -215,9 +215,11 @@ class DiDResults:
                 lines.append(f"{'Test type:':<25} {self.p_val_type:>10}")
 
         # Add variance family label (vcov_type) only when inference was analytical
-        # AND no survey design is in play. For wild-bootstrap the reported SE/CI
-        # come from resampling, so the analytical variance family would mislabel
-        # the actual inference source. Survey fits use Taylor linearization or
+        # AND no survey design is in play. For wild-bootstrap the reported SE is
+        # the analytical cluster-robust (CR1) SE but the p-value and CI come from
+        # the bootstrap test inversion, so labelling a single analytical variance
+        # family would mislabel the actual inference source. Survey fits use
+        # Taylor linearization or
         # replicate-weight variance instead of the analytical HC/CR sandwich;
         # _format_survey_block above already surfaces the survey inference
         # details (weight type, strata/PSU counts, replicate method), so a

@@ -1284,3 +1284,76 @@ def test_twfe_wild_bootstrap_p_val_type_propagates():
     lower, upper = res.conf_int
     assert lower < upper
     assert (not (lower <= 0.0 <= upper)) == (res.p_value < 0.05)
+
+
+# =============================================================================
+# Degenerate-design robustness: no crash, no mixed finite/NaN inference
+# =============================================================================
+
+
+def test_saturated_design_returns_degenerate_not_crash():
+    """A saturated 2x2 DiD (G=2, one obs per cluster-period -> n == k, no
+    residual DOF) must NOT raise ZeroDivisionError from the CR1 small-sample
+    adjustment; it returns the all-or-nothing NaN inference contract."""
+    import warnings
+
+    df = pd.DataFrame(
+        [
+            {
+                "cluster": c,
+                "treated": c,
+                "post": p,
+                "outcome": 5.0 + 2 * p + (1.0 if (c and p) else 0),
+            }
+            for c in range(2)
+            for p in (0, 1)
+        ]
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = DifferenceInDifferences(
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=99, seed=1
+        ).fit(df, outcome="outcome", treatment="treated", time="post")
+    # Full inference family is NaN together (no raw exception, no mixed output).
+    assert np.isnan(res.se)
+    assert np.isnan(res.p_value)
+    assert np.isnan(res.conf_int[0]) and np.isnan(res.conf_int[1])
+
+
+def test_near_zero_se_no_mixed_finite_nan_ci():
+    """A near-degenerate two-cluster design (tiny CR1 SE) must not return finite
+    se/p with NaN CI endpoints. An unbounded inverted CI is represented with
+    +/-inf (NOT NaN), keeping 0 in CI <=> p >= alpha."""
+    import warnings
+
+    rng = np.random.default_rng(0)
+    rows_X, y, cl = [], [], []
+    for c in range(2):
+        tr = 1.0 if c < 1 else 0.0
+        ce = rng.normal(0, 1)
+        for _ in range(2):
+            for p in (0.0, 1.0):
+                rows_X.append([1.0, tr, p, tr * p])
+                y.append(5 + ce + 2 * p + (1.0 if (tr and p) else 0) + rng.normal(0, 0.5))
+                cl.append(c)
+    X = np.array(rows_X)
+    y = np.array(y)
+    cl = np.array(cl)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = wild_bootstrap_se(
+            X,
+            y,
+            y - X @ np.linalg.lstsq(X, y, rcond=None)[0],
+            cl,
+            coefficient_index=3,
+            n_bootstrap=999,
+            seed=1,
+        )
+    finite_point = np.isfinite(res.se) or np.isfinite(res.p_value)
+    nan_ci = np.isnan(res.ci_lower) or np.isnan(res.ci_upper)
+    assert not (finite_point and nan_ci), "mixed finite point estimate with NaN CI endpoints"
+    # Consistency holds whether the result is degenerate or an unbounded interval.
+    if np.isfinite(res.p_value):
+        zero_in_ci = res.ci_lower <= 0.0 <= res.ci_upper
+        assert zero_in_ci == (res.p_value >= 0.05)

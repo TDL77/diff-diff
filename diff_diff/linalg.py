@@ -2623,6 +2623,18 @@ def _compute_robust_vcov_numpy(
     # ------------------------------------------------------------------
     assert vcov_type == "hc1"
 
+    # Saturated design (no residual degrees of freedom): both the HC1 adjustment
+    # n_eff/(n_eff-k) and the CR1 adjustment (n_eff-1)/(n_eff-k) divide by
+    # (n_eff - k), which is zero when the design exactly determines y. Return a
+    # NaN vcov so downstream inference is degenerate (NaN) rather than raising
+    # ZeroDivisionError — consistent with the library's all-or-nothing NaN
+    # convention for undefined inference.
+    if n_eff - k <= 0:
+        nan_vcov = np.full((k, k), np.nan)
+        if return_dof:
+            return nan_vcov, np.full(k, np.nan, dtype=np.float64)
+        return nan_vcov
+
     # Compute weighted scores for cluster-robust meat (outer product of sums).
     # pweight/fweight multiply by w; aweight and unweighted use raw residuals.
     _use_weighted_scores = weights is not None and weight_type not in ("aweight",)

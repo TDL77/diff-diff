@@ -826,8 +826,15 @@ class DifferenceInDifferences:
         conf_int = (bootstrap_results.ci_lower, bootstrap_results.ci_upper)
         t_stat = bootstrap_results.t_stat_original
 
-        # Also compute vcov for storage (using cluster-robust for consistency)
-        vcov = compute_robust_vcov(X, residuals, cluster_ids)
+        # Also compute the cluster-robust vcov for storage. When the bootstrap
+        # itself returned degenerate (all-NaN) inference — e.g. a saturated
+        # design with no residual degrees of freedom — the shared CR1 sandwich
+        # would divide by zero, so store a NaN vcov instead, keeping the
+        # all-or-nothing NaN contract rather than raising.
+        if np.isnan(se):
+            vcov = np.full((X.shape[1], X.shape[1]), np.nan)
+        else:
+            vcov = compute_robust_vcov(X, residuals, cluster_ids)
 
         return se, p_value, conf_int, t_stat, vcov, bootstrap_results
 

@@ -790,20 +790,31 @@ def wild_bootstrap_se(
     # bootstrap stays rank-robust (e.g. an always-treated unit dummy collinear
     # with treated*post on the full-dummy TWFE path: solve_ols drops the nuisance
     # column and reports it as NaN, while the identified ATT is retained).
-    beta_hat, _, vcov_original = _solve_ols_linalg(X, y, cluster_ids=cluster_ids, return_vcov=True)
+    # First fit WITHOUT the cluster-robust vcov: this identifies the kept
+    # (full-rank) columns and lets us reject a saturated design *before*
+    # requesting the cluster sandwich. The shared CR1 small-sample adjustment
+    # (n_eff-1)/(n_eff-k) divides by zero on a saturated design (n == rank), so
+    # routing the degenerate case here keeps the all-or-nothing NaN contract.
+    beta_hat, _, _ = _solve_ols_linalg(X, y, return_vcov=False)
     original_coef = float(beta_hat[coefficient_index])
-    if vcov_original is None:
+    if not np.isfinite(original_coef):
         return _degenerate()
-    se_a = float(np.sqrt(vcov_original[coefficient_index, coefficient_index]))
-    if not np.isfinite(original_coef) or not np.isfinite(se_a) or se_a <= 0:
-        return _degenerate()
-
     kept = np.isfinite(beta_hat)
     if not bool(kept[coefficient_index]):
         return _degenerate()
     X_eff = X[:, kept]
     j_eff = int(np.sum(kept[:coefficient_index]))  # position of the coef among kept columns
     k_eff = X_eff.shape[1]
+    if n <= k_eff:  # no residual degrees of freedom -> CR1 undefined
+        return _degenerate()
+
+    # Now the cluster-robust (CR1) vcov is well-defined; it studentizes the test.
+    _, _, vcov_original = _solve_ols_linalg(X, y, cluster_ids=cluster_ids, return_vcov=True)
+    if vcov_original is None:
+        return _degenerate()
+    se_a = float(np.sqrt(vcov_original[coefficient_index, coefficient_index]))
+    if not np.isfinite(se_a) or se_a <= 0:
+        return _degenerate()
 
     # Projections on the (full-rank) effective design.
     XtX_inv = np.linalg.inv(X_eff.T @ X_eff)
@@ -929,7 +940,13 @@ def wild_bootstrap_se(
             step *= 2.0
             hi = center + direction * step
         if not bracketed:
-            return float("nan")  # CI unbounded on this side (weak identification)
+            # The test never rejects arbitrarily far out: the inverted CI is
+            # genuinely unbounded on this side. Represent it with a signed
+            # infinity (NOT NaN) so the (se, t, p, CI) inference family stays
+            # internally consistent — 0 still lies inside an unbounded interval
+            # exactly when the test fails to reject it, preserving
+            # 0 ∈ CI ⟺ p ≥ alpha.
+            return float(direction) * np.inf
         lo = center  # f(lo) >= level, f(hi) < level
         for _ in range(100):
             mid = 0.5 * (lo + hi)
