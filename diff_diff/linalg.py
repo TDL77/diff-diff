@@ -2623,6 +2623,38 @@ def _compute_robust_vcov_numpy(
     # ------------------------------------------------------------------
     assert vcov_type == "hc1"
 
+    # Cluster-robust validity check FIRST: a cluster-robust request with fewer
+    # than 2 clusters is invalid and must raise the documented error — this has
+    # to precede the saturated-design guard below so a 1-cluster *saturated* fit
+    # still raises rather than being masked by the NaN return. (Mirrors the
+    # effective-cluster count computed in the cluster branch, including the
+    # zero-total-weight exclusion.)
+    if cluster_ids is not None:
+        # Normalize to an array first (as the cluster branch does) so the
+        # weighted groupby below cannot index-align a pandas Series grouper
+        # against the freshly-created Series(weights) and miscount clusters.
+        cluster_ids_arr = np.asarray(cluster_ids)
+        n_clusters_check = len(np.unique(cluster_ids_arr))
+        if weights is not None and weight_type != "fweight" and np.any(weights == 0):
+            cluster_weight_sums = pd.Series(weights).groupby(cluster_ids_arr).sum()
+            n_clusters_check = int((cluster_weight_sums > 0).sum())
+        if n_clusters_check < 2:
+            raise ValueError(
+                f"Need at least 2 clusters for cluster-robust SEs, got {n_clusters_check}"
+            )
+
+    # Saturated design (no residual degrees of freedom): both the HC1 adjustment
+    # n_eff/(n_eff-k) and the CR1 adjustment (n_eff-1)/(n_eff-k) divide by
+    # (n_eff - k), which is zero when the design exactly determines y. Return a
+    # NaN vcov so downstream inference is degenerate (NaN) rather than raising
+    # ZeroDivisionError — consistent with the library's all-or-nothing NaN
+    # convention for undefined inference.
+    if n_eff - k <= 0:
+        nan_vcov = np.full((k, k), np.nan)
+        if return_dof:
+            return nan_vcov, np.full(k, np.nan, dtype=np.float64)
+        return nan_vcov
+
     # Compute weighted scores for cluster-robust meat (outer product of sums).
     # pweight/fweight multiply by w; aweight and unweighted use raw residuals.
     _use_weighted_scores = weights is not None and weight_type not in ("aweight",)

@@ -531,6 +531,42 @@ class TestComputeRobustVcov:
 
         np.testing.assert_array_almost_equal(vcov, vcov.T)
 
+    def test_cluster_count_check_precedes_saturated_guard(self):
+        """A 1-cluster cluster-robust request raises 'need >= 2 clusters' even on
+        a saturated design — the cluster-count validation must precede the
+        saturated (no residual DOF) NaN guard, not be masked by it."""
+        # 1 cluster AND saturated (n == k): must still raise, not return NaN.
+        with pytest.raises(ValueError, match="at least 2 clusters"):
+            compute_robust_vcov(np.eye(2), np.zeros(2), np.zeros(2))
+
+    def test_saturated_multi_cluster_returns_nan(self):
+        """A saturated design (no residual DOF) with >= 2 clusters returns a NaN
+        vcov rather than raising ZeroDivisionError from the CR1 adjustment."""
+        # 2 clusters, n == k == 4 (saturated 2x2 with one obs per cluster-period).
+        X = np.column_stack([np.ones(4), [0, 0, 1, 1], [0.0, 1.0, 0.0, 1.0], [0, 0, 0, 1.0]])
+        vcov = compute_robust_vcov(X, np.zeros(4), np.array([0, 0, 1, 1]))
+        assert np.all(np.isnan(vcov))
+
+    def test_cluster_count_check_normalizes_series_cluster_ids(self):
+        """The early cluster-count validation must normalize `cluster_ids` to an
+        array before the zero-weight groupby, so a non-default-index pandas
+        Series grouper is not index-aligned against Series(weights) and
+        miscounted (which would wrongly raise 'need >= 2 clusters' on a valid
+        multi-cluster fit)."""
+        rng = np.random.default_rng(0)
+        n = 18
+        cl_arr = np.repeat([0, 1, 2], 6)
+        cl = pd.Series(cl_arr, index=np.arange(500, 500 + n))  # non-default index
+        X = np.column_stack([np.ones(n), (cl_arr < 1).astype(float), np.tile([0.0, 1.0], 9)])
+        y = X @ np.array([1.0, 0.5, 0.3]) + rng.normal(scale=0.4, size=n)
+        residuals = y - X @ np.linalg.lstsq(X, y, rcond=None)[0]
+        weights = np.ones(n)
+        weights[0] = 0.0  # one zero-weight obs; cluster 0 still has positive-weight obs
+        # All 3 clusters retain positive weight -> must not raise; vcov finite.
+        vcov = compute_robust_vcov(X, residuals, cl, weights=weights, weight_type="aweight")
+        assert vcov.shape == (3, 3)
+        assert np.all(np.isfinite(vcov))
+
     def test_numerical_instability_fallback_warns(self, ols_data):
         """Test that numerical instability in Rust backend triggers warning and fallback."""
         from unittest.mock import patch
@@ -2140,9 +2176,7 @@ class TestRankGuardedInv:
         rng = np.random.RandomState(3)
         n = 50
         # Deficient: constant column collinear with intercept.
-        A_def = self._gram(
-            np.column_stack([np.ones(n), np.full(n, 2.0), rng.standard_normal(n)])
-        )
+        A_def = self._gram(np.column_stack([np.ones(n), np.full(n, 2.0), rng.standard_normal(n)]))
         tracker = []
         _rank_guarded_inv(A_def, tracker=tracker)
         assert len(tracker) == 1  # exactly one condition-number sample

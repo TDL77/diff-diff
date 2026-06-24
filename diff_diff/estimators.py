@@ -23,7 +23,6 @@ from diff_diff.linalg import (
     LinearRegression,
     _expand_vcov_with_nan,
     compute_r_squared,
-    compute_robust_vcov,
     solve_ols,
 )
 from diff_diff.results import DiDResults, MultiPeriodDiDResults, PeriodEffect
@@ -99,6 +98,12 @@ class DifferenceInDifferences:
     bootstrap_weights : str, default="rademacher"
         Type of bootstrap weights: "rademacher" (standard), "webb"
         (recommended for <10 clusters), or "mammen" (skewness correction).
+    p_val_type : str, default="two-tailed"
+        Shape of the wild cluster bootstrap test (mirrors
+        ``fwildclusterboot::boottest``): "two-tailed" (test on ``|t|``,
+        two-tailed inverted CI — which may be asymmetric) or "equal-tailed"
+        (each tail at ``alpha/2``, equal-tailed CI). Only used when
+        ``inference="wild_bootstrap"``.
     seed : int, optional
         Random seed for reproducibility when using bootstrap inference.
         If None (default), results will vary between runs.
@@ -181,6 +186,7 @@ class DifferenceInDifferences:
         inference: str = "analytical",
         n_bootstrap: int = 999,
         bootstrap_weights: str = "rademacher",
+        p_val_type: str = "two-tailed",
         seed: Optional[int] = None,
         rank_deficient_action: str = "warn",
         conley_coords: Optional[Tuple[str, str]] = None,
@@ -208,6 +214,9 @@ class DifferenceInDifferences:
         self.inference = inference
         self.n_bootstrap = n_bootstrap
         self.bootstrap_weights = bootstrap_weights
+        # Test shape for wild cluster bootstrap (mirrors fwildclusterboot's
+        # p_val_type): "two-tailed" (default) or "equal-tailed".
+        self.p_val_type = p_val_type
         self.seed = seed
         self.rank_deficient_action = rank_deficient_action
         # Conley spatial-HAC parameters; column names (NOT array values) for
@@ -698,10 +707,12 @@ class DifferenceInDifferences:
         inference_method = "analytical"
         n_bootstrap_used = None
         n_clusters_used = None
+        p_val_type_used = None
         if self._bootstrap_results is not None:
             inference_method = "wild_bootstrap"
             n_bootstrap_used = self._bootstrap_results.n_bootstrap
             n_clusters_used = self._bootstrap_results.n_clusters
+            p_val_type_used = self._bootstrap_results.p_val_type
 
         # Store results
         self.results_ = DiDResults(
@@ -722,6 +733,7 @@ class DifferenceInDifferences:
             inference_method=inference_method,
             n_bootstrap=n_bootstrap_used,
             n_clusters=n_clusters_used,
+            p_val_type=p_val_type_used,
             survey_metadata=survey_metadata,
             # Report the family that actually produced the SE, which may be
             # the remapped "hc1" (CR1) under the legacy alias path, not the
@@ -804,6 +816,7 @@ class DifferenceInDifferences:
             alpha=self.alpha,
             seed=self.seed,
             return_distribution=False,
+            p_val_type=self.p_val_type,
         )
         self._bootstrap_results = bootstrap_results
 
@@ -812,8 +825,25 @@ class DifferenceInDifferences:
         conf_int = (bootstrap_results.ci_lower, bootstrap_results.ci_upper)
         t_stat = bootstrap_results.t_stat_original
 
-        # Also compute vcov for storage (using cluster-robust for consistency)
-        vcov = compute_robust_vcov(X, residuals, cluster_ids)
+        # Also compute the cluster-robust vcov for storage. Use the rank-aware
+        # solve_ols path (silently dropping collinear nuisance columns and
+        # NaN-expanding the vcov for them), matching how wild_bootstrap_se itself
+        # handles rank-deficient full-dummy designs — `compute_robust_vcov()`
+        # inverts the full X'X directly and would raise (or return garbage) on a
+        # rank-deficient design even though the ATT and bootstrap are identified.
+        # On a saturated design (degenerate bootstrap, NaN se) store a NaN vcov
+        # to keep the all-or-nothing NaN contract. (On a full-rank design this
+        # vcov is bit-identical to the prior compute_robust_vcov result.)
+        if np.isnan(se):
+            vcov = np.full((X.shape[1], X.shape[1]), np.nan)
+        else:
+            _, _, vcov = solve_ols(
+                X,
+                y,
+                cluster_ids=cluster_ids,
+                return_vcov=True,
+                rank_deficient_action="silent",
+            )
 
         return se, p_value, conf_int, t_stat, vcov, bootstrap_results
 
@@ -994,6 +1024,7 @@ class DifferenceInDifferences:
             "inference": self.inference,
             "n_bootstrap": self.n_bootstrap,
             "bootstrap_weights": self.bootstrap_weights,
+            "p_val_type": self.p_val_type,
             "seed": self.seed,
             "rank_deficient_action": self.rank_deficient_action,
             "conley_coords": self.conley_coords,
@@ -1319,6 +1350,9 @@ class MultiPeriodDiD(DifferenceInDifferences):
         # the analytical-fallback warning first would produce contradictory
         # guidance on the same call (warn "falling back" + raise "not
         # supported"). The Conley raise takes precedence. Codex CI R11 P3.
+        # NOTE: ``p_val_type`` is inherited from DifferenceInDifferences but is
+        # inert here — MultiPeriodDiD has no wild-bootstrap path (it falls back
+        # to analytical inference below), so the parameter has no effect.
         effective_inference = self.inference
         if self.inference == "wild_bootstrap" and self.vcov_type != "conley":
             warnings.warn(
