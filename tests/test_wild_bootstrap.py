@@ -1248,3 +1248,39 @@ def test_wild_bootstrap_results_carries_p_val_type():
     )
     assert res.p_val_type == "equal-tailed"
     assert "equal-tailed" in res.summary()
+
+
+def test_twfe_wild_bootstrap_p_val_type_propagates():
+    """TwoWayFixedEffects (inherits the WCR path) surfaces p_val_type on its
+    result and stays p/CI consistent for the equal-tailed test."""
+    rng = np.random.default_rng(7)
+    rows = []
+    for c in range(20):
+        is_treated = c < 10
+        ce = rng.normal(0, 2)
+        for o in range(10):
+            for period in (0, 1):
+                y = 10 + ce + 1.0 * period + (0.6 if (is_treated and period == 1) else 0)
+                y += rng.normal(0, 0.5)
+                rows.append(
+                    {
+                        "cluster": c,
+                        "unit": c * 10 + o,
+                        "treated": int(is_treated),
+                        "post": period,
+                        "outcome": y,
+                    }
+                )
+    df = pd.DataFrame(rows)
+    res = TwoWayFixedEffects(
+        cluster="cluster",
+        inference="wild_bootstrap",
+        n_bootstrap=999,
+        seed=7,
+        p_val_type="equal-tailed",
+    ).fit(df, outcome="outcome", treatment="treated", time="post", unit="unit")
+    assert res.p_val_type == "equal-tailed"
+    assert res.to_dict()["p_val_type"] == "equal-tailed"
+    lower, upper = res.conf_int
+    assert lower < upper
+    assert (not (lower <= 0.0 <= upper)) == (res.p_value < 0.05)

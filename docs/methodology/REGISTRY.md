@@ -106,8 +106,10 @@ inference and the inherited `p_val_type` is inert there.)
    via `solve_ols` so the identified ATT (and the bootstrap) stay finite.
 2. **Cluster sign-vectors** `w_g`: for Rademacher weights with few clusters the full set of
    `2**n_clusters` sign-vectors is **enumerated** (deterministic) when `2**(n_clusters-1) ≤
-   n_bootstrap` — the same full-enumeration trigger boottest uses; otherwise signs are sampled
-   (`seed`-reproducible). Webb/Mammen always sample (the sign-flip symmetry is Rademacher-specific).
+   n_bootstrap` **and `n_clusters ≤ 20`** (a guard against pathological memory use for an
+   unrealistically large `n_bootstrap`) — the same full-enumeration trigger boottest uses;
+   otherwise signs are sampled (`seed`-reproducible). Webb/Mammen always sample (the sign-flip
+   symmetry is Rademacher-specific).
 3. **Bootstrap statistic** `t*(r) = (β*ⱼ − r) / se*`, where each draw refits the full design on
    `y* = (y − ũ(r)) + ũ(r)·w` and `se*` is the CR1 cluster-robust SE of `β*ⱼ`. The observed
    statistic is `t₀ = (τ̂ − r)/se_a` with the analytical CR1 SE `se_a`.

@@ -601,10 +601,12 @@ def _wild_weight_matrix(
 
     For Rademacher weights with few clusters the full set of ``2**n_clusters``
     sign-vectors is enumerated (deterministic) when that does not exceed
-    ``n_bootstrap`` — i.e. when ``2**(n_clusters-1) <= n_bootstrap``, matching the
-    full-enumeration trigger of ``fwildclusterboot::boottest`` and removing RNG
-    dependence in the few-cluster regime where the wild bootstrap matters most.
-    Otherwise ``n_bootstrap`` weight vectors are sampled. Webb/Mammen always
+    ``n_bootstrap`` — i.e. when ``2**(n_clusters-1) <= n_bootstrap`` (and
+    ``n_clusters <= 20``, a guard against pathological memory use for an
+    unrealistically large ``n_bootstrap``), matching the full-enumeration trigger
+    of ``fwildclusterboot::boottest`` and removing RNG dependence in the
+    few-cluster regime where the wild bootstrap matters most. Otherwise
+    ``n_bootstrap`` weight vectors are sampled. Webb/Mammen always
     sample: the sign-flip enumeration symmetry is Rademacher-specific (Mammen is
     asymmetric, Webb is a 6-point law).
     """
@@ -652,7 +654,8 @@ def wild_bootstrap_se(
     that the p-value and CI are mutually consistent (``0 in CI`` iff
     ``p >= alpha``). For Rademacher weights with few clusters the full set of
     ``2**n_clusters`` sign-vectors is enumerated (deterministic) when that does
-    not exceed ``n_bootstrap``; otherwise signs are sampled.
+    not exceed ``n_bootstrap`` (and ``n_clusters <= 20``, a guard against
+    pathological memory use); otherwise signs are sampled.
 
     The reported ``se`` is the analytical cluster-robust (CR1) standard error of
     the original estimate — the studentized bootstrap drives the p-value and CI,
@@ -665,7 +668,9 @@ def wild_bootstrap_se(
     y : np.ndarray
         Outcome vector of shape (n,).
     residuals : np.ndarray
-        OLS residuals from unrestricted regression, shape (n,).
+        Retained for backward compatibility and IGNORED by the WCR
+        implementation, which recomputes the original fit and the restricted
+        (null-imposed) residualization internally from ``X`` and ``y``.
     cluster_ids : np.ndarray
         Cluster identifiers of shape (n,).
     coefficient_index : int
