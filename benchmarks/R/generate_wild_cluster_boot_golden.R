@@ -15,10 +15,11 @@
 #
 # Notes:
 #   - boottest defaults are the WCR (restricted) bootstrap: impose_null=TRUE,
-#     type="rademacher". With G=6 clusters boottest fully enumerates the
-#     2^(G-1) distinct |t| sign-classes (deterministic, no RNG). The library's
-#     wild_bootstrap_se enumerates on the same trigger (2^(G-1) <= n_bootstrap)
-#     but materializes all 2^G raw sign-vectors (the +/- mirror of each class),
+#     type="rademacher". boottest switches to full enumeration once B reaches the
+#     number of possible draws (2^G); with G=6 and B=99999 it enumerates all
+#     2^6=64 raw sign-vectors (deterministic, no RNG), of which 2^(G-1)=32 have
+#     distinct |t|. The library's wild_bootstrap_se uses the same trigger
+#     (2^n_clusters <= n_bootstrap) and also materializes all 2^G raw vectors,
 #     reporting n_bootstrap = 2^G; both yield the same p-value and CI.
 #   - The DGP uses a deliberately weak effect + heavy noise so the bootstrap
 #     p-value is INTERIOR (not 0/1), letting the test pin the exact p-value.

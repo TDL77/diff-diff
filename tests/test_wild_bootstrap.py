@@ -1357,3 +1357,71 @@ def test_near_zero_se_no_mixed_finite_nan_ci():
     if np.isfinite(res.p_value):
         zero_in_ci = res.ci_lower <= 0.0 <= res.ci_upper
         assert zero_in_ci == (res.p_value >= 0.05)
+
+
+# =============================================================================
+# Enumeration trigger parity with fwildclusterboot (B >= 2**G)
+# =============================================================================
+
+
+def _make_clustered_g10(n_bootstrap, seed):
+    """G=10 design + a wild-bootstrap fit, for the enumeration-boundary tests."""
+    rng = np.random.default_rng(99)  # data fixed; only the bootstrap seed varies
+    rows = []
+    for c in range(10):
+        is_treated = c < 5
+        ce = rng.normal(0, 1.5)
+        for _ in range(6):
+            for p in (0, 1):
+                y = 4 + ce + 1.0 * p + (0.5 if (is_treated and p == 1) else 0) + rng.normal(0, 2.0)
+                rows.append({"cluster": c, "treated": int(is_treated), "post": p, "outcome": y})
+    df = pd.DataFrame(rows)
+    return DifferenceInDifferences(
+        cluster="cluster", inference="wild_bootstrap", n_bootstrap=n_bootstrap, seed=seed
+    ).fit(df, outcome="outcome", treatment="treated", time="post")
+
+
+def test_enumeration_trigger_matches_boottest_boundary():
+    """Enumeration fires only when n_bootstrap >= 2**n_clusters, matching
+    fwildclusterboot::boottest (verified: G=10 samples at B=1023, enumerates at
+    B=1024). Below the threshold the result is seed-dependent (sampled); at/above
+    it is deterministic with n_bootstrap == 2**n_clusters."""
+    # Below 2**10 = 1024: sampled -> seed-dependent, reported n_bootstrap == B.
+    below_a = _make_clustered_g10(999, seed=1)
+    below_b = _make_clustered_g10(999, seed=7)
+    assert below_a.n_bootstrap == 999
+    assert below_a.conf_int != below_b.conf_int  # different seeds -> different draws
+
+    # At/above 2**10: enumerated -> deterministic, reported n_bootstrap == 1024.
+    at_a = _make_clustered_g10(1024, seed=1)
+    at_b = _make_clustered_g10(1024, seed=7)
+    assert at_a.n_bootstrap == 2**10
+    assert at_a.p_value == at_b.p_value
+    assert at_a.conf_int == at_b.conf_int
+
+
+def test_single_regressor_design_does_not_crash():
+    """A degenerate single-regressor design (the reduced model has zero columns)
+    must not raise IndexError; the restricted residuals are the variables
+    themselves."""
+    import warnings
+
+    rng = np.random.default_rng(3)
+    cluster_ids = np.repeat(np.arange(6), 8)
+    X = rng.normal(size=(48, 1))  # a single regressor, no intercept
+    y = X[:, 0] * 0.5 + rng.normal(scale=0.5, size=48)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = wild_bootstrap_se(
+            X,
+            y,
+            y - X @ np.linalg.lstsq(X, y, rcond=None)[0],
+            cluster_ids,
+            coefficient_index=0,
+            n_bootstrap=99,
+            seed=1,
+        )
+    # No exception; whatever inference is returned is self-consistent.
+    assert isinstance(res, WildBootstrapResults)
+    if np.isfinite(res.p_value):
+        assert (res.ci_lower <= 0.0 <= res.ci_upper) == (res.p_value >= 0.05)

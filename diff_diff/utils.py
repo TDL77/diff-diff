@@ -599,22 +599,21 @@ def _wild_weight_matrix(
 ) -> np.ndarray:
     """Build the ``(B, n_clusters)`` matrix of cluster-level bootstrap weights.
 
-    For Rademacher weights with few clusters all ``2**n_clusters`` raw
-    sign-vectors are enumerated (deterministic) when
-    ``2**(n_clusters-1) <= n_bootstrap`` (and ``n_clusters <= 20``, a guard
-    against pathological memory use for an unrealistically large
-    ``n_bootstrap``). The trigger uses ``2**(n_clusters-1)`` because that is the
-    number of distinct ``|t|`` sign-classes (each draw and its all-signs-flipped
-    mirror share ``|t*|``) — the same full-enumeration trigger as
-    ``fwildclusterboot::boottest`` — but the library enumerates the full
-    ``2**n_clusters`` raw set and reports ``n_bootstrap = 2**n_clusters``. This
-    removes RNG dependence in the few-cluster regime where the wild bootstrap
-    matters most. Otherwise ``n_bootstrap`` weight vectors are sampled.
-    Webb/Mammen always
+    For Rademacher weights with few clusters all ``2**n_clusters`` sign-vectors
+    are enumerated (deterministic) once ``n_bootstrap`` reaches the number of
+    possible draws — i.e. when ``2**n_clusters <= n_bootstrap`` (and
+    ``n_clusters <= 20``, a guard against pathological memory use). This matches
+    the full-enumeration switch of ``fwildclusterboot::boottest`` (verified: for
+    ``G=10`` boottest samples at ``B=1023`` and enumerates at ``B=1024``); the
+    reported ``n_bootstrap`` is then ``2**n_clusters``. (Only ``2**(n_clusters-1)``
+    of those draws have distinct ``|t*|`` — each draw and its all-signs-flipped
+    mirror share ``|t*|`` — but the full set is materialized.) Enumeration removes
+    RNG dependence in the few-cluster regime where the wild bootstrap matters
+    most. Otherwise ``n_bootstrap`` weight vectors are sampled. Webb/Mammen always
     sample: the sign-flip enumeration symmetry is Rademacher-specific (Mammen is
     asymmetric, Webb is a 6-point law).
     """
-    if weight_type == "rademacher" and n_clusters <= 20 and 2 ** (n_clusters - 1) <= n_bootstrap:
+    if weight_type == "rademacher" and n_clusters <= 20 and 2**n_clusters <= n_bootstrap:
         n_enum = 2**n_clusters
         bits = (np.arange(n_enum)[:, None] >> np.arange(n_clusters)) & 1
         return np.where(bits == 1, 1.0, -1.0)
@@ -657,11 +656,11 @@ def wild_bootstrap_se(
     bootstrap test** (the set of null values not rejected at level ``alpha``) so
     that the p-value and CI are mutually consistent (``0 in CI`` iff
     ``p >= alpha``). For Rademacher weights with few clusters all
-    ``2**n_clusters`` raw sign-vectors are enumerated (deterministic) when
-    ``2**(n_clusters-1) <= n_bootstrap`` (the ``boottest`` full-enumeration
-    trigger — ``2**(n_clusters-1)`` is the count of distinct ``|t|`` sign-classes)
-    and ``n_clusters <= 20`` (a memory guard); the reported ``n_bootstrap`` is
-    then ``2**n_clusters``. Otherwise signs are sampled.
+    ``2**n_clusters`` sign-vectors are enumerated (deterministic) when
+    ``2**n_clusters <= n_bootstrap`` (the ``boottest`` full-enumeration trigger —
+    it switches to enumeration once ``n_bootstrap`` reaches the number of
+    possible draws) and ``n_clusters <= 20`` (a memory guard); the reported
+    ``n_bootstrap`` is then ``2**n_clusters``. Otherwise signs are sampled.
 
     The reported ``se`` is the analytical cluster-robust (CR1) standard error of
     the original estimate — the studentized bootstrap drives the p-value and CI,
@@ -764,7 +763,7 @@ def wild_bootstrap_se(
             f"Only {n_clusters} clusters detected. Wild cluster bootstrap inference may be "
             "unreliable with fewer than 5 clusters. With Rademacher weights all "
             f"{2 ** n_clusters} sign-vectors are enumerated exactly when "
-            f"2**(n_clusters-1) = {2 ** (n_clusters - 1)} <= n_bootstrap; Webb weights "
+            f"n_bootstrap >= 2**n_clusters = {2 ** n_clusters}; Webb weights "
             "(weight_type='webb') improve finite-sample behaviour but are sampled, not "
             "enumerated.",
             UserWarning,
@@ -833,8 +832,17 @@ def wild_bootstrap_se(
     # candidate null r, so the whole test can be re-evaluated at any r cheaply.
     xj = X_eff[:, j_eff]
     X_reduced = np.delete(X_eff, j_eff, axis=1)
-    _, _, fit_y_red, _ = _solve_ols_linalg(X_reduced, y, return_vcov=False, return_fitted=True)
-    _, _, fit_xj_red, _ = _solve_ols_linalg(X_reduced, xj, return_vcov=False, return_fitted=True)
+    if X_reduced.shape[1] == 0:
+        # Single-regressor design: the reduced model has no regressors, so the
+        # restricted fit is identically 0 and the residuals are the variables
+        # themselves (solve_ols cannot fit a zero-column design).
+        fit_y_red = np.zeros(n)
+        fit_xj_red = np.zeros(n)
+    else:
+        _, _, fit_y_red, _ = _solve_ols_linalg(X_reduced, y, return_vcov=False, return_fitted=True)
+        _, _, fit_xj_red, _ = _solve_ols_linalg(
+            X_reduced, xj, return_vcov=False, return_fitted=True
+        )
     m_y = y - fit_y_red
     m_xj = xj - fit_xj_red
 
