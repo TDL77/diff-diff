@@ -547,6 +547,26 @@ class TestComputeRobustVcov:
         vcov = compute_robust_vcov(X, np.zeros(4), np.array([0, 0, 1, 1]))
         assert np.all(np.isnan(vcov))
 
+    def test_cluster_count_check_normalizes_series_cluster_ids(self):
+        """The early cluster-count validation must normalize `cluster_ids` to an
+        array before the zero-weight groupby, so a non-default-index pandas
+        Series grouper is not index-aligned against Series(weights) and
+        miscounted (which would wrongly raise 'need >= 2 clusters' on a valid
+        multi-cluster fit)."""
+        rng = np.random.default_rng(0)
+        n = 18
+        cl_arr = np.repeat([0, 1, 2], 6)
+        cl = pd.Series(cl_arr, index=np.arange(500, 500 + n))  # non-default index
+        X = np.column_stack([np.ones(n), (cl_arr < 1).astype(float), np.tile([0.0, 1.0], 9)])
+        y = X @ np.array([1.0, 0.5, 0.3]) + rng.normal(scale=0.4, size=n)
+        residuals = y - X @ np.linalg.lstsq(X, y, rcond=None)[0]
+        weights = np.ones(n)
+        weights[0] = 0.0  # one zero-weight obs; cluster 0 still has positive-weight obs
+        # All 3 clusters retain positive weight -> must not raise; vcov finite.
+        vcov = compute_robust_vcov(X, residuals, cl, weights=weights, weight_type="aweight")
+        assert vcov.shape == (3, 3)
+        assert np.all(np.isfinite(vcov))
+
     def test_numerical_instability_fallback_warns(self, ols_data):
         """Test that numerical instability in Rust backend triggers warning and fallback."""
         from unittest.mock import patch

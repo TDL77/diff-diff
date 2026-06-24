@@ -2630,9 +2630,13 @@ def _compute_robust_vcov_numpy(
     # effective-cluster count computed in the cluster branch, including the
     # zero-total-weight exclusion.)
     if cluster_ids is not None:
-        n_clusters_check = len(np.unique(cluster_ids))
+        # Normalize to an array first (as the cluster branch does) so the
+        # weighted groupby below cannot index-align a pandas Series grouper
+        # against the freshly-created Series(weights) and miscount clusters.
+        cluster_ids_arr = np.asarray(cluster_ids)
+        n_clusters_check = len(np.unique(cluster_ids_arr))
         if weights is not None and weight_type != "fweight" and np.any(weights == 0):
-            cluster_weight_sums = pd.Series(weights).groupby(cluster_ids).sum()
+            cluster_weight_sums = pd.Series(weights).groupby(cluster_ids_arr).sum()
             n_clusters_check = int((cluster_weight_sums > 0).sum())
         if n_clusters_check < 2:
             raise ValueError(
