@@ -23,7 +23,6 @@ from diff_diff.linalg import (
     LinearRegression,
     _expand_vcov_with_nan,
     compute_r_squared,
-    compute_robust_vcov,
     solve_ols,
 )
 from diff_diff.results import DiDResults, MultiPeriodDiDResults, PeriodEffect
@@ -826,15 +825,25 @@ class DifferenceInDifferences:
         conf_int = (bootstrap_results.ci_lower, bootstrap_results.ci_upper)
         t_stat = bootstrap_results.t_stat_original
 
-        # Also compute the cluster-robust vcov for storage. When the bootstrap
-        # itself returned degenerate (all-NaN) inference — e.g. a saturated
-        # design with no residual degrees of freedom — the shared CR1 sandwich
-        # would divide by zero, so store a NaN vcov instead, keeping the
-        # all-or-nothing NaN contract rather than raising.
+        # Also compute the cluster-robust vcov for storage. Use the rank-aware
+        # solve_ols path (silently dropping collinear nuisance columns and
+        # NaN-expanding the vcov for them), matching how wild_bootstrap_se itself
+        # handles rank-deficient full-dummy designs — `compute_robust_vcov()`
+        # inverts the full X'X directly and would raise (or return garbage) on a
+        # rank-deficient design even though the ATT and bootstrap are identified.
+        # On a saturated design (degenerate bootstrap, NaN se) store a NaN vcov
+        # to keep the all-or-nothing NaN contract. (On a full-rank design this
+        # vcov is bit-identical to the prior compute_robust_vcov result.)
         if np.isnan(se):
             vcov = np.full((X.shape[1], X.shape[1]), np.nan)
         else:
-            vcov = compute_robust_vcov(X, residuals, cluster_ids)
+            _, _, vcov = solve_ols(
+                X,
+                y,
+                cluster_ids=cluster_ids,
+                return_vcov=True,
+                rank_deficient_action="silent",
+            )
 
         return se, p_value, conf_int, t_stat, vcov, bootstrap_results
 

@@ -1435,3 +1435,48 @@ def test_single_regressor_design_does_not_crash():
     assert isinstance(res, WildBootstrapResults)
     if np.isfinite(res.p_value):
         assert (res.ci_lower <= 0.0 <= res.ci_upper) == (res.p_value >= 0.05)
+
+
+def test_wild_bootstrap_rank_deficient_storage_vcov_does_not_crash():
+    """The estimator's stored cluster-robust vcov is computed through the
+    rank-aware solve_ols path, so a wild-bootstrap fit on a rank-deficient
+    full-dummy design (here a fixed-effect dummy that EXACTLY duplicates the
+    treatment indicator) does not crash, and the stored vcov is NaN-expanded for
+    the dropped column rather than raising on the singular X'X. Regression for
+    the storage-vcov gap in `_run_wild_bootstrap_inference` (the bootstrap helper
+    already handled rank deficiency internally).
+    """
+    import warnings
+
+    rng = np.random.default_rng(0)
+    rows = []
+    for u in range(16):
+        treated = int(u < 8)
+        fe = "T" if treated else "C"  # the 'T' dummy == treated exactly -> singular X'X
+        for period in (0, 1):
+            y = 5 + 2 * period + (1.5 if (treated and period) else 0) + rng.normal(0, 0.5)
+            rows.append(
+                {
+                    "unit": u,
+                    "fe": fe,
+                    "cluster": u % 8,
+                    "treated": treated,
+                    "post": period,
+                    "outcome": y,
+                }
+            )
+    df = pd.DataFrame(rows)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")  # expected rank-deficient drop warning
+        res = DifferenceInDifferences(
+            cluster="cluster", inference="wild_bootstrap", n_bootstrap=99, seed=1
+        ).fit(df, outcome="outcome", treatment="treated", time="post", fixed_effects=["fe"])
+    # ATT identified, bootstrap inference finite, no exception.
+    assert np.isfinite(res.att)
+    assert np.isfinite(res.se) and res.se > 0
+    assert np.isfinite(res.p_value)
+    assert np.isfinite(res.conf_int[0]) and np.isfinite(res.conf_int[1])
+    # Stored vcov is rank-aware (NaN-expanded for the dropped column), not +/-inf.
+    assert res.vcov is not None
+    assert np.any(np.isnan(res.vcov))
+    assert not np.any(np.isinf(res.vcov))
