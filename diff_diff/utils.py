@@ -599,14 +599,18 @@ def _wild_weight_matrix(
 ) -> np.ndarray:
     """Build the ``(B, n_clusters)`` matrix of cluster-level bootstrap weights.
 
-    For Rademacher weights with few clusters the full set of ``2**n_clusters``
-    sign-vectors is enumerated (deterministic) when that does not exceed
-    ``n_bootstrap`` — i.e. when ``2**(n_clusters-1) <= n_bootstrap`` (and
-    ``n_clusters <= 20``, a guard against pathological memory use for an
-    unrealistically large ``n_bootstrap``), matching the full-enumeration trigger
-    of ``fwildclusterboot::boottest`` and removing RNG dependence in the
-    few-cluster regime where the wild bootstrap matters most. Otherwise
-    ``n_bootstrap`` weight vectors are sampled. Webb/Mammen always
+    For Rademacher weights with few clusters all ``2**n_clusters`` raw
+    sign-vectors are enumerated (deterministic) when
+    ``2**(n_clusters-1) <= n_bootstrap`` (and ``n_clusters <= 20``, a guard
+    against pathological memory use for an unrealistically large
+    ``n_bootstrap``). The trigger uses ``2**(n_clusters-1)`` because that is the
+    number of distinct ``|t|`` sign-classes (each draw and its all-signs-flipped
+    mirror share ``|t*|``) — the same full-enumeration trigger as
+    ``fwildclusterboot::boottest`` — but the library enumerates the full
+    ``2**n_clusters`` raw set and reports ``n_bootstrap = 2**n_clusters``. This
+    removes RNG dependence in the few-cluster regime where the wild bootstrap
+    matters most. Otherwise ``n_bootstrap`` weight vectors are sampled.
+    Webb/Mammen always
     sample: the sign-flip enumeration symmetry is Rademacher-specific (Mammen is
     asymmetric, Webb is a 6-point law).
     """
@@ -652,10 +656,12 @@ def wild_bootstrap_se(
     residuals, and the confidence interval is obtained by **inverting the
     bootstrap test** (the set of null values not rejected at level ``alpha``) so
     that the p-value and CI are mutually consistent (``0 in CI`` iff
-    ``p >= alpha``). For Rademacher weights with few clusters the full set of
-    ``2**n_clusters`` sign-vectors is enumerated (deterministic) when that does
-    not exceed ``n_bootstrap`` (and ``n_clusters <= 20``, a guard against
-    pathological memory use); otherwise signs are sampled.
+    ``p >= alpha``). For Rademacher weights with few clusters all
+    ``2**n_clusters`` raw sign-vectors are enumerated (deterministic) when
+    ``2**(n_clusters-1) <= n_bootstrap`` (the ``boottest`` full-enumeration
+    trigger — ``2**(n_clusters-1)`` is the count of distinct ``|t|`` sign-classes)
+    and ``n_clusters <= 20`` (a memory guard); the reported ``n_bootstrap`` is
+    then ``2**n_clusters``. Otherwise signs are sampled.
 
     The reported ``se`` is the analytical cluster-robust (CR1) standard error of
     the original estimate — the studentized bootstrap drives the p-value and CI,
@@ -756,10 +762,11 @@ def wild_bootstrap_se(
     if n_clusters < 5:
         warnings.warn(
             f"Only {n_clusters} clusters detected. Wild cluster bootstrap inference may be "
-            "unreliable with fewer than 5 clusters. With Rademacher weights the full set of "
-            f"{2 ** n_clusters} sign-vectors is enumerated exactly when it does not exceed "
-            "n_bootstrap; Webb weights (weight_type='webb') improve finite-sample behaviour "
-            "but are sampled, not enumerated.",
+            "unreliable with fewer than 5 clusters. With Rademacher weights all "
+            f"{2 ** n_clusters} sign-vectors are enumerated exactly when "
+            f"2**(n_clusters-1) = {2 ** (n_clusters - 1)} <= n_bootstrap; Webb weights "
+            "(weight_type='webb') improve finite-sample behaviour but are sampled, not "
+            "enumerated.",
             UserWarning,
         )
 
