@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [3.5.3] - 2026-06-25
 
 ### Added
 - **`generate_synthetic_control_data()` data generator + a capstone `SyntheticControl` tutorial.** New public generator (`diff_diff/prep_dgp.py`, exported from `diff_diff`) builds a **single-treated-unit** factor-model panel for synthetic-control demos and tests: one treated unit whose latent factor loadings and baseline are an exact convex combination of a few donors (so the noiseless trajectory lies in the donor convex hull and a synthetic control reproduces it closely — the observed fit is approximate under added noise), persistent AR(1) factors, predictor covariates that each proxy a distinct factor, a common calendar time effect, and a known `"ramp"` or `"constant"` treatment effect emitted as `true_effect`. Tutorial **`docs/tutorials/25_synthetic_control_policy.ipynb`** walks the whole `SyntheticControl` surface end-to-end on a policy-evaluation story (one state adopts a clean-energy standard), structured around **two inference philosophies**: cross-unit permutation (`in_space_placebo` + Firpo–Possebom `confidence_set`, with `leave_one_out` / `in_time_placebo` robustness) versus over-time conformal (CWZ `conformal_test` / `conformal_confidence_intervals` / `conformal_average_effect`), with the per-period conformal band as the climax. A `tests/test_t25_synthetic_control_policy_drift.py` drift guard re-derives every quoted number from the generator.
@@ -1609,6 +1609,7 @@ for the full feature history leading to this release.
 [2.1.2]: https://github.com/igerber/diff-diff/compare/v2.1.1...v2.1.2
 [2.1.1]: https://github.com/igerber/diff-diff/compare/v2.1.0...v2.1.1
 [2.1.0]: https://github.com/igerber/diff-diff/compare/v2.0.3...v2.1.0
+[3.5.3]: https://github.com/igerber/diff-diff/compare/v3.5.2...v3.5.3
 [3.5.2]: https://github.com/igerber/diff-diff/compare/v3.5.1...v3.5.2
 [3.5.1]: https://github.com/igerber/diff-diff/compare/v3.5.0...v3.5.1
 [3.5.0]: https://github.com/igerber/diff-diff/compare/v3.4.2...v3.5.0
