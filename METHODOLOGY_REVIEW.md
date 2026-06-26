@@ -82,7 +82,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | HonestDiD | `honest_did.py` | `HonestDiD` package | **Complete** | 2026-04-01 |
 | PreTrendsPower | `pretrends.py` | `pretrends` package | **Complete** | 2026-05-19 |
 | PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | **Complete** | 2026-05-31 |
-| PlaceboTests | `diagnostics.py` | (no canonical reference) | **In Progress** | — |
+| PlaceboTests | `diagnostics.py` | Bertrand-Duflo-Mullainathan (2004) (placebo laws); no canonical R | **In Progress** | — |
 
 ### Cross-Cutting Inference Features
 
@@ -1314,18 +1314,20 @@ CI and extending covariate-adjusted R parity are tracked follow-ups in `TODO.md`
 | Field | Value |
 |-------|-------|
 | Module | `diagnostics.py` |
-| Primary Reference | None canonical (general permutation / leave-one-out diagnostic) |
-| R Reference | None canonical |
+| Primary Reference | Bertrand, Duflo & Mullainathan (2004), QJE 119(1):249-275 (placebo laws / randomization inference). Paper review on file: `docs/methodology/papers/bertrand-duflo-mullainathan-2004-review.md`. |
+| R Reference | None canonical (no R package ships a generic placebo battery) |
 | Status | **In Progress** |
 | Last Review | — |
 
 **Documentation in place:**
 - REGISTRY.md section: `## PlaceboTests` (NaN-inference edge cases for `permutation_test` and `leave_one_out_test`)
+- Paper review: `docs/methodology/papers/bertrand-duflo-mullainathan-2004-review.md` (BDM 2004 placebo-law / serial-correlation grounding; proposes a `## PlaceboTests` REGISTRY entry, not yet integrated)
 - Implementation: tests embedded in `tests/test_diagnostics.py`
 
 **Outstanding for promotion:**
-- Decide whether this surface warrants a standalone methodology review or whether the brief Verified Components walk-through + NaN-inference deviation log should live as a sub-section under each per-estimator diagnostic block instead
-- If kept standalone: brief Verified Components block + Deviations block for the NaN-inference convention
+- Standalone-vs-absorb decision: **resolved — standalone** (`diagnostics.py` is an exported public surface distinct from per-estimator placebo/LOO)
+- Integrate the proposed `## PlaceboTests` entry into REGISTRY.md (cite BDM 2004 + scope) and flip this row to Complete
+- Dedicated `tests/test_methodology_placebo.py` with BDM-anchored Verified Components (empirical permutation p-value per fn 12; p-value floor; LOO; fake-timing/fake-group) + Deviations block (permutation path's deliberate non-`safe_inference` + percentile CI; the NaN-inference convention). R parity is N/A (no canonical R placebo battery) → self-consistency / analytic anchors
 
 ---
 
@@ -1463,7 +1465,7 @@ Promotion priority for the **In Progress** entries, ordered by what's blocked on
 
 **Substantive-review-blocked (each still missing one or more of: a methodology test file, R parity, or a paper review):**
 
-1. **PlaceboTests** — decide first whether to keep standalone or absorb into per-estimator diagnostic sections; methodologically lightweight either way.
+1. **PlaceboTests** — standalone-vs-absorb decision resolved (standalone) and the BDM (2004) paper review is now on file (`docs/methodology/papers/bertrand-duflo-mullainathan-2004-review.md`). Remaining for promotion: the dedicated methodology test file + REGISTRY integration (R parity N/A). Methodologically lightweight.
 
 **Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
 
