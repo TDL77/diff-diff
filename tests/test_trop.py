@@ -10,6 +10,7 @@ import pytest
 
 from diff_diff.prep import generate_factor_data
 from diff_diff.trop import TROP, TROPResults, trop
+from diff_diff.trop_local import _run_trop_bootstrap_loop
 
 
 def generate_factor_dgp(
@@ -2862,6 +2863,168 @@ class TestTROPNValidTreated:
         assert len(nan_warnings) > 0, "Should warn about all-NaN treated outcomes"
         assert results.n_treated_obs == 0
         assert np.isnan(results.att)
+
+
+class TestRunTropBootstrapLoop:
+    """Direct unit tests for the shared ``_run_trop_bootstrap_loop`` helper - the
+    deduplicated per-draw resample-and-refit loop used by both
+    ``TROP._bootstrap_variance`` (local) and ``TROP._bootstrap_variance_global``.
+
+    A stub ``fit_callable`` exercises the loop logic with no linalg (platform-stable,
+    no BLAS flakiness): the resampling + ``f"{u}_{idx}"`` rename, the ``np.isfinite``
+    filter, the exception-skip guard, the non-convergence tracker passthrough, and the
+    degenerate empty-pool branches.
+    """
+
+    @staticmethod
+    def _panel():
+        # 4 units x 2 periods; string ids so the rename device is visible.
+        rows = []
+        for u in ["a", "b", "c", "d"]:
+            for t in [0, 1]:
+                rows.append({"unit": u, "period": t, "outcome": float(ord(u) + t)})
+        return pd.DataFrame(rows)
+
+    def test_resamples_with_renamed_ids_and_calls_fit(self):
+        data = self._panel()
+        control_units = np.array(["a", "b"])
+        treated_units = np.array(["c", "d"])
+        # 2 draws, deterministic index arrays (the helper is RNG-free).
+        control_idx = np.array([[0, 1], [1, 1]])
+        treated_idx = np.array([[0, 1], [0, 0]])
+        seen = []
+        estimates, tracker = _run_trop_bootstrap_loop(
+            data,
+            "unit",
+            control_units,
+            treated_units,
+            control_idx,
+            treated_idx,
+            2,
+            2,
+            2,
+            lambda boot_data, _tr: (seen.append(boot_data), 1.5)[1],
+        )
+        assert estimates == [1.5, 1.5]
+        assert tracker == []
+        # Draw 0: control a,b + treated c,d -> renamed a_0,b_1,c_2,d_3; 2 rows each.
+        assert sorted(seen[0]["unit"].unique()) == ["a_0", "b_1", "c_2", "d_3"]
+        assert len(seen[0]) == 8
+        # Draw 1: control b,b + treated c,c -> duplicated units stay distinct via idx.
+        assert sorted(seen[1]["unit"].unique()) == ["b_0", "b_1", "c_2", "c_3"]
+        assert len(seen[1]) == 8
+
+    def test_finite_filter_drops_nan_estimates(self):
+        data = self._panel()
+        cu, tu = np.array(["a", "b"]), np.array(["c", "d"])
+        cidx = tidx = np.array([[0, 1], [0, 1], [0, 1]])
+        vals = iter([2.0, float("nan"), 3.0])
+        estimates, _ = _run_trop_bootstrap_loop(
+            data,
+            "unit",
+            cu,
+            tu,
+            cidx,
+            tidx,
+            2,
+            2,
+            3,
+            lambda _bd, _tr: next(vals),
+        )
+        assert estimates == [2.0, 3.0]  # the NaN draw is dropped
+
+    def test_exception_draw_is_skipped(self):
+        data = self._panel()
+        cu, tu = np.array(["a", "b"]), np.array(["c", "d"])
+        cidx = tidx = np.array([[0, 1], [0, 1], [0, 1]])
+        calls = {"n": 0}
+
+        def stub(_bd, _tr):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise ValueError("forced failure")
+            return 4.0
+
+        estimates, _ = _run_trop_bootstrap_loop(
+            data,
+            "unit",
+            cu,
+            tu,
+            cidx,
+            tidx,
+            2,
+            2,
+            3,
+            stub,
+        )
+        assert estimates == [4.0, 4.0]  # draw 2 skipped; draws 1 + 3 collected
+        assert calls["n"] == 3
+
+    def test_nonconverg_tracker_passthrough(self):
+        data = self._panel()
+        cu, tu = np.array(["a", "b"]), np.array(["c", "d"])
+        cidx = tidx = np.array([[0, 1], [0, 1]])
+        estimates, tracker = _run_trop_bootstrap_loop(
+            data,
+            "unit",
+            cu,
+            tu,
+            cidx,
+            tidx,
+            2,
+            2,
+            2,
+            lambda _bd, tr: (tr.append(1), 5.0)[1],
+        )
+        assert estimates == [5.0, 5.0]
+        assert tracker == [1, 1]  # the helper's tracker is threaded into fit_callable
+
+    def test_empty_control_pool_branch(self):
+        data = self._panel()
+        cu = np.array([], dtype=object)
+        tu = np.array(["c", "d"])
+        cidx = np.zeros((1, 0), dtype=int)  # unused when n_control_units == 0
+        tidx = np.array([[0, 1]])
+        seen = []
+        estimates, _ = _run_trop_bootstrap_loop(
+            data,
+            "unit",
+            cu,
+            tu,
+            cidx,
+            tidx,
+            0,
+            2,
+            1,
+            lambda bd, _tr: (seen.append(bd), 1.0)[1],
+        )
+        # Only treated units sampled -> renamed c_0, d_1 (assert ids/rows, not dtype).
+        assert sorted(seen[0]["unit"].unique()) == ["c_0", "d_1"]
+        assert len(seen[0]) == 4
+        assert estimates == [1.0]
+
+    def test_empty_treated_pool_branch(self):
+        data = self._panel()
+        cu = np.array(["a", "b"])
+        tu = np.array([], dtype=object)
+        cidx = np.array([[0, 1]])
+        tidx = np.zeros((1, 0), dtype=int)  # unused when n_treated_units == 0
+        seen = []
+        estimates, _ = _run_trop_bootstrap_loop(
+            data,
+            "unit",
+            cu,
+            tu,
+            cidx,
+            tidx,
+            2,
+            0,
+            1,
+            lambda bd, _tr: (seen.append(bd), 2.0)[1],
+        )
+        assert sorted(seen[0]["unit"].unique()) == ["a_0", "b_1"]
+        assert len(seen[0]) == 4
+        assert estimates == [2.0]
 
 
 class TestTROPBootstrapNaNSE:
