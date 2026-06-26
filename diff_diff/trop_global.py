@@ -28,7 +28,11 @@ from diff_diff.bootstrap_utils import (
     stratified_bootstrap_indices,
     warn_bootstrap_failure_rate,
 )
-from diff_diff.trop_local import _setup_trop_data, _soft_threshold_svd
+from diff_diff.trop_local import (
+    _run_trop_bootstrap_loop,
+    _setup_trop_data,
+    _soft_threshold_svd,
+)
 from diff_diff.trop_results import TROPResults
 from diff_diff.utils import safe_inference, warn_if_not_converged
 
@@ -978,43 +982,28 @@ class TROPGlobalMixin:
                 )
 
         # Python fallback: consume the same indices the Rust branch would have used.
-        bootstrap_estimates_list: List[float] = []
-        nonconverg_tracker: List[int] = []
-
-        for b in range(self.n_bootstrap):
-            sampled_control = (
-                control_units[control_idx[b]] if n_control_units > 0 else np.array([], dtype=object)
-            )
-            sampled_treated = (
-                treated_units[treated_idx[b]] if n_treated_units > 0 else np.array([], dtype=object)
-            )
-            sampled_units = np.concatenate([sampled_control, sampled_treated])
-
-            # Create bootstrap sample
-            boot_data = pd.concat(
-                [
-                    data[data[unit] == u].assign(**{unit: f"{u}_{idx}"})
-                    for idx, u in enumerate(sampled_units)
-                ],
-                ignore_index=True,
-            )
-
-            try:
-                tau = self._fit_global_with_fixed_lambda(
-                    boot_data,
-                    outcome,
-                    treatment,
-                    unit,
-                    time,
-                    optimal_lambda,
-                    treated_periods,
-                    survey_design=survey_design,
-                    _nonconvergence_tracker=nonconverg_tracker,
-                )
-                if np.isfinite(tau):
-                    bootstrap_estimates_list.append(tau)
-            except (ValueError, np.linalg.LinAlgError, KeyError):
-                continue
+        bootstrap_estimates_list, nonconverg_tracker = _run_trop_bootstrap_loop(
+            data,
+            unit,
+            control_units,
+            treated_units,
+            control_idx,
+            treated_idx,
+            n_control_units,
+            n_treated_units,
+            self.n_bootstrap,
+            lambda boot_data, tracker: self._fit_global_with_fixed_lambda(
+                boot_data,
+                outcome,
+                treatment,
+                unit,
+                time,
+                optimal_lambda,
+                treated_periods,
+                survey_design=survey_design,
+                _nonconvergence_tracker=tracker,
+            ),
+        )
 
         bootstrap_estimates = np.array(bootstrap_estimates_list)
 
