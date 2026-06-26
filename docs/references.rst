@@ -99,6 +99,14 @@ Placebo Tests and DiD Diagnostics
 
 - **Bertrand, M., Duflo, E., & Mullainathan, S. (2004).** "How Much Should We Trust Differences-in-Differences Estimates?" *The Quarterly Journal of Economics*, 119(1), 249-275. https://doi.org/10.1162/003355304772839588
 
+- **Rosenbaum, P. R. (1996).** "Observational Studies and Nonrandomized Experiments." In *Handbook of Statistics*, Vol. 13, S. Ghosh & C. R. Rao, eds., 181-197. Elsevier. https://doi.org/10.1016/S0169-7161(96)13009-0
+
+  Randomization-inference foundation for the ``PlaceboTests`` permutation test; cited by Bertrand-Duflo-Mullainathan (2004) footnote 11 as the basis for forming a randomization-inference test from the placebo-law distribution.
+
+- **Phipson, B., & Smyth, G. K. (2010).** "Permutation P-values Should Never Be Zero: Calculating Exact P-values When Permutations Are Randomly Drawn." *Statistical Applications in Genetics and Molecular Biology*, 9(1), Article 39. https://doi.org/10.2202/1544-6115.1585
+
+  Valid (slightly conservative) sampled randomization-inference p-value convention ``(1 + count) / (B + 1)`` used by ``permutation_test`` for randomly-drawn (with-replacement) permutations (the ``+1`` includes the observed statistic, giving an intrinsic ``1/(B+1)`` floor); the exact value is the full enumeration ``count/total``.
+
 Synthetic Control Method
 ------------------------
 

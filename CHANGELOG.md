@@ -7,7 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`placebo_group_test` gained an optional `treatment` parameter.** When supplied, units
+  that are ever real-treated are dropped before the placebo so it runs on never-treated units
+  only (the uncontaminated design); without it, behavior is unchanged and the caller must pass
+  control-only data. Degenerate designs (all fake-treated units dropped, or no controls
+  remaining) now raise a clear `ValueError` instead of a cryptic `LinAlgError`, and a
+  fake-treated unit that is itself real-treated emits a `UserWarning`.
+- **PlaceboTests methodology validation:** `tests/test_methodology_placebo.py` (paper-anchored
+  to Bertrand-Duflo-Mullainathan 2004) plus base-R exact-enumeration R parity
+  (`benchmarks/R/generate_placebo_golden.R` → `benchmarks/data/placebo_golden.json`). The
+  `PlaceboTests` methodology-review row is promoted to **Complete**.
+
 ### Changed
+- **`run_placebo_test`'s `fake_group` path now filters ever-treated units by default.** The
+  dispatcher threads its `treatment` column into `placebo_group_test`, so the fake-group
+  placebo runs on never-treated units only (a more-correct placebo). Calling
+  `placebo_group_test` directly without `treatment` retains the previous behavior.
 - **Bumped the Rust backend's `blas-src` crate `0.10` → `0.14`.** `blas-src` is a
   linker-only crate pulled in **only by the `accelerate` (macOS) feature**; the Linux
   `openblas` path links system OpenBLAS via `build.rs` and the default/Windows builds use the
@@ -16,6 +32,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   API or numerical change. Validated on the macOS Accelerate path: clean `cargo build` /
   `maturin develop --features accelerate` against the pinned `ndarray 0.17`, the Rust unit
   tests, and the full Python⇄Rust equivalence suite (`tests/test_rust_backend.py`).
+
+### Fixed
+- **`permutation_test` now reports the randomization-inference p-value
+  `(1 + count) / (B + 1)`** (Phipson & Smyth 2010), replacing `count / B` floored at
+  `1/(B+1)`. The `+1` includes the observed statistic in both numerator and denominator
+  (the floor is now intrinsic). Because assignments are sampled with replacement, this is a
+  valid but slightly conservative Monte-Carlo randomization-inference p-value (not an exact
+  finite-sample value); it converges to the exact full-enumeration value `count/total` as the
+  number of permutations grows. (Permutation p-values shift by a small amount, at most
+  `~1/(B+1)`.)
 
 ### Security
 - **Bumped the Rust backend's `pyo3` and `numpy` crates 0.28 → 0.29.** Resolves two RustSec

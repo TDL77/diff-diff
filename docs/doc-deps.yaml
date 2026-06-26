@@ -732,8 +732,11 @@ sources:
     drift_risk: low
     docs:
       - path: docs/methodology/REGISTRY.md
-        section: "Diagnostics"
+        section: "PlaceboTests"
         type: methodology
+      - path: docs/methodology/papers/bertrand-duflo-mullainathan-2004-review.md
+        type: methodology
+        note: "BDM (2004) placebo-law / randomization-inference grounding for PlaceboTests"
       - path: docs/api/diagnostics.rst
         type: api_reference
       - path: docs/tutorials/04_parallel_trends.ipynb
