@@ -33,9 +33,10 @@ rayon = "1.8"
 # BLAS for matrix-vector products is optional via accelerate/openblas features.
 faer = "0.24"
 
-# BLAS backend (optional, activated by accelerate/openblas features)
-# blas-src 0.10 is ndarray's tested version (see ndarray/crates/blas-tests/Cargo.toml)
-blas-src = { version = "0.10", optional = true }
+# BLAS backend — linker-only crate, pulled in ONLY by the `accelerate`
+# (macOS) feature; OpenBLAS (Linux) is linked via build.rs, not blas-src
+# (see src/lib.rs). 0.14 links the same system Accelerate.framework as 0.10.
+blas-src = { version = "0.14", optional = true }
 
 [profile.release]
 lto = true

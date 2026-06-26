@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Bumped the Rust backend's `blas-src` crate `0.10` → `0.14`.** `blas-src` is a
+  linker-only crate pulled in **only by the `accelerate` (macOS) feature**; the Linux
+  `openblas` path links system OpenBLAS via `build.rs` and the default/Windows builds use the
+  pure-Rust `faer` backend, so neither touches `blas-src`. `0.14` links the **same** system
+  Accelerate.framework as `0.10` (`accelerate-src` is unchanged at `0.3.2`), so there is no
+  API or numerical change. Validated on the macOS Accelerate path: clean `cargo build` /
+  `maturin develop --features accelerate` against the pinned `ndarray 0.17`, the Rust unit
+  tests, and the full Python⇄Rust equivalence suite (`tests/test_rust_backend.py`).
+
 ## [3.5.3] - 2026-06-25
 
 ### Added
