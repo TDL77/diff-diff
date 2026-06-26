@@ -17,6 +17,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `maturin develop --features accelerate` against the pinned `ndarray 0.17`, the Rust unit
   tests, and the full Python⇄Rust equivalence suite (`tests/test_rust_backend.py`).
 
+### Security
+- **Bumped the Rust backend's `pyo3` and `numpy` crates 0.28 → 0.29.** Resolves two RustSec
+  advisories in `pyo3 < 0.29` — RUSTSEC-2026-0176 (out-of-bounds read in `PyList`/`PyTuple`
+  `nth`/`nth_back`, High) and RUSTSEC-2026-0177 (missing `Sync` bound on
+  `PyCFunction::new_closure`, Medium). Neither vulnerable path was reachable in this crate
+  (no `PyList`/`PyTuple` iteration, no `new_closure`, no free-threaded wheels); `numpy` 0.29 is
+  bumped in lockstep because it requires `pyo3` ^0.29. No API or numerical change — both crates
+  are FFI/binding layers, and the math/RNG crates (`ndarray`, `faer`, `rand`, `rand_xoshiro`)
+  are unchanged.
+
 ## [3.5.3] - 2026-06-25
 
 ### Added
@@ -42,16 +52,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TripleDifference(cluster="unit")` for valid power — a `UserWarning` fires otherwise.
   `treatment_fraction` remains inert (balanced 2×2×2); pass `group_frac`/`partition_frac`
   via `data_generator_kwargs`. See `docs/methodology/REGISTRY.md` §PowerAnalysis.
-
-### Security
-- **Bumped the Rust backend's `pyo3` and `numpy` crates 0.28 → 0.29.** Resolves two RustSec
-  advisories in `pyo3 < 0.29` — RUSTSEC-2026-0176 (out-of-bounds read in `PyList`/`PyTuple`
-  `nth`/`nth_back`, High) and RUSTSEC-2026-0177 (missing `Sync` bound on
-  `PyCFunction::new_closure`, Medium). Neither vulnerable path was reachable in this crate
-  (no `PyList`/`PyTuple` iteration, no `new_closure`, no free-threaded wheels); `numpy` 0.29 is
-  bumped in lockstep because it requires `pyo3` ^0.29. No API or numerical change — both crates
-  are FFI/binding layers, and the math/RNG crates (`ndarray`, `faer`, `rand`, `rand_xoshiro`)
-  are unchanged.
 
 ## [3.5.2] - 2026-06-08
 
