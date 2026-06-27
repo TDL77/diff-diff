@@ -56,7 +56,8 @@ When reviewing new features or code paths, specifically check:
 
 ## Deferred Work Acceptance
 
-This project tracks deferred technical debt in `TODO.md` under "Tech Debt from Code Reviews."
+This project tracks deferred technical debt in `TODO.md` under "Deferred / Documented"
+(blocked items, sub-grouped by blocker) and shippable items under "Actionable Backlog."
 
 - If a limitation is already tracked in `TODO.md` with a PR reference, it is NOT a blocker.
 - If a PR ADDS a new `TODO.md` entry for deferred work, that counts as properly tracking
@@ -96,7 +97,7 @@ Apply the assessment based on the HIGHEST severity of UNMITIGATED findings:
 
 A finding is MITIGATED (does not count toward assessment) if:
 - The deviation is documented in `docs/methodology/REGISTRY.md` with a Note/Deviation label
-- The limitation is tracked in `TODO.md` under "Tech Debt from Code Reviews"
+- The limitation is tracked in `TODO.md` under "Deferred / Documented" or "Actionable Backlog"
 - The PR itself adds a TODO.md entry or REGISTRY.md note for the issue
 - The finding is about an implementation choice between valid numerical approaches
 
