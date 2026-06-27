@@ -1424,7 +1424,7 @@ Goldens at `benchmarks/data/r_conleyreg_conley_golden.json`; generator at `bench
 | Field | Value |
 |-------|-------|
 | Module | `survey.py`, `bootstrap_utils.py` (plus per-estimator hooks) |
-| Primary References | Binder (1983) for TSL variance; Lumley (2004) for the R `survey` package; Solon, Haider & Wooldridge (2015) for the "when to weight" framework |
+| Primary References | Binder (1983) for TSL variance (reviewed: `docs/methodology/papers/binder-1983-review.md`); Lumley (2004) for the R `survey` package; Solon, Haider & Wooldridge (2015) for the "when to weight" framework |
 | R Reference | `survey` R package |
 | Status | **In Progress** |
 | Last Review | — |
@@ -1432,6 +1432,7 @@ Goldens at `benchmarks/data/r_conleyreg_conley_golden.json`; generator at `bench
 **Documentation in place:**
 - REGISTRY.md sub-sections (under `## Survey Data Support`): Weighted Estimation, TSL Variance, Weight Type Effects on Inference, Absorbed FE with Survey Weights, Survey Degrees of Freedom, Survey Aggregation (`aggregate_survey`), Survey-Aware Bootstrap (Phase 6), Replicate Weight Variance (Phase 6), DEFF Diagnostics (Phase 6), Subpopulation Analysis (Phase 6), Survey DGP (`generate_survey_did_data`)
 - **Theory document**: `docs/methodology/survey-theory.md` — full Binder-Lumley derivation of design-based variance for modern DiD estimators, including influence-function machinery
+- **Paper review**: `docs/methodology/papers/binder-1983-review.md` — review of Binder (1983), the canonical source for the design-based TSL variance sandwich `V̂(θ̂) = Ĵ⁻¹ Σ̂_U Ĵ⁻ᵀ` (Eq. 3.3/3.4) and its OLS specialization `V̂(B̂) = S_XX⁻¹ Σ̂(B̂) S_XX⁻¹` (Eq. 4.7) that the survey path implements
 - 13 dedicated `tests/test_survey*.py` files: `test_survey.py`, `test_survey_dcdh.py`, `test_survey_dcdh_replicate_psu.py`, `test_survey_estimator_validation.py`, `test_survey_phase3.py`, `test_survey_phase4.py`, `test_survey_phase5.py`, `test_survey_phase6.py`, `test_survey_phase7a.py`, `test_survey_phase8.py`, `test_survey_r_crossvalidation.py`, `test_survey_real_data.py`, `test_survey_staggered_ddd.py`
 - Per-estimator survey hooks documented in the REGISTRY sections of every estimator that supports survey design (DiD/TWFE/MultiPeriodDiD, CS, SunAbraham, StackedDiD, ImputationDiD, TwoStageDiD, WooldridgeDiD, EfficientDiD, ContinuousDiD, DCDH, HAD, TripleDifference, StaggeredTripleDifference, TROP, SyntheticDiD). Scope is *estimators*; survey-capable diagnostics (e.g., `BaconDecomposition` Phase 3, `HonestDiD` survey-df handling) are tracked in their own sections.
 
@@ -1493,7 +1494,7 @@ Only one **In Progress** entry remains: **Survey Data Support**. (PlaceboTests w
 ## Related Documents
 
 - [REGISTRY.md](docs/methodology/REGISTRY.md) — Academic foundations and key equations
-- [docs/methodology/papers/](docs/methodology/papers/) — Per-paper retrospective reviews (Athey 2025, Butts 2021/2023, Clarke 2017, Colella et al. 2019, Conley 1999, de Chaisemartin 2026, Rambachan-Roth 2023, Wooldridge 2023)
+- [docs/methodology/papers/](docs/methodology/papers/) — Per-paper retrospective reviews (Athey 2025, Binder 1983, Butts 2021/2023, Clarke 2017, Colella et al. 2019, Conley 1999, de Chaisemartin 2026, Rambachan-Roth 2023, Wooldridge 2023)
 - [docs/methodology/continuous-did.md](docs/methodology/continuous-did.md) — ContinuousDiD theory note
 - [docs/methodology/survey-theory.md](docs/methodology/survey-theory.md) — Design-based variance estimation for modern DiD estimators
 - [docs/methodology/REPORTING.md](docs/methodology/REPORTING.md) — Reporting conventions across estimators
