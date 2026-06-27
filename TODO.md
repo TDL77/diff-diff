@@ -55,7 +55,6 @@ generic sparse-FE, QR+SVD rank-detection redundancy, `check_finite` bypass — m
 
 | Issue | Location | Origin | Effort | Priority |
 |-------|----------|--------|--------|----------|
-| `ImputationDiD` conservative-variance projection (`_compute_v_untreated_with_covariates`) rebuilds A0/A1 and refactorizes `A0'WA0` for EVERY estimand target (overall, each ES horizon, each group, bootstrap precompute). `A0'WA0` is target-invariant; cache the design + a single factorization per `fit()` and solve only the target-specific RHS `A1'w`. | `imputation.py` | #141 | Mid | Low |
 | `ImputationDiD` dense `(A0'A0).toarray()` scales `O((U+T+K)^2)` — OOM risk on large panels (only triggers when the sparse solver fails). Needs an alternative dense fallback or richer sparse strategy. | `imputation.py` | #141 | Heavy | Medium |
 | `LinearRegression.fit()` pays the CR2 cost twice on the weighted `hc2_bm` path: once in `solve_ols(..., return_vcov=True)` and again via `compute_robust_vcov(..., return_dof=True)` for `_bm_dof`. Fix: thread `return_dof` through `solve_ols`, or cache the per-cluster `A_g` / `MUWTWUM` precomputes. (CI codex P3 on #475.) | `linalg.py` | #475 | Mid | Low |
 | MPD `cluster+hc2_bm` computes CR2 precomputes twice — `solve_ols → _compute_cr2_bm` for vcov+DOF, then `_compute_cr2_bm_contrast_dof` for the post-period-average contrast DOF. Both rebuild `H`, `M`, per-cluster `A_g`. Plumb the contrast DOF through the vcov path or share via a cached helper. | `linalg.py`, `estimators.py::MultiPeriodDiD.fit` | follow-up | Mid | Low |

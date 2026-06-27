@@ -49,7 +49,6 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 import pandas as pd
 import pytest
-from scipy.sparse.linalg import MatrixRankWarning
 
 from diff_diff import ImputationDiD
 
@@ -243,11 +242,11 @@ class TestB2024Theorem3Variance:
                 assert np.isfinite(eff["se"]) and eff["se"] > 0, f"h={h}"
 
     def test_singular_omega0_routes_to_dense_fallback(self) -> None:
-        """Regression: a rank-deficient Ω₀ makes A₀'A₀ singular, where SciPy
-        `spsolve` returns NaN with a `MatrixRankWarning` instead of raising. The
-        variance projection must still route to the dense-`lstsq` fallback (not
-        silently zero the untreated influence contributions via `np.nan_to_num`)
-        even under production warning filters that do NOT promote the warning.
+        """Regression: a rank-deficient Ω₀ makes A₀'[W]A₀ exactly singular, where
+        ``scipy.sparse.linalg.factorized`` raises ``RuntimeError`` at factorization
+        time. The variance projection must still route to the dense-`lstsq`
+        fallback (not silently zero the untreated influence contributions via
+        `np.nan_to_num`), emitting a `UserWarning` so the degraded path is visible.
         """
         # A period observed ONLY among treated obs -> its time FE is unidentified
         # in Ω₀ -> A₀ has an all-zero column -> A₀'A₀ is singular. Drop the
@@ -269,8 +268,6 @@ class TestB2024Theorem3Variance:
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            # Production-like: MatrixRankWarning is NOT promoted to an error here.
-            warnings.filterwarnings("ignore", category=MatrixRankWarning)
             res = ImputationDiD(rank_deficient_action="silent").fit(
                 panel,
                 outcome="outcome",
@@ -278,12 +275,200 @@ class TestB2024Theorem3Variance:
                 time="time",
                 first_treat="first_treat",
             )
-        # The code's internal MatrixRankWarning->error promotion must trigger the
-        # dense fallback even though the warning is ambiently ignored.
-        assert any(
-            "dense lstsq" in str(w.message) for w in caught
-        ), "expected the dense-lstsq fallback under a singular Ω₀"
+        # The build-time RuntimeError on the singular factorization must trigger
+        # the dense-lstsq fallback (with a UserWarning carrying "dense lstsq").
+        fallback_warnings = [w for w in caught if "dense lstsq" in str(w.message)]
+        assert fallback_warnings, "expected the dense-lstsq fallback under a singular Ω₀"
+        # Factorize-once: the build-time singular warning fires a single time for
+        # this single-target (overall-only) fit, not once per (g,t).
+        assert len(fallback_warnings) == 1
         assert np.isfinite(res.overall_se)
+
+
+# =============================================================================
+# Theorem 3 variance — per-fit factorization cache (perf refactor, #141)
+# =============================================================================
+
+
+class TestImputationVarianceFactorizationCache:
+    """The untreated imputation projection
+    ``v_untreated = -A_0 (A_0'[W]A_0)^{-1} A_1' w`` has a target-INVARIANT design
+    (``A_0``/``A_1``/factorization) and a target-SPECIFIC RHS (``A_1' w``). The
+    perf refactor (#141) builds + factorizes the design once per ``fit()``
+    (cached) and solves only the RHS per target, replacing the prior per-target
+    ``spsolve``. These tests pin that the cached factorize-once / solve-many path
+    is **bit-identical** to the prior per-target ``spsolve`` and that the cache is
+    actually exercised (built once per fit) and leak-free across fits.
+    """
+
+    @staticmethod
+    def _cov_panel(seed: int = 4242, n_per_cohort: int = 40):
+        """Staggered covariate panel + a positive survey-weight column."""
+        rng = np.random.default_rng(seed)
+        rows = []
+        uid = 0
+        for g in (0, 3, 4, 5):
+            for _ in range(n_per_cohort):
+                c_i = rng.standard_normal()
+                x_i = rng.standard_normal()
+                for t in range(1, 8):
+                    treated = g > 0 and t >= g
+                    x1 = x_i + 0.1 * rng.standard_normal()
+                    x2 = rng.standard_normal()
+                    y = c_i + 0.5 * t + 0.4 * x1 - 0.2 * x2 + (1.0 if treated else 0.0)
+                    y += 0.1 * rng.standard_normal()
+                    rows.append(
+                        {
+                            "unit": uid,
+                            "time": t,
+                            "first_treat": g,
+                            "outcome": y,
+                            "x1": x1,
+                            "x2": x2,
+                            "weight": 1.0 + 0.5 * abs(x_i),
+                        }
+                    )
+                uid += 1
+        return pd.DataFrame(rows)
+
+    def _split(self, panel):
+        treated = (panel["first_treat"] > 0) & (panel["time"] >= panel["first_treat"])
+        return panel.loc[~treated], panel.loc[treated]
+
+    @pytest.mark.parametrize("survey", [False, True])
+    def test_cached_factorized_matches_spsolve_bit_identical(self, survey: bool) -> None:
+        """``_solve_untreated_v`` on the cached factorization reproduces the prior
+        per-target ``spsolve`` solution EXACTLY (atol=0) for several RHS, on both
+        the unweighted and the survey-weighted (W_0) normal equations. This is the
+        productized bit-identity spike justifying the spsolve -> factorized swap.
+        """
+        from scipy.sparse.linalg import spsolve
+
+        panel = self._cov_panel()
+        df_0, df_1 = self._split(panel)
+        est = ImputationDiD()
+        rng = np.random.default_rng(7)
+        sw_0 = rng.uniform(0.5, 2.0, size=len(df_0)) if survey else None
+
+        ctx = est._build_untreated_projection(
+            df_0, df_1, "unit", "time", ["x1", "x2"], survey_weights_0=sw_0
+        )
+        assert not ctx.singular and ctx.solver is not None
+
+        n1 = len(df_1)
+        weight_vecs = [
+            np.full(n1, 1.0 / n1),
+            rng.standard_normal(n1),
+            rng.uniform(0.0, 1.0, size=n1),
+        ]
+        for w in weight_vecs:
+            v_cached = est._solve_untreated_v(ctx, w)
+            # Reference: the prior per-target path (fresh spsolve on the same
+            # cached normal-equations matrix), with the WLS left-weight reapplied.
+            a1_w = ctx.A_1.T @ w
+            z_ref = spsolve(ctx.A0tA0_csc, a1_w)
+            v_ref = -(ctx.A_0 @ z_ref)
+            if sw_0 is not None:
+                v_ref = v_ref * sw_0
+            np.testing.assert_array_equal(v_cached, v_ref)
+
+    def test_cache_reuse_matches_fresh_build(self) -> None:
+        """Reusing a cached projection across targets is bit-identical to building
+        a fresh projection per target (the cache is a numerical no-op)."""
+        panel = self._cov_panel()
+        df_0, df_1 = self._split(panel)
+        est = ImputationDiD()
+        rng = np.random.default_rng(11)
+        n1 = len(df_1)
+        weights = [np.full(n1, 1.0 / n1), rng.standard_normal(n1)]
+
+        ctx_shared = est._build_untreated_projection(df_0, df_1, "unit", "time", ["x1"])
+        for w in weights:
+            v_shared = est._solve_untreated_v(ctx_shared, w)
+            ctx_fresh = est._build_untreated_projection(df_0, df_1, "unit", "time", ["x1"])
+            v_fresh = est._solve_untreated_v(ctx_fresh, w)
+            np.testing.assert_array_equal(v_shared, v_fresh)
+
+    @pytest.mark.parametrize("survey", [False, True])
+    def test_projection_built_once_per_fit(self, survey: bool) -> None:
+        """The cache collapses the (1 + #horizons + #groups) per-target projection
+        builds -- and, with bootstrap, the analytical + precompute builds -- to a
+        single ``_build_untreated_projection`` per ``fit()``. Holds for the survey
+        path too (survey_weights is excluded from the cache key)."""
+        from diff_diff.imputation import ImputationDiD as _Cls
+
+        panel = self._cov_panel()
+        base = dict(outcome="outcome", unit="unit", time="time", first_treat="first_treat")
+        kw: Dict[str, Any] = dict(covariates=["x1", "x2"], aggregate="all")
+        if survey:
+            from diff_diff import SurveyDesign
+
+            kw["survey_design"] = SurveyDesign(weights="weight")
+
+        orig = _Cls._build_untreated_projection
+        calls = {"n": 0}
+
+        def counting(self, *a, **k):
+            calls["n"] += 1
+            return orig(self, *a, **k)
+
+        _Cls._build_untreated_projection = counting  # type: ignore[method-assign]
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                res = ImputationDiD().fit(panel, **base, **kw)
+        finally:
+            _Cls._build_untreated_projection = orig  # type: ignore[method-assign]
+
+        # Multiple aggregation targets exist (so the naive count would be > 1).
+        assert res.event_study_effects and res.group_effects
+        assert calls["n"] == 1, f"expected 1 projection build, got {calls['n']}"
+
+    def test_projection_built_once_per_fit_with_bootstrap(self) -> None:
+        """With ``n_bootstrap > 0`` the analytical aggregation AND the bootstrap
+        precompute both consume the projection (overall + #horizons + #groups
+        each), yet the shared fit-local cache still builds it exactly once -- the
+        bootstrap precompute path threads the same ``proj_cache``."""
+        from diff_diff.imputation import ImputationDiD as _Cls
+
+        panel = self._cov_panel()
+        base = dict(outcome="outcome", unit="unit", time="time", first_treat="first_treat")
+
+        orig = _Cls._build_untreated_projection
+        calls = {"n": 0}
+
+        def counting(self, *a, **k):
+            calls["n"] += 1
+            return orig(self, *a, **k)
+
+        _Cls._build_untreated_projection = counting  # type: ignore[method-assign]
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                res = ImputationDiD(n_bootstrap=50, seed=99).fit(
+                    panel, **base, covariates=["x1", "x2"], aggregate="all"
+                )
+        finally:
+            _Cls._build_untreated_projection = orig  # type: ignore[method-assign]
+
+        # Bootstrap actually ran (so the precompute path executed), and the
+        # analytical + precompute targets still collapse to a single build.
+        assert res.bootstrap_results is not None
+        assert res.event_study_effects and res.group_effects
+        assert calls["n"] == 1, f"expected 1 projection build, got {calls['n']}"
+
+    def test_fit_idempotent_cache_no_leak(self) -> None:
+        """The cache is a fit-time local, so refitting the same estimator yields
+        identical SEs (no cross-fit cache leak)."""
+        panel = self._cov_panel()
+        base = dict(outcome="outcome", unit="unit", time="time", first_treat="first_treat")
+        est = ImputationDiD()
+        r1 = est.fit(panel, **base, covariates=["x1", "x2"], aggregate="all")
+        r2 = est.fit(panel, **base, covariates=["x1", "x2"], aggregate="all")
+        assert r1.overall_se == r2.overall_se
+        assert r1.event_study_effects is not None and r2.event_study_effects is not None
+        for h in r1.event_study_effects:
+            assert r1.event_study_effects[h]["se"] == r2.event_study_effects[h]["se"]
 
 
 # =============================================================================

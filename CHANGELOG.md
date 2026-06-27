@@ -57,6 +57,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `maturin develop --features accelerate` against the pinned `ndarray 0.17`, the Rust unit
   tests, and the full Python⇄Rust equivalence suite (`tests/test_rust_backend.py`).
 
+### Performance
+- **`ImputationDiD` conservative-variance: cache the untreated-projection factorization per
+  fit.** The exact imputation projection `v_untreated = -A_0 (A_0'[W]A_0)^{-1} A_1'w` has a
+  target-invariant design (`A_0`/`A_1`/factorization) and a target-specific RHS (`A_1'w`), but
+  previously rebuilt the sparse design and re-`spsolve`d it for every estimand target (overall
+  ATT, each event-study horizon, each group) and again for the bootstrap precompute. It now
+  factorizes `(A_0'[W]A_0)` once per `fit()` via `scipy.sparse.linalg.factorized` and solves
+  only the per-target RHS (factorize-once / solve-many), collapsing `O(1 + #horizons +
+  #groups)` factorizations to one. **Bit-identical** to the prior per-target `spsolve` (proven
+  at `atol=0` across FE-only, covariate, survey-weighted, and bootstrap paths); no methodology,
+  numerical, or public-API change.
+
 ### Fixed
 - **Corrected the Korn & Graubard (1990) citation venue** in `docs/methodology/REGISTRY.md`
   (Survey Degrees of Freedom) from *JASA* 85(409) to *The American Statistician* 44(4), 270-276
