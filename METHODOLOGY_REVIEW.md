@@ -24,7 +24,7 @@ A **Complete** entry has a documented review pass against the primary academic s
 
 The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
 
-**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures; others have only the REGISTRY entry and unit tests. The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
+**In Progress** entries have a REGISTRY.md section and unit-test coverage but no formal walk-through captured here yet, carrying a "Documentation in place" / "Outstanding for promotion" pair until promoted. **As of 2026-06-27 no In Progress rows remain** — every estimator, diagnostic, and cross-cutting inference feature has been reviewed to Complete (Survey Data Support was the last, promoted 2026-06-27). The band description is retained for surfaces that enter the tracker later.
 
 **Not Started** entries have neither a tracker walk-through nor an REGISTRY.md section. This tracker no longer carries any Not Started rows; new estimators are expected to enter as In Progress when their REGISTRY entry lands.
 
@@ -89,11 +89,11 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | Feature | Module | Reference | Status | Last Review |
 |---------|--------|-----------|--------|-------------|
 | ConleySpatialHAC | `conley.py`, `linalg.py` | `conleyreg` (R) / `acreg` (Stata) | **Complete** | 2026-05-26 |
-| Survey Data Support | `survey.py`, `bootstrap_utils.py` | `survey` package (R) | **In Progress** | — |
+| Survey Data Support | `survey.py`, `bootstrap_utils.py` | `survey` package (R) | **Complete** | 2026-06-27 |
 
 **Status legend** (matches the contract in [§ What "Complete" means in this tracker](#what-complete-means-in-this-tracker) above):
 - **Not Started**: No REGISTRY.md entry yet. Reserved for future surfaces; this tracker currently carries no Not Started rows.
-- **In Progress**: REGISTRY.md entry and unit-test coverage exist, but no formal walk-through has been captured in this document yet. The band is wide — see each entry's "Documentation in place" / "Outstanding for promotion" sub-sections for specifics.
+- **In Progress**: REGISTRY.md entry and unit-test coverage exist, but no formal walk-through has been captured in this document yet (a "Documentation in place" / "Outstanding for promotion" pair tracks the gap). No rows currently carry this status — the tracker is fully Complete as of 2026-06-27.
 - **Complete**: A documented review pass against the primary academic source is captured here (minimum: Corrections Made, Deviations or `(None)`, and Verified Components / Edge Cases Verified / R Comparison Results in some form).
 
 ---
@@ -1426,21 +1426,50 @@ Goldens at `benchmarks/data/r_conleyreg_conley_golden.json`; generator at `bench
 | Module | `survey.py`, `bootstrap_utils.py` (plus per-estimator hooks) |
 | Primary References | Binder (1983) for TSL variance (reviewed: `docs/methodology/papers/binder-1983-review.md`); Lumley (2004) for the R `survey` package; Solon, Haider & Wooldridge (2015) for the "when to weight" framework |
 | R Reference | `survey` R package |
-| Status | **In Progress** |
-| Last Review | — |
+| Status | **Complete** |
+| Last Review | 2026-06-27 |
 
-**Documentation in place:**
-- REGISTRY.md sub-sections (under `## Survey Data Support`): Weighted Estimation, TSL Variance, Weight Type Effects on Inference, Absorbed FE with Survey Weights, Survey Degrees of Freedom, Survey Aggregation (`aggregate_survey`), Survey-Aware Bootstrap (Phase 6), Replicate Weight Variance (Phase 6), DEFF Diagnostics (Phase 6), Subpopulation Analysis (Phase 6), Survey DGP (`generate_survey_did_data`)
-- **Theory document**: `docs/methodology/survey-theory.md` — full Binder-Lumley derivation of design-based variance for modern DiD estimators, including influence-function machinery
-- **Paper review**: `docs/methodology/papers/binder-1983-review.md` — review of Binder (1983), the canonical source for the design-based TSL variance sandwich `V̂(θ̂) = Ĵ⁻¹ Σ̂_U Ĵ⁻ᵀ` (Eq. 3.3/3.4) and its OLS specialization `V̂(B̂) = S_XX⁻¹ Σ̂(B̂) S_XX⁻¹` (Eq. 4.7) that the survey path implements
-- 13 dedicated `tests/test_survey*.py` files: `test_survey.py`, `test_survey_dcdh.py`, `test_survey_dcdh_replicate_psu.py`, `test_survey_estimator_validation.py`, `test_survey_phase3.py`, `test_survey_phase4.py`, `test_survey_phase5.py`, `test_survey_phase6.py`, `test_survey_phase7a.py`, `test_survey_phase8.py`, `test_survey_r_crossvalidation.py`, `test_survey_real_data.py`, `test_survey_staggered_ddd.py`
-- Per-estimator survey hooks documented in the REGISTRY sections of every estimator that supports survey design (DiD/TWFE/MultiPeriodDiD, CS, SunAbraham, StackedDiD, ImputationDiD, TwoStageDiD, WooldridgeDiD, EfficientDiD, ContinuousDiD, DCDH, HAD, TripleDifference, StaggeredTripleDifference, TROP, SyntheticDiD). Scope is *estimators*; survey-capable diagnostics (e.g., `BaconDecomposition` Phase 3, `HonestDiD` survey-df handling) are tracked in their own sections.
+**Verified Components** (`tests/test_methodology_survey.py`, 33 tests; the variance machinery in `diff_diff/survey.py` was read against Binder (1983) Eq. 4.7 and `docs/methodology/survey-theory.md` §5/§6 and verified to implement the documented identities — the only fix was a citation venue, see Corrections Made):
+- [x] **Binder Eq. 4.7 TSL sandwich** `V = (X'WX)⁻¹ [Σ_h V_h] (X'WX)⁻¹` — the full sandwich structure is already exact in `test_survey.py::test_weighted_hc1_vcov_exact_oracle` (atol=1e-10) / `::test_weights_only_oracle` (atol=1e-12); the **residual-scale == score-scale** cross-function identity (`compute_survey_vcov(X=ones)` == `compute_survey_if_variance`) and the PSU-only clustered-meat form are new first-class assertions — `TestTSLSandwich`
+- [x] **Binder §4.4 IF variance** `V = Σ_h (1-f_h)(n_h/(n_h-1)) Σ_j (ψ_hj - ψ̄_h)²` for arbitrary ψ with within-stratum PSU-total centering — `TestBinder1983Variance`
+- [x] **Stratum meat + FPC** — the **multi-stratum Bessel decomposition** (≥2 strata, heterogeneous n_h, distinct `n_h/(n_h-1)` factors summed) at atol=1e-12 (the single-group factor is already exact in `test_survey.py::test_no_strata_degeneracy`); FPC `(1-f_h)` scaling, full-census-zero, `N_h<n_psu`→`ValueError` — `TestStratumMeatAndFPC`
+- [x] **Singleton / lonely-PSU handling** remove/certainty/adjust + the all-singleton **zero-vs-NaN identification** contract (remove→NaN; certainty / full-census→finite 0.0) — `TestSingletonStratum`
+- [x] **Survey df = n_PSU − n_strata** 4-way branch + replicate QR-rank−1 (Korn-Graubard 1990; matches R `survey::degf()`) — `TestSurveyDegreesOfFreedom`
+- [x] **Weight-type meat** — fweight one-power-`w` `X'diag(wu²)X` + `df=Σw−k` and aweight unweighted meat at atol=1e-12 (the genuinely-untested structures; pweight `Σw²u²xx'` is already exact in `test_weighted_hc1_vcov_exact_oracle`), + the survey-TSL aweight-drops-`w` path — `TestWeightTypeMeat`
+- [x] **Replicate variance** `V = c·Σ_r s_r (θ_r − θ_c)²` — BRR `1/R` / Fay `1/(R(1-ρ)²)` / JK1 `(R-1)/R` / SDR `4/R` / JKn per-stratum `((n_h-1)/n_h)` factors, the IF-reweighting formula at atol=1e-12, and the `n_valid<2`→NaN contract — `TestReplicateVariance`
+- [x] **DEFF = design_var / srs_var** exact ratio identity (atol=1e-12) + DEFF>1 under positive intra-PSU correlation — `TestDEFF`
+- [x] **Survey-weighted estimating equations** `X'W(y−Xβ)=0` (Binder Eq. 2.1/2.3) + weight scale-invariance — `TestSurveyWLSEstimation`
+- [x] **R parity** referenced, not duplicated — `TestSurveyParityR` points at the machine-precision goldens below
 
-**Outstanding for promotion:**
-- Dedicated `tests/test_methodology_survey.py` (or split between TSL and replicate-weight surfaces) with Binder-equation-numbered Verified Components walk-through
-- R parity benchmark against `survey::svyglm` / `survey::svycontrast` for the linear DiD case (`tests/test_survey_r_crossvalidation.py` exists; needs to be wired into a documented "Reference results" table here)
-- Document deviations: PSU-level Hall-Mammen wild clustering as the bootstrap path when survey design is present (vs. R `survey`'s default analytical TSL); strata-vs-no-strata bit-equality not achievable due to RNG-path divergence between the per-stratum numpy loop and the batched `generate_survey_multiplier_weights_batch` call (see `docs/methodology/REGISTRY.md` HAD Stute survey-bootstrap section, "Distributional parity, NOT bit-exact" note, for the documented impossibility — distributional parity holds at large B, exact agreement at `atol=1e-10` does not)
-- Consolidated "Outstanding cross-estimator gaps" enumerating which estimators still raise `NotImplementedError` on which survey-design combinations (e.g., Conley + survey, SyntheticDiD + Conley, HAD replicate weights on Stute family)
+**Test Coverage:** `tests/test_methodology_survey.py` (33 tests, 10 classes — 4 gap-filling first-class assertions + 6 canonical Binder-equation-anchored that reference the existing direct oracles) plus the ~642 functional tests across the 13 `tests/test_survey*.py` files and the per-estimator survey hooks (CS, SunAbraham, ImputationDiD, TwoStageDiD, WooldridgeDiD, EfficientDiD, ContinuousDiD, DCDH, HAD, TripleDifference, StaggeredTripleDifference, TROP, SyntheticDiD). Theory: `docs/methodology/survey-theory.md`; paper review: `docs/methodology/papers/binder-1983-review.md`.
+
+**R Comparison Results** (machine-precision goldens vs R `survey`; full tables in `docs/benchmarks.rst` §"Survey Real-Data Validation" / §"Survey Estimator Validation"):
+
+| Suite | R reference | Scenarios | Agreement |
+|-------|-------------|-----------|-----------|
+| svyglm DiD / TWFE / CS / BRR | `survey::svyglm` / `svydesign` / `svrepdesign`; `did::att_gt` | 10 synthetic (`test_survey_r_crossvalidation.py`) | ATT 1e-4, SE 1% |
+| Estimator validation S1-S4 | `survey::svyglm` (ImputationDiD / StackedDiD / SunAbraham / TripleDifference) | 4 (`test_survey_estimator_validation.py`) | coef 1e-8, SE ≤1.5% (S2 0.77%, S4 0.36% — documented) |
+| Real data API / NHANES / RECS | `survey` on apistrat / NHANES / RECS-2020 | 13 (A1-A7, B1-B4, C1-C2; `test_survey_real_data.py`) | machine precision, atol 1e-8 |
+
+**Corrections Made:**
+- **Citation venue (`docs/methodology/REGISTRY.md` + `docs/references.rst`):** Korn & Graubard (1990) was mis-cited as *JASA* 85(409); the survey-df / Bonferroni-t paper is *The American Statistician* 44(4), 270-276 (DOI 10.1080/00031305.1990.10475737). Corrected, and added to `references.rst` along with Lumley (2004) JSS 9(8) and Solon-Haider-Wooldridge (2015) JHR 50(2) — both cited in REGISTRY/theory but previously absent from `references.rst`.
+- **Core variance machinery — no code correction required.** `compute_survey_vcov`, `_compute_stratified_psu_meat`, `compute_survey_if_variance`, `compute_replicate_vcov` / `_replicate_variance_factor`, and `df_survey` were read against Binder Eq. 4.7 / `survey-theory.md` §5/§6 and verified to implement the documented identities faithfully (consistent with the machine-precision R-parity above).
+
+**Deviations** (documented in REGISTRY `## Survey Data Support`):
+- **Deviation from R:** `lonely_psu` defaults to `"remove"` (with warning) vs R `survey`'s `lonely.psu="fail"` (REGISTRY "TSL Variance").
+- **Deviation from R:** survey df use the simple `n_PSU − n_strata` (Korn-Graubard) convention rather than a Satterthwaite-type approximation (REGISTRY "Survey Degrees of Freedom").
+- **Note:** under a survey design the bootstrap path is PSU-level Hall-Mammen wild clustering (vs R's default analytical TSL); strata-vs-no-strata bit-equality is **not** achievable — the per-stratum numpy loop and the batched `generate_survey_multiplier_weights_batch` call diverge in RNG path, so distributional parity holds at large B but exact agreement at `atol=1e-10` does not (cross-ref REGISTRY HAD Stute survey-bootstrap "Distributional parity, NOT bit-exact").
+- **Note:** the replicate variance factor (`_replicate_variance_factor`) divides by the design replicate count `R`, not the surviving `n_valid`, when some replicate solves drop (the factor is a fixed design constant; a dropped replicate contributes 0 to the sum). `n_valid < 2` returns NaN.
+- **Note:** the documented R-parity SE gaps on the stacked / triple-difference paths are design artifacts — S2 StackedDiD 0.77% (R omits FPC on stacked data), S4 TripleDifference 0.36% (conservative FPC re-resolution), API subpopulation df differs (Python `subpopulation()` preserves all strata vs R `subset()` dropping empty strata — conservative per Lumley 2004) (`docs/benchmarks.rst`).
+
+**Outstanding Concerns — cross-estimator survey coverage boundary** (intentional, fail-closed `NotImplementedError` deferrals, not bugs; line refs current as of this review — re-grep before relying on them):
+- **Conley + survey_design** (open methodological question — no canonical weighted spatial-HAC under probability sampling): `conley.py:298`, `linalg.py:1367` / `linalg.py:3501`, `spillover.py:3246`.
+- **Replicate-weight designs** (use TSL strata/PSU/FPC, or `n_bootstrap=0`): `synthetic_did.py:437`, `continuous_did.py:1408`, `staggered_triple_diff.py:701`, `spillover.py:2400`, `bacon.py:526`, `had.py:1751` (+ HAD pretests), `wooldridge.py:89`, `trop.py:444`, `staggered.py:2228` (CS bootstrap), `efficient_did.py:1175`, `chaisemartin_dhaultfoeuille.py:2810`.
+- **Survey + non-HC1 vcov** — HC2 / HC2-BM / classical **explicitly raise `NotImplementedError`** under `survey_design=` (a fail-closed guard: the survey TSL / replicate-refit variance would otherwise silently discard the requested sandwich family): `stacked_did.py:428`, `sun_abraham.py:751`, `wooldridge.py:702`, `twfe.py:252`.
+- **Survey + user `cluster=`** — **explicitly raises** (a fail-closed guard, not a silent drop): the survey TSL / replicate-refit variance would otherwise ignore `cluster=`, so the combination is rejected at construction: `efficient_did.py:518`, `staggered.py:1719`, `imputation.py:314`, `two_stage.py:1439`, `triple_diff.py:674`.
+- **SyntheticControl** — no survey support yet (`synthetic_control.py:335`).
+- **HAD-specific** — `trends_lin=True` + survey (`had.py:3067`); QUG pretest + survey (extreme-order statistic not smooth in the empirical CDF, `had_pretests.py:1455`); `lonely_psu='adjust'` + singleton strata on the sup-t / Stute bootstrap.
+- **HonestDiD M>0 smoothness** survey FLCI uses asymptotic normal only (`df_survey=0`→NaN); tracked in the HonestDiD section.
 
 ---
 
@@ -1483,11 +1512,11 @@ whereas R's `did::att_gt` would error. This is a defensive enhancement that prov
 more graceful handling of edge cases while still signaling invalid inference to users.
 ```
 
-### Priority Order (updated 2026-06-26)
+### Priority Order (updated 2026-06-27)
 
-Only one **In Progress** entry remains: **Survey Data Support**. (PlaceboTests was promoted to Complete on 2026-06-26 — see its detail section above.)
+**No In Progress entries remain.** **Survey Data Support** was promoted to Complete on 2026-06-27 — the last consolidation-pass row (PlaceboTests was promoted 2026-06-26). The methodology-review tracker is now Complete across all core/staggered/continuous/triple-difference/synthetic estimators, diagnostics, and cross-cutting inference features.
 
-- **Survey Data Support** — cross-cutting feature; consolidation-pass-blocked. Promotion requires the per-estimator integration paths to be locked down first, then a dedicated `tests/test_methodology_survey.py` (Binder-equation-numbered Verified Components), an R-parity table vs `survey::svyglm`/`svycontrast` wired into this tracker, a deviations block, and a consolidated cross-estimator `NotImplementedError`-gaps enumeration.
+- Going forward, a new surface enters as **In Progress** when its REGISTRY.md entry lands and is promoted via a documented review pass (primary-source fidelity walk → dedicated methodology test file with paper-equation-numbered Verified Components → R-parity / deviation documentation), per the contract in [§ What "Complete" means in this tracker](#what-complete-means-in-this-tracker).
 
 ---
 

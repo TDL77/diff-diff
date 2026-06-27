@@ -94,6 +94,18 @@ Survey-Design Inference (Taylor-Series Linearization)
 
   Proposition 1 shows that the influence-function representations of 15 modern DiD estimators (including TwoStageDiD, explicitly derived in the Appendix) satisfy Binder's (1983) smoothness conditions, so standard stratified-cluster Taylor linearization produces design-consistent SEs. SpilloverDiD's Wave E.1 survey-design integration composes this result with the Wave D Gardner GMM first-stage uncertainty correction; see ``docs/methodology/REGISTRY.md`` SpilloverDiD section "Variance (Wave E.1)".
 
+- **Lumley, T. (2004).** "Analysis of Complex Survey Samples." *Journal of Statistical Software*, 9(8), 1-19. https://doi.org/10.18637/jss.v009.i08
+
+  Companion paper for the R ``survey`` package; defines the ``svydesign`` / ``svyglm`` / ``svrepdesign`` interface that diff-diff's survey path is cross-validated against (``tests/test_survey_r_crossvalidation.py``). The Lumley (2010) book below is the longer treatment.
+
+- **Korn, E. L. & Graubard, B. I. (1990).** "Simultaneous Testing of Regression Coefficients with Complex Survey Data: Use of Bonferroni t Statistics." *The American Statistician*, 44(4), 270-276. https://doi.org/10.1080/00031305.1990.10475737
+
+  Source for the survey degrees-of-freedom convention ``df = n_PSU - n_strata`` used for t-based inference on the TSL path (``ResolvedSurveyDesign.df_survey``; REGISTRY.md ``## Survey Data Support`` -> "Survey Degrees of Freedom").
+
+- **Solon, G., Haider, S. J. & Wooldridge, J. M. (2015).** "What Are We Weighting For?" *Journal of Human Resources*, 50(2), 301-316. https://doi.org/10.3368/jhr.50.2.301
+
+  The "when to weight" framework distinguishing precision, endogenous-sampling, and population-effect motivations for survey weights; cited in REGISTRY.md ``## Survey Data Support`` -> "Weighted Estimation".
+
 Placebo Tests and DiD Diagnostics
 ---------------------------------
 

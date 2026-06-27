@@ -18,6 +18,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to Bertrand-Duflo-Mullainathan 2004) plus base-R exact-enumeration R parity
   (`benchmarks/R/generate_placebo_golden.R` → `benchmarks/data/placebo_golden.json`). The
   `PlaceboTests` methodology-review row is promoted to **Complete**.
+- **Survey Data Support methodology validation:** `tests/test_methodology_survey.py` (33 tests
+  anchored to Binder 1983 Eq. 4.7 / `docs/methodology/survey-theory.md` §5/§6) isolates the
+  design-based TSL and replicate-weight variance identities — the multi-stratum Bessel
+  decomposition, the fweight (`df=Σw−k`) / aweight (unweighted-meat) structures, the exact
+  `DEFF = design_var/srs_var` ratio, and the residual-scale==score-scale identity — that the
+  broad survey suite previously covered only indirectly. The core variance machinery
+  (`compute_survey_vcov` / `_compute_stratified_psu_meat` / `compute_replicate_vcov` /
+  `df_survey`) was read against Binder and verified faithful (no code change required). The
+  `Survey Data Support` methodology-review row is promoted to **Complete** — the last In Progress
+  row, so the methodology-review tracker is now fully Complete. Added Lumley (2004) JSS 9(8),
+  Korn-Graubard (1990), and Solon-Haider-Wooldridge (2015) to `docs/references.rst`.
 
 ### Changed
 - **`run_placebo_test`'s `fake_group` path now filters ever-treated units by default.** The
@@ -34,6 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests, and the full Python⇄Rust equivalence suite (`tests/test_rust_backend.py`).
 
 ### Fixed
+- **Corrected the Korn & Graubard (1990) citation venue** in `docs/methodology/REGISTRY.md`
+  (Survey Degrees of Freedom) from *JASA* 85(409) to *The American Statistician* 44(4), 270-276
+  — the survey-df / Bonferroni-t paper (DOI 10.1080/00031305.1990.10475737).
 - **`permutation_test` now reports the randomization-inference p-value
   `(1 + count) / (B + 1)`** (Phipson & Smyth 2010), replacing `count / B` floored at
   `1/(B+1)`. The `+1` includes the observed statistic in both numerator and denominator
