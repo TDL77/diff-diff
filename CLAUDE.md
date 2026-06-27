@@ -107,8 +107,23 @@ wording will cause a P1 finding ("undocumented methodology deviation").
 
 **TODO.md format** — for deferring P2/P3 items only (P0/P1 cannot be deferred):
 
-Add a row to the table in `TODO.md` under "Tech Debt from Code Reviews" in the appropriate
-category (`Methodology/Correctness`, `Performance`, or `Testing/Docs`):
+Add a row to `TODO.md`. If the item is genuinely shippable (clear path, no external
+blocker), put it under **Actionable Backlog** in the appropriate sub-section
+(`Methodology / correctness`, `Performance`, or `Testing / docs`). If it is blocked, put it
+under **Deferred / Documented** in the matching blocker sub-section (`Paper-gated / needs
+methodology derivation`, `Needs external reference (R / Stata / Julia)`, `Parked — pending
+user demand / out of scope`, or `Won't-fix / waived`). Either way the AI reviewer's
+deviation-grep resolves on the row's `Location` + reason text. The two buckets use
+different table shapes — Actionable rows carry an `Effort` column, Deferred rows a `PR`
+column:
+
+Actionable Backlog:
+
+| Issue | Location | Origin | Effort | Priority |
+|-------|----------|--------|--------|----------|
+| Description of the work item | `file.py` | #NNN | Quick/Mid/Heavy | Medium/Low |
+
+Deferred / Documented:
 
 | Issue | Location | PR | Priority |
 |-------|----------|----|----------|

@@ -4,11 +4,162 @@ Internal tracking for technical debt, known limitations, and maintenance tasks.
 
 For the public feature roadmap, see [ROADMAP.md](ROADMAP.md).
 
+## How this file is organized
+
+- **[Actionable Backlog](#actionable-backlog)** — work with a clear implementation path and
+  no external blocker. **Pull from here.** Effort (`Quick` ≤1 day · `Mid` 3-10 CI rounds ·
+  `Heavy` derivation-free but large) is noted per row; `Priority` is carried from the
+  originating PR review.
+- **[Deferred / Documented](#deferred--documented)** — known gaps that are **not currently
+  actionable**: blocked on a methodology derivation, on external tooling (R / Stata / Julia)
+  absent from CI, parked pending user demand / out of paper scope, or explicitly won't-fix.
+  Retained for provenance and AI-review deviation-documentation — **do not pull from here
+  without first clearing the named blocker.**
+- **[Reference / Status](#reference--status)** — not backlog: user-facing limitations,
+  module-size monitoring, deprecations, and current-state notes.
+
+The `Origin` column (Actionable tables) and the `PR` column (Deferred tables) both point to the originating PR number or review tag.
+
 ---
 
-## Known Limitations
+## Actionable Backlog
 
-Current limitations that may affect users:
+### Methodology / correctness
+
+| Issue | Location | Origin | Effort | Priority |
+|-------|----------|--------|--------|----------|
+| `SyntheticControl` cv: thread an `"infeasible"` reason-code from `_outer_solve_V_cv()` / `_placebo_fit_unit()` so `in_space_placebo()` / `leave_one_out()` distinguish a structural cv-refit exclusion (donor-indistinguishable re-aggregated window) from a genuine inner-solver non-convergence — mirror the split `in_time_placebo()` already emits. Warnings already distinguish the two causes; only the machine-readable status/count is missing. | `synthetic_control.py`, `synthetic_control_results.py` | follow-up | Mid | Low |
+| `CallawaySantAnna`: materialize NaN entries for non-estimable `(g,t)` cells in `group_time_effects` (currently omitted with a consolidated warning); requires updating downstream consumers (event study, `balance_e`, aggregation). | `staggered.py` | #256 | Mid | Low |
+| `CallawaySantAnna` / `StaggeredTripleDifference` fit their covariate OR nuisance via estimator-local `cho_solve(X'X)` / `scipy.lstsq(cond=1e-7)` that bypass `solve_ols`, so they are NOT scale-equilibrated — a large-scale covariate can perturb the nuisance fit (`TripleDifference`'s OR fit already routes through `solve_ols`). Route the local OR fits through the shared scale-robust solver (or equilibrate locally). | `staggered.py`, `staggered_triple_diff.py` | covariate-review | Mid | Medium |
+| Adopt the shared `_rank_guarded_inv` for the *structural* (non-covariate) matrix inverses sharing the `LinAlgError`-only fallback that can go near-singular: `continuous_did.py:1056` (dose B-spline), `spillover.py:3371` (ring-solve, partially guarded), `two_stage.py:3154` (TSL Stage-2 variance), `imputation.py:2403`, `had.py:2413`, `conley.py:1109`. These invert internal bases users cannot perturb with `covariates=` (distinct from the already-fixed covariate-triggered SE bug); the helper is the seam. | `continuous_did.py`, `spillover.py`, `two_stage.py`, `imputation.py`, `had.py`, `conley.py` | dr-or-se-rank-guard | Mid | Low |
+| Survey-design resolution / collapse patterns are inconsistent across panel estimators — `ContinuousDiD` rebuilds unit-level design in SE code, `EfficientDiD` builds once in `fit()`, `StackedDiD` re-resolves on stacked data. Extract shared helpers for panel-to-unit collapse, post-filter re-resolution, and metadata recomputation. | `continuous_did.py`, `efficient_did.py`, `stacked_did.py` | #226 | Mid | Low |
+| `SyntheticControl` remaining ADH-2015 §4 items: the regression-weight `W^reg = X_0'(X_0 X_0')^{-1} X_1` extrapolation diagnostic (flag implied OLS weights outside `[0,1]`) and sparse-SC subset search (`l < J`, holding `V` fixed). LOO, in-time placebo, CV `V`-selection, and inverse-variance `V` have landed; these two are the deferred tail. | `synthetic_control.py`, `synthetic_control_results.py` | ADH-2015 | Mid | Low |
+| `SyntheticControl` conformal (CWZ 2021) extensions: (a) one-sided / signed-`t` variants (§7); (b) covariates in the conformal proxy (`X_jt`, eqs 4/6 — current proxy is outcomes-only); (c) AR / innovation-permutation path (Lemmas 5-7) for time-series proxies. The joint test, pointwise CIs, and average-effect CI have landed. | `conformal.py`, `synthetic_control_results.py` | CWZ-2021 | Heavy | Low |
+| `ContinuousDiD` CGBS-2024 extensions (matches R `contdid` v0.1.0 deferral set): (a) `covariates=` kwarg; (b) discrete-treatment saturated regression (integer dose currently warned, not routed to per-level coefficients); (c) lowest-dose-as-control per Remark 3.1 when `P(D=0)=0`. REGISTRY `## ContinuousDiD` → Implementation Checklist marks these `[ ]`. | `continuous_did.py` | CGBS-2024 | Heavy | Low |
+| `EfficientDiD` survey-weighted Silverman bandwidth in conditional Omega* — `_silverman_bandwidth()` uses unweighted mean/std; survey-weighted statistics better reflect the population distribution (second-order refinement). | `efficient_did_covariates.py` | — | Quick | Low |
+| Survey sandwich SE is not exactly invariant to zero-weight (subpopulation / padded) rows: `_compute_stratified_psu_meat`'s finite-sample correction counts zero-weight units as PSUs, so padding shifts the SE ~2e-4 relative. Point estimate is exactly invariant. Fix: count only positive-weight PSUs in the correction (cross-cutting across all survey-enabled estimators). | `survey.py` (`_compute_stratified_psu_meat`) | PR-B | Mid | Low |
+| `ImputationDiD` LOO conservative-variance refinement (BJS 2024 Supp. Appendix A.9) — a finite-sample improvement to the auxiliary-model residuals reducing overfit of `tau_tilde_g` to `epsilon`. Asymptotic Theorem-3 variance is implemented and matches R `didimputation` (which also omits LOO by default). | `imputation.py` | imputation-validation | Mid | Low |
+| Multi-absorb weighted demeaning needs iterative alternating projections for `N > 1` absorbed FE with survey weights; unweighted multi-absorb also uses single-pass (exact only for balanced panels). | `estimators.py` | #218 | Heavy | Medium |
+| `TwoWayFixedEffects(vcov_type in {hc2, hc2_bm})` with replicate-weight designs raises `NotImplementedError` (`twfe.py:~233`). The replicate path re-demeans per replicate, which doesn't compose with the full-dummy HC2/HC2-BM build — a correct impl needs per-replicate full-dummy refit. Workaround: `hc1` for replicate-weight CR1. | `twfe.py::fit` | follow-up | Heavy | Low |
+| TWFE's HC2/HC2-BM inline full-dummy build (`twfe.py:280-315`) duplicates the dummy-construction logic in `DifferenceInDifferences(fixed_effects=...)` (`estimators.py:478-486`). Extract a shared helper, or delegate TWFE's HC2/HC2-BM path to DiD's `fixed_effects=` branch (with TWFE-specific cluster-default threading), to reduce drift risk on FE naming / survey behavior / result-surface conventions. Substantive refactor — touches both estimators. | `twfe.py::fit`, `estimators.py::DifferenceInDifferences.fit` | follow-up | Heavy | Low |
+| Decide whether to formally deprecate `CallawaySantAnna.cluster=X` in favor of `survey_design=SurveyDesign(psu=X)` (the bare-cluster path already synthesizes a minimal SurveyDesign). Two equivalent paths = redundant surface. Mirrors the question for ImputationDiD / EfficientDiD / TwoStageDiD. | `staggered.py` | follow-up | Mid | Low |
+| `HeterogeneousAdoptionDiD` continuous paths: thread `cluster=` through `bias_corrected_local_linear` (the Phase-1c wrapper already supports cluster; Phase 2a ignores it with a `UserWarning`). | `had.py`, `local_linear.py` | Phase 2a | Mid | Low |
+| `SpilloverDiDResults` not registered in `DiagnosticReport`'s `_APPLICABILITY` / `_PT_METHOD` tables, so `DiagnosticReport(spillover_result)` doesn't route to event-study diagnostics. Decide which diagnostics apply (PT, pre-trends power, heterogeneity, design-effect) and add an end-to-end test. | `diagnostic_report.py` | Wave C | Mid | Low |
+
+### Performance
+
+Consolidates the former `#### Performance` tech-debt table and the standalone
+`## Performance Optimizations` section. (Speculative / low-value perf notes — numba JIT,
+generic sparse-FE, QR+SVD rank-detection redundancy, `check_finite` bypass — moved to
+[Deferred → Parked](#parked--pending-user-demand--out-of-scope).)
+
+| Issue | Location | Origin | Effort | Priority |
+|-------|----------|--------|--------|----------|
+| `ImputationDiD` conservative-variance projection (`_compute_v_untreated_with_covariates`) rebuilds A0/A1 and refactorizes `A0'WA0` for EVERY estimand target (overall, each ES horizon, each group, bootstrap precompute). `A0'WA0` is target-invariant; cache the design + a single factorization per `fit()` and solve only the target-specific RHS `A1'w`. | `imputation.py` | #141 | Mid | Low |
+| `ImputationDiD` dense `(A0'A0).toarray()` scales `O((U+T+K)^2)` — OOM risk on large panels (only triggers when the sparse solver fails). Needs an alternative dense fallback or richer sparse strategy. | `imputation.py` | #141 | Heavy | Medium |
+| `LinearRegression.fit()` pays the CR2 cost twice on the weighted `hc2_bm` path: once in `solve_ols(..., return_vcov=True)` and again via `compute_robust_vcov(..., return_dof=True)` for `_bm_dof`. Fix: thread `return_dof` through `solve_ols`, or cache the per-cluster `A_g` / `MUWTWUM` precomputes. (CI codex P3 on #475.) | `linalg.py` | #475 | Mid | Low |
+| MPD `cluster+hc2_bm` computes CR2 precomputes twice — `solve_ols → _compute_cr2_bm` for vcov+DOF, then `_compute_cr2_bm_contrast_dof` for the post-period-average contrast DOF. Both rebuild `H`, `M`, per-cluster `A_g`. Plumb the contrast DOF through the vcov path or share via a cached helper. | `linalg.py`, `estimators.py::MultiPeriodDiD.fit` | follow-up | Mid | Low |
+| CR2 Bell-McCaffrey DOF uses a naive `O(n²k)` per-coefficient loop over cluster pairs; Pustejovsky-Tipton (2018) Appendix B has a scores-based formulation avoiding the full `n×n` `M`. Switch when a user hits a large-`n` cluster-robust design. | `linalg.py::_compute_cr2_bm` | Phase 1a | Heavy | Low |
+| Rust-backend HC2: the Rust path only supports HC1; HC2 and CR2 Bell-McCaffrey fall through to NumPy. Noticeable for large-`n` fits. | `rust/src/linalg.rs` | Phase 1a | Mid | Low |
+| `SyntheticControl` retains a full `_SyntheticControlFitSnapshot` (pivoted panels) on EVERY fit for the opt-in `in_space_placebo()`, so callers who never run the placebo pay `O(units × periods × predictor-vars)` memory. Store a compact array/index representation, or build the snapshot lazily on first placebo call. | `synthetic_control.py`, `synthetic_control_results.py` | follow-up | Mid | Low |
+| Wild cluster bootstrap CI inversion calls `_t_star(r)` ~O(100) times, each materializing a fresh `(B×n)` `y_star` + `(k×B)` refit + `(n×B)` residual arrays. Acceptable for the few-cluster regime; for large-`n`/large-`B`, chunk `_t_star` over draws or precompute the `r`-independent cluster-level pieces (restricted residuals are linear in `r`). | `utils.py::wild_bootstrap_se._t_star` | #543 | Mid | Low |
+| `SpilloverDiD` sparse cKDTree path for the staggered nearest-treated-distance helper (mirrors the static helper's sparse branch). `_compute_nearest_treated_distance_staggered` always builds dense `(n_units, n_treated_by_onset)` matrices per cohort; add a sparse branch gated on `n > _CONLEY_SPARSE_N_THRESHOLD`. | `spillover.py` | Wave B | Mid | Low |
+| `HeterogeneousAdoptionDiD` Phase 3 Stute: Appendix-D vectorized form replaces the per-iteration OLS refit with a single precomputed `M = I - X(X'X)^{-1}X'` applied to `eps*eta` (~2× faster, functionally identical). Shipped the literal-refit form to match paper text. | `had_pretests.py::stute_test` | Phase 3 | Mid | Low |
+| Rust faer SVD ndarray-to-faer conversion overhead (minimal vs SVD cost). | `rust/src/linalg.rs:67` | #115 | Quick | Low |
+
+### Testing / docs
+
+| Issue | Location | Origin | Effort | Priority |
+|-------|----------|--------|--------|----------|
+| Render `docs/methodology/REPORTING.md` and `REGISTRY.md` as in-site Sphinx pages so cross-refs can use `:doc:` instead of off-site `blob/main` URLs (stable-docs readers can otherwise land on a different revision than their package version). Two paths: (a) add `myst-parser` to `conf.py` + docs extras and link with `:doc:`, or (b) convert both to `.rst`. **Note:** REGISTRY.md is ~4.5k lines of LaTeX-heavy markdown — high risk under the `-W` (warnings-as-errors) Sphinx build; budget multiple rounds. | `docs/conf.py`, `docs/api/business_report.rst`, `docs/api/diagnostic_report.rst`, tutorials 18 & 19 | follow-up | Mid | Low |
+| `ImputationDiD` covariate-path variance lacks a dedicated parity anchor — only the no-covariate staggered panel is R-parity'd, though the covariate path shares the same validated projection code. Add a small dense-design **hand-calc** for the covariate projection (no external tooling), or a covariate (time-varying X) R `didimputation` golden asserting overall/ES SE parity (the golden variant needs local R). | `tests/test_methodology_imputation.py`, `benchmarks/R/generate_didimputation_golden.R` | imputation-validation | Mid | Low |
+| Add true half-sample BRR replicate-weight regressions per estimator family (current tests use Fay-like 0.5/1.5 perturbations; `test_survey_phase6.py` covers true BRR at the helper level). | `tests/test_replicate_weight_expansion.py` | #253 | Mid | Low |
+| Port the CI `<notebook-prose>` extraction into the reviewer-eval harness so `docs/tutorials/*.ipynb` cases (currently guarded out of `verify-corpus`/`run`) can be reviewed with CI-equivalent context. | `tools/reviewer-eval/adapters/ci_prompt.py` | local-review | Mid | Low |
+
+---
+
+## Deferred / Documented
+
+Not currently actionable. Retained for provenance + AI-review deviation-documentation.
+
+### Paper-gated / needs methodology derivation
+
+| Issue | Location | PR | Priority |
+|-------|----------|----|----------|
+| CBWSDID covariate balancing (`StackedDiD(balance="entropy")`) v1 supports only balanced event windows + `weighting="aggregate"`; unbalanced/ragged panels fail closed (unit-count vs observation-count corrector convention unresolved off balanced panels). Matching-based balancing and the repeated `0→1`/`1→0` episode extension are also deferred. Documented in REGISTRY StackedDiD "Covariate balancing (CBWSDID)" Notes. | `stacked_did.py`, `balancing.py`, REGISTRY | follow-up | Low |
+| dCDH: Phase-1 per-period placebo `DID_M^pl` has NaN SE (no IF derivation for the per-period aggregation path). Multi-horizon placebos (`L_max ≥ 1`) have valid SE. | `chaisemartin_dhaultfoeuille.py` | #294 | Low |
+| dCDH: survey cell-period allocator's post-period attribution is a library convention, not derived from the observation-level survey linearization. MC coverage is empirically close to nominal; a formal derivation (or covariance-aware two-cell alternative) is deferred. Documented in REGISTRY survey IF expansion Note. | `chaisemartin_dhaultfoeuille.py`, REGISTRY | #408 | Medium |
+| dCDH by_path: survey-aware backward-horizon (`placebo + predict_het + survey_design`) raises `NotImplementedError` (and `_compute_heterogeneity_test` warn-and-skips to forward-horizon-only heterogeneity) — the Binder TSL cell-period allocator's REGISTRY justification is tied to post-period attribution; backward horizons would put ψ_g mass on a pre-period cell. Needs the pre-period cell allocator derived. | `chaisemartin_dhaultfoeuille.py`, REGISTRY | follow-up | Medium |
+| **HonestDiD Δ^RM ARP confidence sets** (consolidates the former "Honest DiD Improvements" checklist): uses a naive FLCI instead of the paper's ARP conditional/hybrid sets (Sections 3.2.1-3.2.2). ARP infrastructure exists but the moment-inequality transformation needs calibration; CIs are conservative (valid coverage). Sub-items folded here: improved C-LF via direct optimization instead of grid search (`honest_did.py:947`); hybrid inference methods; event-study-specific bounds per post-period; simulation-based power analysis for honest bounds. (`CallawaySantAnnaResults` support has **landed**.) | `honest_did.py` | #248 | Medium |
+| **Conley `vcov_type` for IF / GMM estimators** (consolidates 8 near-identical rows). No reference implementation exists for any of these spatial-HAC × influence-function/GMM compositions; each was rejected at `__init__` with a deferral pointer here. SunAbraham + WooldridgeDiD-OLS conley have **shipped** (within-transform via `solve_ols`). Per estimator: <br>• `CallawaySantAnna` — Conley kernel × per-(g,t) IF aggregation (`staggered.py`). <br>• `TripleDifference` — × the 3-pairwise-DiD IF decomposition `w3·IF_3 + w2·IF_2 - w1·IF_1` (`triple_diff.py`). <br>• `ImputationDiD` — × Theorem-3 per-unit IF `sigma_sq = (cluster_psi_sums**2).sum()` (`imputation.py`). <br>• `EfficientDiD` — × per-unit EIF `_compute_se_from_eif` (`efficient_did.py`). <br>• `TwoStageDiD` — thread into the GMM sandwich meat `_compute_gmm_variance`; the SpilloverDiD `_compute_gmm_corrected_meat` machinery could be adapted to score `S_g = gamma_hat' c_g - X'_{2g} eps_{2g}` but two-stage-GMM × Conley has no reference (`two_stage.py`). <br>• `StackedDiD` — **methodology-blocked, not plumbing**: the stacked design replicates each control unit across sub-experiments, so Conley's distance matrix sees same-unit copies at distance 0 (`K(0)=1`); needs a per-stack spatial identifier (`stacked_did.py`). <br>• `SyntheticDiD` — uses `variance_method ∈ {bootstrap, jackknife, placebo}`, no analytical sandwich for Conley to plug into; needs an analytical-sandwich path or a spatial-block bootstrap (Politis-Romano 1994) (`synthetic_did.py`). <br>• Conley + survey weights / `survey_design` — score-reweighting is mechanical but the PSU×spatial-kernel interaction and replicate-weight spatial variance are non-trivial (Bertanha-Imbens 2014 covers cluster-sample, not Conley); raises `NotImplementedError` at the linalg validator (`linalg.py::_validate_vcov_args`). | (per sub-item) | follow-up · Phase 1b · Phase 5 | Low-Med |
+| `HeterogeneousAdoptionDiD` Phase 4.5 C still-open: (a) **replicate-weight designs** (BRR/Fay/JK1/JKn/SDR) — per-replicate weight-ratio rescaling for the OLS-on-residuals refit isn't covered by the multiplier-bootstrap composition; each linearity-family helper raises `NotImplementedError` on replicate weights. (b) **`lonely_psu='adjust'` + singleton-strata** on the Stute family — the pseudo-stratum centering transform isn't derived for the Stute CvM functional. | `had_pretests.py` | Phase 4.5 C | Low |
+| `HeterogeneousAdoptionDiD` mass-point `vcov_type in {hc2, hc2_bm}` raises `NotImplementedError` — OLS leverage `x_i'(X'X)^{-1}x_i` is wrong for 2SLS; needs the `x_i'(Z'X)^{-1}(...)(X'Z)^{-1}x_i` correction plus an R/Stata (`ivreg2 small robust`) parity anchor. | `had.py::_fit_mass_point_2sls` | Phase 2a | Medium |
+| `HeterogeneousAdoptionDiD` `trends_lin × survey_design`: per-group linear-trend slope under survey weighting is not derived from the paper. Raises `NotImplementedError` across all 3 `trends_lin` surfaces. | `had.py`, `had_pretests.py` | #389 | Low |
+| `SpilloverDiD(survey_design=...)` replicate-weight variance (BRR/Fay/JK1/JKn/SDR): Wave E.1 ships Taylor-linearization only. Per Gerber (2026) Appendix A the IF-reweighting shortcut does NOT apply to TwoStageDiD-class estimators (`gamma_hat` is weight-sensitive); correct support needs per-replicate full re-fit of both stages. | `spillover.py`, `survey.py::compute_replicate_refit_variance` | follow-up | Low |
+| `SpilloverDiD(vcov_type="conley", conley_lag_cutoff>0, survey_design=...)` no-effective-PSU serial Bartlett HAC: weights-only / strata-only designs without a cluster fallback raise `NotImplementedError` (each pseudo-PSU appears in one period, so the serial cross-period loop contributes zero). Needs a unit-level serial fallback derivation or routing through `conley_unit` with documented IF-allocator asymmetry. | `spillover.py`, `two_stage.py::_compute_stratified_serial_bartlett_meat` | Wave E.2 tail | Low |
+| `SpilloverDiD` data-driven `d_bar` selection (Butts 2021b / 2023 JUE Insight cross-validation). | `spillover.py` | follow-up | Low |
+
+### Needs external reference (R / Stata / Julia)
+
+Blocked on tooling absent from CI (no workflow installs R/Stata/Julia). A clear path
+exists but parity can't be verified without a local toolchain.
+
+| Issue | Location | PR | Priority |
+|-------|----------|----|----------|
+| `StaggeredTripleDifference` R cross-validation: CSV fixtures not committed (gitignored); tests skip without local R + `triplediff`. Commit fixtures or generate deterministically. | `tests/test_methodology_staggered_triple_diff.py` | #245 | Medium |
+| `StaggeredTripleDifference` R parity: benchmark only tests the no-covariate path (`xformla=~1`). Add covariate-adjusted scenarios + aggregation-SE parity assertions. | `benchmarks/R/benchmark_staggered_triplediff.R` | #245 | Medium |
+| `StaggeredTripleDifference` per-cohort group-effect SEs include WIF (conservative vs R's `wif=NULL`); documented in REGISTRY. Could override the mixin for an exact R match (verification needs R `triplediff`). | `staggered_triple_diff.py` | #245 | Low |
+| **WooldridgeDiD follow-up cluster** (PR-B Stage D/E fail-closed surfaces; re-enable after R/Stata validation): <br>• QMLE sandwich uses `aweight` cluster adjustment `(G/(G-1))·(n-1)/(n-k)` vs Stata's `G/(G-1)` (conservative); add a `qmle` weight type if Stata goldens confirm a material difference (`wooldridge.py`, `linalg.py`). <br>• response-scale APE / log-link coefficient bridge for R `etwfe(family=poisson|logit)` cell-level parity — needs `emfx()` APE extraction or link-inversion with baseline-mean adjustment (`generate_wooldridge_golden.R`, `test_methodology_wooldridge.py`). <br>• `aggregate(weights="cohort_share")` on survey-weighted fits: `_n_g_per_cohort` uses raw `unit.nunique()`; implement design-weighted unit totals per cohort (paper W2025 §7) and lift the `ValueError` gate (`wooldridge.py`, `wooldridge_results.py`). <br>• unconditional inference for `cohort_share` accounting for ω̂_g sampling uncertainty (W2025 §7.5); currently NaN-closed (`wooldridge_results.py`). <br>• `cohort_trends=True × survey_design` and `× control_group="never_treated"` raise `NotImplementedError` (unvalidated TSL variance / trend columns spanned by placebo cell-dummies) (`wooldridge.py`). <br>• Stata `jwdid` golden-value `TestReferenceValues` (`tests/test_wooldridge.py`). | `wooldridge.py`, `wooldridge_results.py`, `linalg.py`, benchmarks | #216 · PR-B | Med-Low |
+| Extend `WooldridgeDiD` `method ∈ {logit, poisson}` with `vcov_type ∈ {classical, hc2, hc2_bm}`: composing HC2 leverage + Bell-McCaffrey DOF with the QMLE pseudo-residual sandwich needs derivation + R parity vs `clubSandwich::vcovCR(glm, type="CR2")`. Rejected at `__init__`. | `wooldridge.py` | follow-up | Medium |
+| `PreTrendsPower` CS/SA `anticipation=1` R-parity fixture: R `pretrends` has no anticipation parameter, so the Python `_extract_pre_period_params` anticipation filter isn't R-parity-locked. Build a synthetic CS/SA result with `anticipation=1` and assert γ_p matches R's `slope_for_power()`. (Mechanism already covered by MC + full-VCV tests.) | `tests/test_methodology_pretrends.py`, `generate_pretrends_golden.R` | PR-C | Low |
+| Harmonize SunAbraham's HC1 within-transform finite-sample correction with `fixest::sunab()` — SA applies `n/(n-k_dm)`, fixest applies `n/(n-k_total)` (counts absorbed FE); ~1-2% SE difference, documented as a "Deviation from R" and pinned at `atol=5e-3`. Either thread `df_adjustment` or keep as an intentional, R-verified difference. | `sun_abraham.py`, `linalg.py` | follow-up | Low |
+| Rust multiplier-bootstrap weight RNG (`generate_bootstrap_weights_batch`) seeds `Xoshiro256PlusPlus::seed_from_u64(seed+i)` per row; audit Python callers (`sdid.py`, `efficient_did_bootstrap.py`, `bootstrap_utils.py`) for parity-test gaps and, where a numpy-canonical equivalent exists, pre-generate in Python and pass through PyO3 (same fix shape as TROP RNG parity #354). | `rust/src/bootstrap.rs`, `bootstrap_utils.py` | follow-up | Medium |
+| `SyntheticDiD` bootstrap cross-language parity anchor vs R `synthdid::vcov(method="bootstrap")` or Julia `Synthdid.jl` (refit-native). Same-library validation is in place; Julia is the cleanest target. Tolerance ~1e-6 (BLAS+RNG paths preclude 1e-10). | `benchmarks/R/`, `benchmarks/julia/`, `tests/` | follow-up | Low |
+| CS R helpers hard-code `xformla = ~1`; no covariate-adjusted R benchmark for the IRLS path. | `tests/test_methodology_callaway.py` | #202 | Low |
+| `CallawaySantAnna` bootstrap: align p-value computation with R `did`'s symmetric-percentile method (former "CallawaySantAnna Bootstrap Improvements" section). | `staggered.py` | — | Low |
+| **`bias_corrected_local_linear` (lprobust) Phase-1c follow-ups:** extend golden parity to `kernel ∈ {triangular, uniform}` (epa-only today); expose `vce ∈ {hc0,hc1,hc2,hc3}` on the public wrapper once R goldens exist (port supports all four; needs a per-mode generator + a hc2/hc3 q-fit-leverage decision); clustered-DGP auto-bandwidth parity is **blocked upstream** on an nprobust singleton-cluster bug in `lpbwselect.mse.dpi` (Phase-1c DGP 4 uses manual `h=b=0.3`). | `_nprobust_port.py`, `local_linear.py`, `generate_nprobust_lprobust_golden.R` | Phase 1c | Low-Med |
+| `HeterogeneousAdoptionDiD` Stute-family Stata-bridge parity: no public R `Stutetest` package exists; would add `benchmarks/stata/generate_stute_golden.do` + a Stata dependency. | `benchmarks/stata/`, `tests/test_stute_test_parity.py` | follow-up | Low |
+| `HeterogeneousAdoptionDiD` Phase-3 R-parity: ships coverage-rate validation on synthetic DGPs, not tight point parity vs `chaisemartin::stute_test` / `yatchew_test` (needs bootstrap-seed-semantics + `B` alignment across numpy/R). | `tests/test_had_pretests.py` | Phase 3 | Low |
+
+### Parked — pending user demand / out of scope
+
+Doable in principle, but no current caller and/or explicitly out of paper scope.
+
+| Issue | Location | PR | Priority |
+|-------|----------|----|----------|
+| dCDH parity-test SE/CI assertions only cover pure-direction scenarios; mixed-direction SE comparison is structurally apples-to-oranges (cell-count vs obs-count weighting). | `test_chaisemartin_dhaultfoeuille_parity.py` | #294 | Low |
+| `HeterogeneousAdoptionDiD` survey-design API consolidation (**scheduled: next minor bump**): drop the deprecated `survey=` / `weights=` kwargs on all 8 HAD surfaces; only `survey_design=` remains. Also fold the legacy back-end `weights=` routing into the unified `_resolve_survey_for_fit` path. DeprecationWarning has shipped; the removal is ~50 LoC gated on the semver bump. | `had.py`, `had_pretests.py` | next minor | Medium |
+| `HeterogeneousAdoptionDiD` joint cross-horizon covariance / sup-t bands: per-horizon SEs use independent sandwiches (paper-faithful pointwise CIs per Pierce-Schott Fig 2). Follow-ups (low demand): IF-based stacking for joint cross-horizon inference; analytical H×H covariance on the weighted ES path; a sup-t band on the unweighted ES path. | `had.py::_fit_event_study` | Phase 2b / 4.5 B | Low |
+| `HeterogeneousAdoptionDiD` event-study staggered timing beyond the last cohort: Phase 2b auto-filters to the last cohort (paper App B.2); earlier-cohort effects aren't HAD-identified (redirect to dCDH). Full staggered HAD needs a different identification path (out of paper scope). | `had.py::_validate_had_panel_event_study` | Phase 2b | Low |
+| `HeterogeneousAdoptionDiD` survey-aware support-endpoint test (**research, waits on literature**): needs a calibrated support-infimum test under complex sampling (endpoint EVT × survey-aware functional CLT × tail-empirical-process theory). Permanent `NotImplementedError` on `qug_test(survey=...)`; rationale in REGISTRY § "QUG Null Test" Note (Phase 4.5 C0). | `had_pretests.py::qug_test` | Phase 4.5 C0 | Low |
+| `HeterogeneousAdoptionDiD` Phase-4.5 weight-aware auto-bandwidth MSE-DPI selector (~300 LoC); users pass `h`/`b` explicitly today. Plus replicate-weight SurveyDesigns on the continuous-dose paths (Rao-Wu-style per-replicate weight-ratio rescaling for the local-linear intercept IF). | `_nprobust_port.py::lpbwselect_mse_dpi`, `had.py::_aggregate_unit_resolved_survey` | Phase 4.5 | Low |
+| `HeterogeneousAdoptionDiD` Phase-4 Pierce-Schott (2016) replication harness — **waived (2026-05-20)**: R parity at `atol=1e-8` on the same 3 DGPs is a strictly stronger anchor than reproducing Fig 2's pointwise CIs on the LBD-restricted PNTR panel (paper §5.2 self-acknowledges NP estimators too noisy there). Re-open only on user demand. See REGISTRY HAD Deviations Notes #3/#4. | `benchmarks/`, `tests/` | Phase 2a | Low |
+| `HeterogeneousAdoptionDiD` time-varying dose on event study: Phase 2b rejects panels where `D_{g,t}` varies within a unit for `t≥F` (constant-dose convention, App B.2). A time-varying-dose estimator is a future PR; current behavior is front-door rejection. | `had.py::_validate_had_panel_event_study` | Phase 2b | Low |
+| `HeterogeneousAdoptionDiD` repeated-cross-section support: paper §2 allows panel OR RCS, but Phase 2a is panel-only (RCS inputs rejected by the balanced-panel validator). Needs an RCS identification path (pre/post cell means) with its own validator + `data_mode` surface. | `had.py::_validate_had_panel` | Phase 2a | Medium |
+| `HeterogeneousAdoptionDiD` Phase-3 nprobust bandwidth for Stute variants on continuous regressors (currently OLS residuals from a 2-parameter linear fit, no bandwidth selection). Not in paper scope. | `had_pretests.py::stute_test` | Phase 3 | Low |
+| `SpilloverDiD(ring_method="count")`: count-of-treated-in-ring (paper §3.2) is methodologically supported by Butts but re-introduces functional-form dependence; expose behind an explicit kwarg gate + warning. | `spillover.py` | follow-up | Low |
+| `TwoStageDiD` paper-permitted estimand variants (Gardner 2022): the Eq.(5) P̄-period-average estimand and the fn.8 full-sample first-stage variant have no public parameter. Documented ⚠️ in `gardner-2022-review.md`; surface as `estimand=` / `first_stage=` if a use case arises. | `two_stage.py` | follow-up | Low |
+| `bias_corrected_local_linear` multi-eval grid (`neval > 1`) with cross-covariance (`covgrid=TRUE`). Not needed for HAD; useful for multi-dose diagnostics. | `_nprobust_port.py::lprobust` | Phase 1c | Low |
+| Rust local-method `estimate_model` → unify to `solve_wls_svd` (the global-method's SVD helper) for sub-1e-14 bootstrap-SE parity. The local-method bootstrap parity test passes at `atol=1e-5`; the residual ~1e-7 is roundoff, not a user-visible correctness bug. | `rust/src/trop.rs`, `rust/src/linalg.rs` | follow-up | Low |
+| Validate the `.txt` AI guides (`llms-full.txt`, `llms-practitioner.txt`) as executable snippets — **not low-lift** (re-scoped 2026-06-01): only ~20% of ~112 fenced blocks are standalone-runnable; the rest are signature pseudo-code, context fragments, or data-shape-specific. Needs signature-block detection + a context/data skip-allowlist + per-snippet fixtures. | `tests/test_doc_snippets.py` | #239 | Low |
+| `TestWorkflowDoesNotExecutePRHeadCode` (CodeQL #14 guard) doesn't model `bash/sh/./source <script>` execution, multi-line `python3 -c` bodies, shell-var indirection, `eval`, `find -exec`, `xargs -I`. Catches common accidental regressions (16 forms); closing the residuals needs multi-line shell parsing + script-exec allowlists — diminishing return given the documented threat model. | `tests/test_openai_review.py`, `.github/workflows/ai_pr_review.yml` | #436 | Low |
+| Calendar-time aggregation (R `did` feature gap) — blocks 1 ported test in `test-att_gt.R`. | — | — | Low |
+| **Speculative / low-value performance notes** (relocated from the old `## Performance Optimizations`): numba JIT for bootstrap loops — **blocked by the numpy/pandas/scipy-only dependency policy**; generic sparse-matrix handling for large FE; QR+SVD rank-detection redundancy in `solve_ols` (QR overhead is minimal vs the SVD solve — correctness over micro-opt; `skip_rank_check` already exists for known-full-rank hot paths); incomplete `check_finite=False` bypass (scipy's QR in `_detect_rank_deficiency()` still validates; edge-case only). All `Low`, none correctness-affecting. | `linalg.py::solve_ols` | — | Low |
+
+### Won't-fix / waived (decisions on the record)
+
+| Decision | Location | Verified |
+|----------|----------|----------|
+| **`bread_inv` reuse not bit-identically achievable.** "Factor `(X'WX)` once, reuse across HC2/HC2-BM" can't be done bit-identically (the bar for a pure perf refactor of the inference path). Internal bread ops solve against *different* RHS (`X.T`, `eye`, `meat`+`temp.T`, `contrasts`); only same-RHS results are bit-reusable. Measured: `lu_solve(lu_factor(A),B)` differs from `solve(A,B)` up to 6.4e-15; the `inv(A)@meat@inv(A)` sandwich differs up to 1.24e-14 — both nonzero and *below* the affected goldens' tolerances (1e-12/1e-10), so a broad reuse would silently shift SEs without tripping the suite. The one genuine bit-identical redundancy (a duplicated `solve(bread, X.T)` in the unweighted one-way `hc2_bm`+`return_dof` path) is dwarfed by that path's dense `M=I−H` build, so the saving is negligible. | `linalg.py::compute_robust_vcov` | 2026-06-01 |
+| **R-script-per-test consolidation has no CI impact.** No CI workflow installs R, so every R-parity test skips in CI behind a per-file availability gate — consolidating `Rscript` spawns yields zero CI speedup. `test_methodology_twfe.py` already session-caches its R fits. The only residual is a LOCAL-dev micro-opt for `test_methodology_continuous_did.py` / `test_methodology_callaway.py` (re-spawn `library(...)` per call). Low value; retained as a local-dev note. | `tests/test_methodology_continuous_did.py`, `tests/test_methodology_callaway.py` | #139 / 2026-06-07 |
+
+---
+
+## Reference / Status
+
+Not backlog — current-state notes, monitoring, and scheduled removals.
+
+### Known Limitations (user-facing)
 
 | Issue | Location | Priority | Notes |
 |-------|----------|----------|-------|
@@ -16,14 +167,13 @@ Current limitations that may affect users:
 | `predict()` raises NotImplementedError | `estimators.py:890-911` | Low | Rarely needed |
 
 For survey-specific limitations (NotImplementedError paths), see the
-[Current Limitations](docs/survey-roadmap.md#current-limitations) section
-of survey-roadmap.md.
-
-## Code Quality
+[Current Limitations](docs/survey-roadmap.md#current-limitations) section of survey-roadmap.md.
 
 ### Large Module Files
 
-Target: ideally < 1000 lines per module; modules ≥3000 lines are candidates for splitting, 2000-3000 are monitored, 1000-2000 are accepted as a cohesion / scope trade-off. Updated 2026-05-15.
+Target: ideally < 1000 lines per module; modules ≥3000 lines are candidates for splitting,
+2000-3000 are monitored, 1000-2000 are accepted as a cohesion / scope trade-off. Updated
+2026-05-15.
 
 | File | Lines | Action |
 |------|-------|--------|
@@ -31,7 +181,7 @@ Target: ideally < 1000 lines per module; modules ≥3000 lines are candidates fo
 | `had_pretests.py` | 4951 | Consider splitting (Stute / Yatchew / QUG / joint pretests) |
 | `had.py` | 4593 | Consider splitting (continuous / mass-point / event-study / survey paths) |
 | `staggered.py` | 3963 | Consider splitting — grew through survey + aggregation features |
-| `linalg.py` | 3601 | Consider splitting (vcov surfaces) only if cohesion can be preserved — unified backend; vcov / solver paths are tightly coupled |
+| `linalg.py` | 3601 | Consider splitting (vcov surfaces) only if cohesion preserved — unified backend; vcov / solver paths tightly coupled |
 | `diagnostic_report.py` | 3380 | Consider splitting (per-method renderers + provenance) |
 | `power.py` | 3196 | Consider splitting (power analysis + MDE + sample size) |
 | `synthetic_did.py` | 2819 | Monitor — variance methods + survey paths |
@@ -64,280 +214,52 @@ Target: ideally < 1000 lines per module; modules ≥3000 lines are candidates fo
 | `conley.py` | 1006 | Acceptable |
 | `visualization/` | 4316 | Subpackage (split across 7 files) — OK |
 
----
-
-### Tech Debt from Code Reviews
-
-Deferred items from PR reviews that were not addressed before merge.
-
-#### Methodology/Correctness
-
-| Issue | Location | PR | Priority |
-|-------|----------|----|----------|
-| CBWSDID covariate balancing (`StackedDiD(balance="entropy")`) v1 supports only balanced event windows + `weighting="aggregate"`; unbalanced/ragged panels fail closed (the unit-count vs observation-count corrector convention is unresolved off balanced panels). Matching-based balancing and the repeated `0→1`/`1→0` episode extension are also deferred (out-of-scope guards raise). Documented in REGISTRY.md StackedDiD "Covariate balancing (CBWSDID)" Notes. | `stacked_did.py`, `balancing.py`, `docs/methodology/REGISTRY.md` | follow-up | Low |
-| `SyntheticControl` cv: `in_space_placebo()` / `leave_one_out()` report a cv refit excluded for STRUCTURAL infeasibility (donor-indistinguishable re-aggregated window) with the generic `status="failed"` — same machine-readable status as a genuine inner-solver non-convergence. The failure warnings now distinguish the two causes (and the correct remediation) under cv, and `in_time_placebo()` already splits structural→`"infeasible"` vs `"failed"`, but in-space/LOO do not yet emit a separate machine-readable status/reason-code. Thread a reason code from `_outer_solve_V_cv()`/`_placebo_fit_unit()` and add an `"infeasible"` status + count to the in-space/LOO outputs (mirror the in-time split). | `synthetic_control.py`, `synthetic_control_results.py` | follow-up | Low |
-| dCDH: Phase 1 per-period placebo DID_M^pl has NaN SE (no IF derivation for the per-period aggregation path). Multi-horizon placebos (L_max >= 1) have valid SE. | `chaisemartin_dhaultfoeuille.py` | #294 | Low |
-| dCDH: Survey cell-period allocator's post-period attribution is a library convention, not derived from the observation-level survey linearization. MC coverage is empirically close to nominal on the test DGP; a formal derivation (or a covariance-aware two-cell alternative) is deferred. Documented in REGISTRY.md survey IF expansion Note. | `chaisemartin_dhaultfoeuille.py`, `docs/methodology/REGISTRY.md` | #408 | Medium |
-| dCDH: Parity test SE/CI assertions only cover pure-direction scenarios; mixed-direction SE comparison is structurally apples-to-oranges (cell-count vs obs-count weighting). | `test_chaisemartin_dhaultfoeuille_parity.py` | #294 | Low |
-| dCDH by_path: survey-aware backward-horizon (`placebo + predict_het + survey_design`) raises `NotImplementedError` because the Binder TSL cell-period allocator's REGISTRY justification is tied to post-period attribution. Backward horizons would put ψ_g mass on a pre-period cell. Deriving the pre-period cell allocator (or adding a covariance-aware two-cell alternative) is deferred to a follow-up methodology PR. | `diff_diff/chaisemartin_dhaultfoeuille.py`, `docs/methodology/REGISTRY.md` | follow-up | Medium |
-| CallawaySantAnna: consider materializing NaN entries for non-estimable (g,t) cells in group_time_effects dict (currently omitted with consolidated warning); would require updating downstream consumers (event study, balance_e, aggregation) | `staggered.py` | #256 | Low |
-| CallawaySantAnna and StaggeredTripleDifference fit their covariate outcome-regression nuisance via estimator-local `cho_solve(X'X)` / `scipy.lstsq(cond=1e-7)` that bypass `solve_ols`, so they are NOT scale-equilibrated — a large-scale covariate can in principle perturb the nuisance fit (TripleDifference's OR fit already routes through `solve_ols` and is covered). Route the local OR fits through the shared scale-robust solver (or equilibrate locally). | `staggered.py`, `staggered_triple_diff.py` | covariate-review | Medium |
-| Adopt the shared `_rank_guarded_inv` for the *structural* (non-covariate) matrix inverses that share the `LinAlgError`-only fallback pattern and can become near-singular: `continuous_did.py:1056` (dose B-spline basis), `spillover.py:3371` (ring-solve, partially guarded via `kept_cols`), `two_stage.py:3154` (TSL Stage-2 variance), `imputation.py:2403`, `had.py:2413`, `conley.py:1109`. These invert internal bases users cannot perturb with `covariates=` (so not the covariate-triggered SE bug already fixed by the DR/OR rank-guard) — lower priority; the `_rank_guarded_inv` helper is the seam. | `continuous_did.py`, `spillover.py`, `two_stage.py`, `imputation.py`, `had.py`, `conley.py` | dr-or-se-rank-guard | Low |
-| ImputationDiD dense `(A0'A0).toarray()` scales O((U+T+K)^2), OOM risk on large panels | `imputation.py` | #141 | Medium (deferred — only triggers when sparse solver fails) |
-| Multi-absorb weighted demeaning needs iterative alternating projections for N > 1 absorbed FE with survey weights; unweighted multi-absorb also uses single-pass (pre-existing, exact only for balanced panels) | `estimators.py` | #218 | Medium |
-| Survey design resolution/collapse patterns are inconsistent across panel estimators — ContinuousDiD rebuilds unit-level design in SE code, EfficientDiD builds once in fit(), StackedDiD re-resolves on stacked data; extract shared helpers for panel-to-unit collapse, post-filter re-resolution, and metadata recomputation | `continuous_did.py`, `efficient_did.py`, `stacked_did.py` | #226 | Low |
-| SyntheticControl: the remaining ADH-2015 §4 items — the regression-weight `W^reg = X_0'(X_0 X_0')^{-1} X_1` extrapolation diagnostic (flag implied OLS weights outside `[0,1]`) and sparse-SC subset search (`l < J`, holding `V` fixed). Leave-one-out (`leave_one_out()`), the in-time placebo (`in_time_placebo()`), out-of-sample CV `V`-selection (`v_method="cv"`), and inverse-variance `V` (`v_method="inverse_variance"`) have landed; these two are the deferred tail. | `synthetic_control.py`, `synthetic_control_results.py` | ADH-2015 follow-up | Low |
-| SyntheticControl conformal inference (CWZ 2021) deferred extensions: (a) one-sided / signed-`t` variants (§7); (b) covariates folded into the conformal proxy (`X_jt`, eqs 4/6 allow it — current proxy is outcomes-only); (c) the AR/innovation-permutation path (Lemmas 5–7) for time-series proxies where residual-permutation ≠ data-permutation. The joint test, pointwise CIs, and average-effect CI (the constrained-LS SC proxy) have landed. | `diff_diff/conformal.py`, `synthetic_control_results.py` | CWZ-2021 follow-up | Low |
-| ContinuousDiD deferred CGBS 2024 extensions: (a) `covariates=` kwarg not implemented (matches R `contdid` v0.1.0); (b) discrete-treatment saturated regression deferred (integer-valued dose currently warned, not routed to per-level coefficients); (c) lowest-dose-as-control per CGBS 2024 Remark 3.1 (when `P(D=0) = 0`) not implemented — estimator requires never-treated controls. REGISTRY `## ContinuousDiD` → Implementation Checklist marks these as deferred `[ ]` items. | `diff_diff/continuous_did.py` | — | Low |
-| Survey-weighted Silverman bandwidth in EfficientDiD conditional Omega* — `_silverman_bandwidth()` uses unweighted mean/std for bandwidth selection; survey-weighted statistics would better reflect the population distribution but is a second-order refinement | `efficient_did_covariates.py` | — | Low |
-| Survey sandwich SE is not exactly invariant to zero-weight (subpopulation / padded) rows: the shared `_compute_stratified_psu_meat` finite-sample correction counts zero-weight units as PSUs (an `n_psu/(n_psu-1)`-style factor), so adding zero-weight rows shifts the SE by a second-order amount (~2e-4 relative in the EfficientDiD e2e). The point estimate is exactly invariant and the weighted scores of zero-weight rows are already zero — only the DOF correction's PSU count includes them. Cross-cutting across all survey-enabled estimators; fix by counting only positive-weight PSUs in the correction. | `survey.py` (`_compute_stratified_psu_meat`) | PR-B follow-up | Low |
-| ImputationDiD: leave-one-out (LOO) conservative-variance refinement (BJS 2024 Supplementary Appendix A.9) not implemented — a finite-sample improvement to the auxiliary-model residuals that reduces overfitting of `tau_tilde_g` to `epsilon`. The asymptotic Theorem-3 variance is implemented and matches R `didimputation` (which also omits LOO by default). | `imputation.py` | imputation-validation follow-up | Low |
-| StaggeredTripleDifference R cross-validation: CSV fixtures not committed (gitignored); tests skip without local R + triplediff. Commit fixtures or generate deterministically. | `tests/test_methodology_staggered_triple_diff.py` | #245 | Medium |
-| StaggeredTripleDifference R parity: benchmark only tests no-covariate path (xformla=~1). Add covariate-adjusted scenarios and aggregation SE parity assertions. | `benchmarks/R/benchmark_staggered_triplediff.R` | #245 | Medium |
-| StaggeredTripleDifference: per-cohort group-effect SEs include WIF (conservative vs R's wif=NULL). Documented in REGISTRY. Could override mixin for exact R match. | `staggered_triple_diff.py` | #245 | Low |
-| HonestDiD Delta^RM: uses naive FLCI instead of paper's ARP conditional/hybrid confidence sets (Sections 3.2.1-3.2.2). ARP infrastructure exists but moment inequality transformation needs calibration. CIs are conservative (wider, valid coverage). | `honest_did.py` | #248 | Medium |
-| Replicate weight tests use Fay-like BRR perturbations (0.5/1.5), not true half-sample BRR. Add true BRR regressions per estimator family. Existing `test_survey_phase6.py` covers true BRR at the helper level. | `tests/test_replicate_weight_expansion.py` | #253 | Low |
-| WooldridgeDiD: QMLE sandwich uses `aweight` cluster-robust adjustment `(G/(G-1))*(n-1)/(n-k)` vs Stata's `G/(G-1)` only. Conservative (inflates SEs). Add `qmle` weight type if Stata golden values confirm material difference. | `wooldridge.py`, `linalg.py` | #216 | Medium |
-| WooldridgeDiD: response-scale APE / log-link coefficient bridge for R `etwfe(family="poisson")` + `etwfe(family="logit")` cell-level numerical parity. diff-diff `WooldridgeDiD(method="poisson"\|"logit")` returns ATT on the response scale (counterfactual μ_1 − μ_0 / p_1 − p_0 per paper W2023 ASF / APE framework); R `etwfe` returns the cell-level log-link coefficient. PR-B Stage D ships log-link goldens at `benchmarks/data/wooldridge_golden.json` and surface tests (fit completes + goldens well-formed); cell-level numerical parity requires either `emfx()`-based APE extraction on the R side or link-function inversion with baseline-mean adjustment. | `benchmarks/R/generate_wooldridge_golden.R`, `tests/test_methodology_wooldridge.py::TestWooldridgeParityRPoisson/TestWooldridgeParityRLogit` | PR-B follow-up | Medium |
-| WooldridgeDiD: design-consistent cohort totals for `aggregate(weights="cohort_share")` on survey-weighted fits. Current impl populates `_n_g_per_cohort` from `unit.nunique()` (raw counts); composing these unweighted cohort shares with the design-weighted ATTs targets a mixed estimand inconsistent with paper W2025 Section 7's design-population cohort-share form. PR-B Stage E fail-closes the surface (raises `ValueError` when `survey_design is not None`); the follow-up implements survey-weighted unit totals per cohort and re-enables the surface. | `wooldridge.py` `_n_g_per_cohort` population, `wooldridge_results.py::aggregate` survey gate | PR-B follow-up | Medium |
-| WooldridgeDiD: unconditional inference for `aggregate(weights="cohort_share")` accounting for sampling uncertainty in the cohort shares ω̂_g / ω̂_{ge} (paper W2025 Section 7.5). Current impl fail-closes the t-stat / p-value / conf-int fields to NaN under cohort-share aggregation because the analytical SE is conditional-on-shares. Proper APE/GMM-style aggregate inference (Wooldridge 2023 Section 4 framework) re-enables full inference. | `wooldridge_results.py::aggregate` cohort_share inference branch | PR-B follow-up | Medium |
-| WooldridgeDiD: `cohort_trends=True` + `survey_design` composition. PR-B Stage E fail-closes the cross-product with `NotImplementedError` at `fit()` because the full-dummy `dg_i · t` design composed with the survey TSL variance hasn't been validated against R-parity goldens. Follow-up: validate the composition (or implement a survey-aware alternative) and re-enable the surface. | `wooldridge.py` fit guard, `wooldridge_results.py::aggregate` (if survey-aware cohort_trends variance plumbing is added) | PR-B follow-up | Low |
-| WooldridgeDiD: `cohort_trends=True` + `control_group="never_treated"` composition. PR-B Stage E (codex R9 P1 fix) fail-closes the cross-product with `NotImplementedError` at `fit()` because the OLS + never_treated branch emits ALL `(g, t)` cells as treatment-cell dummies (paper Section 4.4 placebo coverage); the appended `dg_i · t` trend columns are linearly spanned by the per-cohort sum of those cell dummies, so the Section 8 trend specification is unidentified. Follow-up: implement a separate design-matrix branch that drops the pre-treatment placebo dummies (or restricts the trend interaction to post-treatment cells) under the trend specification, then re-enable the combination. | `wooldridge.py` fit guard + `_build_interaction_matrix` redesign for the cohort_trends path | PR-B follow-up | Low |
-| WooldridgeDiD: Stata `jwdid` golden value tests — add R/Stata reference script and `TestReferenceValues` class. | `tests/test_wooldridge.py` | #216 | Medium |
-| PreTrendsPower: CS/SA `anticipation=1` R-parity fixture. The PR-C R-parity goldens cover NIS power + γ_p MDV at `atol=1e-4` on four shifted-grid / regular / irregular / K=1 fixtures, but R `pretrends` has no anticipation parameter so the Python-side `_extract_pre_period_params` anticipation filter (`if t < _pre_cutoff` in `pretrends.py` lines 1138-1150 for CS; mirror in SA branch) is not R-parity-locked. Build a synthetic `CallawaySantAnnaResults` (or `SunAbrahamResults`) with `anticipation=1` and a t=-1 event-study entry that should be filtered before reaching `_compute_power_nis`, then assert the resulting γ_p matches R's `slope_for_power()` on the K=4 shifted-grid fixture. Existing PR-B MC-based tests (`TestPretrendsPropositions`) and full-VCV tests (`TestPretrendsCovarianceSource`) already cover the filter mechanically; this would close the loop against R. | `tests/test_methodology_pretrends.py::TestPretrendsParityR`, `benchmarks/R/generate_pretrends_golden.R` | PR-C follow-up | Low |
-| `StackedDiD` `vcov_type="conley"` — deferred for a **methodology** reason, NOT plumbing (unlike the now-shipped SunAbraham / WooldridgeDiD-OLS conley threading): the stacked design replicates each control unit across every sub-experiment it qualifies for (`_build_sub_experiment`), so one geographic unit occupies many stacked rows. Conley's pairwise distance matrix would see those same-unit copies at distance 0 (`K(0)=1`, perfectly correlated), conflating the stacking-replication device with real spatial correlation, and there is no `conleyreg` analogue for stacked DiD to anchor parity. A correct treatment needs a per-stack spatial identifier and is **paper-gated**. | `diff_diff/stacked_did.py` | follow-up | Low |
-| Extend `WooldridgeDiD` `method ∈ {"logit","poisson"}` paths with `vcov_type ∈ {classical, hc2, hc2_bm}`. The GLM QMLE sandwich uses pseudo-residuals (`weights=p(1-p)` for logit, `weights=μ_i` for Poisson, aweight semantics); composing HC2 leverage and Bell-McCaffrey Satterthwaite DOF with QMLE on canonical-link pseudo-residuals needs derivation + R parity against `clubSandwich::vcovCR(glm(...), type="CR2")`. Phase 1b PR 3/8 rejects `method != "ols" + vcov_type != "hc1"` at `__init__` with a deferral pointer here. | `diff_diff/wooldridge.py` (`_fit_logit`, `_fit_poisson`) | follow-up | Medium |
-| Extend `CallawaySantAnna` with `vcov_type="conley"` — would require deriving a spatial-HAC composition for per-unit influence functions (Conley 1999 spatial kernel × per-(g,t) IF aggregation); no reference implementation exists today. Phase 1b interstitial PR rejected this at `__init__` with a deferral pointer here. | `diff_diff/staggered.py` | follow-up | Low |
-| Extend `TripleDifference` with `vcov_type="conley"` — would require deriving a spatial-HAC composition for the 3-pairwise-DiD influence-function decomposition (Conley 1999 spatial kernel × `inf = w3·IF_3 + w2·IF_2 - w1·IF_1` aggregation); no reference implementation exists today. Phase 1b interstitial #2 PR rejected this at `__init__` with a deferral pointer here. | `diff_diff/triple_diff.py` | follow-up | Low |
-| Extend `ImputationDiD` with `vcov_type="conley"` — would require deriving a spatial-HAC composition with the Theorem 3 per-unit IF aggregation (Conley 1999 spatial kernel × `sigma_sq = (cluster_psi_sums**2).sum()` reduction); no reference implementation exists today. Phase 1b interstitial #3 PR rejected this at `__init__` with a deferral pointer here. | `diff_diff/imputation.py` | follow-up | Low |
-| Extend `EfficientDiD` with `vcov_type="conley"` — would require deriving a spatial-HAC composition with the per-unit EIF aggregation (Conley 1999 spatial kernel × `_compute_se_from_eif` reduction); no reference implementation exists today. Phase 1b interstitial #4 PR rejected this at `__init__` with a deferral pointer here. | `diff_diff/efficient_did.py` | follow-up | Low |
-| Extend `TwoStageDiD` with `vcov_type="conley"` — thread a spatial-HAC composition into the GMM sandwich meat (`_compute_gmm_variance`); the Conley machinery already exists in the sibling SpilloverDiD `_compute_gmm_corrected_meat` (same module) and could be adapted to TwoStageDiD's per-cluster GMM score `S_g = gamma_hat' c_g - X'_{2g} eps_{2g}`, but two-stage GMM × Conley has no reference implementation. Phase 1b interstitial #5 PR rejected this at `__init__`/`fit()` with a deferral pointer here. | `diff_diff/two_stage.py` | follow-up | Low |
-| Decide whether to formally deprecate `CallawaySantAnna.cluster=X` in favor of `survey_design=SurveyDesign(psu=X)`. Both APIs are first-class today (the bare-cluster path synthesizes a minimal SurveyDesign internally), but having two equivalent paths to express the same intent creates redundant surface. Mirrors a similar question for ImputationDiD / EfficientDiD / TwoStageDiD if those estimators ever face the same review. | `diff_diff/staggered.py` | follow-up | Low |
-| Harmonize SunAbraham's HC1 within-transform finite-sample correction with `fixest::sunab()`. SA's `solve_ols` applies `n / (n - k_dm)` (within-transform columns only); fixest applies `n / (n - k_total)` (counts absorbed FE). SE values differ by ~1-2% on typical panel sizes (documented in REGISTRY.md "Deviation from R"; pinned at `atol=5e-3` in `tests/test_methodology_sun_abraham.py`). Either thread `df_adjustment` into the vcov scaling or document as an intentional difference. | `diff_diff/sun_abraham.py`, `diff_diff/linalg.py::compute_robust_vcov` | follow-up | Low |
-| `LinearRegression.fit()` pays the CR2 cost twice on the weighted `hc2_bm` path: once inside `solve_ols(..., return_vcov=True)` and again via `compute_robust_vcov(..., return_dof=True)` to populate `_bm_dof`. Correct but redundant. Fix: thread `return_dof` through `solve_ols` so the same CR2 computation produces both vcov + DOF, or cache the per-cluster `A_g` / `MUWTWUM` precomputes between calls. CI codex P3 on PR #475. | `linalg.py::LinearRegression.fit`, `linalg.py::solve_ols` | PR #475 follow-up | Low |
-| `TwoWayFixedEffects(vcov_type in {"hc2","hc2_bm"})` with replicate-weight survey designs raises `NotImplementedError` (`twfe.py:~233`). The replicate path re-demeans per replicate (re-demeaning depends on the per-replicate weight vector), which doesn't compose with the full-dummy HC2/HC2-BM build — a correct implementation would need per-replicate full-dummy refit. Workaround: use `vcov_type="hc1"` for replicate-weight CR1. | `twfe.py::fit` | follow-up | Low |
-| TWFE's HC2/HC2-BM inline full-dummy build (`twfe.py:280-315`) duplicates the dummy-construction logic in `DifferenceInDifferences(fixed_effects=...)` (`estimators.py:478-486`). Extract a shared helper (or delegate TWFE's HC2/HC2-BM path to DiD's `fixed_effects=` branch, with TWFE-specific cluster default threading) to reduce drift risk on FE naming, survey behavior, and result-surface conventions. Substantive refactor — touches both estimators. | `twfe.py::fit`, `estimators.py::DifferenceInDifferences.fit` | follow-up | Low |
-| Unify Rust local-method `estimate_model` solver path to `solve_wls_svd` (the same SVD helper used by the global-method since PR #348) for sub-1e-14 bootstrap SE parity. Current local-method bootstrap parity test (`tests/test_rust_backend.py::TestTROPRustEdgeCaseParity::test_bootstrap_seed_reproducibility_local`) passes at `atol=1e-5` — the residual ~1e-7 gap is roundoff between Rust's `estimate_model` matrix factorization and numpy's `lstsq`, which accumulates differently across per-replicate bootstrap fits. Main-fit ATT parity is regime-dependent (`atol=1e-14` for `lambda_nn=inf`, `atol=1e-10` for finite `lambda_nn` — see `test_local_method_main_fit_parity`); the bootstrap gap is a same-solver-path roundoff concern and not a user-visible correctness bug. | `rust/src/trop.rs::estimate_model`, `rust/src/linalg.rs::solve_wls_svd` | follow-up | Low |
-| Rust multiplier-bootstrap weight RNG (`generate_bootstrap_weights_batch` in `rust/src/bootstrap.rs:9-10, 57-75`) uses `Xoshiro256PlusPlus::seed_from_u64(seed + i)` per row for Rademacher/Mammen/Webb generation. If any Python caller (SDID / efficient-DiD multiplier bootstrap) has a numpy-canonical equivalent, the two backends likely diverge under the same seed. Audit Python callers (`diff_diff/sdid.py`, `diff_diff/efficient_did_bootstrap.py`, `diff_diff/bootstrap_utils.py::generate_bootstrap_weights_batch_numpy`) for parity-test gaps. Same fix shape as TROP RNG parity (PR #354): pre-generate weights in Python via numpy and pass them to Rust through PyO3. | `rust/src/bootstrap.rs`, `diff_diff/bootstrap_utils.py` | follow-up | Medium |
-| `bias_corrected_local_linear`: extend golden parity to `kernel="triangular"` and `kernel="uniform"` (currently epa-only; all three kernels share `kernel_W` and the `lprobust` math, so parity is expected but not separately asserted). | `benchmarks/R/generate_nprobust_lprobust_golden.R`, `tests/test_bias_corrected_lprobust.py` | Phase 1c | Low |
-| `bias_corrected_local_linear`: expose `vce in {"hc0", "hc1", "hc2", "hc3"}` on the public wrapper once R parity goldens exist (currently raises `NotImplementedError`). The port-level `lprobust` and `lprobust_res` already support all four; expanding the public surface requires a golden generator for each hc mode and a decision on hc2/hc3 q-fit leverage (R reuses p-fit `hii` for q-fit residuals; whether to match that or stage-match deserves a derivation before the wrapper advertises CCT-2014 conformance). | `diff_diff/local_linear.py::bias_corrected_local_linear`, `benchmarks/R/generate_nprobust_lprobust_golden.R`, `tests/test_bias_corrected_lprobust.py` | Phase 1c | Medium |
-| `bias_corrected_local_linear`: support multi-eval grid (`neval > 1`) with cross-covariance (`covgrid=TRUE` branch of `lprobust.R:253-378`). Not needed for HAD but useful for multi-dose diagnostics. | `diff_diff/_nprobust_port.py::lprobust` | Phase 1c | Low |
-| Clustered-DGP parity: Phase 1c's DGP 4 uses manual `h=b=0.3` to sidestep an nprobust-internal singleton-cluster bug in `lpbwselect.mse.dpi`'s pilot fits. Once nprobust ships a fix (or we derive one independently), add a clustered-auto-bandwidth parity test. | `benchmarks/R/generate_nprobust_lprobust_golden.R` | Phase 1c | Low |
-| `HeterogeneousAdoptionDiD` joint cross-horizon covariance on event study: per-horizon SEs use INDEPENDENT sandwiches in Phase 2b (paper-faithful pointwise CIs per Pierce-Schott Figure 2). A follow-up could derive an IF-based stacking of per-horizon scores for joint cross-horizon inference (needed for joint hypothesis tests across event-time horizons). Block-bootstrap is a reasonable alternative. | `diff_diff/had.py::_fit_event_study` | Phase 2b | Low |
-| `HeterogeneousAdoptionDiD` event-study staggered-timing beyond last cohort: Phase 2b auto-filters staggered panels to the last cohort per paper Appendix B.2. Earlier-cohort treatment effects are not identified by HAD; redirecting to `ChaisemartinDHaultfoeuille` / `did_multiplegt_dyn` is the paper's prescription. A full staggered HAD would require a different identification path (out of paper scope). | `diff_diff/had.py::_validate_had_panel_event_study` | Phase 2b | Low |
-| `HeterogeneousAdoptionDiD` joint cross-horizon analytical covariance on the weighted event-study path: Phase 4.5 B ships multiplier-bootstrap sup-t simultaneous CIs on the weighted event-study path but pointwise analytical variance is still independent across horizons. A follow-up could derive the full H × H analytical covariance from the per-horizon IF matrix (`Psi.T @ Psi` under survey weighting) for an analytical alternative to the bootstrap. Would also let the unweighted event-study path ship a sup-t band. | `diff_diff/had.py::_fit_event_study` | follow-up | Low |
-| `HeterogeneousAdoptionDiD` unweighted event-study sup-t band: Phase 4.5 B ships sup-t only on the WEIGHTED event-study path (to preserve pre-PR bit-exact output on unweighted). Extending sup-t to unweighted event-study (either via the multiplier bootstrap with unit-level iid multipliers or via analytical joint cross-horizon covariance) is a symmetric follow-up. | `diff_diff/had.py::_fit_event_study` | follow-up | Low |
-| `HeterogeneousAdoptionDiD` survey-aware support-endpoint test (research, not engineering): if the academic literature ever publishes a calibrated support-infimum test under complex sampling — combining endpoint-estimation EVT (Hall 1982, Aarssen-de Haan 1994, Hall-Wang 1999) with survey-aware functional CLTs for the empirical process (Boistard-Lopuhaä-Ruiz-Gazen 2017, Bertail-Chautru-Clémençon 2017) and tail-empirical-process theory (Drees 2003) — Phase 4.5 C0's permanent NotImplementedError on `qug_test(..., survey=...)` / `weights=` can be revisited and the bridge implemented against the published recipe. See `docs/methodology/REGISTRY.md` § "QUG Null Test" — Note (Phase 4.5 C0) for the decision rationale and the research-direction sketch. | `diff_diff/had_pretests.py::qug_test` | Phase 4.5 C0 (2026-04, decision shipped) | Low |
-| `HeterogeneousAdoptionDiD` survey-aware pretests Phase 4.5 C still-open follow-ups (pweight + PSU + FPC + strata already shipped via `bootstrap_utils.apply_stratum_centering` + Yatchew closed-form weighted variance): (a) **replicate-weight designs** (BRR/Fay/JK1/JKn/SDR) — the per-replicate weight-ratio rescaling for the OLS-on-residuals refit step is not covered by the multiplier-bootstrap composition; each linearity-family helper raises `NotImplementedError` on `survey.replicate_weights is not None`. (b) **`lonely_psu='adjust'` + singleton-strata** on the Stute family — the pseudo-stratum centering transform has not been derived for the Stute CvM functional (same pseudo-stratum centering gap as the HAD sup-t deviation; see REGISTRY § "Note (Stute stratified survey-bootstrap calibration)"). | `diff_diff/had_pretests.py` | Phase 4.5 C follow-up | Low |
-| `HeterogeneousAdoptionDiD` Phase 4.5: weight-aware auto-bandwidth MSE-DPI selector. Phase 4.5 A ships weighted `lprobust` with an unweighted DPI selector; users who want a weight-aware bandwidth must pass `h`/`b` explicitly. Extending `lpbwselect_mse_dpi` to propagate weights through density, second-derivative, and variance stages is ~300 LoC of methodology and was out of scope. | `diff_diff/_nprobust_port.py::lpbwselect_mse_dpi` | Phase 4.5 | Low |
-| `HeterogeneousAdoptionDiD` Phase 4.5 C: replicate-weight SurveyDesigns (BRR / Fay / JK1 / JKn / SDR) on the continuous-dose paths. Phase 4.5 A raises `NotImplementedError` on replicate designs in `_aggregate_unit_resolved_survey`. Rao-Wu-style replicate bootstrap for HAD paths requires deriving the per-replicate weight-ratio rescaling for the local-linear intercept IF. | `diff_diff/had.py::_aggregate_unit_resolved_survey` | Phase 4.5 C | Low |
-| `HeterogeneousAdoptionDiD` mass-point: `vcov_type in {"hc2", "hc2_bm"}` raises `NotImplementedError` pending a 2SLS-specific leverage derivation. The OLS leverage `x_i' (X'X)^{-1} x_i` is wrong for 2SLS; the correct finite-sample correction uses `x_i' (Z'X)^{-1} (...) (X'Z)^{-1} x_i`. Needs derivation plus an R / Stata (`ivreg2 small robust`) parity anchor. | `diff_diff/had.py::_fit_mass_point_2sls` | Phase 2a | Medium |
-| `HeterogeneousAdoptionDiD` survey-design API consolidation, **next minor bump**: drop the deprecated `survey=` and `weights=` kwargs on all 8 HAD surfaces (`HeterogeneousAdoptionDiD.fit`, `did_had_pretest_workflow`, `qug_test`, `stute_test`, `yatchew_hr_test`, `stute_joint_pretest`, `joint_pretrends_test`, `joint_homogeneity_test`); only `survey_design=` remains. Also fold the legacy back-end `weights=` paths (e.g. `_aggregate_unit_weights` ad-hoc routing) into the unified `_resolve_survey_for_fit`-driven path. The `_make_trivial_resolved` underscore alias on `survey.py` stays (one-line, harmless). DeprecationWarning ships in this PR; the removal PR is ~50 LoC of cleanup. | `diff_diff/had.py`, `diff_diff/had_pretests.py` | next minor bump | Medium |
-| `HeterogeneousAdoptionDiD` continuous paths: thread `cluster=` through `bias_corrected_local_linear` (Phase 1c's wrapper already supports cluster; Phase 2a ignores it with a `UserWarning` on the continuous path to keep scope tight). | `diff_diff/had.py`, `diff_diff/local_linear.py` | Phase 2a | Low |
-| `HeterogeneousAdoptionDiD` `trends_lin × survey_design` follow-up: per-group linear-trend slope under survey weighting (weighted slope estimator? per-PSU slope?) is not derived from the paper. PR #389 raises `NotImplementedError` on the combination across all 3 trends_lin surfaces. If user demand emerges, derive the weighted variant and lift the gate. | `diff_diff/had.py::HeterogeneousAdoptionDiD.fit`, `diff_diff/had_pretests.py::joint_pretrends_test`, `diff_diff/had_pretests.py::joint_homogeneity_test` | follow-up | Low |
-| `HeterogeneousAdoptionDiD` Stute family Stata-bridge parity: PR #389 R-parity covers the full HAD fit + Yatchew surfaces but skips Stute family (`stute_test`, `stute_joint_pretest`, `joint_pretrends_test`, `joint_homogeneity_test`) because no R `Stutetest` package exists publicly (chaisemartinPackages publishes only the Stata `stute_test` module; the paper cites a 2024c R Stutetest module that is not on GitHub or CRAN). Stata-bridge parity would add `benchmarks/stata/generate_stute_golden.do` + a Stata installation requirement. Low priority unless user demand emerges. | `benchmarks/stata/`, `tests/test_stute_test_parity.py` | follow-up | Low |
-| `HeterogeneousAdoptionDiD` Phase 3 Stute performance: Appendix D vectorized matrix form replaces the per-iteration OLS refit with a single precomputed `M = I - X(X'X)^{-1}X'` applied to `eps * eta`. Functionally identical, ~2x faster. Shipped literal-refit form in Phase 3 to match paper text and keep reviewer surface small. | `diff_diff/had_pretests.py::stute_test` | Phase 3 | Low |
-| `HeterogeneousAdoptionDiD` Phase 3 R-parity: Phase 3 ships coverage-rate validation on synthetic DGPs (not tight point parity against `chaisemartin::stute_test` / `yatchew_test`). Tight numerical parity requires aligning bootstrap seed semantics and `B` across numpy/R and is deferred. | `tests/test_had_pretests.py` | Phase 3 | Low |
-| `HeterogeneousAdoptionDiD` Phase 3 nprobust bandwidth for Stute: some Stute variants on continuous regressors use nprobust-style optimal bandwidth selection. Phase 3 uses OLS residuals from a 2-parameter linear fit (no bandwidth selection). nprobust integration is a future enhancement; not in paper scope. | `diff_diff/had_pretests.py::stute_test` | Phase 3 | Low |
-| `HeterogeneousAdoptionDiD` Phase 4: Pierce-Schott (2016) replication harness; reproduce paper Figure 2 values and Table 1 coverage rates. **Waived in tracker-promotion PR (2026-05-20):** R parity at `atol=1e-8` on the same 3 DGPs (`tests/test_did_had_parity.py`) is a strictly stronger correctness anchor than reproducing Figure 2's pointwise CIs on the LBD-restricted PNTR panel; paper Section 5.2 self-acknowledges NP estimators too noisy to be informative there. Table 1 coverage-rate MC would re-verify the CCF asymptotic coverage already pinned by R parity (Python ≡ R ≡ paper). See REGISTRY HAD Deviations Notes #3 / #4 for full scope-caveat statements. Re-open if user demand emerges for an empirical-application replication harness. | `benchmarks/`, `tests/` | Phase 2a | Low |
-| `HeterogeneousAdoptionDiD` time-varying dose on event study: Phase 2b REJECTS panels where `D_{g,t}` varies within a unit for `t >= F` (the aggregation uses `D_{g, F}` as the single regressor for all horizons, paper Appendix B.2 constant-dose convention). A follow-up PR could add a time-varying-dose estimator for these panels; current behavior is front-door rejection with a redirect to `ChaisemartinDHaultfoeuille`. | `diff_diff/had.py::_validate_had_panel_event_study` | Phase 2b | Low |
-| `HeterogeneousAdoptionDiD` repeated-cross-section support: paper Section 2 defines HAD on panel OR repeated cross-section, but Phase 2a is panel-only. RCS inputs (disjoint unit IDs between periods) are rejected by the balanced-panel validator with the generic "unit(s) do not appear in both periods" error. A follow-up PR will add an RCS identification path based on pre/post cell means (rather than unit-level first differences), with its own validator and a distinct `data_mode` / API surface. | `diff_diff/had.py::_validate_had_panel`, `diff_diff/had.py::_aggregate_first_difference` | Phase 2a | Medium |
-| SyntheticDiD: bootstrap cross-language parity anchor against R's default `synthdid::vcov(method="bootstrap")` (refit; rebinds `opts` per draw) or Julia `Synthdid.jl::src/vcov.jl::bootstrap_se` (refit by construction). Same-library validation (placebo-SE tracking, AER §6.3 MC truth) is in place; a cross-language anchor is desirable to bolster the methodology contract. Julia is the cleanest target — minimal wrapping work and refit-native vcov. Tolerance target: 1e-6 on Monte Carlo samples (different BLAS + RNG paths preclude 1e-10). The R-parity fixture from the previous release was deleted because it pinned the now-removed fixed-weight path. | `benchmarks/R/`, `benchmarks/julia/`, `tests/` | follow-up | Low |
-| Conley + survey weights / `survey_design`. Score-reweighted meat `s_i = w_i · X_i · ε_i` is mechanical, but PSU clustering interaction with the spatial kernel and replicate-weights variance under spatial correlation are non-trivial (Bertanha-Imbens 2014 covers cluster-sample but not the explicit Conley case). Phase 5 of the spillover-conley initiative; paper review prerequisite. Currently raises `NotImplementedError` at the linalg validator. | `linalg.py::_validate_vcov_args` | Phase 5 (spillover-conley) | Medium |
-| `SyntheticDiD(vcov_type="conley")` support. Currently raises `TypeError` at `__init__` because SyntheticDiD uses `variance_method ∈ {bootstrap, jackknife, placebo}` rather than the analytical sandwich that Conley plugs into. Wiring would require either reimplementing an analytical sandwich path for SyntheticDiD or designing a spatial-block bootstrap (new methodology, Politis-Romano 1994 territory). | `synthetic_did.py::SyntheticDiD` | follow-up (spillover-conley) | Low |
-| `SpilloverDiD(survey_design=...)` replicate-weight variance (BRR / Fay / JK1 / JKn / SDR). Wave E.1 ships Taylor-linearization only. Per Gerber (2026) Appendix A, the IF-reweighting shortcut does NOT apply to TwoStageDiD-class estimators because `gamma_hat` is weight-sensitive; correct support requires per-replicate full re-fit of stage 1 and stage 2 (200+ LoC of test surface beyond E.1). | `spillover.py::SpilloverDiD.fit`, `survey.py::compute_replicate_refit_variance` | follow-up | Low |
-| `SpilloverDiD(vcov_type="conley", conley_lag_cutoff > 0, survey_design=...)` no-effective-PSU serial Bartlett HAC. Wave E.2 follow-up ships the panel-block composition when an effective PSU exists (explicit `survey_design.psu` OR injected via `cluster=<col>` per `_inject_cluster_as_psu`). Weights-only / strata-only survey designs WITHOUT a cluster fallback raise `NotImplementedError` at `SpilloverDiD.fit` post-resolution because under the pseudo-PSU = obs-index fallback each pseudo-PSU appears in exactly one period — the per-PSU serial cross-period loop would silently contribute zero. Fix would either derive a unit-level serial fallback for no-PSU designs (mixes IF allocators with the pseudo-PSU spatial term — needs methodology work) or route the serial loop through `conley_unit` with explicit documentation of the IF-allocator asymmetry. Regression goldens vs the effective-PSU shipped path. | `spillover.py::SpilloverDiD.fit`, `two_stage.py::_compute_stratified_serial_bartlett_meat` | follow-up (Wave E.2 follow-up tail) | Low |
-| `SpilloverDiD(ring_method="count")` extension. Currently only the nearest-treated-ring specification is exposed. Count-of-treated-in-ring (paper Section 3.2 end) is methodologically supported by Butts but re-introduces functional-form dependence; expose with an explicit kwarg gate and documentation warning. | `spillover.py::SpilloverDiD.fit` | follow-up | Low |
-| `SpilloverDiD` data-driven `d_bar` selection (Butts 2021b / Butts 2023 JUE Insight cross-validation). | `spillover.py::SpilloverDiD` | follow-up | Low |
-| `SpilloverDiD` sparse cKDTree path for the staggered nearest-treated-distance helper (mirrors the static helper's sparse branch). Currently `_compute_nearest_treated_distance_staggered` always builds dense `(n_units, n_treated_by_onset)` pairwise distance matrices per cohort; on large staggered panels with many cohorts this is avoidable memory/runtime. Add a sparse k-d-tree branch analogous to `_compute_nearest_treated_distance_sparse`, gated on `n > _CONLEY_SPARSE_N_THRESHOLD`. | `spillover.py::_compute_nearest_treated_distance_staggered` | follow-up (Wave B) | Low |
-| `SpilloverDiDResults` in `DiagnosticReport` dispatch tables. Wave C event-study emits a TwoStageDiD-compatible `event_study_effects: Dict[int, Dict]` alias that `plot_event_study` consumes via the new `reference_period` attribute fallback in `_extract_plot_data`, but `SpilloverDiDResults` is NOT registered in `DiagnosticReport`'s `_APPLICABILITY` / `_PT_METHOD` tables — so `DiagnosticReport(spillover_result)` doesn't currently route to event-study diagnostics. Registering requires (a) deciding which diagnostics apply (parallel trends, pre-trends power, heterogeneity, design-effect) AND (b) adding an end-to-end test. | `diff_diff/diagnostic_report.py::_APPLICABILITY`, `_PT_METHOD` | follow-up (Wave C) | Low |
-| `TwoStageDiD` paper-permitted estimand variants not exposed (Gardner 2022): the **Eq. (5) P̄-period-average** estimand (duration-restricted Stage-2 sample) and the **fn. 8 full-sample first-stage** variant (treatment-status×period interactions in Stage 1). Both are valid modifications described in the paper but have no public parameter (`get_params()` exposes neither; Stage 1 is always untreated-only). Documented as ⚠️ in `docs/methodology/papers/gardner-2022-review.md`; surface as `estimand=`/`first_stage=` options if a use case arises. | `diff_diff/two_stage.py` | two-stage-validation follow-up | Low |
-
-#### Performance
-
-| Issue | Location | PR | Priority |
-|-------|----------|----|----------|
-| ImputationDiD conservative-variance projection (`_compute_v_untreated_with_covariates`) rebuilds A0/A1 and refactorizes A0'WA0 for EVERY estimand target (overall, each event-study horizon, each group, and the bootstrap precompute) — now including the FE-only path, after PR-B routed it through the exact projection (was an O(n) closed form). A0'WA0 is target-invariant (depends only on the design + survey weights, not the per-target w); cache the design + a single factorization per `fit()` and solve only the target-specific RHS A1'w. | `imputation.py` | #141 | Low |
-| Rust faer SVD ndarray-to-faer conversion overhead (minimal vs SVD cost) | `rust/src/linalg.rs:67` | #115 | Low |
-| **Won't-fix — not bit-identically achievable (verified 2026-06-01).** The proposed `bread_inv` reuse / "factor `(X'WX)` once, reuse across HC2/HC2-BM" cannot be done **bit-identically**, which is the bar for a pure perf refactor of the inference path (no SE may move at all). The internal bread operations solve against *different* right-hand sides (`X.T` for hat-diagonals, `eye` for classical/CR2, `meat`+`temp.T` for the sandwich, `contrasts` for BM-DOF); only **same-RHS** results are bit-reusable. Measured (numpy 2.4.5): `scipy.linalg.lu_solve(lu_factor(A), B)` differs from `np.linalg.solve(A, B)` by up to 6.4e-15 (only 32/900 bit-equal — `dgesv` fuses factor+solve and rounds differently from a separate `dgetrf`+`dgetrs`); the `inv(A) @ meat @ inv(A)` sandwich differs from the current double-`solve` by up to 1.24e-14. Both are **nonzero → not bit-identical** — and note both sit *below* the affected goldens' actual tolerances (the HC2/HC2-BM/CR2 asserts are atol 1e-12/1e-10, e.g. `test_methodology_wls_cr2.py::TestUnweightedRegressionStillBitEqual` at 1e-12; the atol=1e-14 checks in `test_linalg_hc2_bm.py` are HC1 default-vs-explicit *dispatch*-equality sentinels, not this path), so a broad reuse would silently shift SEs at ~1e-14 *without* tripping the suite, which is exactly what the bit-identity bar exists to prevent. `np.linalg.solve(A, eye) == np.linalg.inv(A)` IS bit-identical (and raises the same `LinAlgError`) but swapping saves nothing. The *only* genuine bit-identical redundancy is one duplicated `solve(bread, X.T)` (hat-diagonals + the DOF `H`-build) in the unweighted one-way `hc2_bm`+`return_dof` path — an O(k²n) solve dwarfed by that path's dense `(n×n)` `M=I−H` construction and its O(n²k)/O(n²m) per-contrast quadratic forms (per the `_compute_bm_dof_from_contrasts` unweighted-branch cost model), so the achievable saving is negligible. | `linalg.py::compute_robust_vcov` | Phase 1a | Low |
-| MPD cluster+hc2_bm path computes CR2 precomputes twice — once via `solve_ols` → `_compute_cr2_bm` for vcov + per-coefficient DOF, then again via `_compute_cr2_bm_contrast_dof` from `MultiPeriodDiD.fit()` for the post-period-average contrast DOF. Both rebuild `H = X bread_inv X'`, the residual-maker `M`, and the per-cluster `A_g = (I - H_gg)^{-1/2}` matrices. O(n²k) redundant work; acceptable for typical cluster-robust DiD panel sizes (n ≤ a few thousand). Fix would plumb the contrast DOF through the existing CR2 vcov path (intrusive API change) or share the precomputes via a cached helper. | `linalg.py::_compute_cr2_bm_contrast_dof`, `estimators.py::MultiPeriodDiD.fit` | follow-up | Low |
-| Rust-backend HC2 implementation. Current Rust path only supports HC1; HC2 and CR2 Bell-McCaffrey fall through to the NumPy backend. For large-n fits this is noticeable. | `rust/src/linalg.rs` | Phase 1a | Low |
-| CR2 Bell-McCaffrey DOF uses a naive `O(n² k)` per-coefficient loop over cluster pairs. Pustejovsky-Tipton (2018) Appendix B has a scores-based formulation that avoids the full `n × n` `M` matrix. Switch when a user hits a large-`n` cluster-robust design. | `linalg.py::_compute_cr2_bm` | Phase 1a | Low |
-| `SyntheticControl` retains a full `_SyntheticControlFitSnapshot` (pivoted outcome/predictor panels) on EVERY fit to support the opt-in `in_space_placebo()`, so callers who never run the placebo still pay O(units × periods × predictor-vars) memory (same as `SyntheticDiD`'s always-on snapshot for `in_time_placebo`). Store a compact array/index representation instead of per-variable DataFrames, or build the snapshot lazily on first placebo call (would need to retain the source data, ~same cost). | `synthetic_control.py` snapshot build, `synthetic_control_results.py::_SyntheticControlFitSnapshot` | follow-up | Low |
-| Wild cluster bootstrap CI inversion calls `_t_star(r)` ~O(100) times (outward bracketing + bisection per endpoint), and each call materializes a fresh `(B × n)` `y_star` matrix plus the `(k × B)` refit and `(n × B)` residual arrays. For large panels or large `n_bootstrap` this allocation churn is noticeable. The bootstrap is for the few-cluster regime (small `B` when enumerated; `n` typically modest), so it is acceptable today; if a large-`n`/large-`B` user hits it, chunk `_t_star` over bootstrap draws or precompute the `r`-independent cluster-level pieces (the restricted residuals are linear in `r`) so each inversion evaluation avoids rebuilding the full `B × n` matrix. | `diff_diff/utils.py::wild_bootstrap_se._t_star` | #543 | Low |
-
-#### Testing/Docs
-
-| Issue | Location | PR | Priority |
-|-------|----------|----|----------|
-| ImputationDiD covariate-path variance lacks dedicated R `didimputation` parity / hand-calc. The PR-B FE-design correction (keep all unit dummies) affects the covariate projection too, but only the no-covariate staggered panel is R-parity'd (the covariate path shares the same validated projection code and passes the full suite). Add a covariate (time-varying X) R golden asserting overall/event-study SE parity, or a small dense-design hand-calc for the covariate projection. | `tests/test_methodology_imputation.py`, `benchmarks/R/generate_didimputation_golden.R` | imputation-validation follow-up | Low |
-| Port the CI `<notebook-prose>` extraction into the reviewer-eval harness so `docs/tutorials/*.ipynb` cases (currently guarded out of `verify-corpus`/`run`) can be reviewed with CI-equivalent context | `tools/reviewer-eval/adapters/ci_prompt.py` | local-review | Low |
-| **Premise corrected — no CI impact (verified 2026-06-07).** The "slow CI" motivation does not hold: no CI workflow installs R (no `setup-r` / `r-lib/actions` / `fixest` / `r-base` install anywhere in `.github/workflows/`), so every R-parity test skips in CI behind a per-file availability gate (`fixest_available` in twfe, `_check_r_contdid()` in continuous_did, `require_r` / `r_available` in `conftest.py`, etc.) — consolidating `Rscript` spawns yields zero CI speedup. The originally-cited file already session-caches its R fits: `test_methodology_twfe.py` exposes `r_twfe_results` / `r_twfe_results_with_covariate` as `scope="session"` fixtures, so each R model runs once per session, not once per test. The only residual is a LOCAL-dev micro-optimization for developers who have R installed: `test_methodology_continuous_did.py` (the `_run_r_contdid` helper plus three standalone inline `Rscript` calls) and `test_methodology_callaway.py` (`_run_r_estimation` called inline in three test methods, plus `_get_r_mpdta_and_results` re-run by the MPDTA R-parity tests) re-spawn `library(...)` per call with no session-level result cache. Applying the twfe session-fixture pattern there would speed local R-parity runs only. Low value; retained as a local-dev note. | `tests/test_methodology_continuous_did.py`, `tests/test_methodology_callaway.py` | #139 | Low |
-| CS R helpers hard-code `xformla = ~ 1`; no covariate-adjusted R benchmark for IRLS path | `tests/test_methodology_callaway.py` | #202 | Low |
-| Validating the `.txt` AI guides (`diff_diff/guides/llms-full.txt`, `llms-practitioner.txt`) as executable snippets is **not low-lift** (re-scoped 2026-06-01): of their ~112 fenced Python blocks only ~20% are standalone-runnable — the rest are API-signature references (`Foo(param: type = default)` pseudo-signatures that are `SyntaxError` by design), context fragments (e.g. `results.att` on an undefined `results`), or dataset-shape-specific blocks. The guides are reference documentation, not runnable examples; a real implementation needs signature-block detection + a context/data skip-allowlist + per-snippet fixtures (multi-round curation), unlike the curated `.rst` files the existing smoke test covers. | `tests/test_doc_snippets.py` | #239 | Low |
-| `TestWorkflowDoesNotExecutePRHeadCode` (CodeQL #14 dismissal guard) does not model: `bash <script>` / `sh <script>` / `./<script>` / `source <script>` / `. <script>` direct shell-script execution; multi-line `python3 -c` bodies (line-by-line shlex can't reassemble across newlines — the workflow's 5 sanitizer bodies are exempt by invisibility); shell-variable-expansion indirection (`SCRIPT="$X"; python3 "$SCRIPT"`); `eval`; `find -exec`; `xargs -I {}`. Each represents a path by which PR-head bytes COULD execute without the test failing. The guard catches accidental regressions of common forms (16 tests covering pip/npm/cargo/maturin/etc. installs, python file exec, bash -c indirection with compound flags, env-var prefixes, line continuations, subshells/brace groups, single-line python -c, write-overwrites of allowlisted /tmp paths). Closing the residuals would require multi-line shell parsing with command-substitution awareness + script-execution allowlists — significant work for diminishing return given the dismissal's primary defense is the documented threat model on the alert and in `.github/workflows/ai_pr_review.yml` comment block. | `tests/test_openai_review.py`, `.github/workflows/ai_pr_review.yml` | #436 | Low |
-| Render `docs/methodology/REPORTING.md` and `docs/methodology/REGISTRY.md` as in-site Sphinx pages so cross-references can use `:doc:` instead of off-site GitHub `blob/main` URLs. Current state (#410 fix-audit-r2) restores navigable links via `blob/main`, but stable-docs readers can land on a different revision than the package version they are reading. Two viable paths: (a) add `myst-parser` to `docs/conf.py` extensions + docs extras and link with `:doc:`, or (b) convert both files to `.rst`. | `docs/conf.py`, `docs/api/business_report.rst`, `docs/api/diagnostic_report.rst`, `docs/tutorials/18_geo_experiments.ipynb`, `docs/tutorials/19_dcdh_marketing_pulse.ipynb` | follow-up | Low |
----
-
-### Prioritized Tech-Debt Backlog
-
-Ordered paydown view across the tables above. Tier A → D is by effort × risk, not severity — every item here already carries its own `Low / Medium` priority in the source-of-truth tables. The intent is to give a flat ordering to draw from wave-by-wave without re-litigating priority each time. Anchors point to the location reference of the originating row.
-
-#### Tier A — Quick wins (≤1 day, ≤3 CI rounds expected)
-
-_(No active items. The sole prior entry — the WooldridgeDiD method/outcome efficiency hint — has shipped; see CHANGELOG `## [Unreleased]` and REGISTRY §WooldridgeDiD "Nonlinear extensions".)_
-
-#### Tier B — Mid-size methodology (5-10 CI rounds expected, per memory cascade priors)
-
-- StaggeredTripleDifference R parity: commit CSV fixtures + add covariate-adjusted scenarios + aggregation-SE assertions (`tests/test_methodology_staggered_triple_diff.py`, `benchmarks/R/benchmark_staggered_triplediff.R`)
-- StaggeredTripleDifference: per-cohort group-effect SE WIF override for exact R `triplediff` match (`staggered_triple_diff.py`)
-- WooldridgeDiD: QMLE Stata-parity `qmle` weight type + Stata golden values (`wooldridge.py`, `linalg.py`, `tests/test_wooldridge.py`)
-- WooldridgeDiD: optional `weights="cohort_share"` on `aggregate()` (`wooldridge_results.py`)
-- HAD survey-design API consolidation: drop deprecated `survey=`/`weights=` kwargs (`had.py`, `had_pretests.py`; gated on next minor bump)
-- Survey-design resolution / collapse helper extraction across `continuous_did.py`, `efficient_did.py`, `stacked_did.py`
-- dCDH survey + backward-horizon `predict_het` allocator derivation: lift the warn-and-skip fallback at `_compute_heterogeneity_test` once the pre-period Binder TSL cell-period allocator is derived (currently the gate emits a `UserWarning` and falls back to forward-horizon-only heterogeneity under `survey_design + placebo + heterogeneity`) (`chaisemartin_dhaultfoeuille.py`, `docs/methodology/REGISTRY.md`)
-- Rust local-method solver path unification to `solve_wls_svd` + bootstrap-weight RNG parity audit (`rust/src/trop.rs`, `rust/src/bootstrap.rs`)
-- In-site Sphinx render of `REPORTING.md` and `REGISTRY.md` (`docs/conf.py` + `:doc:` link migration)
-
-#### Tier C — Heavy / derivation required
-
-- HonestDiD Δ^RM ARP conditional/hybrid confidence sets (`honest_did.py`)
-- Multi-absorb weighted demeaning: alternating-projection iteration for N>1 absorb + weights (`estimators.py`)
-- ImputationDiD dense `(A0'A0).toarray()` OOM: alternative dense fallback or richer sparse strategy (`imputation.py:1531`)
-- HAD mass-point `vcov_type ∈ {hc2, hc2_bm}`: 2SLS-specific leverage derivation (`had.py::_fit_mass_point_2sls`)
-- HAD repeated-cross-section identification path (`had.py::_validate_had_panel`)
-- HAD time-varying-dose event study estimator (`had.py::_validate_had_panel_event_study`)
-- Conley + `survey_design` (`linalg.py::_validate_vcov_args`, `conley.py`)
-- SyntheticDiD `vcov_type="conley"` (`synthetic_did.py::SyntheticDiD` — new analytical sandwich path OR spatial-block bootstrap)
-
-#### Tier D — Deferred / research (no active action planned)
-
-- HAD survey-aware support-endpoint test (`had_pretests.py::qug_test`; waits on literature — endpoint EVT × survey-aware functional CLT)
-- HAD joint cross-horizon analytical covariance / unweighted event-study sup-t band (low user demand)
-- HAD Phase 4.5 replicate-weight pretests (BRR/Fay/JK1/JKn/SDR composition derivation)
-- HAD Stute family Stata-bridge parity (no R `Stutetest` package exists publicly)
-- HAD `trends_lin × survey_design` weighted-slope derivation
-- Phase 1c lprobust follow-ups (`vce` modes, weight-aware auto-bandwidth DPI, multi-eval grid, clustered-DGP auto-bandwidth) — deferred to Phase 2+ of `bias_corrected_local_linear`
-- TestWorkflowDoesNotExecutePRHeadCode (CodeQL #14) residual bypass paths — diminishing return given documented threat model
-- All remaining `Low`-priority Performance and Testing/Docs rows (R-script-per-test local-dev caching, CS R covariate-adjusted IRLS benchmark, Rust faer SVD overhead, etc.)
-
----
-
 ### Standard Error Consistency
 
-`vcov_type` has subsumed the previously-proposed `se_type` knob. `DifferenceInDifferences` and `TwoWayFixedEffects` accept `vcov_type ∈ {"classical", "hc1", "hc2", "hc2_bm", "conley"}` (the validated set in `linalg.py::_VALID_VCOV_TYPES`); cluster-robust variance is obtained by passing `cluster=` alongside the heteroscedasticity kind (`hc1 + cluster` ⇒ CR1 Liang-Zeger; `hc2_bm + cluster` ⇒ CR2 Bell-McCaffrey, including the weighted path landed via the clubSandwich WLS-CR2 port; the N>1 absorbed-FE + weights composition remains gated by the open multi-absorb row in the table above); wild cluster bootstrap is a separate `inference="wild_bootstrap"` path on the same estimator. Threading `vcov_type` through the 8 standalone estimators (`CallawaySantAnna`, `SunAbraham`, `ImputationDiD`, `TwoStageDiD`, `TripleDifference`, `StackedDiD`, `WooldridgeDiD`, `EfficientDiD`) is **complete** as of Phase 1b; four of them (`CallawaySantAnna`, `TripleDifference`, `ImputationDiD`, `EfficientDiD`) are permanently narrow to `{"hc1"}` per their influence-function variance, and `TwoStageDiD` is likewise narrow because its Gardner GMM-corrected meat has no single cross-stage hat matrix for `classical`/`hc2`/`hc2_bm`. The per-estimator `vcov_type="conley"` extensions are tracked as follow-up rows in the table above: SunAbraham + WooldridgeDiD-OLS are **shipped** (within-transform conley via `solve_ols`); StackedDiD is deferred for a methodology reason (unit replication × spatial distance); the IF-based / GMM estimators have no reference implementation.
+`vcov_type` has subsumed the previously-proposed `se_type` knob. `DifferenceInDifferences`
+and `TwoWayFixedEffects` accept `vcov_type ∈ {classical, hc1, hc2, hc2_bm, conley}`
+(the validated set in `linalg.py::_VALID_VCOV_TYPES`); cluster-robust variance comes from
+`cluster=` alongside the heteroscedasticity kind (`hc1+cluster` ⇒ CR1 Liang-Zeger;
+`hc2_bm+cluster` ⇒ CR2 Bell-McCaffrey, including the weighted WLS-CR2 port; the N>1
+absorbed-FE + weights composition remains gated by the open multi-absorb row in Actionable);
+wild cluster bootstrap is the separate `inference="wild_bootstrap"` path. Threading
+`vcov_type` through the 8 standalone estimators is **complete** (Phase 1b); four
+(`CallawaySantAnna`, `TripleDifference`, `ImputationDiD`, `EfficientDiD`) are permanently
+narrow to `{hc1}` per their influence-function variance, and `TwoStageDiD` is likewise
+narrow (Gardner GMM meat has no single cross-stage hat matrix). The per-estimator
+`vcov_type="conley"` extensions: SunAbraham + WooldridgeDiD-OLS are **shipped**; the
+IF/GMM estimators are tracked in
+[Deferred → Paper-gated](#paper-gated--needs-methodology-derivation).
 
 ### Type Annotations
 
-Mypy reports 0 errors. All mixin `attr-defined` errors resolved via
-`TYPE_CHECKING`-guarded method stubs in bootstrap mixin classes.
+Mypy reports 0 errors. All mixin `attr-defined` errors resolved via `TYPE_CHECKING`-guarded
+method stubs in the bootstrap mixin classes.
 
-## Deprecated Code
+### Test Coverage
 
-Deprecated parameters still present for backward compatibility:
+Visualization tests skip when matplotlib / plotly are not installed (see
+`pytest.importorskip` markers in `tests/test_visualization*.py`).
 
-- `lambda_reg` and `zeta` in `SyntheticDiD` (`synthetic_did.py`)
-  - Deprecated in favor of `zeta_omega`/`zeta_lambda` parameters
-  - Remove in v4.0.0 (SemVer-safe: public kwarg removal requires a major bump)
+### Deprecated Code
 
----
+- `lambda_reg` and `zeta` in `SyntheticDiD` (`synthetic_did.py`) — deprecated in favor of
+  `zeta_omega` / `zeta_lambda`; remove in v4.0.0 (public kwarg removal requires a major bump).
 
-## Test Coverage
+### RuntimeWarnings — Apple Silicon M4 BLAS bug (numpy < 2.3)
 
-Visualization tests skip when matplotlib / plotly are not installed (see `pytest.importorskip` markers in `tests/test_visualization*.py`).
+Spurious RuntimeWarnings ("divide by zero", "overflow", "invalid value") are emitted by
+`np.matmul`/`@` on Apple Silicon M4 + macOS Sequoia with numpy < 2.3, for matrices with
+≥260 rows. They **do not affect correctness** (coefficients/fitted values are valid, designs
+full rank). Root cause: Apple's BLAS SME kernels corrupt the FP status register
+([numpy#28687](https://github.com/numpy/numpy/issues/28687),
+[#29820](https://github.com/numpy/numpy/issues/29820); fixed in numpy ≥ 2.3 via
+[PR #29223](https://github.com/numpy/numpy/pull/29223)). Not reproducible on M3, Intel, or
+Linux.
 
----
-
-## Honest DiD Improvements
-
-Enhancements for `honest_did.py`:
-
-- [ ] Improved C-LF implementation with direct optimization instead of grid search
-  (current implementation uses simplified FLCI approach with estimation uncertainty
-  adjustment; see `honest_did.py:947`)
-- [x] Support for CallawaySantAnnaResults (implemented in `honest_did.py:612-653`;
-  requires `aggregate='event_study'` when calling `CallawaySantAnna.fit()`)
-- [ ] Event-study-specific bounds for each post-period
-- [ ] Hybrid inference methods
-- [ ] Simulation-based power analysis for honest bounds
-
----
-
-## CallawaySantAnna Bootstrap Improvements
-
-- [ ] Consider aligning p-value computation with R `did` package (symmetric percentile method)
-
----
-
-## RuntimeWarnings in Linear Algebra Operations
-
-### Apple Silicon M4 BLAS Bug (numpy < 2.3)
-
-Spurious RuntimeWarnings ("divide by zero", "overflow", "invalid value") are emitted by `np.matmul`/`@` on Apple Silicon M4 + macOS Sequoia with numpy < 2.3. The warnings appear for matrices with ≥260 rows but **do not affect result correctness** — coefficients and fitted values are valid (no NaN/Inf), and the design matrices are full rank.
-
-**Root cause**: Apple's BLAS SME (Scalable Matrix Extension) kernels corrupt the floating-point status register, causing spurious FPE signals. Tracked in [numpy#28687](https://github.com/numpy/numpy/issues/28687) and [numpy#29820](https://github.com/numpy/numpy/issues/29820). Fixed in numpy ≥ 2.3 via [PR #29223](https://github.com/numpy/numpy/pull/29223).
-
-**Not reproducible** on M3, Intel, or Linux.
-
-- [ ] `linalg.py:162` - Warnings in fitted value computation (`X @ coefficients`)
-  - Caused by M4 BLAS bug, not extreme coefficient values
-  - Seen in test_prep.py during treatment effect recovery tests (n > 260)
-- [ ] `triple_diff.py:307,323` - Warnings in propensity score computation
-  - Occurs in IPW and DR estimation methods with covariates
-  - Related to logistic regression overflow in edge cases (separate from BLAS bug)
-
-- **Long-term:** Revert to `@` operator when numpy ≥ 2.3 becomes the minimum supported version.
-
----
-
-## Feature Gaps (from R `did` package comparison)
-
-Features in R's `did` package that block porting additional tests:
-
-| Feature | R tests blocked | Priority | Status |
-|---------|----------------|----------|--------|
-| Calendar time aggregation | 1 test in test-att_gt.R | Low | |
-
----
-
-## Performance Optimizations
-
-Potential future optimizations:
-
-- [ ] JIT compilation for bootstrap loops (numba)
-- [ ] Sparse matrix handling for large fixed effects
-
-### QR+SVD Redundancy in Rank Detection
-
-**Background**: The current `solve_ols()` implementation performs both QR (for rank detection) and SVD (for solving) decompositions on rank-deficient matrices. This is technically redundant since SVD can determine rank directly.
-
-**Current approach** (R-style, chosen for robustness):
-1. QR with pivoting for rank detection (`_detect_rank_deficiency()`)
-2. scipy's `lstsq` with 'gelsd' driver (SVD-based) for solving
-
-**Why we use QR for rank detection**:
-- QR with pivoting provides the canonical ordering of linearly dependent columns
-- R's `lm()` uses this approach for consistent dropped-column reporting
-- Ensures consistent column dropping across runs (SVD column selection can vary)
-
-**Potential optimization** (future work):
-- Skip QR when `rank_deficient_action="silent"` since we don't need column names
-- Use SVD rank directly in the Rust backend (already implemented)
-- Add `skip_rank_check` parameter for hot paths where matrix is known to be full-rank (implemented in v2.2.0)
-
-**Priority**: Low - the QR overhead is minimal compared to SVD solve, and correctness is more important than micro-optimization.
-
-### Incomplete `check_finite` Bypass
-
-**Background**: The `solve_ols()` function accepts a `check_finite=False` parameter intended to skip NaN/Inf validation for performance in hot paths where data is known to be clean.
-
-**Current limitation**: When `check_finite=False`, our explicit validation is skipped, but scipy's internal QR decomposition in `_detect_rank_deficiency()` still validates finite values. This means callers cannot fully bypass all finite checks.
-
-**Impact**: Minimal - the scipy check is fast and only affects edge cases where users explicitly pass `check_finite=False` with non-finite data (which would be a bug in their code anyway).
-
-**Potential fix** (future work):
-- Pass `check_finite=False` through to scipy's QR call (requires scipy >= 1.9.0)
-- Or skip `_detect_rank_deficiency()` entirely when `check_finite=False` and `_skip_rank_check=True`
-
-**Priority**: Low - this is an edge case optimization that doesn't affect correctness.
-
+- `linalg.py:162` — warnings in fitted-value computation (`X @ coefficients`); seen in
+  `test_prep.py` during treatment-effect recovery (n > 260).
+- `triple_diff.py:307,323` — warnings in propensity-score computation (IPW/DR with
+  covariates); logistic-regression overflow in edge cases (separate from the BLAS bug).
+- **Long-term:** revert to the `@` operator when numpy ≥ 2.3 becomes the minimum supported
+  version.
