@@ -866,7 +866,8 @@ class TestImputationVariance:
         assert results.overall_se > 0
 
     def test_sparse_solver_dense_fallback(self):
-        """Test that dense fallback produces finite SE when spsolve fails."""
+        """Test that dense fallback produces finite SE when the sparse
+        factorization fails."""
         import unittest.mock
 
         data = generate_test_data(n_units=80, n_periods=8, seed=42)
@@ -875,9 +876,9 @@ class TestImputationVariance:
 
         est = ImputationDiD()
 
-        # Monkey-patch spsolve to force fallback to dense lstsq
+        # Monkey-patch the sparse factorization to force the dense-lstsq fallback.
         with unittest.mock.patch(
-            "diff_diff.imputation.spsolve", side_effect=RuntimeError("test failure")
+            "diff_diff.imputation.sparse_factorized", side_effect=RuntimeError("test failure")
         ):
             results = est.fit(
                 data,
@@ -904,9 +905,11 @@ class TestImputationVariance:
         est = ImputationDiD()
 
         with unittest.mock.patch(
-            "diff_diff.imputation.spsolve", side_effect=RuntimeError("test failure")
+            "diff_diff.imputation.sparse_factorized", side_effect=RuntimeError("test failure")
         ):
-            with pytest.warns(UserWarning, match="sparse solve.*falling back to dense lstsq"):
+            with pytest.warns(
+                UserWarning, match="sparse factorization.*falling back to dense lstsq"
+            ):
                 est.fit(
                     data,
                     outcome="outcome",

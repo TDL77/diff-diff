@@ -24,12 +24,12 @@ IF-vs-sandwich taxonomy.
 """
 
 import warnings
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
 from scipy import sparse, stats
-from scipy.sparse.linalg import MatrixRankWarning, spsolve
+from scipy.sparse.linalg import factorized as sparse_factorized
 
 from diff_diff.imputation_bootstrap import ImputationDiDBootstrapMixin, _compute_target_weights
 from diff_diff.imputation_results import (  # noqa: F401 (re-export)
@@ -38,6 +38,30 @@ from diff_diff.imputation_results import (  # noqa: F401 (re-export)
 )
 from diff_diff.linalg import solve_ols
 from diff_diff.utils import safe_inference, warn_if_not_converged
+
+
+class _UntreatedProjection(NamedTuple):
+    """Cached, target-invariant pieces of the untreated imputation projection
+    ``v_untreated = -A_0 (A_0' [W] A_0)^{-1} A_1' w`` (BJS 2024 Theorem 3).
+
+    Within a single ``fit()`` the untreated design (``df_0``/``df_1``, covariates,
+    survey weights) is identical across every estimand target (overall ATT, each
+    event-study horizon, each group, and the bootstrap precompute) -- only the
+    treated aggregation ``weights`` (the RHS ``A_1' w``) vary. So ``A_0``, ``A_1``
+    and the factorization of ``A_0'[W]A_0`` are built once and reused across
+    targets (factorize-once / solve-many), mirroring the TwoStageDiD GMM-sandwich
+    ``sparse_factorized`` pattern.
+    """
+
+    A_0: sparse.csr_matrix
+    A_1: sparse.csr_matrix
+    # solver(rhs) -> z; None when the factorization was exactly singular (the
+    # solve path then routes to a dense lstsq fallback).
+    solver: Optional[Callable[[np.ndarray], np.ndarray]]
+    A0tA0_csc: sparse.csc_matrix  # retained for the dense-lstsq fallback
+    survey_weights_0: Optional[np.ndarray]
+    singular: bool
+
 
 # =============================================================================
 # Main Estimator
@@ -388,6 +412,13 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         omega_0_mask = ~df["_treated"]
         omega_1_mask = df["_treated"]
 
+        # Per-fit cache of the target-invariant untreated-projection design +
+        # factorization, shared across every estimand target (overall ATT, each
+        # event-study horizon, each group) AND the bootstrap precompute. A
+        # fit-time local (not self.* state) so fit() stays idempotent; see
+        # _compute_cluster_psi_sums for the key derivation.
+        proj_cache: Dict[Any, _UntreatedProjection] = {}
+
         n_omega_0 = int(omega_0_mask.sum())
         n_omega_1 = int(omega_1_mask.sum())
 
@@ -569,6 +600,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
                     kept_cov_mask=kept_cov_mask,
                     survey_weights=survey_weights,
                     resolved_survey=(resolved_survey if not _uses_replicate_imp else None),
+                    proj_cache=proj_cache,
                 )
 
         # Survey degrees of freedom for t-distribution inference
@@ -607,6 +639,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
                 survey_weights=survey_weights,
                 survey_df=_survey_df,
                 resolved_survey=(resolved_survey if not _uses_replicate_imp else None),
+                proj_cache=proj_cache,
             )
 
         if aggregate in ("group", "all"):
@@ -629,6 +662,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
                 survey_weights=survey_weights,
                 survey_df=_survey_df,
                 resolved_survey=(resolved_survey if not _uses_replicate_imp else None),
+                proj_cache=proj_cache,
             )
 
         # Replicate variance: derive keys from actual outputs (after filtering)
@@ -823,6 +857,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
                     balance_e=balance_e,
                     survey_weights_0=_sw_0,
                     survey_weights_1=_sw_1,
+                    proj_cache=proj_cache,
                 )
             except Exception as e:
                 warnings.warn(
@@ -1312,6 +1347,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         cluster_var: str,
         kept_cov_mask: Optional[np.ndarray] = None,
         survey_weights_0: Optional[np.ndarray] = None,
+        proj_cache: Optional[Dict[Any, _UntreatedProjection]] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute cluster-level influence function sums (Theorem 3).
@@ -1341,17 +1377,40 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         # observations are removed), which biased the analytical SE downward
         # (~27% on the parity panel). The projection matches R `didimputation`
         # exactly -- see tests/test_methodology_imputation.py::TestImputationDiDParityR.
-        v_untreated = self._compute_v_untreated_with_covariates(
-            df_0,
-            df_1,
-            unit,
-            time,
-            covariates if covariates is not None else [],
-            weights,
-            delta_hat,
-            kept_cov_mask=kept_cov_mask,
-            survey_weights_0=survey_weights_0,
-        )
+        # Build the target-invariant projection design + factorization once per
+        # fit() (cached in proj_cache), then solve only the target-specific RHS.
+        # survey_weights is DELIBERATELY excluded from the key: the cache is a
+        # fit-LOCAL dict, and within one fit() survey_weights is a single fixed
+        # object, so the masks deterministically map to one sw_0 =
+        # survey_weights[omega_0_mask]. The masks + covariates + kept_cov_mask
+        # therefore FULLY identify the design (sw_0 itself is a fresh-sliced array
+        # per call -- keying on its id() would miss every time and balloon the
+        # cache to 1+H+G full A_0/A_1/factorization entries). id()-keys are safe:
+        # the masks are fit() locals alive for the whole fit and the cache is a
+        # fit-local dict, so no cross-fit leak / id reuse.
+        cov_list = covariates if covariates is not None else []
+        ctx: Optional[_UntreatedProjection] = None
+        if proj_cache is not None:
+            key = (
+                id(omega_0_mask),
+                id(omega_1_mask),
+                tuple(cov_list),
+                kept_cov_mask.tobytes() if kept_cov_mask is not None else None,
+            )
+            ctx = proj_cache.get(key)
+        if ctx is None:
+            ctx = self._build_untreated_projection(
+                df_0,
+                df_1,
+                unit,
+                time,
+                cov_list,
+                kept_cov_mask=kept_cov_mask,
+                survey_weights_0=survey_weights_0,
+            )
+            if proj_cache is not None:
+                proj_cache[key] = ctx
+        v_untreated = self._solve_untreated_v(ctx, weights)
 
         # ---- Compute auxiliary model residuals (Equation 8) ----
         epsilon_treated = self._compute_auxiliary_residuals_treated(
@@ -1411,6 +1470,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         kept_cov_mask: Optional[np.ndarray] = None,
         survey_weights: Optional[np.ndarray] = None,
         resolved_survey=None,
+        proj_cache: Optional[Dict[Any, _UntreatedProjection]] = None,
     ) -> float:
         """
         Compute conservative clustered variance (Theorem 3, Equation 7).
@@ -1451,6 +1511,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
             cluster_var=cluster_var,
             kept_cov_mask=kept_cov_mask,
             survey_weights_0=sw_0,
+            proj_cache=proj_cache,
         )
 
         if resolved_survey is not None:
@@ -1465,33 +1526,34 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         sigma_sq = float((cluster_psi_sums**2).sum())
         return np.sqrt(max(sigma_sq, 0.0))
 
-    def _compute_v_untreated_with_covariates(
+    def _build_untreated_projection(
         self,
         df_0: pd.DataFrame,
         df_1: pd.DataFrame,
         unit: str,
         time: str,
         covariates: List[str],
-        weights: np.ndarray,
-        delta_hat: Optional[np.ndarray],
         kept_cov_mask: Optional[np.ndarray] = None,
         survey_weights_0: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
+    ) -> _UntreatedProjection:
         """
-        Compute the untreated observation weights v_it via the exact imputation
-        projection. This is the GENERAL path -- used for both the FE-only and the
-        covariate cases (an empty ``covariates`` list builds a pure two-way-FE
-        design). The name is retained for history; ``n_cov == 0`` is the FE-only
-        path.
+        Build the target-INVARIANT pieces of the exact imputation projection
+        ``v_untreated = -A_0 (A_0' [W] A_0)^{-1} A_1' w_treated`` and factorize the
+        normal-equations matrix once. The result is cached per ``fit()`` (see
+        ``_compute_cluster_psi_sums``) and reused across all estimand targets;
+        only the target-specific RHS ``A_1' w`` is solved per target in
+        ``_solve_untreated_v``.
 
-        Uses the projection: v_untreated = -A_0 (A_0'A_0)^{-1} A_1' w_treated.
-        When survey_weights_0 is provided, uses the weighted normal equations
-        v_untreated = -A_0 (A_0' W A_0)^{-1} A_1' w_treated, then multiplies the
-        result by the per-observation survey weight (the WLS projection's `W_0`).
+        This is the GENERAL path -- used for both the FE-only and the covariate
+        cases (an empty ``covariates`` list builds a pure two-way-FE design;
+        ``n_cov == 0`` is the FE-only path). When survey_weights_0 is provided,
+        uses the weighted normal equations ``A_0' W A_0`` (the per-observation
+        survey weight is reapplied to the solved v in ``_solve_untreated_v``).
 
         Uses scipy.sparse for FE dummy columns to reduce memory from O(N*(U+T))
-        to O(N) for the FE portion. A singular A_0'A_0 (rank-deficient Omega_0)
-        falls back to a dense least-squares solve with a UserWarning.
+        to O(N) for the FE portion. An exactly singular ``A_0'[W]A_0`` makes
+        ``sparse_factorized`` raise ``RuntimeError``; we emit a UserWarning (once
+        per fit) and record ``singular=True`` so the solve routes to dense lstsq.
         """
         # Exclude rank-deficient covariates from design matrices
         if kept_cov_mask is not None and not np.all(kept_cov_mask):
@@ -1548,48 +1610,80 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         A_0 = _build_A_sparse(df_0, units_0, times_0)
         A_1 = _build_A_sparse(df_1, units_1, times_1)
 
-        # Compute A_1' w (sparse.T @ dense -> dense)
-        A1_w = A_1.T @ weights  # shape (p,)
-
-        # Solve (A_0' [W] A_0) z = A_1' w using sparse direct solver
-        # When survey weights present, use weighted normal equations A_0' W A_0
+        # Form (A_0' [W] A_0). When survey weights present, use the weighted
+        # normal equations A_0' W A_0.
         if survey_weights_0 is not None:
             A0tA0_sparse = A_0.T @ A_0.multiply(survey_weights_0[:, None])
         else:
             A0tA0_sparse = A_0.T @ A_0  # stays sparse
+        A0tA0_csc = A0tA0_sparse.tocsc()
+
+        # Factorize once (factorize-once / solve-many). An exactly singular
+        # matrix makes sparse_factorized raise RuntimeError -- the same condition
+        # that previously surfaced as spsolve's MatrixRankWarning -> non-finite
+        # solution. Mirror the TwoStageDiD GMM-sandwich pattern: warn once and
+        # fall back to dense lstsq per target. (Bit-identical to the prior
+        # per-target spsolve for a single dense RHS -- both use the SuperLU
+        # simple driver with the same defaults.)
         try:
-            with warnings.catch_warnings():
-                # On a singular A_0'A_0, SciPy's spsolve does NOT raise -- it emits
-                # a MatrixRankWarning and returns a non-finite (NaN) solution.
-                # Promote that warning to an error so the dense-lstsq fallback below
-                # actually triggers under production warning filters (not only under
-                # pytest's filter), instead of letting NaN v_it silently zero valid
-                # influence-function contributions downstream (np.nan_to_num).
-                warnings.filterwarnings("error", category=MatrixRankWarning)
-                z = spsolve(A0tA0_sparse.tocsc(), A1_w)
-            if not np.all(np.isfinite(z)):
-                # Defensive: a non-finite solution that slipped through without a
-                # MatrixRankWarning still routes to the fallback.
-                raise RuntimeError("spsolve returned a non-finite solution")
-        except Exception as exc:
-            # Fallback to dense lstsq if sparse solver fails (e.g., singular matrix).
+            solver: Optional[Callable[[np.ndarray], np.ndarray]] = sparse_factorized(A0tA0_csc)
+            singular = False
+        except RuntimeError as exc:
             # Silent-failure audit axis C: emit a UserWarning on fallback instead
-            # of swallowing the error.
+            # of swallowing the error. Keep the "dense lstsq" substring (asserted
+            # by tests).
             warnings.warn(
-                "ImputationDiD variance: sparse solve of (A_0' [W] A_0) z = A_1' w "
+                "ImputationDiD variance: sparse factorization of (A_0' [W] A_0) "
                 f"failed ({type(exc).__name__}); falling back to dense lstsq. This "
                 "may indicate a rank-deficient or near-singular normal-equations "
                 "matrix and variance estimates may be less reliable.",
                 UserWarning,
                 stacklevel=2,
             )
-            A0tA0_dense = A0tA0_sparse.toarray()
-            z, _, _, _ = np.linalg.lstsq(A0tA0_dense, A1_w, rcond=None)
+            solver = None
+            singular = True
+
+        return _UntreatedProjection(
+            A_0=A_0,
+            A_1=A_1,
+            solver=solver,
+            A0tA0_csc=A0tA0_csc,
+            survey_weights_0=survey_weights_0,
+            singular=singular,
+        )
+
+    def _solve_untreated_v(self, ctx: _UntreatedProjection, weights: np.ndarray) -> np.ndarray:
+        """
+        Solve the target-SPECIFIC RHS of the untreated imputation projection using
+        the cached design + factorization in ``ctx``:
+        ``v_untreated = -[W_0] A_0 (A_0'[W]A_0)^{-1} A_1' w_treated``.
+        """
+        A1_w = ctx.A_1.T @ weights  # (p,)
+
+        if ctx.singular:
+            # Factorization was singular at build time (warned once already).
+            z, _, _, _ = np.linalg.lstsq(ctx.A0tA0_csc.toarray(), A1_w, rcond=None)
+        else:
+            assert ctx.solver is not None
+            z = ctx.solver(A1_w)
+            if not np.all(np.isfinite(z)):
+                # Defensive, target-specific: a non-finite solve on an otherwise
+                # factorizable matrix routes this RHS to dense lstsq. Warn per
+                # target (silent-failure audit axis C) -- distinct from the
+                # once-per-fit build-time singular warning.
+                warnings.warn(
+                    "ImputationDiD variance: sparse solve of (A_0' [W] A_0) z = "
+                    "A_1' w returned a non-finite solution; falling back to dense "
+                    "lstsq for this target. Variance estimates may be less reliable.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                z, _, _, _ = np.linalg.lstsq(ctx.A0tA0_csc.toarray(), A1_w, rcond=None)
 
         # v_untreated = -[W_0] A_0 z (WLS projection requires per-obs weight)
-        v_untreated = -(A_0 @ z)
-        if survey_weights_0 is not None:
-            v_untreated = v_untreated * survey_weights_0
+        v_untreated = -(ctx.A_0 @ z)
+        if ctx.survey_weights_0 is not None:
+            v_untreated = v_untreated * ctx.survey_weights_0
         return v_untreated
 
     def _compute_auxiliary_residuals_treated(
@@ -1758,6 +1852,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         survey_weights: Optional[np.ndarray] = None,
         survey_df: Optional[int] = None,
         resolved_survey=None,
+        proj_cache: Optional[Dict[Any, _UntreatedProjection]] = None,
     ) -> Dict[int, Dict[str, Any]]:
         """Aggregate treatment effects by event-study horizon."""
         df_1 = df.loc[omega_1_mask]
@@ -1970,6 +2065,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
                 kept_cov_mask=kept_cov_mask,
                 survey_weights=survey_weights,
                 resolved_survey=resolved_survey,
+                proj_cache=proj_cache,
             )
 
             t_stat, p_value, conf_int = safe_inference(effect, se, alpha=self.alpha, df=survey_df)
@@ -2033,6 +2129,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         survey_weights: Optional[np.ndarray] = None,
         survey_df: Optional[int] = None,
         resolved_survey=None,
+        proj_cache: Optional[Dict[Any, _UntreatedProjection]] = None,
     ) -> Dict[Any, Dict[str, Any]]:
         """Aggregate treatment effects by cohort."""
         df_1 = df.loc[omega_1_mask]
@@ -2105,6 +2202,7 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
                 kept_cov_mask=kept_cov_mask,
                 survey_weights=survey_weights,
                 resolved_survey=resolved_survey,
+                proj_cache=proj_cache,
             )
 
             t_stat, p_value, conf_int = safe_inference(effect, se, alpha=self.alpha, df=survey_df)

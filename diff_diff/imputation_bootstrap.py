@@ -91,6 +91,7 @@ class ImputationDiDBootstrapMixin:
             cluster_var: str,
             kept_cov_mask: Optional[np.ndarray] = None,
             survey_weights_0: Optional[np.ndarray] = None,
+            proj_cache: Optional[Dict[Any, Any]] = None,
         ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]: ...
 
         @staticmethod
@@ -132,6 +133,7 @@ class ImputationDiDBootstrapMixin:
         balance_e: Optional[int],
         survey_weights_0: Optional[np.ndarray] = None,
         survey_weights_1: Optional[np.ndarray] = None,
+        proj_cache: Optional[Dict[Any, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Pre-compute cluster-level influence function sums for each bootstrap target.
@@ -141,8 +143,10 @@ class ImputationDiDBootstrapMixin:
         bootstrap then perturbs these psi sums with multiplier weights
         (rademacher/mammen/webb; configurable via ``bootstrap_weights``).
 
-        Computational cost scales with the number of aggregation targets, since
-        each target requires its own v_untreated computation (weight-dependent).
+        The per-target v_untreated computation reuses the cached, target-invariant
+        untreated-projection factorization via ``proj_cache`` (shared with the
+        analytical path of the same ``fit()``), so the design + factorization is
+        built once rather than once per target.
         """
         result: Dict[str, Any] = {}
 
@@ -162,6 +166,7 @@ class ImputationDiDBootstrapMixin:
             cluster_var=cluster_var,
             kept_cov_mask=kept_cov_mask,
             survey_weights_0=survey_weights_0,
+            proj_cache=proj_cache,
         )
 
         # Overall ATT
