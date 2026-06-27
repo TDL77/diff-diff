@@ -8,10 +8,15 @@ are in :mod:`diff_diff.bootstrap_utils`.
 
 import warnings
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
+from diff_diff.bootstrap_chunking import (
+    compute_block_size,
+    iter_survey_multiplier_weight_blocks,
+    iter_weight_blocks,
+)
 from diff_diff.bootstrap_utils import (
     compute_bootstrap_pvalue as _compute_bootstrap_pvalue_func,
 )
@@ -23,12 +28,6 @@ from diff_diff.bootstrap_utils import (
 )
 from diff_diff.bootstrap_utils import (
     compute_percentile_ci as _compute_percentile_ci_func,
-)
-from diff_diff.bootstrap_utils import (
-    generate_bootstrap_weights_batch as _generate_bootstrap_weights_batch,
-)
-from diff_diff.bootstrap_utils import (
-    generate_survey_multiplier_weights_batch as _generate_survey_multiplier_weights_batch,
 )
 
 if TYPE_CHECKING:
@@ -347,9 +346,20 @@ class CallawaySantAnnaBootstrapMixin:
         _bootstrap_cluster_variance_unidentified = False
 
         if _use_survey_bootstrap:
-            # PSU-level multiplier weights
-            psu_weights, psu_ids = _generate_survey_multiplier_weights_batch(
-                self.n_bootstrap, resolved_survey_unit, self.bootstrap_weights, rng
+            # PSU-level multiplier weights, generated AND expanded one draw-block
+            # at a time so the (n_bootstrap, n_units) matrix is never built in
+            # full. This is the dominant allocation at large n_units, including
+            # the default unit-level bootstrap (cluster=None, equivalently
+            # cluster="unit": each unit its own PSU, n_psu == n_units).
+            # Unstratified designs tile the generation; stratified designs (few
+            # PSUs) fall back to full generation + sliced blocks.
+            _block_size = compute_block_size(n_units, self.n_bootstrap)
+            psu_ids, _psu_blocks = iter_survey_multiplier_weight_blocks(
+                self.n_bootstrap,
+                resolved_survey_unit,
+                self.bootstrap_weights,
+                rng,
+                block_size=_block_size,
             )
             if len(psu_ids) < 2:
                 import warnings as _warnings
@@ -377,44 +387,35 @@ class CallawaySantAnnaBootstrapMixin:
                 # Each unit is its own PSU — identity mapping
                 unit_to_psu_col = np.arange(n_units)
 
-            # Expand PSU weights to unit level for per-(g,t) perturbation
-            # Shape: (n_bootstrap, n_units)
-            all_bootstrap_weights = psu_weights[:, unit_to_psu_col]
+            # When each unit is its own PSU (e.g. cluster="unit"), the PSU block
+            # is already unit-aligned, so the fancy-index expansion is an
+            # identity permutation whose only effect is a needless full-block
+            # copy (doubling live block memory). Detect that once and skip it.
+            _psu_is_identity = len(psu_ids) == n_units and bool(
+                np.array_equal(unit_to_psu_col, np.arange(n_units))
+            )
+
+            # Expand each PSU-weight block to unit level on demand; the full
+            # (n_bootstrap, n_units) expansion is never materialized at once.
+            def _weight_blocks() -> Iterator[Tuple[int, np.ndarray]]:
+                for _cs, _psu_block in _psu_blocks:
+                    if _psu_is_identity:
+                        yield _cs, _psu_block
+                    else:
+                        yield _cs, _psu_block[:, unit_to_psu_col]
+
+            weight_blocks: Iterator[Tuple[int, np.ndarray]] = _weight_blocks()
         else:
-            # Standard unit-level weights (no survey or weights-only)
-            all_bootstrap_weights = _generate_bootstrap_weights_batch(
+            # Standard unit-level weights (no survey or weights-only), generated
+            # one row-block at a time directly at unit width.
+            weight_blocks = iter_weight_blocks(
                 self.n_bootstrap, n_units, self.bootstrap_weights, rng
             )
 
-        # Vectorized bootstrap ATT(g,t) computation
-        # Compute all bootstrap ATTs for all (g,t) pairs using matrix operations
-        bootstrap_atts_gt = np.zeros((self.n_bootstrap, n_gt))
-
-        for j in range(n_gt):
-            treated_idx = gt_treated_indices[j]
-            control_idx = gt_control_indices[j]
-            treated_inf = gt_treated_inf[j]
-            control_inf = gt_control_inf[j]
-
-            # Extract weights for this (g,t)'s units across all bootstrap iterations
-            # Shape: (n_bootstrap, n_treated) and (n_bootstrap, n_control)
-            treated_weights = all_bootstrap_weights[:, treated_idx]
-            control_weights = all_bootstrap_weights[:, control_idx]
-
-            # Vectorized perturbation: matrix-vector multiply
-            # Shape: (n_bootstrap,)
-            # Suppress RuntimeWarnings for edge cases (small samples, extreme weights)
-            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-                perturbations = treated_weights @ treated_inf + control_weights @ control_inf
-
-            # Let non-finite values propagate - they will be handled at statistics computation
-            bootstrap_atts_gt[:, j] = original_atts[j] + perturbations
-
-        # Vectorized overall ATT using combined IF (includes WIF)
-        # Shape: (n_bootstrap,)
-        if skip_overall_aggregation:
-            bootstrap_overall = np.full(self.n_bootstrap, np.nan)
-        else:
+        # Pre-compute the overall combined IF once (reused across every block).
+        # None exactly when the overall aggregation is skipped.
+        overall_combined_if: Optional[np.ndarray] = None
+        if not skip_overall_aggregation:
             # Use combined IF (standard IF + WIF) for proper bootstrap
             post_gt_pairs = [gt_pairs[i] for i in post_treatment_indices]
             post_groups = np.array([gt_pairs[i][0] for i in post_treatment_indices])
@@ -431,38 +432,69 @@ class CallawaySantAnnaBootstrapMixin:
                 global_unit_to_idx=unit_to_idx,
                 n_global_units=n_units,
             )
-            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-                bootstrap_overall = original_overall + all_bootstrap_weights @ overall_combined_if
 
-        # Vectorized event study aggregation using combined IFs
-        # Non-finite values handled at statistics computation stage
+        # Pre-allocate the small bootstrap output arrays. Only these (sized in
+        # n_bootstrap, not n_units) persist; each weight block is discarded once
+        # its rows are written, capping peak memory at O(block x n_units).
+        bootstrap_atts_gt = np.empty((self.n_bootstrap, n_gt))
+        if skip_overall_aggregation:
+            bootstrap_overall = np.full(self.n_bootstrap, np.nan)
+        else:
+            bootstrap_overall = np.empty(self.n_bootstrap)
+
         rel_periods: List[int] = []
         bootstrap_event_study: Optional[Dict[int, np.ndarray]] = None
         if event_study_info is not None:
             rel_periods = sorted(event_study_info.keys())
-            bootstrap_event_study = {}
-            for e in rel_periods:
-                agg_info = event_study_info[e]
-                # Use combined IF (standard IF + WIF) for proper bootstrap
-                with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-                    bootstrap_event_study[e] = (
-                        agg_info["effect"] + all_bootstrap_weights @ agg_info["combined_if"]
-                    )
+            bootstrap_event_study = {e: np.empty(self.n_bootstrap) for e in rel_periods}
 
-        # Vectorized group aggregation
-        # Non-finite values handled at statistics computation stage
         group_list: List[Any] = []
         bootstrap_group: Optional[Dict[Any, np.ndarray]] = None
         if group_agg_info is not None:
             group_list = sorted(group_agg_info.keys())
-            bootstrap_group = {}
-            for g in group_list:
-                agg_info = group_agg_info[g]
-                gt_indices = agg_info["gt_indices"]
-                weights = agg_info["weights"]
-                # Suppress RuntimeWarnings for edge cases
+            bootstrap_group = {g: np.empty(self.n_bootstrap) for g in group_list}
+
+        # Consume the weights one row-block at a time. Each block fills its rows
+        # of every output array; only the draw axis is tiled. The weight stream
+        # is bit-identical to the un-chunked path; the BLAS weights @ influence
+        # reductions may reassociate, so statistics match to within ~1 ULP (far
+        # below bootstrap Monte-Carlo error), not bit-for-bit.
+        for _chunk_start, _w_block in weight_blocks:
+            _rows = slice(_chunk_start, _chunk_start + _w_block.shape[0])
+
+            # ATT(g,t)
+            for j in range(n_gt):
+                treated_weights = _w_block[:, gt_treated_indices[j]]
+                control_weights = _w_block[:, gt_control_indices[j]]
                 with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-                    bootstrap_group[g] = bootstrap_atts_gt[:, gt_indices] @ weights
+                    perturbations = (
+                        treated_weights @ gt_treated_inf[j] + control_weights @ gt_control_inf[j]
+                    )
+                bootstrap_atts_gt[_rows, j] = original_atts[j] + perturbations
+
+            # Overall ATT (combined IF includes WIF); skipped when None.
+            if overall_combined_if is not None:
+                with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                    bootstrap_overall[_rows] = original_overall + _w_block @ overall_combined_if
+
+            # Event study aggregation (combined IFs)
+            if bootstrap_event_study is not None and event_study_info is not None:
+                for e in rel_periods:
+                    agg_info = event_study_info[e]
+                    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                        bootstrap_event_study[e][_rows] = (
+                            agg_info["effect"] + _w_block @ agg_info["combined_if"]
+                        )
+
+            # Group aggregation (reads this block's freshly written ATT(g,t) rows)
+            if bootstrap_group is not None and group_agg_info is not None:
+                for g in group_list:
+                    agg_info = group_agg_info[g]
+                    with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                        bootstrap_group[g][_rows] = (
+                            bootstrap_atts_gt[_rows][:, agg_info["gt_indices"]]
+                            @ agg_info["weights"]
+                        )
 
         # Batch compute bootstrap statistics for ATT(g,t)
         batch_ses, batch_ci_lo, batch_ci_hi, batch_pv = _compute_effect_bootstrap_stats_batch_func(

@@ -21,7 +21,9 @@ import pytest
 
 from diff_diff import CallawaySantAnna
 from diff_diff.prep import generate_staggered_data
-from diff_diff.staggered_bootstrap import _generate_bootstrap_weights_batch
+from diff_diff.bootstrap_utils import (
+    generate_bootstrap_weights_batch as _generate_bootstrap_weights_batch,
+)
 
 
 # =============================================================================

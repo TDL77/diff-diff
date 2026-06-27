@@ -282,11 +282,16 @@ class CallawaySantAnna(
         Recommended: 999 or more for reliable inference.
 
         .. note:: Memory Usage
-            The bootstrap stores all weights in memory as a (n_bootstrap, n_units)
-            float64 array. For large datasets, this can be significant:
-            - 1K bootstrap × 10K units = ~80 MB
-            - 10K bootstrap × 100K units = ~8 GB
-            Consider reducing n_bootstrap if memory is constrained.
+            Bootstrap multiplier weights are generated and consumed one
+            draw-block at a time (see :mod:`diff_diff.bootstrap_chunking`), so the
+            full ``(n_bootstrap, n_units)`` weight matrix is never materialized.
+            The live weight intermediate is bounded by roughly
+            ``max(~256 MB, 8 * n_units)`` bytes -- a block holds at least one full
+            draw row -- independent of ``n_bootstrap``. Only the small bootstrap
+            *output* arrays (``(n_bootstrap, n_group_time)`` and ``(n_bootstrap,)``
+            per aggregation) stay fully in memory. Stratified survey designs are
+            the current exception (the full PSU-weight matrix is built up front,
+            but PSUs are few).
 
     bootstrap_weights : str, default="rademacher"
         Type of weights for multiplier bootstrap:
@@ -445,7 +450,6 @@ class CallawaySantAnna(
         pscore_fallback: str = "error",
         vcov_type: str = "hc1",
     ):
-        import warnings
 
         if control_group not in ["never_treated", "not_yet_treated"]:
             raise ValueError(
