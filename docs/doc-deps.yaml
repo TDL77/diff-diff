@@ -907,6 +907,14 @@ sources:
         type: roadmap
         note: "Phase 6 bootstrap+survey interaction"
 
+  diff_diff/bootstrap_chunking.py:
+    drift_risk: low
+    docs:
+      - path: docs/methodology/REGISTRY.md
+        section: "Bootstrap, Survey Bootstrap"
+        type: methodology
+        note: "Memory-bounded draw-block chunking of multiplier-bootstrap weight generation/consumption (shared by CallawaySantAnna; EfficientDiD/HAD adoption is follow-up). Implementation detail — numerically equivalent (~1 ULP, BLAS reassociation) to the un-chunked path; weight stream bit-identical."
+
   diff_diff/prep.py:
     drift_risk: low
     docs:

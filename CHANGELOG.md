@@ -31,6 +31,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Korn-Graubard (1990), and Solon-Haider-Wooldridge (2015) to `docs/references.rst`.
 
 ### Changed
+- **CallawaySantAnna multiplier bootstrap now tiles weight generation over draws, cutting
+  peak memory at large `n_units`.** The dense `(n_bootstrap × n_units)` multiplier-weight
+  matrix (the dominant allocation for the default unit-level bootstrap — `cluster=None`,
+  equivalently `cluster="unit"` — where each unit is its own
+  PSU) is generated and consumed one draw-block at a time via the new
+  `diff_diff/bootstrap_chunking.py` helper instead of being materialized in full. Measured peak
+  RSS at 999 bootstrap reps drops ~79% at 500k units (11.6 GB → 2.4 GB) and ~68% at 1M units
+  (10.8 GB → 3.4 GB); the previously out-of-reach millions-of-units × 999-rep regime now stays
+  near the fit's memory floor. The weight *stream* is bit-identical on both backends (Rust
+  absolute per-row seeding; NumPy in-order stream); end-to-end bootstrap SEs match to within
+  floating-point reassociation of the BLAS reductions (~1 ULP, far below bootstrap Monte-Carlo
+  error). Stratified survey designs (few PSUs) are unchanged (full generation + sliced blocks);
+  see TODO.md for the deferred per-stratum tiling.
 - **`run_placebo_test`'s `fake_group` path now filters ever-treated units by default.** The
   dispatcher threads its `treatment` column into `placebo_group_test`, so the fake-group
   placebo runs on never-treated units only (a more-correct placebo). Calling
