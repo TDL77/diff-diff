@@ -4111,7 +4111,8 @@ unequal selection probabilities).
 ### Taylor Series Linearization (TSL) Variance
 
 - **Reference**: Binder (1983) "On the Variances of Asymptotically Normal
-  Estimators from Complex Surveys", International Statistical Review 51(3).
+  Estimators from Complex Surveys", International Statistical Review 51(3)
+  (paper review on file: `docs/methodology/papers/binder-1983-review.md`).
   Lumley (2004).
 - **Formula**: `V_TSL = (X'WX)^{-1} [sum_h V_h] (X'WX)^{-1}` with stratified
   PSU-level scores
@@ -4174,7 +4175,8 @@ unequal selection probabilities).
 ### Survey Degrees of Freedom
 
 - **Reference**: Korn & Graubard (1990) "Simultaneous Testing of Regression
-  Coefficients with Complex Survey Data", JASA 85(409).
+  Coefficients with Complex Survey Data: Use of Bonferroni t Statistics",
+  The American Statistician 44(4), 270-276.
 - **Formula**: `df = n_PSU - n_strata` (replaces `n - k` for t-distribution
   inference)
 - **Deviation from R:** Some software uses Satterthwaite-type df approximation;
