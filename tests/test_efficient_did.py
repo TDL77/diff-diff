@@ -2787,3 +2787,107 @@ class TestEfficientDiDVcovType:
         assert r1.overall_att == r2.overall_att
         assert r1.overall_se == r2.overall_se
         assert r1.vcov_type == r2.vcov_type
+
+
+class TestSieveBasisCache:
+    """The per-fit sieve-basis cache shares ``_polynomial_sieve_basis(X, K)`` across the
+    three DR nuisance helpers. Because the basis is a pure function of ``(X, degree)`` and
+    the helpers only read it, caching is bit-identical to rebuilding — these tests pin the
+    cache mechanism (the end-to-end bit-identity is also proven against an origin/main
+    capture during development)."""
+
+    def test_cache_hit_returns_same_object_and_is_bit_identical(self):
+        from diff_diff.efficient_did_covariates import (
+            _polynomial_sieve_basis,
+            _sieve_basis_cached,
+        )
+
+        rng = np.random.default_rng(0)
+        X = rng.normal(size=(40, 2))
+        cache: dict = {}
+        a = _sieve_basis_cached(X, 2, cache)
+        b = _sieve_basis_cached(X, 2, cache)
+        # Cache hit returns the SAME object (so downstream reads see identical bytes)...
+        assert a is b
+        assert len(cache) == 1
+        # ...and it equals a fresh build bit-for-bit.
+        np.testing.assert_array_equal(a, _polynomial_sieve_basis(X, 2))
+        # A different degree adds a second, distinct entry.
+        c = _sieve_basis_cached(X, 3, cache)
+        assert len(cache) == 2
+        assert c is not a
+        np.testing.assert_array_equal(c, _polynomial_sieve_basis(X, 3))
+
+    def test_cache_none_is_plain_passthrough(self):
+        from diff_diff.efficient_did_covariates import (
+            _polynomial_sieve_basis,
+            _sieve_basis_cached,
+        )
+
+        rng = np.random.default_rng(1)
+        X = rng.normal(size=(30, 2))
+        a = _sieve_basis_cached(X, 2, None)
+        b = _sieve_basis_cached(X, 2, None)
+        # No cache: distinct fresh arrays, each equal to a direct build.
+        assert a is not b
+        np.testing.assert_array_equal(a, b)
+        np.testing.assert_array_equal(a, _polynomial_sieve_basis(X, 2))
+
+    def test_reads_do_not_mutate_cached_basis(self):
+        from diff_diff.efficient_did_covariates import (
+            _polynomial_sieve_basis,
+            _sieve_basis_cached,
+        )
+
+        rng = np.random.default_rng(2)
+        X = rng.normal(size=(50, 2))
+        pristine = _polynomial_sieve_basis(X, 2)
+        cache: dict = {}
+        cached = _sieve_basis_cached(X, 2, cache)
+        # The representative reads the helpers perform on basis_all.
+        mask = np.arange(50) % 2 == 0
+        _ = cached[mask]
+        _ = cached @ np.ones(cached.shape[1])
+        _ = (np.ones(50)[:, None] * cached).sum(axis=0)
+        _ = cached.sum(axis=0)
+        # Re-fetch: still the same object and still bit-identical to the pristine build.
+        again = _sieve_basis_cached(X, 2, cache)
+        assert again is cached
+        np.testing.assert_array_equal(again, pristine)
+
+    def test_fit_builds_each_degree_once_across_helpers(self, monkeypatch):
+        """End-to-end: a covariate DR fit requests the basis many times (3 helpers ×
+        multiple (g,t) cells) but builds each distinct degree exactly once, proving the
+        per-fit cache actually shares work."""
+        import diff_diff.efficient_did_covariates as cov
+
+        real_build = cov._polynomial_sieve_basis
+        real_cached = cov._sieve_basis_cached
+        build_keys: list = []  # one entry per ACTUAL _polynomial_sieve_basis build
+        request_keys: list = []  # one entry per _sieve_basis_cached request
+
+        def counting_build(X, degree):
+            build_keys.append((id(X), degree))
+            return real_build(X, degree)
+
+        def counting_cached(X, degree, cache):
+            request_keys.append((id(X), degree))
+            return real_cached(X, degree, cache)
+
+        monkeypatch.setattr(cov, "_polynomial_sieve_basis", counting_build)
+        monkeypatch.setattr(cov, "_sieve_basis_cached", counting_cached)
+
+        df = _make_covariate_panel(n_units=150)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = EfficientDiD(pt_assumption="post").fit(
+                df, "y", "unit", "time", "first_treat", covariates=["x1", "x2"]
+            )
+        assert np.isfinite(result.overall_att)
+        # The path was exercised through the cache.
+        assert request_keys, "covariate DR path did not run the sieve helpers"
+        # Each distinct (X, degree) was built exactly once (perfect dedup)...
+        assert len(build_keys) == len(set(build_keys))
+        assert len(build_keys) == len(set(request_keys))
+        # ...and there was genuine redundancy for the cache to eliminate.
+        assert len(request_keys) > len(build_keys)

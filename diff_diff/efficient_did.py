@@ -789,6 +789,11 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
         m_hat_cache: Dict[Tuple, np.ndarray] = {}
         r_hat_cache: Dict[Tuple[float, float], np.ndarray] = {}
         s_hat_cache: Dict[float, np.ndarray] = {}  # inverse propensities per group
+        # Per-fit cache of the polynomial sieve basis, keyed (id(X), degree). The three
+        # sieve nuisance helpers all build the basis from the same fit-level
+        # `covariate_matrix`, so this shares each distinct degree's basis across them
+        # instead of rebuilding it per helper. Lives only for this fit() call.
+        sieve_basis_cache: Dict[Tuple[int, int], np.ndarray] = {}
 
         if use_covariates:
             assert covariates is not None  # for type narrowing
@@ -934,6 +939,7 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
                                 k_max=self.sieve_k_max,
                                 criterion=self.sieve_criterion,
                                 unit_weights=unit_level_weights,
+                                basis_cache=sieve_basis_cache,
                             )
                         # m_{g', tpre, 1}(X)
                         key_gp_tpre = (gp, tpre_col_val, effective_p1_col)
@@ -950,6 +956,7 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
                                 k_max=self.sieve_k_max,
                                 criterion=self.sieve_criterion,
                                 unit_weights=unit_level_weights,
+                                basis_cache=sieve_basis_cache,
                             )
                         # r_{g, inf}(X) and r_{g, g'}(X) via sieve (Eq 4.1-4.2)
                         for comp in {np.inf, gp}:
@@ -966,6 +973,7 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
                                     criterion=self.sieve_criterion,
                                     ratio_clip=self.ratio_clip,
                                     unit_weights=unit_level_weights,
+                                    basis_cache=sieve_basis_cache,
                                 )
 
                     # Per-unit DR generated outcomes: shape (n_units, H)
@@ -998,6 +1006,7 @@ class EfficientDiD(EfficientDiDBootstrapMixin):
                                 k_max=self.sieve_k_max,
                                 criterion=self.sieve_criterion,
                                 unit_weights=unit_level_weights,
+                                basis_cache=sieve_basis_cache,
                             )
 
                     # Conditional Omega*(X) with per-unit propensities (Eq 3.12)

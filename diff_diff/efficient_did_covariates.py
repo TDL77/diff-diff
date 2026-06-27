@@ -42,6 +42,7 @@ def estimate_outcome_regression(
     k_max: Optional[int] = None,
     criterion: str = "bic",
     unit_weights: Optional[np.ndarray] = None,
+    basis_cache: Optional[Dict[Tuple[int, int], np.ndarray]] = None,
 ) -> np.ndarray:
     r"""Estimate conditional mean outcome change m_hat(X) via a polynomial sieve.
 
@@ -169,7 +170,7 @@ def estimate_outcome_regression(
         if n_basis >= n_pos:
             break
 
-        basis_all = _polynomial_sieve_basis(covariate_matrix, K)
+        basis_all = _sieve_basis_cached(covariate_matrix, K, basis_cache)
         basis_group = basis_all[group_mask]
 
         # Rank guard on the (weighted) design Gram, mirroring the propensity sieve.
@@ -288,6 +289,38 @@ def _polynomial_sieve_basis(X: np.ndarray, degree: int) -> np.ndarray:
     return np.column_stack(columns)
 
 
+def _sieve_basis_cached(
+    X: np.ndarray, degree: int, cache: Optional[Dict[Tuple[int, int], np.ndarray]]
+) -> np.ndarray:
+    """Per-fit memoized :func:`_polynomial_sieve_basis`.
+
+    ``cache`` is a dict owned by one ``EfficientDiD.fit()`` and shared across the three
+    sieve nuisance helpers, which all receive the same fit-level ``covariate_matrix``.
+    The basis is a pure function of ``(X, degree)``, so for any degree reached by more
+    than one helper (every helper starts at ``K=1`` on the same ``X``) the identical
+    array would otherwise be rebuilt from scratch each time.
+
+    Keyed on ``(id(X), degree)``: ``X`` is fixed for a fit, so the basis depends only on
+    ``degree``; ``id(X)`` guards against accidental reuse of a cache with a different
+    matrix. The cache lives only for the duration of one ``fit()`` (``covariate_matrix``
+    stays alive throughout, so its ``id`` is stable and uncollidable), so there is no
+    cross-fit leak and no ``id``-reuse hazard.
+
+    When ``cache is None`` (the default for any standalone caller) this is a plain
+    pass-through to :func:`_polynomial_sieve_basis`, leaving non-``EfficientDiD`` callers
+    byte-for-byte unchanged. The helpers only read the returned array (no in-place
+    mutation), so returning a shared cached object is bit-identical to rebuilding it.
+    """
+    if cache is None:
+        return _polynomial_sieve_basis(X, degree)
+    key = (id(X), degree)
+    basis = cache.get(key)
+    if basis is None:
+        basis = _polynomial_sieve_basis(X, degree)
+        cache[key] = basis
+    return basis
+
+
 def estimate_propensity_ratio_sieve(
     covariate_matrix: np.ndarray,
     mask_g: np.ndarray,
@@ -296,6 +329,7 @@ def estimate_propensity_ratio_sieve(
     criterion: str = "bic",
     ratio_clip: float = 20.0,
     unit_weights: Optional[np.ndarray] = None,
+    basis_cache: Optional[Dict[Tuple[int, int], np.ndarray]] = None,
 ) -> np.ndarray:
     r"""Estimate propensity ratio via sieve convex minimization (Eq 4.1-4.2).
 
@@ -396,7 +430,7 @@ def estimate_propensity_ratio_sieve(
         if n_basis >= n_gp_pos:
             break
 
-        basis_all = _polynomial_sieve_basis(covariate_matrix, K)
+        basis_all = _sieve_basis_cached(covariate_matrix, K, basis_cache)
         Psi_gp = basis_all[mask_gp]  # (n_gp, n_basis)
         Psi_g = basis_all[mask_g]  # (n_g, n_basis)
 
@@ -496,6 +530,7 @@ def estimate_inverse_propensity_sieve(
     k_max: Optional[int] = None,
     criterion: str = "bic",
     unit_weights: Optional[np.ndarray] = None,
+    basis_cache: Optional[Dict[Tuple[int, int], np.ndarray]] = None,
 ) -> np.ndarray:
     r"""Estimate s_{g'}(X) = 1/p_{g'}(X) via sieve convex minimization.
 
@@ -586,7 +621,7 @@ def estimate_inverse_propensity_sieve(
         if n_basis >= n_group_pos:
             break
 
-        basis_all = _polynomial_sieve_basis(covariate_matrix, K)
+        basis_all = _sieve_basis_cached(covariate_matrix, K, basis_cache)
         Psi_gp = basis_all[group_mask]
 
         # Normal equations (weighted when survey weights present):
