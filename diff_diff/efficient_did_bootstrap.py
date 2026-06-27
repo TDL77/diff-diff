@@ -8,15 +8,17 @@ of ATT(g,t) and aggregated parameters.
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
-from diff_diff.bootstrap_utils import (
-    compute_effect_bootstrap_stats as _compute_effect_bootstrap_stats_func,
+from diff_diff.bootstrap_chunking import (
+    compute_block_size,
+    iter_survey_multiplier_weight_blocks,
+    iter_weight_blocks,
 )
 from diff_diff.bootstrap_utils import (
-    generate_bootstrap_weights_batch as _generate_bootstrap_weights_batch,
+    compute_effect_bootstrap_stats as _compute_effect_bootstrap_stats_func,
 )
 
 
@@ -97,8 +99,16 @@ class EfficientDiDBootstrapMixin:
         gt_pairs = list(group_time_effects.keys())
         n_gt = len(gt_pairs)
 
-        # Generate bootstrap weights — PSU-level when survey design is present,
-        # cluster-level if clustered, unit-level otherwise.
+        # Original ATTs (independent of the draws; referenced per block below).
+        original_atts = np.array([group_time_effects[gt]["effect"] for gt in gt_pairs])
+
+        # Bootstrap weights are generated AND consumed one draw-block at a time so
+        # the dense (n_bootstrap, n_units) weight matrix is never materialized in
+        # full — the dominant allocation at large n_units. Weight source per path:
+        # PSU-level under a survey design, cluster-level if clustered, unit-level
+        # otherwise. The weight stream is bit-identical to the un-chunked path; the
+        # BLAS weights @ eif reductions may reassociate, so SEs match to within
+        # ~1 ULP (far below bootstrap Monte-Carlo error), not bit-for-bit.
         _use_survey_bootstrap = resolved_survey is not None and (
             resolved_survey.strata is not None
             or resolved_survey.psu is not None
@@ -106,12 +116,16 @@ class EfficientDiDBootstrapMixin:
         )
 
         if _use_survey_bootstrap:
-            from diff_diff.bootstrap_utils import (
-                generate_survey_multiplier_weights_batch as _gen_survey_weights,
-            )
-
-            psu_weights, psu_ids = _gen_survey_weights(
-                self.n_bootstrap, resolved_survey, self.bootstrap_weights, rng
+            # PSU-level multiplier weights, generated and expanded one draw-block
+            # at a time (unstratified designs tile the generation; stratified
+            # designs have few PSUs and fall back to full generation + slicing).
+            _block_size = compute_block_size(n_units, self.n_bootstrap)
+            psu_ids, _psu_blocks = iter_survey_multiplier_weight_blocks(
+                self.n_bootstrap,
+                resolved_survey,
+                self.bootstrap_weights,
+                rng,
+                block_size=_block_size,
             )
             # Single-cluster (G<2) survey-PSU multiplier bootstrap collapses
             # to constant multiplier draws → BLAS roundoff produces ≈0
@@ -143,35 +157,63 @@ class EfficientDiDBootstrapMixin:
                 )
             else:
                 unit_to_psu_col = np.arange(n_units)
-            all_weights = psu_weights[:, unit_to_psu_col]
-        elif cluster_indices is not None and n_clusters is not None:
-            cluster_weights = _generate_bootstrap_weights_batch(
-                self.n_bootstrap, n_clusters, self.bootstrap_weights, rng
+            # When each unit is its own PSU the expansion is an identity
+            # permutation — skip the needless full-block copy (CS parity).
+            _psu_is_identity = len(psu_ids) == n_units and bool(
+                np.array_equal(unit_to_psu_col, np.arange(n_units))
             )
-            # Expand cluster weights to unit level
-            all_weights = cluster_weights[:, cluster_indices]
+
+            def _weight_blocks() -> Iterator[Tuple[int, np.ndarray]]:
+                for _cs, _psu_block in _psu_blocks:
+                    if _psu_is_identity:
+                        yield _cs, _psu_block
+                    else:
+                        yield _cs, _psu_block[:, unit_to_psu_col]
+
+            weight_blocks: Iterator[Tuple[int, np.ndarray]] = _weight_blocks()
+        elif cluster_indices is not None and n_clusters is not None:
+            # Cluster-level weights, expanded to unit level per block via the
+            # helper's expand_index (block[:, cluster_indices]).
+            weight_blocks = iter_weight_blocks(
+                self.n_bootstrap,
+                n_clusters,
+                self.bootstrap_weights,
+                rng,
+                expand_index=cluster_indices,
+            )
         else:
-            all_weights = _generate_bootstrap_weights_batch(
+            # Standard unit-level weights, generated one row-block at a time.
+            weight_blocks = iter_weight_blocks(
                 self.n_bootstrap, n_units, self.bootstrap_weights, rng
             )
 
-        # Original ATTs
-        original_atts = np.array([group_time_effects[gt]["effect"] for gt in gt_pairs])
+        # eif SCALING is a SEPARATE axis from the weight PATH: it is keyed on
+        # unit_level_weights (set whenever a SurveyDesign was passed — including a
+        # weights-only design that takes the unit weight path above), NOT on
+        # _use_survey_bootstrap. With weights present we perturb the survey-score
+        # object w_i * eif_i / sum(w) (matches compute_survey_if_variance);
+        # otherwise the raw eif with a 1/n prefactor applied after the matmul.
+        _has_unit_weights = unit_level_weights is not None
+        _total_w = float(np.sum(unit_level_weights)) if _has_unit_weights else 1.0
 
-        # Perturbed ATTs: (n_bootstrap, n_gt)
-        # Under survey design, perturb survey-score object w_i * eif_i / sum(w)
-        # to match the analytical variance convention (compute_survey_if_variance).
-        bootstrap_atts = np.zeros((self.n_bootstrap, n_gt))
-        for j, gt in enumerate(gt_pairs):
-            eif_gt = eif_by_gt[gt]  # shape (n_units,)
-            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-                if unit_level_weights is not None:
-                    total_w = float(np.sum(unit_level_weights))
-                    eif_scaled = unit_level_weights * eif_gt / total_w
-                    perturbation = all_weights @ eif_scaled
-                else:
-                    perturbation = (all_weights @ eif_gt) / n_units
-            bootstrap_atts[:, j] = original_atts[j] + perturbation
+        # Pre-allocate the small (n_bootstrap, n_gt) output; only this persists.
+        # Each weight block fills its rows of every column, then is discarded —
+        # peak memory is capped at O(block x n_units). The per-(g,t) scaled EIF is
+        # recomputed per block as a single O(n_units) temporary (not cached across
+        # all n_gt cells), so the perturbation adds no O(n_gt x n_units) allocation
+        # that would erode the memory win on weighted panels. The aggregations
+        # below (overall, event study, group) re-aggregate these columns and never
+        # touch the weight matrix.
+        bootstrap_atts = np.empty((self.n_bootstrap, n_gt))
+        for _chunk_start, _w_block in weight_blocks:
+            _rows = slice(_chunk_start, _chunk_start + _w_block.shape[0])
+            for j, gt in enumerate(gt_pairs):
+                with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                    if _has_unit_weights:
+                        perturbation = _w_block @ (unit_level_weights * eif_by_gt[gt] / _total_w)
+                    else:
+                        perturbation = (_w_block @ eif_by_gt[gt]) / n_units
+                bootstrap_atts[_rows, j] = original_atts[j] + perturbation
 
         # Post-treatment mask — also exclude NaN effects
         post_mask = np.array(
