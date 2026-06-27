@@ -24,7 +24,7 @@ A **Complete** entry has a documented review pass against the primary academic s
 
 The catalog grew incrementally over several quarters, so formats vary across the existing Complete entries; the consistent invariant is that someone walked through the implementation against the academic source and captured the result here. New reviews going forward should aim for the fuller structure (Verified Components + Corrections Made + Deviations + dedicated methodology test file) used by the more recent entries.
 
-**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures; others have only the REGISTRY entry and unit tests (e.g., PlaceboTests). The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
+**In Progress** entries have a REGISTRY.md section and unit-test coverage, but no formal walk-through has been captured here yet. The In Progress band is wide — some entries also have some combination of a paper review (primary or companion), a dedicated methodology test file, and R parity fixtures; others have only the REGISTRY entry and unit tests. The "Documentation in place" sub-section enumerates what each entry already has; the "Outstanding for promotion" sub-section enumerates what's still needed to flip it to Complete.
 
 **Not Started** entries have neither a tracker walk-through nor an REGISTRY.md section. This tracker no longer carries any Not Started rows; new estimators are expected to enter as In Progress when their REGISTRY entry lands.
 
@@ -82,7 +82,7 @@ The catalog grew incrementally over several quarters, so formats vary across the
 | HonestDiD | `honest_did.py` | `HonestDiD` package | **Complete** | 2026-04-01 |
 | PreTrendsPower | `pretrends.py` | `pretrends` package | **Complete** | 2026-05-19 |
 | PowerAnalysis | `power.py` | `pwr` / `DeclareDesign` | **Complete** | 2026-05-31 |
-| PlaceboTests | `diagnostics.py` | Bertrand-Duflo-Mullainathan (2004) (placebo laws); no canonical R | **In Progress** | — |
+| PlaceboTests | `diagnostics.py` | Bertrand-Duflo-Mullainathan (2004); base-R exact-enumeration parity | **Complete** | 2026-06-26 |
 
 ### Cross-Cutting Inference Features
 
@@ -1314,20 +1314,43 @@ CI and extending covariate-adjusted R parity are tracked follow-ups in `TODO.md`
 | Field | Value |
 |-------|-------|
 | Module | `diagnostics.py` |
-| Primary Reference | Bertrand, Duflo & Mullainathan (2004), QJE 119(1):249-275 (placebo laws / randomization inference). Paper review on file: `docs/methodology/papers/bertrand-duflo-mullainathan-2004-review.md`. |
-| R Reference | None canonical (no R package ships a generic placebo battery) |
-| Status | **In Progress** |
-| Last Review | — |
+| Primary Reference | Bertrand, Duflo & Mullainathan (2004), QJE 119(1):249-275 (placebo laws / randomization inference). Paper review: `docs/methodology/papers/bertrand-duflo-mullainathan-2004-review.md`. |
+| R Reference | No canonical R package for the DiD placebo battery; parity via base-R `combn` exact enumeration (`benchmarks/R/generate_placebo_golden.R`), optional `ri2`/`coin` convention check. |
+| Status | **Complete** |
+| Last Review | 2026-06-26 |
 
-**Documentation in place:**
-- REGISTRY.md section: `## PlaceboTests` (NaN-inference edge cases for `permutation_test` and `leave_one_out_test`)
-- Paper review: `docs/methodology/papers/bertrand-duflo-mullainathan-2004-review.md` (BDM 2004 placebo-law / serial-correlation grounding; proposes a `## PlaceboTests` REGISTRY entry, not yet integrated)
-- Implementation: tests embedded in `tests/test_diagnostics.py`
+**Verified Components:**
+- [x] Sampled randomization-inference p-value `(1 + count)/(B + 1)` — valid but slightly conservative (with-replacement Monte Carlo; Phipson & Smyth 2010; BDM fn 11), converging to the exact `count/total` full enumeration — `tests/test_methodology_placebo.py::TestPlaceboRandomizationInference`
+- [x] R parity: Python exhaustive enumeration matches base-R `combn` exact p-value + observed ATT at `atol=1e-12`; deterministic `leave_one_out_test` / `placebo_group_test` match R at `atol≈1e-10`; sampled `permutation_test` within Monte-Carlo tolerance — `TestPlaceboParityR` (skip-guarded; golden `benchmarks/data/placebo_golden.json`)
+- [x] `placebo_timing_test` detects differential pre-trends (significant under violated trends, null under parallel) and restricts to pre-treatment data — `TestPlaceboFakeTiming`
+- [x] `placebo_group_test` never-treated `treatment` filter (drops ever-treated), degenerate-design `ValueError`, misuse `UserWarning`, backward-compatible without `treatment` — `TestPlaceboFakeGroup`
+- [x] Permutation NaN-decoupling contract (RI p-value finite when `se` degenerate) + fail-closed `RuntimeError` on all-fail — `TestPlaceboInferenceContracts`
+- [x] Functional coverage (dispatch routing, zero-SE / `<2`-LOO NaN-inference) — `tests/test_diagnostics.py`
 
-**Outstanding for promotion:**
-- Standalone-vs-absorb decision: **resolved — standalone** (`diagnostics.py` is an exported public surface distinct from per-estimator placebo/LOO)
-- Integrate the proposed `## PlaceboTests` entry into REGISTRY.md (cite BDM 2004 + scope) and flip this row to Complete
-- Dedicated `tests/test_methodology_placebo.py` with BDM-anchored Verified Components (empirical permutation p-value per fn 12; p-value floor; LOO; fake-timing/fake-group) + Deviations block (permutation path's deliberate non-`safe_inference` + percentile CI; the NaN-inference convention). R parity is N/A (no canonical R placebo battery) → self-consistency / analytic anchors
+**Test Coverage:**
+- `tests/test_methodology_placebo.py` (24 tests across 5 paper-anchored classes; 2 `@pytest.mark.slow`)
+- `tests/test_diagnostics.py` (32 functional / edge-case tests)
+
+**R Comparison Results** (base-R `combn` exact enumeration; golden committed at `benchmarks/data/placebo_golden.json`):
+
+| Quantity | Tolerance | Result |
+|----------|-----------|--------|
+| Observed DiD ATT | `atol=1e-12` | match |
+| Exact RI p-value (`count/total`) | `atol=1e-12` | match |
+| Leave-one-out mean / se / CI / per-drop ATTs | `atol=1e-10` / `1e-9` | match |
+| Fake-group ATT (never-treated filtered) | `atol=1e-10` | match |
+| Sampled permutation p-value | Monte-Carlo | converges to exact |
+
+**Corrections Made:**
+- **Permutation p-value (this PR):** replaced `count/B` floored at `1/(B+1)` with the Phipson-Smyth (2010) randomization-inference value `(1 + count)/(B + 1)` — a valid but slightly conservative estimator for with-replacement Monte-Carlo draws (floor now intrinsic); "exact" is reserved for the full enumeration (`diff_diff/diagnostics.py`).
+- **`placebo_group_test` (this PR):** added an optional `treatment` parameter that drops ever-treated units so the placebo runs on never-treated data only (uncontaminated); added degenerate-design `ValueError` guards (replacing a cryptic `LinAlgError`) and a misuse `UserWarning`; corrected the docstring to describe both modes. The `run_placebo_test` dispatcher's `fake_group` path now filters ever-treated units by default (a more-correct placebo) — documented in CHANGELOG + REGISTRY.
+- **Docstring (this PR):** reworded `permutation_test`'s docstring — dropped the "exact ... valid with any sample size" overclaim; the sampled value is the valid/conservative with-replacement RI p-value, with "exact" reserved for full enumeration (BDM fn 12).
+
+**Deviations:** (documented in REGISTRY `## PlaceboTests`)
+- Permutation inference deliberately bypasses `safe_inference`: RI p-value + null-distribution percentile interval (not an effect CI) + null-mean `placebo_effect`.
+- `leave_one_out_test` reports the dispersion of per-drop ATTs (a sensitivity spread), not a design-based jackknife SE.
+- Permutation NaN-decoupling: the count-based RI p-value stays valid when the permutation `se` is degenerate (intentional departure from the bootstrap-NaN contract).
+- BDM's serial-correlation SE corrections (parametric AR, block bootstrap, cluster VCV, aggregation) are out of scope for this diagnostic surface.
 
 ---
 
@@ -1459,17 +1482,11 @@ whereas R's `did::att_gt` would error. This is a defensive enhancement that prov
 more graceful handling of edge cases while still signaling invalid inference to users.
 ```
 
-### Priority Order (2026-05-26)
+### Priority Order (updated 2026-06-26)
 
-Promotion priority for the **In Progress** entries, ordered by what's blocked on substantive review work (top of list = needs review next) vs. consolidation pass (bottom of list = mostly tracker walk-through):
+Only one **In Progress** entry remains: **Survey Data Support**. (PlaceboTests was promoted to Complete on 2026-06-26 — see its detail section above.)
 
-**Substantive-review-blocked (each still missing one or more of: a methodology test file, R parity, or a paper review):**
-
-1. **PlaceboTests** — standalone-vs-absorb decision resolved (standalone) and the BDM (2004) paper review is now on file (`docs/methodology/papers/bertrand-duflo-mullainathan-2004-review.md`). Remaining for promotion: the dedicated methodology test file + REGISTRY integration (R parity N/A). Methodologically lightweight.
-
-**Consolidation-pass-blocked (already has paper review or methodology file or R parity; mostly Verified Components walk-through):**
-
-4. **Survey Data Support** — cross-cutting feature; promotion requires the per-estimator integration paths to be locked down first.
+- **Survey Data Support** — cross-cutting feature; consolidation-pass-blocked. Promotion requires the per-estimator integration paths to be locked down first, then a dedicated `tests/test_methodology_survey.py` (Binder-equation-numbered Verified Components), an R-parity table vs `survey::svyglm`/`svycontrast` wired into this tracker, a deviations block, and a consolidated cross-estimator `NotImplementedError`-gaps enumeration.
 
 ---
 

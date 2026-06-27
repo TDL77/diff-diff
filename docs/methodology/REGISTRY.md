@@ -3097,13 +3097,56 @@ Shipped in `diff_diff/had_pretests.py` as `stute_joint_pretest()` (residuals-in 
 
 ## PlaceboTests
 
+**Primary source:** [Bertrand, M., Duflo, E., & Mullainathan, S. (2004). How Much Should We Trust Differences-in-Differences Estimates? *The Quarterly Journal of Economics*, 119(1), 249-275.](https://doi.org/10.1162/003355304772839588). Paper review on file: `docs/methodology/papers/bertrand-duflo-mullainathan-2004-review.md`.
+
 **Module:** `diff_diff/diagnostics.py`
 
+**Scope:** A battery of placebo / randomization-inference diagnostics for the parallel-trends assumption, built on the base 2×2 `DifferenceInDifferences`. BDM (2004) introduce the **placebo-law experiment** — randomly assign a fake treatment date and/or fake treated group, estimate the DD, and check whether a (necessarily spurious) "effect" is significant more than ~5% of the time. These are **diagnostics**, not estimators, and are distinct from the per-estimator placebo/LOO surfaces documented elsewhere (SyntheticDiD donor leave-one-out per ADH 2015 §4, HAD pre-tests, DCDH placebo). Public API: `run_placebo_test` (dispatcher) → `placebo_timing_test` / `placebo_group_test` / `permutation_test` / `leave_one_out_test`, plus `run_all_placebo_tests` and `PlaceboTestResults`.
+
+**Key implementation requirements:**
+
+*The four diagnostics:*
+- **`placebo_timing_test` (fake timing):** restrict to pre-treatment periods, assign a fake post indicator (`time >= fake_treatment_period`), and run the DD on the real treated vs control units. A significant effect flags differential pre-trends. Requires ≥2 pre-periods; a `fake_treatment_period` inside `post_periods` raises `ValueError`.
+- **`placebo_group_test` (fake group):** designate control units as fake-treated. With the optional `treatment=` column, units that are *ever* real-treated are dropped first (placebo on never-treated units only, uncontaminated by the real effect); without it, the caller must pass control-only data. Degenerate designs (all fake-treated dropped, or no controls remain) raise `ValueError`; a fake-treated unit that is itself real-treated emits a `UserWarning`. Via the `run_placebo_test` dispatcher (which always has the `treatment` column) the `fake_group` path filters ever-treated units by default.
+- **`permutation_test` (randomization inference):** randomly reassign the treated-group label across units (BDM placebo-law over a fixed outcome set; the randomization-inference link is BDM fn 11, citing Rosenbaum 1996) and form the null distribution of the DD estimate.
+- **`leave_one_out_test`:** drop each treated unit, refit, and report the per-drop ATTs (single-unit sensitivity).
+
+*Randomization-inference p-value (Phipson & Smyth 2010):*
+
+```
+p = (1 + #{ |ATT*_b| >= |ATT_obs| }) / (B + 1)
+```
+
+where `ATT*_b` are the `B` valid permutation estimates and the `+1` includes the observed statistic in both numerator and denominator (intrinsic floor `1/(B+1)`). Assignments are drawn independently each iteration (Monte-Carlo sampling **with replacement** from the assignment space), so this is the Phipson & Smyth (2010) **valid but slightly conservative** RI p-value — *not* an exact finite-sample value. The term **exact** is reserved for the full enumeration of all `C(N, n_treated)` assignments (observed included), `#{|ATT*| >= |ATT_obs|} / total`, to which the sampled value converges as `B → ∞` (this enumeration is the R-parity reference).
+
+*Standard errors / inference (stated honestly):*
+- `placebo_timing_test` / `placebo_group_test` surface the underlying `DifferenceInDifferences` estimator's own jointly-computed inference (HC1 default via `safe_inference`).
+- `permutation_test` does **not** use `safe_inference`: the p-value is the count-based RI value above, the confidence interval is the **percentile interval of the null (permutation) distribution — not an effect CI**, and `t_stat = original_att / se` is computed individually (`se` = std of the null distribution). `placebo_effect` reports the **mean of the null distribution** (≈0), with `original_effect` holding the observed ATT.
+- `leave_one_out_test` uses `safe_inference` (t-distribution, `df = n_valid − 1`), but its `se` is the **dispersion (sample std) of the leave-one-out ATTs — a sensitivity spread, not a design-based jackknife SE**; the per-unit `leave_one_out_effects` dict is the primary output and `t_stat`/`p_value`/CI are heuristic.
+
 *Edge cases:*
+- **Permutation NaN-decoupling (deliberate):** the RI p-value is count-based and stays finite even when the permutation `se` is degenerate (`se == 0` for identical permutations, or `se` NaN at `n_valid == 1`), in which case `t_stat` is NaN. This intentionally departs from the bootstrap-NaN contract (non-finite SE → full NaN tuple), because the RI p-value does not depend on `se` (BDM fn 12: the placebo reference distribution is not standard normal, so the count-based RI p-value — not an `se`-based statistic — is the valid one). **Note:** intentional contract; see `tests/test_methodology_placebo.py::TestPlaceboInferenceContracts`.
 - NaN inference for undefined statistics:
-  - `permutation_test`: t_stat is NaN when permutation SE is zero (all permutations produce identical estimates)
-  - `leave_one_out_test`: t_stat, p_value, CI are NaN when LOO SE is zero (all LOO effects identical)
-  - **Note**: Defensive enhancement matching CallawaySantAnna NaN convention
+  - `permutation_test`: t_stat is NaN when the permutation SE is zero/degenerate (the p-value remains valid — see decoupling above).
+  - `leave_one_out_test`: t_stat, p_value, CI are NaN when the LOO SE is zero (all LOO effects identical) or `< 2` valid effects.
+  - **Note**: Defensive enhancement matching CallawaySantAnna NaN convention.
+- Fail-closed: `permutation_test` and `leave_one_out_test` raise `RuntimeError` if **all** refits fail; `permutation_test` emits a `UserWarning` when `> 10%` of permutations fail.
+
+**Reference implementation(s):**
+- No single canonical R/Stata package implements the DiD placebo *battery* as one command (BDM's own code is custom). R parity is anchored by **exact enumeration** in base R (`combn`) of the full randomization distribution, with an optional `ri2`/`coin` convention cross-check (guarded by `requireNamespace`, not a committed dependency). Generator: `benchmarks/R/generate_placebo_golden.R`; golden: `benchmarks/data/placebo_golden.json` (+ `placebo_test_panel.csv`). The deterministic `leave_one_out_test` / `placebo_group_test` / observed ATT match R exactly (`atol≈1e-10`); the sampled `permutation_test` matches the exact value within Monte-Carlo tolerance.
+
+**Deviations:**
+- **Note (permutation inference is not `safe_inference`):** the permutation path uses the RI p-value + a null-distribution percentile interval (not an effect CI) and a null-mean `placebo_effect`. This is the standard randomization-inference convention and deliberately differs from the project-wide `safe_inference` t-based inference (which assumes a sampling-distribution SE the permutation test does not have).
+- **Note (leave-one-out spread):** `leave_one_out_test`'s reported `se`/`t_stat`/`p_value`/CI summarize the dispersion of the per-drop ATTs (a robustness signal), not a design-based jackknife standard error; the per-unit effects are the primary output.
+- **Note (BDM scope):** BDM (2004) is primarily about serial-correlation-robust *standard errors* (parametric AR, block bootstrap, cluster/arbitrary VCV, time aggregation). Those inference corrections are out of scope for this diagnostic surface — diff-diff's cluster-robust SE and bootstrap paths cover them under the relevant estimators. This entry covers only the placebo-law / randomization-inference diagnostics that BDM motivate.
+
+**Requirements checklist:**
+- [x] RI p-value `(1+count)/(B+1)` (sampled) converges to the exact enumeration `count/total`: `tests/test_methodology_placebo.py::TestPlaceboRandomizationInference`
+- [x] R parity: exact enumeration + observed ATT at `atol=1e-12`; deterministic LOO / fake-group at `atol=1e-10`; sampled permutation within MC tolerance: `TestPlaceboParityR` (skip-guarded)
+- [x] Fake-timing detects differential pre-trends; null under parallel trends; pre-data only: `TestPlaceboFakeTiming`
+- [x] Fake-group never-treated `treatment` filter + degenerate `ValueError` + misuse `UserWarning`; backward-compatible without `treatment`: `TestPlaceboFakeGroup`
+- [x] Permutation NaN-decoupling + fail-closed `RuntimeError`: `TestPlaceboInferenceContracts`
+- [x] Functional coverage (dispatch routing, zero-SE / `<2`-LOO NaN-inference): `tests/test_diagnostics.py`
 
 ---
 

@@ -19,7 +19,7 @@ import pandas as pd
 
 from diff_diff.estimators import DifferenceInDifferences
 from diff_diff.results import _get_significance_stars
-from diff_diff.utils import safe_inference
+from diff_diff.utils import safe_inference, validate_binary
 
 
 @dataclass
@@ -228,7 +228,7 @@ def run_placebo_test(
     test_type : str, default="fake_timing"
         Type of placebo test:
         - "fake_timing": Assign treatment at a fake (earlier) time period
-        - "fake_group": Run DiD designating some control units as "fake treated"
+        - "fake_group": Designate control units as "fake treated" (real-treated units, per the ``treatment`` column, are dropped first)
         - "permutation": Randomly reassign treatment and compute distribution
         - "leave_one_out": Drop each treated unit and re-estimate
     fake_treatment_period : any, optional
@@ -313,6 +313,7 @@ def run_placebo_test(
             fake_treated_units=fake_treatment_group,
             post_periods=post_periods,
             alpha=alpha,
+            treatment=treatment,
             **estimator_kwargs,
         )
 
@@ -445,14 +446,20 @@ def placebo_group_test(
     fake_treated_units: List[Any],
     post_periods: Optional[List[Any]] = None,
     alpha: float = 0.05,
+    treatment: Optional[str] = None,
     **estimator_kwargs,
 ) -> PlaceboTestResults:
     """
-    Test for differential trends among never-treated units.
+    Test for differential trends by designating control units as "fake treated".
 
-    Assigns some never-treated units as "fake treated" and estimates a
-    DiD model using only never-treated data. A significant effect suggests
-    heterogeneous trends in the control group.
+    Designates ``fake_treated_units`` as fake-treated and estimates a DiD on the
+    resulting panel. A significant effect suggests heterogeneous trends in the
+    control group (a parallel-trends red flag).
+
+    If ``treatment`` is provided, units that are *ever* really treated are dropped
+    first, so the placebo runs on never-treated units only (the recommended,
+    uncontaminated design). If ``treatment`` is ``None``, the test runs on whatever
+    data is supplied, so the caller must pass control-only data for a valid placebo.
 
     Parameters
     ----------
@@ -470,6 +477,11 @@ def placebo_group_test(
         List of post-treatment period values.
     alpha : float, default=0.05
         Significance level.
+    treatment : str, optional
+        Real treatment-indicator column. When given, units that are ever
+        real-treated (``data.groupby(unit)[treatment].max() == 1``) are dropped
+        before the placebo, so it runs on never-treated units only. When ``None``
+        (default), no filtering is done and the caller must pass control-only data.
     **estimator_kwargs
         Arguments passed to DifferenceInDifferences.
 
@@ -481,7 +493,35 @@ def placebo_group_test(
     if fake_treated_units is None or len(fake_treated_units) == 0:
         raise ValueError("fake_treated_units must be a non-empty list")
 
-    all_periods = sorted(data[time].unique())
+    fake_data = data.copy()
+
+    # Optionally restrict to never-treated units so the placebo is not contaminated
+    # by the real treatment effect (the BDM 2004 placebo-law design on controls).
+    if treatment is not None:
+        # Fail closed: a missing column or non-0/1 values would otherwise silently
+        # skip the ever-treated filter (groupby().max() drops NaN), running the
+        # placebo on contaminated data.
+        if treatment not in fake_data.columns:
+            raise ValueError(f"treatment column '{treatment}' not found in data")
+        if fake_data[treatment].isna().any():
+            raise ValueError(f"treatment column '{treatment}' contains missing values")
+        validate_binary(fake_data[treatment].to_numpy(), "treatment")
+        ever_treated = fake_data.groupby(unit)[treatment].max()
+        ever_treated_units = set(ever_treated[ever_treated == 1].index)
+        misused = [u for u in fake_treated_units if u in ever_treated_units]
+        if misused:
+            import warnings
+
+            warnings.warn(
+                f"{len(misused)} of fake_treated_units are themselves ever real-treated "
+                f"and will be dropped with the other real-treated units: {misused}. "
+                f"Pass only never-treated units as fake_treated_units for a valid placebo.",
+                UserWarning,
+                stacklevel=2,
+            )
+        fake_data = fake_data[~fake_data[unit].isin(ever_treated_units)].copy()
+
+    all_periods = sorted(fake_data[time].unique())
 
     # Infer post periods if not provided
     if post_periods is None:
@@ -489,13 +529,30 @@ def placebo_group_test(
         post_periods = all_periods[mid:]
 
     # Create fake treatment indicator
-    fake_data = data.copy()
     fake_data["_fake_treated"] = fake_data[unit].isin(fake_treated_units).astype(int)
     fake_data["_post"] = fake_data[time].isin(post_periods).astype(int)
+
+    # Guard degenerate designs (e.g., all fake_treated_units were dropped as
+    # real-treated, or no controls remain) before they surface as a cryptic
+    # LinAlgError inside the estimator.
+    if fake_data["_fake_treated"].sum() == 0:
+        raise ValueError(
+            "No fake-treated observations remain (all fake_treated_units were "
+            "dropped as real-treated, or are absent from the data). Pass "
+            "never-treated units as fake_treated_units."
+        )
+    if (fake_data["_fake_treated"] == 0).sum() == 0:
+        raise ValueError("No control (non-fake-treated) units remain for the placebo comparison.")
 
     # Fit DiD
     did = DifferenceInDifferences(**estimator_kwargs)
     results = did.fit(fake_data, outcome=outcome, treatment="_fake_treated", time="_post")
+
+    # Record the fake-treated units actually used (after any never-treated
+    # filtering), not just the originally requested list, to avoid metadata drift.
+    # Preserve the caller's order (sorting could raise TypeError on mixed-type IDs).
+    retained = set(fake_data.loc[fake_data["_fake_treated"] == 1, unit].unique())
+    used_fake_treated = [u for u in fake_treated_units if u in retained]
 
     return PlaceboTestResults(
         test_type="fake_group",
@@ -507,7 +564,7 @@ def placebo_group_test(
         n_obs=results.n_obs,
         is_significant=bool(results.p_value < alpha),
         alpha=alpha,
-        fake_group=list(fake_treated_units),
+        fake_group=used_fake_treated,
     )
 
 
@@ -526,8 +583,12 @@ def permutation_test(
     Compute permutation-based p-value for DiD estimate.
 
     Randomly reassigns treatment status at the unit level and computes the
-    DiD estimate for each permutation. The p-value is the proportion of
-    permuted estimates at least as extreme as the original.
+    DiD estimate for each permutation. The p-value is the randomization-inference
+    value ``(1 + count) / (B + 1)`` (Phipson & Smyth 2010), where ``count`` is the
+    number of permuted estimates at least as extreme as the observed and ``B`` is
+    the number of valid permutations. With ``B`` sampled permutations this is a
+    Monte-Carlo approximation that converges to the exact full-enumeration value
+    ``count / total`` as ``B`` grows.
 
     Parameters
     ----------
@@ -557,8 +618,17 @@ def permutation_test(
 
     Notes
     -----
-    The permutation test is exact and does not rely on asymptotic
-    approximations, making it valid with any sample size.
+    This is a randomization-inference (permutation) test of the sharp null of no
+    effect for any unit; it does not rely on asymptotic approximations. Treatment
+    assignments are drawn independently each iteration (Monte-Carlo sampling *with
+    replacement* from the assignment space), so the reported p-value
+    ``(1 + count) / (B + 1)`` (Phipson & Smyth 2010) is a **valid but slightly
+    conservative** estimator -- the ``+1`` adds the observed assignment and
+    prevents a zero p-value. Here ``count`` is the number of permutations at least
+    as extreme as the observed estimate and ``B`` is the number of valid
+    permutations. As ``B`` grows it converges to the *exact* p-value obtained by
+    full enumeration of all assignments (the R-parity reference). "Exact" is
+    reserved for that full enumeration; the sampled value approximates it.
     """
     rng = np.random.default_rng(seed)
 
@@ -620,11 +690,12 @@ def permutation_test(
                 stacklevel=2,
             )
 
-    # Compute p-value: proportion of |permuted| >= |original|
-    p_value = np.mean(np.abs(valid_effects) >= np.abs(original_att))
-
-    # Ensure p-value is at least 1/(n_permutations + 1)
-    p_value = max(p_value, 1 / (len(valid_effects) + 1))
+    # Randomization-inference p-value (Phipson & Smyth 2010): include the observed
+    # statistic in both numerator and denominator. The 1/(B+1) floor is intrinsic
+    # (count == 0 -> 1/(B+1)), so no separate clamp is needed. With sampled
+    # permutations this converges to the exact full-enumeration value count/total.
+    count = int(np.sum(np.abs(valid_effects) >= np.abs(original_att)))
+    p_value = (1 + count) / (len(valid_effects) + 1)
 
     # Compute SE and CI from permutation distribution
     se = np.std(valid_effects, ddof=1)
