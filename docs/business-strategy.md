@@ -325,7 +325,7 @@ Not the academic flowchart -- a business decision tree.
 
 ## 7. Interaction with ROADMAP.md
 
-`ROADMAP.md` has been refreshed to organize work as Current State / Recently Shipped / Shipping Next / Under Consideration / AI-Agent Track / Long-term. This strategy document is an internal planning artifact that sits alongside it:
+`ROADMAP.md` is a forward-looking plan organizing work as Shipping Next / Under Consideration / AI-Agent Track / Long-term (present-state capability lives in the README estimator catalog, RTD, and CHANGELOG, not the roadmap). This strategy document is an internal planning artifact that sits alongside it:
 
 **Subsumed into current capability:**
 - **Survey guidance for practitioners** -- now covered by the practitioner getting-started guide, practitioner decision tree, and the Brand Awareness Survey DiD tutorial (all shipped).
@@ -333,7 +333,7 @@ Not the academic flowchart -- a business decision tree.
 - **de Chaisemartin-D'Haultfoeuille (reversible treatments)** -- shipped end-to-end. Marketing interventions that switch on and off (seasonal campaigns, promotions) are now supported.
 
 **In Shipping Next on ROADMAP.md:**
-- Practitioner-ready output (`BusinessReport`, `DiagnosticReport` with context-aware `practitioner_next_steps()`).
+- Context-aware `practitioner_next_steps()` — follow-up to the shipped `BusinessReport` / `DiagnosticReport` layer.
 - Practitioner tutorials: dCDH comprehensive walkthrough, BRFSS state-policy, Marketing Campaign Lift, Pricing / Promotion Impact.
 - Survey breadth and validation: two-phase sampling + multi-stage cluster R-cross-validation.
 
@@ -345,7 +345,7 @@ Not the academic flowchart -- a business decision tree.
 
 ## 8. Current State and Sequenced Work
 
-This section mirrors the `ROADMAP.md` structure (Current State / Shipping Next / Under Consideration / AI-Agent Track) but adds internal context useful for strategic planning.
+This section mirrors the `ROADMAP.md` forward-looking structure (Shipping Next / Under Consideration / AI-Agent Track) but adds internal context useful for strategic planning.
 
 ### Shipped (foundation complete)
 

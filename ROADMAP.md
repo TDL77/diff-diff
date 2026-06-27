@@ -1,75 +1,6 @@
 # diff-diff Roadmap
 
-This document outlines the feature roadmap for diff-diff, organized as current state, queued work, candidates under consideration, and longer-term directions.
-
-For past changes and release history, see [CHANGELOG.md](CHANGELOG.md).
-
----
-
-## Current State
-
-diff-diff is a production Python library for difference-in-differences causal inference with sklearn-like estimators and statsmodels-style output. It has feature parity with the standard R DiD ecosystem for core analysis, plus survey-design support that is not currently available in any other Python or R package.
-
-### Estimators
-
-- **Core**: Basic DiD, TWFE, MultiPeriod event study
-- **Heterogeneity-robust**: Callaway-Sant'Anna (2021), Sun-Abraham (2021), Borusyak-Jaravel-Spiess Imputation (2024), Two-Stage DiD (Gardner 2022), Stacked DiD (Wing et al. 2024)
-- **Specialized**: Synthetic DiD (Arkhangelsky et al. 2021), Triple Difference, Staggered Triple Difference (Ortiz-Villavicencio & Sant'Anna 2025), Continuous DiD (Callaway, Goodman-Bacon & Sant'Anna 2024), TROP
-- **Efficient**: EfficientDiD (Chen, Sant'Anna & Xie 2025) - attains the semiparametric efficiency bound on the no-covariate path; offers an optional doubly-robust covariate path (sieve-based propensity ratios plus linear OLS outcome regression) that is DR-consistent but does not generically attain the bound
-- **Nonlinear**: WooldridgeDiD / ETWFE (Wooldridge 2023, 2025) - saturated OLS, logit, Poisson QMLE with ASF-based ATT
-- **Reversible treatment**: ChaisemartinDHaultfoeuille (de Chaisemartin & D'Haultfœuille AER 2020 + NBER WP 29873) - the only estimator in the library for non-absorbing (on/off) treatments, with full dynamic event study, covariates, group-specific trends, non-binary treatment, HonestDiD integration, and survey support
-
-### Inference and diagnostics
-
-- Robust SEs, cluster SEs, wild bootstrap, multiplier bootstrap, placebo-based variance, jackknife (SyntheticDiD)
-- Parallel trends tests, placebo tests, Goodman-Bacon decomposition, TWFE decomposition diagnostic
-- Honest DiD sensitivity analysis (Rambachan & Roth 2023), pre-trends power analysis (Roth 2022)
-- Power analysis, MDE, and sample-size tools (analytical + simulation), including survey-aware variants
-- EPV diagnostics for propensity score estimation
-
-### Survey support
-
-`SurveyDesign` with strata, PSU, FPC, weight types (pweight/fweight/aweight), lonely PSU handling. All 16 estimators accept `survey_design` (15 inference-level + BaconDecomposition diagnostic):
-
-- **TSL variance** (Taylor Series Linearization) with strata + PSU + FPC
-- **Replicate weights**: BRR, Fay's BRR, JK1, JKn, SDR - 12 of 16 estimators
-- **Survey-aware bootstrap**: PSU-level multiplier (IF-based) and Rao-Wu rescaled (resampling-based)
-- **Diagnostics**: per-coefficient DEFF, subpopulation analysis, weight trimming, CV on estimates
-- **Repeated cross-sections**: `CallawaySantAnna(panel=False)` for BRFSS, ACS, CPS
-- **Microdata-to-panel bridge**: `aggregate_survey()` helper with design-based precision
-- **Survey-aware power analysis** via `SurveyPowerConfig`
-- **R cross-validation**: tests against R's `survey` package using NHANES, RECS, and API datasets
-
-See [Survey Design Support](docs/choosing_estimator.rst#survey-design-support) for the compatibility matrix and [survey-roadmap.md](docs/survey-roadmap.md) for the technical reference.
-
-### Infrastructure
-
-- Optional Rust backend for accelerated computation
-- Label-gated CI (tests run only when `ready-for-ci` label is added); standalone CI Gate workflow
-- Documentation dependency map (`docs/doc-deps.yaml`) with `/docs-impact` skill
-- AI practitioner guardrails based on Baker et al. (2025) 8-step workflow
-- Runtime-accessible LLM guides via `get_llm_guide(...)`, bundled in the wheel
-- JOSS paper materials (`paper.md`, `paper.bib`)
-
----
-
-## Recently Shipped
-
-Major landings since the prior roadmap revision. See [CHANGELOG.md](CHANGELOG.md) for the full history.
-
-- **`BusinessReport` and `DiagnosticReport`** - practitioner-ready output layer. Plain-English stakeholder summaries + unified diagnostic runner with a stable AI-legible `to_dict()` schema. `BusinessReport` auto-constructs `DiagnosticReport` by default so summaries mention pre-trends, robustness, and design-effect findings in one call. Estimator-native validation surfaces are routed through: SyntheticDiD uses `pre_treatment_fit` / `in_time_placebo` / `sensitivity_to_zeta_omega`; EfficientDiD uses its native `hausman_pretest`; TROP exposes factor-model fit metrics. See `docs/methodology/REPORTING.md` for methodology deviations including no-traffic-light gates, pre-trends verdict thresholds, and power-aware phrasing.
-- **ChaisemartinDHaultfoeuille (dCDH)** - full feature set: `DID_M` contemporaneous-switch, multi-horizon `DID_l` event study, analytical SE, multiplier bootstrap, TWFE decomposition diagnostic, dynamic placebos, normalized estimator, cost-benefit aggregate, sup-t bands, covariate adjustment (`DID^X`), group-specific linear trends (`DID^{fd}`), state-set-specific trends, heterogeneity testing, non-binary treatment, HonestDiD integration, survey support (TSL + pweight), and per-path event-study disaggregation via `by_path=k` (mirrors R `did_multiplegt_dyn(..., by_path=k)`).
-- **SyntheticDiD jackknife variance** (`variance_method='jackknife'`) with survey-weighted jackknife.
-- **SyntheticDiD validation diagnostics**.
-- **Survey support completion** - all 16 estimators accept `survey_design`; `aggregate_survey()` microdata-to-panel bridge with `second_stage_weights` parameter; `conditional_pt` DGP parameter for conditional-PT scenarios.
-- **Survey-aware power analysis** via `SurveyPowerConfig`.
-- **Practitioner onboarding** - Brand Awareness Survey DiD tutorial, Geo-Experiment Analysis tutorial, practitioner decision tree, practitioner getting-started guide, README "For Data Scientists" section.
-- **Survey academic grounding** - `survey-theory.md` methodology document, research-grade survey DGP, expanded R-validation across additional estimators, flat-weight-vs-design-based comparison tutorial.
-- **WooldridgeDiD / ETWFE estimator** (Wooldridge 2023, 2025).
-- **Staggered Triple Difference** (Ortiz-Villavicencio & Sant'Anna 2025).
-- **LLM guide bundling** - `get_llm_guide()` exposes `llms.txt`, `llms-full.txt`, and `llms-practitioner.txt` at runtime.
-- **JOSS paper materials** and CONTRIBUTORS.md.
-- **Python 3.14 support**; standalone CI Gate workflow.
+Forward-looking plan for diff-diff, organized as queued work, candidates under consideration, and longer-term directions. For what exists today, see the [README](README.md) estimator catalog and the [API reference on Read the Docs](https://diff-diff.readthedocs.io); for shipped history and release notes, see [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -79,7 +10,7 @@ Queued work, ordered by expected leverage. Each item is its own PR. Ordering is 
 
 ### Practitioner-ready output
 
-- **Context-aware `practitioner_next_steps()`.** Substitutes actual column names from fitted results instead of generic placeholders, so next-step guidance is executable rather than illustrative. (Standalone follow-up to the `BusinessReport` / `DiagnosticReport` landing below; tracked under the AI-Agent Track too.)
+- **Context-aware `practitioner_next_steps()`.** Substitutes actual column names from fitted results instead of generic placeholders, so next-step guidance is executable rather than illustrative. (Standalone follow-up to the `BusinessReport` / `DiagnosticReport` layer; tracked under the AI-Agent Track too.)
 
 ### Practitioner tutorials
 
@@ -100,14 +31,12 @@ Research-informed candidates. Each has a rationale, a tractability note, and a c
 
 ### Methodology extensions
 
-- **DiD with no untreated group** (de Chaisemartin, Ciccia, D'Haultfœuille & Knau, arXiv:2405.04465, 2024, plus continuous-treatment-with-no-stayers companion, AEA P&P 2024). New estimator for designs where treatment is universal with heterogeneous dose (the inverse of the few-treated-many-donors case). Uses quasi-untreated units as controls. No existing diff-diff estimator handles this. Tractability: medium; closed-form identification. **Status (2026-04-18):** methodology plan approved; paper review at `docs/methodology/papers/dechaisemartin-2026-review.md`, REGISTRY stub at `docs/methodology/REGISTRY.md#heterogeneousadoptiondid`, class name `HeterogeneousAdoptionDiD`, implementation queued across 7 phased PRs. **Commit when**: methodology plan drafted and validated against the paper's Pierce and Schott (2016) PNTR manufacturing-employment replication (Figure 2).
 - **Nonparametric / flexible outcome regression for `EfficientDiD` DR covariate path** (Chen, Sant'Anna & Xie, arXiv:2506.17729, 2025, Section 4). The shipped staggered `EfficientDiD` uses a linear OLS outcome regression in its doubly-robust covariate path; that preserves DR consistency but does not generically attain the semiparametric efficiency bound unless the conditional mean is linear in the covariates. Replacing the OLS outcome regression with sieve / kernel / ML nuisance estimation (as the paper's Section 4 allows) would close the efficiency gap on the covariate path. Tractability: medium; the hook points are in `diff_diff/efficient_did_covariates.py`. **Commit when**: a paper-review synthesis is written, with an implementation plan for the nonparametric OR that preserves the existing DR consistency guarantees and survey-weighted variance surface.
 - **Distributional DiD for staggered timing** (Ciaccio, arXiv:2408.01208, 2024). New estimator extending Callaway-Li QTT to staggered adoption. `CallawaySantAnna` currently gives mean ATT only; this unlocks quantile effects. Tractability: medium. **Commit when**: a health-econ or public-health user reports need for quantile effects in a repeated-cross-section design.
 - **Local Projections DiD** (Dube, Girardi, Jordà & Taylor, JAE 2025). New estimator with flexible impulse-response and robustness to dynamic misspecification; natural for anticipation-prone settings. Tractability: well-scoped. **Commit when**: a methodology review confirms the dynamic variant's variance derivation fits our SE helpers.
 - **Few-treated-units inference option** (Alvarez, Ferman & Wüthrich, arXiv:2504.19841, 2025). `inference=` option covering t(G-1) corrections, randomization inference, and Ferman-Pinto-style permutation tests. Current SE paths assume large-G asymptotics. Tractability: medium. **Commit when**: a user reports sparse-treatment pain.
 - **Riesz-representation sensitivity** (Bach et al., arXiv:2510.09064, 2025). Confounder-based sensitivity bound complementing HonestDiD's trend-based bound. Tractability: medium. **Commit when**: HonestDiD users ask for confounder bounds.
 - **Compositional-change inference** (Sant'Anna & Xu, arXiv:2304.13925 v3, 2025). Corrects inference for rolling-panel repeated-cross-section designs (ACS, CPS) where sample composition changes across periods. Tractability: medium. **Commit when**: BRFSS tutorial or an applied user surfaces the issue.
-- **Triple-difference identification-with-covariates audit** (Ortiz-Villavicencio & Sant'Anna, arXiv:2505.09942, 2025). The paper shows common DDD implementations are invalid under covariate-conditional identification. Audit existing `TripleDifference` / `StaggeredTripleDifference` against the paper. Tractability: small. **Promote to Shipping Next** if the audit finds a real issue.
 
 ### Post-estimation and export capabilities
 
@@ -133,14 +62,7 @@ Long-running program, framed as "building toward" rather than with discrete ship
 
 **Vision.** A practitioner hands an AI agent a business scenario. The agent, with diff-diff as its toolkit, interprets the scenario, selects the correct estimator and identification strategy, executes the analysis with correct diagnostics and sensitivity, and returns a business-ready report. Practitioners never see raw coefficients unless they want to.
 
-**Building blocks already in place.**
-
-- Baker et al. (2025) 8-step workflow enforcement in `diff_diff/practitioner.py`.
-- `practitioner_next_steps()` context-aware guidance.
-- Runtime LLM guides via `get_llm_guide(...)` (`llms.txt`, `llms-full.txt`, `llms-practitioner.txt`, `llms-autonomous.txt`), bundled in the wheel.
-- `profile_panel(df, ...)` returns a `PanelProfile` dataclass of structural facts about the panel - factual, not opinionated. Pairs with the `"autonomous"` guide variant (reference-shaped: estimator-support matrix + per-design-feature reasoning) so agents describe the data then consult a bundled reference rather than calling a deterministic recommender. `PanelProfile.outcome_shape` and `PanelProfile.treatment_dose` extensions add descriptive distributional context (count-likeness / bounded-support hints on numeric outcomes; dose support and zero-dose presence on continuous treatments). Most fields are descriptive context. `outcome_shape.is_count_like` informs the WooldridgeDiD-QMLE-vs-linear-OLS judgment but does not gate it. `profile_panel` does not see the separate `first_treat` column that `ContinuousDiD.fit()` consumes; under the canonical `ContinuousDiD` setup (per-unit time-invariant dose `D_i` + separate `first_treat`), several preflight checks become predictive on the dose column: `has_never_treated` (proxies `P(D=0) > 0`), `treatment_varies_within_unit == False` (actual fit-time gate), `is_balanced` (actual fit-time gate), absence of the `duplicate_unit_time_rows` alert (silent last-row-wins overwrite path), and `treatment_dose.dose_min > 0` (predicts strictly-positive-treated-dose). When `has_never_treated == False` but all doses are non-negative, `ContinuousDiD` does not apply (Remark 3.1 not implemented); `HeterogeneousAdoptionDiD` is a routing alternative on this branch. When `dose_min <= 0` (negative doses), neither `ContinuousDiD` nor `HeterogeneousAdoptionDiD` apply (HAD raises on negative post-period dose); linear DiD with a signed continuous covariate is the applicable alternative. Re-encoding the treatment column is an agent-side preprocessing choice that is not documented in REGISTRY as a supported fallback. The estimator's force-zero coercion on inconsistent `first_treat == 0 + nonzero dose` inputs is implementation behavior, not a documented method for manufacturing controls. The autonomous guide §5 walks through three end-to-end PanelProfile -> reasoning -> validation worked examples.
-- Package docstring leads with an "For AI agents" entry block so `help(diff_diff)` surfaces the agent entry points automatically.
-- Silent-operation warnings so agents and humans see the same signals at the same time.
+**Building blocks already in place.** Several agent-facing building blocks already ship - Baker et al. (2025) 8-step workflow enforcement, runtime LLM guides via `get_llm_guide(...)`, `profile_panel(...)` structural panel profiling, an "For AI agents" package-docstring entry block, and silent-operation warnings. See the README "For AI Agents" section and the bundled `llms*.txt` guides for the current surface.
 
 **Next blocks toward the vision.**
 
@@ -161,12 +83,6 @@ Frontier methods that may graduate to Under Consideration given time and researc
 Extends DiD to duration / survival outcomes where standard methods fail (hazard rates, time-to-event). Duration analogue of parallel trends; avoids distributional and hazard-function assumptions.
 
 **Reference**: Deaner & Ku (2025), *AEA Conference Paper*.
-
-### DiD with Interference / Spillovers
-
-Standard DiD assumes SUTVA; spatial and network spillovers violate this. Two-stage imputation approaches estimate treatment and spillover effects jointly under staggered timing.
-
-**Reference**: Butts (2024), working paper.
 
 ### Quantile / Distributional DiD
 
