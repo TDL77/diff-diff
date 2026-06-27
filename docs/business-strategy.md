@@ -333,7 +333,7 @@ Not the academic flowchart -- a business decision tree.
 - **de Chaisemartin-D'Haultfoeuille (reversible treatments)** -- shipped end-to-end. Marketing interventions that switch on and off (seasonal campaigns, promotions) are now supported.
 
 **In Shipping Next on ROADMAP.md:**
-- Practitioner-ready output (`BusinessReport`, `DiagnosticReport` with context-aware `practitioner_next_steps()`).
+- Context-aware `practitioner_next_steps()` — follow-up to the shipped `BusinessReport` / `DiagnosticReport` layer.
 - Practitioner tutorials: dCDH comprehensive walkthrough, BRFSS state-policy, Marketing Campaign Lift, Pricing / Promotion Impact.
 - Survey breadth and validation: two-phase sampling + multi-stage cluster R-cross-validation.
 
