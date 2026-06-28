@@ -2181,14 +2181,22 @@ class TestTWFECovariateNameCollision:
         df = self._panel_with(name)
         with pytest.raises(ValueError, match="collide"):
             TwoWayFixedEffects(vcov_type=vcov_type).fit(
-                df, outcome="y", treatment="treated", time="time", unit="unit",
+                df,
+                outcome="y",
+                treatment="treated",
+                time="time",
+                unit="unit",
                 covariates=[name],
             )
 
     def test_hc2_full_dummy_noncolliding_preserves_coefs(self):
         df = self._panel_with("x1")
         r = TwoWayFixedEffects(vcov_type="hc2").fit(
-            df, outcome="y", treatment="treated", time="time", unit="unit",
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
             covariates=["x1"],
         )
         ck = r.coefficients
@@ -2199,7 +2207,11 @@ class TestTWFECovariateNameCollision:
     def test_within_transform_noncolliding_returns_att_only(self):
         df = self._panel_with("x1")
         r = TwoWayFixedEffects().fit(  # default hc1 -> within-transform
-            df, outcome="y", treatment="treated", time="time", unit="unit",
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
             covariates=["x1"],
         )
         # The within-transform path exposes only the ATT coefficient by design;
@@ -2215,13 +2227,117 @@ class TestTWFECovariateNameCollision:
         df = self._panel_with("x1")
 
         def _boom(*args, **kwargs):
-            raise AssertionError(
-                "pd.get_dummies must not be called on the within-transform path"
-            )
+            raise AssertionError("pd.get_dummies must not be called on the within-transform path")
 
         monkeypatch.setattr(pd, "get_dummies", _boom)
         r = TwoWayFixedEffects().fit(
-            df, outcome="y", treatment="treated", time="time", unit="unit",
+            df,
+            outcome="y",
+            treatment="treated",
+            time="time",
+            unit="unit",
             covariates=["x1"],
         )
         assert set(r.coefficients.keys()) == {"ATT"}
+
+
+class TestMPDClusterHC2BMSharedPrecompute:
+    """`MultiPeriodDiD(cluster=..., vcov_type='hc2_bm')` builds the CR2
+    Bell-McCaffrey precomputes ONCE, not twice.
+
+    Mechanism guard for the perf dedup: vcov and the per-coefficient +
+    post-period-average contrast DOF now come from a single
+    `_compute_cr2_bm_vcov_and_dof` call, so the expensive per-cluster
+    adjustment matrices (`_cr2_adjustment_matrix`) are built exactly once per
+    cluster. Before the dedup, solve_ols's vcov path and the separate
+    contrast-DOF call each built them, i.e. `2 * G`.
+
+    (Absolute SE/DOF values are pinned independently by the R/clubSandwich
+    goldens in `test_multi_period_cluster_hc2_bm_avg_att_uses_clubsandwich_dof`
+    and `test_linalg_hc2_bm.py`; these tests guard the *new invariants* the
+    refactor introduces.)
+    """
+
+    @staticmethod
+    def _balanced_panel():
+        rng = np.random.default_rng(2)
+        rows = []
+        for i in range(20):
+            treated = int(i >= 10)
+            for t in range(3):
+                y = rng.normal(0.0, 1.0) + 0.5 * treated * (t >= 1)
+                rows.append({"unit": i, "time": t, "treated": treated, "y": y})
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def _unbalanced_panel():
+        rng = np.random.default_rng(7)
+        rows = []
+        for i in range(24):
+            treated = int(i >= 12)
+            periods = [0, 1, 2, 3] if (i % 3 != 0) else [0, 2, 3]
+            for t in periods:
+                y = rng.normal(0.0, 1.0) + 0.4 * treated * (t >= 2)
+                rows.append({"unit": i, "time": t, "treated": treated, "y": y})
+        return pd.DataFrame(rows)
+
+    @pytest.mark.parametrize("which", ["balanced", "unbalanced"])
+    def test_cr2_precompute_built_once(self, which, monkeypatch):
+        """`_cr2_adjustment_matrix` is called exactly `G` times (one precompute
+        build), not `2 * G`, on the cluster+hc2_bm path."""
+        import diff_diff.linalg as L
+
+        data = self._balanced_panel() if which == "balanced" else self._unbalanced_panel()
+        n_clusters = data["unit"].nunique()
+
+        orig = L._cr2_adjustment_matrix
+        calls = {"n": 0}
+
+        def _counting(*args, **kwargs):
+            calls["n"] += 1
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(L, "_cr2_adjustment_matrix", _counting)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = MultiPeriodDiD(vcov_type="hc2_bm", cluster="unit").fit(
+                data, outcome="y", treatment="treated", time="time", unit="unit"
+            )
+
+        # One build: exactly one adjustment matrix per cluster (was 2 * G when
+        # solve_ols's vcov and the contrast-DOF call each built the precomputes).
+        assert calls["n"] == n_clusters, (
+            f"Expected {n_clusters} _cr2_adjustment_matrix calls (one CR2 "
+            f"precompute build), got {calls['n']} — the precompute is being "
+            "built more than once."
+        )
+        # Inference is still finite (the dedup did not break the path).
+        assert np.isfinite(res.avg_att) and np.isfinite(res.avg_se)
+        assert np.isfinite(res.avg_p_value)
+
+    def test_fit_is_reproducible(self):
+        """Two independent fits (and a repeat fit of the same estimator) give
+        identical avg-ATT and per-period inference — determinism + the
+        fit-does-not-mutate-config contract on the bypass path."""
+        data = self._balanced_panel()
+
+        est = MultiPeriodDiD(vcov_type="hc2_bm", cluster="unit")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            r1 = est.fit(data, outcome="y", treatment="treated", time="time", unit="unit")
+            # Repeat fit of the SAME object (config must be unmutated).
+            r2 = est.fit(data, outcome="y", treatment="treated", time="time", unit="unit")
+            # Fresh object, same config.
+            r3 = MultiPeriodDiD(vcov_type="hc2_bm", cluster="unit").fit(
+                data, outcome="y", treatment="treated", time="time", unit="unit"
+            )
+
+        for r in (r2, r3):
+            assert r.avg_att == r1.avg_att
+            assert r.avg_se == r1.avg_se
+            assert r.avg_t_stat == r1.avg_t_stat
+            assert r.avg_p_value == r1.avg_p_value
+            assert set(r.period_effects) == set(r1.period_effects)
+            for p in r1.period_effects:
+                assert r.period_effects[p].effect == r1.period_effects[p].effect
+                assert r.period_effects[p].se == r1.period_effects[p].se

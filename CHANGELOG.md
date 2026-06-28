@@ -87,10 +87,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   DOF now come from a single combined call (the CR2 helper returns both together), halving the
   per-coefficient CR2 sandwich cost on every `hc2_bm` fit (weighted one-way WLS-CR2,
   weighted/unweighted clustered CR2-BM — i.e. `DiD`/`TWFE`/`MPD` with `vcov_type="hc2_bm"`).
-  (`MultiPeriodDiD`'s separate post-period-average contrast DOF still has its own recomputation,
-  tracked as an open follow-up in `TODO.md`.) **Bit-identical** SEs and DOF
+  (`MultiPeriodDiD`'s separate post-period-average contrast DOF recomputation is addressed by the
+  `MultiPeriodDiD` entry below.) **Bit-identical** SEs and DOF
   (proven at `atol=0`); no methodology, numerical, or public-API change. Minor side effect: the
   HC2→HC1 high-leverage-fallback `UserWarning` now fires once per fit instead of twice.
+- **`MultiPeriodDiD(cluster=..., vcov_type="hc2_bm")`: build the CR2 precomputes once, not
+  twice.** The cluster + CR2 Bell-McCaffrey path built the expensive per-cluster precomputes
+  (the `A_g` adjustment-matrix eigendecompositions, `S_W`, the residual-maker `M = I − H`) twice
+  per fit — once in `solve_ols`'s vcov path (whose per-coefficient DOF was then discarded) and
+  again in the separate `_compute_cr2_bm_contrast_dof` call for the per-coefficient and
+  post-period-average ATT Satterthwaite DOF. The vcov **and** all DOF now come from a single
+  shared CR2 core (`_compute_cr2_bm_vcov_and_dof`) per fit; `_compute_cr2_bm` and
+  `_compute_cr2_bm_contrast_dof` become thin wrappers over it (removing the formerly-duplicated
+  ~50-line precompute block, so every CR2 caller routes through one implementation). The fit-level
+  call computes vcov and the per-coefficient + avg-ATT DOF together from one precompute build.
+  **Bit-identical** `vcov_`, per-period DOF, avg-ATT DOF, p-values, and CIs (proven at `atol=0`
+  across balanced, unbalanced, and rank-deficient designs; a mechanism test asserts the
+  per-cluster adjustment matrix is built exactly once per cluster, down from twice). Completes the
+  `MultiPeriodDiD` follow-up noted in the `LinearRegression` entry above. No methodology,
+  numerical, or public-API change.
 
 ### Fixed
 - **Corrected the Korn & Graubard (1990) citation venue** in `docs/methodology/REGISTRY.md`

@@ -28,6 +28,7 @@ from diff_diff.linalg import (
     _compute_bm_dof_oneway,
     _compute_cr2_bm,
     _compute_cr2_bm_contrast_dof,
+    _compute_cr2_bm_vcov_and_dof,
     _compute_hat_diagonals,
     _cr2_adjustment_matrix,
     compute_robust_vcov,
@@ -769,3 +770,71 @@ class TestCR2BMContrastDOF:
         bread = X.T @ X
         with pytest.raises(ValueError, match=r"[Nn]eed at least 2 clusters"):
             _compute_cr2_bm_contrast_dof(X, cluster, bread, np.eye(k))
+
+    def test_wrappers_are_bit_identical_to_shared_core(self):
+        """`_compute_cr2_bm` and `_compute_cr2_bm_contrast_dof` are thin
+        wrappers over `_compute_cr2_bm_vcov_and_dof`, so they must reproduce
+        the core's output exactly (atol=0 / array_equal).
+
+        This is the refactor's structural guard: the per-coefficient vcov+DOF
+        path (`contrasts=eye(k)`, residuals provided) and the DOF-only contrast
+        path (`residuals=None`) both route through the single core, unweighted
+        and weighted.
+        """
+        rng = np.random.default_rng(20260628)
+        n, k = 40, 3
+        X = np.column_stack([np.ones(n), rng.standard_normal(n), rng.standard_normal(n)])
+        beta = np.array([0.5, 1.0, -0.7])
+        y = X @ beta + rng.standard_normal(n) * 0.3
+        cluster = np.repeat(np.arange(8), 5)
+        # Compound contrast: per-coef columns plus an average of the slopes.
+        C = np.column_stack([np.eye(k), np.array([0.0, 0.5, 0.5])])
+
+        for weights in (None, rng.uniform(0.5, 2.0, size=n)):
+            if weights is None:
+                bread = X.T @ X
+            else:
+                bread = X.T @ (X * weights[:, np.newaxis])
+            coef = np.linalg.solve(bread, X.T @ (y if weights is None else y * weights))
+            residuals = y - X @ coef
+
+            # Per-coefficient vcov + DOF via wrapper vs core (eye(k)).
+            v_wrap, d_wrap = _compute_cr2_bm(X, residuals, cluster, bread, weights=weights)
+            v_core, d_core = _compute_cr2_bm_vcov_and_dof(
+                X, cluster, bread, np.eye(k), residuals=residuals, weights=weights
+            )
+            assert np.array_equal(v_wrap, v_core)
+            assert np.array_equal(d_wrap, d_core, equal_nan=True)
+
+            # DOF-only contrast path via wrapper vs core (residuals=None).
+            dof_wrap = _compute_cr2_bm_contrast_dof(X, cluster, bread, C, weights=weights)
+            vcov_core, dof_core = _compute_cr2_bm_vcov_and_dof(
+                X, cluster, bread, C, residuals=None, weights=weights
+            )
+            assert vcov_core is None  # no residuals -> meat/vcov skipped
+            assert np.array_equal(dof_wrap, dof_core, equal_nan=True)
+
+    def test_dof_only_with_zero_weights_does_not_crash(self):
+        """DOF-only callers pass `weights=` AND `residuals=None`; the shared
+        core's zero-weight filter must guard the residuals subscript.
+
+        Regression for the merge of `_compute_cr2_bm`'s filter (which subscripts
+        `residuals` unconditionally) into the shared core: without the
+        `residuals is not None` guard, a DOF-only call with zero weights would
+        raise `TypeError` (StackedDiD's weighted contrast-DOF path and the
+        weighted singleton-cluster dispatch hit exactly this).
+        """
+        rng = np.random.default_rng(20260629)
+        n, k = 40, 3
+        X = np.column_stack([np.ones(n), rng.standard_normal(n), rng.standard_normal(n)])
+        cluster = np.repeat(np.arange(8), 5)
+        weights = np.ones(n)
+        # Zero out a few rows, keeping >=2 clusters with positive total weight.
+        weights[[0, 7, 13]] = 0.0
+        bread = X.T @ (X * weights[:, np.newaxis])
+        C = np.column_stack([np.eye(k), np.array([0.0, 0.5, 0.5])])
+
+        # Must not raise (the bug was an unconditional residuals[positive_mask]).
+        dof = _compute_cr2_bm_contrast_dof(X, cluster, bread, C, weights=weights)
+        assert dof.shape == (C.shape[1],)
+        assert np.all(np.isfinite(dof))
