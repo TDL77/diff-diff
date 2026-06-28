@@ -10,11 +10,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from scipy import linalg as scipy_linalg
 
 from diff_diff.linalg import (
     _check_propensity_diagnostics,
     _detect_rank_deficiency,
+    _equilibrated_lstsq,
     _format_dropped_columns,
     _rank_guarded_inv,
     solve_logit,
@@ -785,7 +785,6 @@ class CallawaySantAnna(
         t: Any,
         covariates: Optional[List[str]],
         pscore_cache: Optional[Dict] = None,
-        cho_cache: Optional[Dict] = None,
         epv_diagnostics: Optional[Dict] = None,
     ) -> Tuple[Optional[float], float, int, int, Optional[Dict[str, Any]], Optional[float]]:
         """
@@ -912,15 +911,6 @@ class CallawaySantAnna(
             else:
                 pscore_key = (g, base_period_val, t)
 
-        # Compute cache key for Cholesky reuse (DR outcome regression)
-        cho_key = None
-        if cho_cache is not None and X_control is not None:
-            is_balanced = precomputed.get("is_balanced", False)
-            if is_balanced and self.control_group == "never_treated":
-                cho_key = base_period_val
-            else:
-                cho_key = (g, base_period_val, t)
-
         # Estimation method
         if self.estimation_method == "reg":
             att_gt, se_gt, inf_func = self._outcome_regression(
@@ -961,8 +951,6 @@ class CallawaySantAnna(
                 X_control,
                 pscore_cache=pscore_cache,
                 pscore_key=pscore_key,
-                cho_cache=cho_cache,
-                cho_key=cho_key,
                 sw_treated=sw_treated,
                 sw_control=sw_control,
                 sw_all=sw_all,
@@ -1212,9 +1200,10 @@ class CallawaySantAnna(
         """
         Optimized computation of all ATT(g,t) for the covariate regression case.
 
-        Groups (g,t) pairs by their control regression key to reuse Cholesky
-        factorizations of X^T X across pairs that share the same control design
-        matrix.
+        Fits the per-cohort control outcome regression through the shared
+        scale-equilibrated ``solve_ols`` (column-equilibrated SVD/gelsd; matches
+        ``TripleDifference`` and R's ``lm()``/QR), reusing the per-control-group
+        design across the (g, t) pairs that share it.
 
         Returns
         -------
@@ -1315,42 +1304,26 @@ class CallawaySantAnna(
                 continue
 
             X_ctrl = None
-            cho = None
-            kept_cols = None
             if not ctrl_has_nan:
                 X_ctrl = np.column_stack([np.ones(n_c_base), X_ctrl_raw])
 
-                # One-time rank check for this control group
+                # One-time rank check per control group — for the informative
+                # warning ONLY. The OR coefficient solve now routes through the
+                # shared scale-robust solver (`solve_ols` -> equilibrated SVD),
+                # which does its own rank handling, so we no longer pre-factor
+                # X'X here (a large-scale covariate would have made the
+                # normal-equations Cholesky / cond=1e-7 lstsq scale-sensitive).
                 rank, dropped_cols, _ = _detect_rank_deficiency(X_ctrl)
-
-                if len(dropped_cols) > 0:
-                    # Rank-deficient: force lstsq for both "warn" and "silent".
-                    # Cholesky on near-singular XtX could yield unstable coefficients.
-                    if self.rank_deficient_action == "warn":
-                        col_info = _format_dropped_columns(dropped_cols)
-                        warnings.warn(
-                            f"Rank-deficient covariate design (control_key={control_key}): "
-                            f"dropped columns {col_info}. Rank {rank} < {X_ctrl.shape[1]}. "
-                            "Using minimum-norm least-squares solution.",
-                            UserWarning,
-                            stacklevel=2,
-                        )
-                    cho = None  # Force lstsq path for ALL rank-deficient cases
-                    # dtype=int so an empty result (rank 0) is an int index array;
-                    # X_ctrl always carries an intercept column (positive norm,
-                    # independent), so kept_cols.size >= 1 here in practice.
-                    kept_cols = np.array(
-                        [i for i in range(X_ctrl.shape[1]) if i not in dropped_cols],
-                        dtype=int,
+                if len(dropped_cols) > 0 and self.rank_deficient_action == "warn":
+                    col_info = _format_dropped_columns(dropped_cols)
+                    warnings.warn(
+                        f"Rank-deficient covariate design (control_key={control_key}): "
+                        f"dropped columns {col_info}. Rank {rank} < {X_ctrl.shape[1]}. "
+                        "Using a rank-reduced least-squares solution (dropped columns "
+                        "excluded from the prediction).",
+                        UserWarning,
+                        stacklevel=2,
                     )
-                else:
-                    kept_cols = None  # Full rank — use all columns
-                    with np.errstate(all="ignore"):
-                        XtX = X_ctrl.T @ X_ctrl
-                    try:
-                        cho = scipy_linalg.cho_factor(XtX)
-                    except np.linalg.LinAlgError:
-                        cho = None
 
             # Process each (g, t) pair in this group
             for g, t, bp_val, base_col, post_col in tasks:
@@ -1417,49 +1390,47 @@ class CallawaySantAnna(
                         pair_X_ctrl = np.column_stack([np.ones(n_c), X_control_pair])
                         pair_n_c = n_c
 
-                    # Solve for beta
-                    beta = None
+                    # Solve for beta via the shared scale-robust solver
+                    # (`solve_ols` -> column-equilibrated SVD/gelsd; matches
+                    # TripleDifference._fit_predict_mu and R's lm()/QR). This
+                    # replaces the prior cached/per-pair `cho_solve(X'X)` +
+                    # `lstsq(cond=1e-7)` fallbacks, which were NOT scale-
+                    # equilibrated. `rank_deficient_action="silent"` preserves
+                    # this path's pre-existing never-raise behavior — the
+                    # informative rank warning is emitted once per control group
+                    # above.
                     with np.errstate(all="ignore"):
-                        if (
-                            cho is not None
-                            and is_balanced
-                            and self.control_group == "never_treated"
-                        ):
-                            # Use cached Cholesky
-                            Xty = pair_X_ctrl.T @ control_change
-                            beta = scipy_linalg.cho_solve(cho, Xty)
+                        if pair_X_ctrl.shape[0] < pair_X_ctrl.shape[1]:
+                            # Underdetermined control cell (fewer controls than
+                            # covariate columns): solve_ols raises on n < k *before*
+                            # it can rank-drop, so reproduce the documented R-style /
+                            # solve_ols column-drop contract here — detect the rank-
+                            # deficient columns, fit the reduced (full-column-rank)
+                            # design via the equilibrated lstsq, and leave dropped
+                            # coefficients NaN (zero-filled for prediction below, so
+                            # a dropped covariate contributes 0). This matches the
+                            # prior reduced-lstsq's no-crash handling under
+                            # warn/silent AND avoids the non-unique minimum-norm
+                            # extrapolation of a full n<k solve (the rank-deficiency
+                            # warning already fired for this control group above).
+                            pair_rank, _, pair_pivot = _detect_rank_deficiency(pair_X_ctrl)
+                            kept_cols = np.sort(pair_pivot[:pair_rank])
+                            beta = np.full(pair_X_ctrl.shape[1], np.nan)
+                            if kept_cols.size:
+                                beta[kept_cols] = _equilibrated_lstsq(
+                                    pair_X_ctrl[:, kept_cols], control_change
+                                )
                         else:
-                            # Compute per-pair Cholesky or lstsq fallback
-                            if kept_cols is not None:
-                                # Rank-deficient: skip Cholesky, use reduced lstsq
-                                pass
-                            else:
-                                pair_XtX = pair_X_ctrl.T @ pair_X_ctrl
-                                try:
-                                    pair_cho = scipy_linalg.cho_factor(pair_XtX)
-                                    Xty = pair_X_ctrl.T @ control_change
-                                    beta = scipy_linalg.cho_solve(pair_cho, Xty)
-                                except np.linalg.LinAlgError:
-                                    pass
-
-                        if beta is None or np.any(~np.isfinite(beta)):
-                            if kept_cols is not None:
-                                # Reduced solve for rank-deficient design
-                                result = scipy_linalg.lstsq(
-                                    pair_X_ctrl[:, kept_cols],
-                                    control_change,
-                                    cond=1e-07,
-                                )
-                                beta = np.zeros(pair_X_ctrl.shape[1])
-                                beta[kept_cols] = result[0]
-                            else:
-                                # Full-rank lstsq fallback (Cholesky numerical failure)
-                                result = scipy_linalg.lstsq(
-                                    pair_X_ctrl,
-                                    control_change,
-                                    cond=1e-07,
-                                )
-                                beta = result[0]
+                            beta, _, _ = solve_ols(
+                                pair_X_ctrl,
+                                control_change,
+                                rank_deficient_action="silent",
+                                return_vcov=False,
+                            )
+                    # Dropped (collinear) columns come back NaN; zero them for
+                    # prediction (a dropped covariate contributes 0 to the
+                    # column-space projection), matching the prior reduced-lstsq.
+                    beta = np.where(np.isnan(beta), 0.0, beta)
 
                     nan_cell = False
 
@@ -2021,9 +1992,10 @@ class CallawaySantAnna(
             covariates is not None
             and self.estimation_method == "reg"
             and self.rank_deficient_action != "error"
-            and not has_survey  # Cholesky cache uses X'X; survey needs X'WX
+            and not has_survey  # vectorized OR path is unweighted; survey reg routes separately
         ):
-            # Optimized covariate regression path with Cholesky caching
+            # Optimized (vectorized) covariate regression path; the OR nuisance
+            # is fit through the shared scale-equilibrated solve_ols.
             group_time_effects, influence_func_info, _skip_info = (
                 self._compute_all_att_gt_covariate_reg(
                     precomputed, treatment_groups, time_periods, min_period
@@ -2037,18 +2009,6 @@ class CallawaySantAnna(
 
             # Propensity score cache for IPW/DR with covariates
             pscore_cache = {} if (covariates and self.estimation_method in ("ipw", "dr")) else None
-            # Cholesky cache for DR outcome regression component
-            # Skip cache when survey weights present (X'WX differs from X'X)
-            cho_cache = (
-                {}
-                if (
-                    covariates
-                    and self.estimation_method == "dr"
-                    and self.rank_deficient_action != "error"
-                    and not has_survey
-                )
-                else None
-            )
 
             epv_diagnostics = (
                 {} if (covariates and self.estimation_method in ("ipw", "dr")) else None
@@ -2070,7 +2030,6 @@ class CallawaySantAnna(
                         t,
                         covariates,
                         pscore_cache=pscore_cache,
-                        cho_cache=cho_cache,
                         epv_diagnostics=epv_diagnostics,
                     )
 
@@ -2485,7 +2444,7 @@ class CallawaySantAnna(
 
             # Zero NaN coefficients for prediction (dropped rank-deficient columns
             # contribute 0 to the column space projection, matching DR path convention)
-            beta = np.where(np.isfinite(beta), beta, 0.0)
+            beta = np.where(np.isnan(beta), 0.0, beta)
 
             # Predict counterfactual for treated units
             X_treated_with_intercept = np.column_stack([np.ones(n_t), X_treated])
@@ -2811,8 +2770,6 @@ class CallawaySantAnna(
         X_control: Optional[np.ndarray] = None,
         pscore_cache: Optional[Dict] = None,
         pscore_key: Optional[Any] = None,
-        cho_cache: Optional[Dict] = None,
-        cho_key: Optional[Any] = None,
         sw_treated: Optional[np.ndarray] = None,
         sw_control: Optional[np.ndarray] = None,
         sw_all: Optional[np.ndarray] = None,
@@ -2846,50 +2803,23 @@ class CallawaySantAnna(
         if X_treated is not None and X_control is not None and X_treated.shape[1] > 0:
             # Doubly robust estimation with covariates
             ps_fallback_used = False
-            # Step 1: Outcome regression - fit E[Delta Y | X] on control
-            # Try Cholesky cache for outcome regression (disabled when survey weights present)
-            beta = None
+            # Step 1: Outcome regression - fit E[Delta Y | X] on control via the
+            # shared scale-robust solver (`_linear_regression` -> `solve_ols` ->
+            # column-equilibrated SVD/gelsd; matches TripleDifference and R's
+            # lm()/QR). This replaces the prior `cho_solve(X'X)` cache fast path,
+            # which was NOT scale-equilibrated (a large-scale covariate would
+            # corrupt the OR fit). `solve_ols` adds the intercept and handles
+            # rank deficiency; we only need beta for prediction (m_treated,
+            # m_control), so zero the NaN (dropped-column) coefficients — a
+            # dropped covariate contributes 0 to the projection.
             X_control_with_intercept = np.column_stack([np.ones(n_c), X_control])
-            if cho_cache is not None and cho_key is not None:
-                cached_cho = cho_cache.get(cho_key)
-
-                if cached_cho is False:
-                    # Rank-deficient sentinel: skip Cholesky, fall through
-                    pass
-                elif cached_cho is not None:
-                    Xty = X_control_with_intercept.T @ control_change
-                    beta = scipy_linalg.cho_solve(cached_cho, Xty)
-                    if np.any(~np.isfinite(beta)):
-                        beta = None
-                else:
-                    # First time for this cho_key: check rank before Cholesky
-                    rank_info = _detect_rank_deficiency(X_control_with_intercept)
-                    if len(rank_info[1]) > 0:
-                        cho_cache[cho_key] = False  # Sentinel
-                    else:
-                        XtX = X_control_with_intercept.T @ X_control_with_intercept
-                        try:
-                            cho_factor = scipy_linalg.cho_factor(XtX)
-                            cho_cache[cho_key] = cho_factor
-                            Xty = X_control_with_intercept.T @ control_change
-                            beta = scipy_linalg.cho_solve(cho_factor, Xty)
-                            if np.any(~np.isfinite(beta)):
-                                beta = None
-                        except np.linalg.LinAlgError:
-                            pass
-
-            if beta is None:
-                beta, _ = _linear_regression(
-                    X_control,
-                    control_change,
-                    rank_deficient_action=self.rank_deficient_action,
-                    weights=sw_control,
-                )
-                # Zero NaN coefficients for prediction only — dropped columns
-                # contribute 0 to the column space projection. Note: solve_ols
-                # deliberately uses NaN (R's lm() convention) for inference, but
-                # here we only need beta for prediction (m_treated, m_control).
-                beta = np.where(np.isfinite(beta), beta, 0.0)
+            beta, _ = _linear_regression(
+                X_control,
+                control_change,
+                rank_deficient_action=self.rank_deficient_action,
+                weights=sw_control,
+            )
+            beta = np.where(np.isnan(beta), 0.0, beta)
 
             # Predict counterfactual for both treated and control
             X_treated_with_intercept = np.column_stack([np.ones(n_t), X_treated])

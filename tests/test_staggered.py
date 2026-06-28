@@ -1004,23 +1004,28 @@ class TestCallawaySantAnnaCovariates:
         import warnings
         from unittest.mock import patch
 
+        import diff_diff.staggered as _ddstg
+
         data = generate_staggered_data_with_covariates(seed=42, n_units=100)
 
-        # Patch lstsq to return inf for one specific call to simulate numerical failure
-        original_lstsq = __import__("scipy").linalg.lstsq
+        # Poison one covariate OR solve to simulate a numerical failure. The reg
+        # path routes the OR fit through `diff_diff.staggered.solve_ols` (the
+        # scale-robust solver), NOT `scipy.linalg.lstsq` — so patch that seam.
+        original_solve_ols = _ddstg.solve_ols
         call_count = [0]
 
-        def mock_lstsq(*args, **kwargs):
+        def mock_solve_ols(*args, **kwargs):
             call_count[0] += 1
-            result = original_lstsq(*args, **kwargs)
-            if call_count[0] == 1:
-                # Poison the first lstsq result
+            result = original_solve_ols(*args, **kwargs)
+            # Poison call #7 (the (g=3, t=3) OR solve). An inf coefficient survives
+            # the dropped-column NaN zero-fill and trips the nan_cell guard.
+            if call_count[0] == 7:
                 bad_beta = np.full_like(result[0], np.inf)
                 return (bad_beta,) + result[1:]
             return result
 
-        # Use rank_deficient_action="warn" to ensure we go through the covariate reg path
-        # and also force lstsq fallback by using collinear covariates
+        # Collinear covariates force the rank-deficient OR path; reg + warn routes
+        # the OR fit through diff_diff.staggered.solve_ols.
         data["x1_dup"] = data["x1"]
         cs = CallawaySantAnna(
             n_bootstrap=0,
@@ -1031,7 +1036,7 @@ class TestCallawaySantAnnaCovariates:
 
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            with patch("scipy.linalg.lstsq", side_effect=mock_lstsq):
+            with patch("diff_diff.staggered.solve_ols", side_effect=mock_solve_ols):
                 results = cs.fit(
                     data,
                     outcome="outcome",
@@ -1041,19 +1046,24 @@ class TestCallawaySantAnnaCovariates:
                     covariates=["x1", "x1_dup"],
                 )
 
-        # Check that NaN cells are preserved (not dropped)
+        # The mock must actually fire (otherwise the test is vacuous).
+        assert call_count[0] >= 7, (
+            f"mock solve_ols should have been called >=7 times, got {call_count[0]} "
+            "(the OR solve seam moved — update the patch target)"
+        )
+
+        # The poisoned cell must be PRESERVED as NaN (not dropped), with NaN SE,
+        # and the non-finite-regression warning must fire.
         nan_cells = [
             (g, t) for (g, t), eff in results.group_time_effects.items() if np.isnan(eff["effect"])
         ]
-        # At least one cell should have NaN effect from our mock
-        if call_count[0] > 0:
-            # Verify warning about non-finite regression results
-            nan_warnings = [x for x in w if "non-finite regression results" in str(x.message)]
-            if nan_cells:
-                assert len(nan_warnings) > 0
-                # NaN cells should have NaN SE too
-                for g, t in nan_cells:
-                    assert np.isnan(results.group_time_effects[(g, t)]["se"])
+        assert len(nan_cells) > 0, "Expected at least one NaN cell from the poisoned OR solve"
+        nan_warnings = [x for x in w if "non-finite regression results" in str(x.message)]
+        assert len(nan_warnings) > 0, "Expected a 'non-finite regression results' warning"
+        for g, t in nan_cells:
+            assert np.isnan(
+                results.group_time_effects[(g, t)]["se"]
+            ), f"NaN cell ({g},{t}) must have NaN SE"
 
         # Overall ATT should still be finite (NaN cells excluded from aggregation)
         assert np.isfinite(results.overall_att)
@@ -1065,14 +1075,20 @@ class TestCallawaySantAnnaCovariates:
 
         data = generate_staggered_data_with_covariates(seed=42, n_units=100)
 
-        original_lstsq = __import__("scipy").linalg.lstsq
+        import diff_diff.staggered as _ddstg
+
+        original_solve_ols = _ddstg.solve_ols
         call_count = [0]
 
-        def mock_lstsq(*args, **kwargs):
+        def mock_solve_ols(*args, **kwargs):
             call_count[0] += 1
-            result = original_lstsq(*args, **kwargs)
-            # Poison call #7 — corresponds to (g=3, t=3), a post-treatment cell,
-            # so the overall ATT bootstrap aggregation path is exercised.
+            result = original_solve_ols(*args, **kwargs)
+            # Poison call #7 — the (g=3, t=3) outcome-regression solve, a
+            # post-treatment cell, so the overall ATT bootstrap aggregation path
+            # is exercised. The covariate OR fit routes through `solve_ols` (the
+            # scale-robust solver), not `scipy.linalg.lstsq` directly; an inf
+            # coefficient survives the dropped-column NaN zero-fill and trips the
+            # nan_cell guard.
             if call_count[0] == 7:
                 bad_beta = np.full_like(result[0], np.inf)
                 return (bad_beta,) + result[1:]
@@ -1089,7 +1105,7 @@ class TestCallawaySantAnnaCovariates:
 
         with warnings.catch_warnings(record=True):
             warnings.simplefilter("always")
-            with patch("scipy.linalg.lstsq", side_effect=mock_lstsq):
+            with patch("diff_diff.staggered.solve_ols", side_effect=mock_solve_ols):
                 results = cs.fit(
                     data,
                     outcome="outcome",
@@ -1139,13 +1155,18 @@ class TestCallawaySantAnnaCovariates:
 
         data = generate_staggered_data_with_covariates(seed=42, n_units=100)
 
-        original_lstsq = __import__("scipy").linalg.lstsq
+        import diff_diff.staggered as _ddstg
+
+        original_solve_ols = _ddstg.solve_ols
         call_count = [0]
 
-        def mock_lstsq(*args, **kwargs):
+        def mock_solve_ols(*args, **kwargs):
             call_count[0] += 1
-            result = original_lstsq(*args, **kwargs)
-            # Poison call #7: (g=3, t=3), the anchor for cohort g=3 at e=0
+            result = original_solve_ols(*args, **kwargs)
+            # Poison call #7: the (g=3, t=3) outcome-regression solve, the anchor
+            # for cohort g=3 at e=0. The OR fit routes through `solve_ols` (the
+            # scale-robust solver); an inf coefficient survives the dropped-column
+            # NaN zero-fill and trips the nan_cell guard.
             if call_count[0] == 7:
                 bad_beta = np.full_like(result[0], np.inf)
                 return (bad_beta,) + result[1:]
@@ -1162,7 +1183,7 @@ class TestCallawaySantAnnaCovariates:
 
         with warnings.catch_warnings(record=True):
             warnings.simplefilter("always")
-            with patch("scipy.linalg.lstsq", side_effect=mock_lstsq):
+            with patch("diff_diff.staggered.solve_ols", side_effect=mock_solve_ols):
                 results = cs.fit(
                     data,
                     outcome="outcome",
@@ -1198,6 +1219,65 @@ class TestCallawaySantAnnaCovariates:
         if results.bootstrap_results and results.bootstrap_results.event_study_ses:
             for e, se in results.bootstrap_results.event_study_ses.items():
                 assert np.isfinite(se), f"e={e}: bootstrap SE should be finite"
+
+    @pytest.mark.parametrize("action", ["silent", "warn"])
+    def test_reg_underdetermined_control_cell_no_crash(self, action):
+        """CS `reg` must not crash on an underdetermined control cell
+        (n_control < n_covariates + 1) under ``rank_deficient_action`` warn/silent.
+
+        Regression for the OR scale-equilibration change: the covariate OR fit now
+        routes through ``solve_ols``, which raises on ``n < k`` *before* it can rank-
+        drop. The optimized reg path detects the rank-deficient columns, drops them,
+        and fits the reduced (full-column-rank) design via the equilibrated lstsq —
+        the documented R-style / ``lm()`` column-drop contract, NOT a minimum-norm
+        full-design solve (CI codex P1 on the scale-equilibration PR).
+        """
+        rng = np.random.default_rng(3)
+        rows = []
+        for i in range(10):
+            g = 2 if i < 8 else 0  # 8 treated (g=2), only 2 never-treated controls
+            x1, x2, x3 = rng.normal(size=3)
+            for t in range(1, 4):
+                post = 1 if (g != 0 and t >= g) else 0
+                rows.append(
+                    {
+                        "unit": i,
+                        "time": t,
+                        "first_treat": g,
+                        "outcome": rng.normal() + 0.5 * t + 0.3 * x1 + 1.5 * post,
+                        "x1": x1,
+                        "x2": x2,
+                        "x3": x3,
+                    }
+                )
+        data = pd.DataFrame(rows)
+        # 2 controls vs intercept + 3 covariates = 4 params -> underdetermined OR cell.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = CallawaySantAnna(estimation_method="reg", rank_deficient_action=action).fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                covariates=["x1", "x2", "x3"],
+            )
+        post_effects = [res.group_time_effects[(2, t)]["effect"] for t in (2, 3)]
+        assert all(np.isfinite(e) for e in post_effects), (
+            "underdetermined control cell should yield a finite ATT under "
+            f"rank_deficient_action={action!r}, got {post_effects}"
+        )
+        # R-style column-drop contract, NOT minimum-norm: dropping the unidentified
+        # column(s) and fitting the reduced design reproduces the prior reduced-lstsq
+        # result to working precision. A minimum-norm solve on the full n<k design
+        # would give a different (non-unique) extrapolation to the treated covariates.
+        rank_reduced = [-1.3958318723, -1.2987532126]  # prior reduced-lstsq / R lm() drop
+        minimum_norm = [-1.9213829489, -1.8180077026]  # a full n<k min-norm solve (rejected)
+        np.testing.assert_allclose(post_effects, rank_reduced, atol=1e-6)
+        assert not np.allclose(post_effects, minimum_norm, atol=1e-3), (
+            "underdetermined reg fit must use the rank-reduced column-drop solve, "
+            "not the minimum-norm full-design solve"
+        )
 
 
 class TestRankGuardedAnalyticalSE:
@@ -1463,16 +1543,16 @@ class TestRankGuardedAnalyticalSE:
     def test_exact_duplicate_covariate(self, method):
         # A WELL-SCALED exact duplicate (xdup == x1) is dropped exactly: the
         # rank-guard's column-drop matches the point estimate, SE == dropping it.
-        # For ipw/dr the SE is also order-invariant under exact collinearity
-        # (well-defined regardless of which proportional column is listed first),
-        # including the MIXED-SCALE case (xbig == 1e8*x1), because the variance
-        # flows through the equilibrated rank-guarded inverse. NOTE: for mixed
-        # scale under `reg`, the point estimate's un-equilibrated local OR solve
-        # (tracked TODO) hits a near-singular X'WX whose solution is roundoff- and
-        # column-order-dependent (a ~21% SE swing was observed across CI BLAS/LAPACK
-        # vs bit-identical locally) — a point-estimate property, not the rank-guard.
-        # So for `reg` at mixed scale we assert only that the SE is finite, not
-        # drop-one parity and not order-invariance.
+        # The SE is also order-invariant under exact collinearity (well-defined
+        # regardless of which proportional column is listed first), including the
+        # MIXED-SCALE case (xbig == 1e8*x1), for ALL methods: the variance flows
+        # through the equilibrated rank-guarded inverse, and since the OR
+        # scale-equilibration change the `reg`/`dr` point-estimate OR fit also
+        # routes through the equilibrated `solve_ols`. Equilibration scales x1 and
+        # 1e8*x1 to identical unit-norm columns, so the SE is order-invariant even
+        # though which member is dropped differs. (Previously `reg`'s un-equilibrated
+        # local OR solve hit a near-singular X'WX whose 1e8-scale SE was column-order-
+        # and BLAS-dependent; that is now fixed.)
         base = generate_staggered_data_with_covariates(seed=789)
         d = base.copy()
         d["xdup"] = d["x1"]  # well-scaled exact duplicate
@@ -1498,13 +1578,13 @@ class TestRankGuardedAnalyticalSE:
         # Mixed-scale exact duplicate: finite for every method.
         assert np.isfinite(big_ab.overall_se) and big_ab.overall_se > 0
         assert np.isfinite(big_ba.overall_se) and big_ba.overall_se > 0
-        # Order-invariance holds for ipw/dr (variance via the equilibrated
-        # rank-guard); NOT asserted for reg, whose 1e8-scale SE follows the
-        # un-equilibrated local OR solve (TODO-82) and is order-sensitive.
-        if method != "reg":
-            np.testing.assert_allclose(
-                big_ab.overall_se, big_ba.overall_se, rtol=1e-9
-            )
+        # Order-invariance holds for ALL methods now: ipw/dr via the equilibrated
+        # rank-guarded inverse, and reg via the equilibrated point-estimate OR
+        # solve (post OR scale-equilibration change) — mixed-scale exact-duplicate
+        # columns become identical after equilibration, so the SE is order-invariant.
+        np.testing.assert_allclose(
+            big_ab.overall_se, big_ba.overall_se, rtol=1e-9
+        )
 
     @pytest.mark.parametrize("method", ["reg", "ipw", "dr"])
     def test_exact_duplicate_covariate_survey_weighted(self, method):
@@ -1545,14 +1625,13 @@ class TestRankGuardedAnalyticalSE:
             )
         # Well-scaled exact duplicate == dropping it, under survey weighting.
         np.testing.assert_allclose(well.overall_se, drop_one.overall_se, rtol=1e-7)
-        # Mixed-scale exact duplicate under survey weighting: finite for every
-        # method; order-invariance asserted only for ipw/dr. For `reg` the 1e8-scale
-        # SE follows the un-equilibrated local OR solve (TODO-82), which is
-        # order-sensitive on a near-singular X'WX — see test_exact_duplicate_covariate.
+        # Mixed-scale exact duplicate under survey weighting: finite + order-invariant
+        # for ALL methods. reg's point-estimate OR fit now routes through the
+        # equilibrated solve_ols (post OR scale-equilibration change), so its SE is
+        # order-invariant like ipw/dr — see test_exact_duplicate_covariate.
         assert np.isfinite(big_ab.overall_se) and big_ab.overall_se > 0
         assert np.isfinite(big_ba.overall_se) and big_ba.overall_se > 0
-        if method != "reg":
-            np.testing.assert_allclose(big_ab.overall_se, big_ba.overall_se, rtol=1e-7)
+        np.testing.assert_allclose(big_ab.overall_se, big_ba.overall_se, rtol=1e-7)
 
 
 class TestCallawaySantAnnaRankDeficiencyPaths:

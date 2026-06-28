@@ -821,3 +821,40 @@ class TestRankGuardedAnalyticalSE:
         np.testing.assert_allclose(
             with_deg.overall_se, drop_one.overall_se, rtol=5e-2
         )
+
+
+class TestStaggeredTripleDiffCovariateScaleEquilibration:
+    """StaggeredTripleDifference covariate outcome-regression is scale-robust.
+
+    The OR nuisance (``_compute_or``) is fit through the shared scale-equilibrated
+    ``solve_ols`` (column-equilibrated SVD/gelsd), matching ``TripleDifference``
+    and R's ``lm()``/QR. Adding a large constant offset to a covariate is absorbed
+    by the regression intercept and MUST NOT change ATT(g,t). The prior
+    ``cho_solve(X'X)`` cache path was not scale-equilibrated. Anchored on
+    ``est_method="reg"`` so the perturbation routes purely through the OR fit.
+    """
+
+    def _fit(self, offset):
+        data = generate_staggered_ddd_data(
+            n_units=600, treatment_effect=3.0, add_covariates=True, seed=11
+        )
+        data = data.copy()
+        data["x1"] = data["x1"] + offset
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return StaggeredTripleDifference(
+                estimation_method="reg", control_group="nevertreated"
+            ).fit(data, *_FIT_COLS, covariates=["x1"])
+
+    def test_or_fit_offset_invariant(self):
+        """A 1e6 constant offset on the covariate (absorbed by the intercept)
+        leaves ATT(g,t) unchanged — the OR fit is scale-equilibrated."""
+        base = self._fit(0.0)
+        shifted = self._fit(1e6)
+        common = set(base.group_time_effects) & set(shifted.group_time_effects)
+        assert common, "no shared (g,t) cells"
+        for gt in common:
+            b = base.group_time_effects[gt]["effect"]
+            s = shifted.group_time_effects[gt]["effect"]
+            if np.isfinite(b):
+                assert b == pytest.approx(s, abs=1e-7), f"ATT{gt} not offset-invariant"

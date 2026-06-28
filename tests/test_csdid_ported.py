@@ -991,6 +991,39 @@ class TestCSDIDGoldenValues:
                     abs(py_att - r_att) < 0.05
                 ), f"IPW ATT(g={g}, t={t}): Py={py_att:.6f}, R={r_att:.6f}"
 
+    def test_golden_default_dgp_dr_covariates(self, golden_values):
+        """DR method WITH covariates matches R `did` att AND se.
+
+        Fills the previously-unasserted ``with_covariates_dr`` golden scenario
+        (``test_att_recovery_with_covariates_dr`` checks recovery of the TRUE
+        effect, not parity vs R). The covariate outcome-regression nuisance is
+        now fit through the shared scale-equilibrated ``solve_ols`` (matching
+        TripleDifference + R's ``lm()``/QR); this pins both the ATT(g,t) and the
+        analytical IF SE against R. Tolerances are empirical: DR ATT(g,t) agrees
+        with R to ~1e-3 (DR small-sample numerics) and the DR SE to ~1e-4.
+        (``reg``/``ipw`` SE are NOT pinned here — they have a pre-existing
+        divergence from R's ``did`` unrelated to the OR solver: ipw SE depends on
+        the propensity IF, not the OR fit.)
+        """
+        if "with_covariates_dr" not in golden_values:
+            pytest.skip("Scenario not in golden values")
+        results, expected = self._run_scenario(
+            golden_values,
+            "with_covariates_dr",
+            est_method="dr",
+        )
+        r_gt = expected["group_time"]
+        for i, (g, t) in enumerate(zip(r_gt["group"], r_gt["time"])):
+            g, t = int(g), int(t)
+            if (g, t) in results.group_time_effects:
+                eff = results.group_time_effects[(g, t)]
+                assert (
+                    abs(eff["effect"] - r_gt["att"][i]) < 2e-3
+                ), f"DR ATT(g={g}, t={t}): Py={eff['effect']:.6f}, R={r_gt['att'][i]:.6f}"
+                assert (
+                    abs(eff["se"] - r_gt["se"][i]) < 2e-3
+                ), f"DR SE(g={g}, t={t}): Py={eff['se']:.6f}, R={r_gt['se'][i]:.6f}"
+
     def test_golden_dynamic_effects(self, golden_values):
         """Event study aggregation ATTs match R."""
         if "dynamic_effects" not in golden_values:

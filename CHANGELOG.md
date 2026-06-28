@@ -118,6 +118,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   numerical, or public-API change.
 
 ### Fixed
+- **`CallawaySantAnna` / `StaggeredTripleDifference` covariate outcome-regression is now
+  scale-robust.** The covariate OR nuisance fits — `_compute_all_att_gt_covariate_reg` and
+  `_doubly_robust` (CS) and `_compute_or` (StaggeredTripleDifference) — previously used an
+  estimator-local `cho_solve(X'X)` cache fast path (with bare `scipy.linalg.lstsq(cond=1e-7)`
+  fallbacks) that **bypassed the shared scale-equilibrated solver**. They now route through
+  `solve_ols` (column-equilibrated SVD/gelsd), matching `TripleDifference._fit_predict_mu` and
+  R's `lm()`/QR. A covariate **correlated with another regressor at a very large scale** (e.g. a
+  large constant offset, near-collinear with the intercept) could perturb the point-estimate ATT —
+  and the influence-function SE that follows it — because forming the normal equations squares the
+  condition number; the equilibrated SVD avoids this (offset-invariant to ~1e-11 where the prior
+  solve drifted, e.g. ~4e-6 at an offset of 1e6, growing with scale). Pure orthogonal ill-scaling
+  was already safe (diagonal `X'X`), so the practical impact is confined to ill-conditioned /
+  correlated covariate designs. **Not bit-identical** (cho/normal-equations → SVD) — well-scaled
+  designs move only ~1e-12, well under the R-parity tolerances; the existing CS covariate R-`did`
+  golden tests (`reg`/`ipw`) still pass, a new `with_covariates_dr` att+SE golden parity test is
+  added (R-parity at ~1e-3), and scale-invariance tests pin the fix. No change to estimands,
+  identifying assumptions, the no-covariate path, or the propensity-score fits.
 - **Corrected the Korn & Graubard (1990) citation venue** in `docs/methodology/REGISTRY.md`
   (Survey Degrees of Freedom) from *JASA* 85(409) to *The American Statistician* 44(4), 270-276
   — the survey-df / Bonferroni-t paper (DOI 10.1080/00031305.1990.10475737).
