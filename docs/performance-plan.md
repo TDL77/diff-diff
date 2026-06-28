@@ -4,6 +4,52 @@ This document outlines the strategy for improving diff-diff's performance on lar
 
 ---
 
+## Memory scaling at the millions-of-units tail (v3.x, June 2026)
+
+At the scale where the dense working arrays - not compute - are the binding constraint
+(millions of units, few periods), three 2026-06 refactors cut peak resident memory for
+the multiplier-bootstrap and within-transform paths:
+
+- **CallawaySantAnna / EfficientDiD / HeterogeneousAdoptionDiD multiplier bootstraps**
+  (#561, #563) generate and consume the dense `(n_bootstrap x n_units)` weight matrix one
+  draw-block at a time via `diff_diff/bootstrap_chunking.py`, instead of materializing it
+  in full (`999 x 5,000,000 x 8` bytes is ~40 GB).
+- **`within_transform`** (#567) drops a redundant defensive full-frame copy and attaches the
+  demeaned columns via a single `pd.concat` (under copy-on-write the originals are shared,
+  not copied).
+
+Numerical contract: the `within_transform` change (#567) is **bit-identical** to the prior
+code - it only changes frame assembly, so estimates match at `atol=0`. For the bootstrap
+chunking (#561, #563) the generated weight *stream* is bit-identical, but the downstream
+`weights @ influence` statistics match the un-chunked path only to within BLAS floating-point
+reassociation (~1 ULP, far below bootstrap Monte-Carlo error) - not bit-for-bit. Either way
+the working arrays are the same size, so these **peak-memory** numbers are unaffected.
+
+Measured with `benchmarks/speed_review/bench_memory_scaling.py` - each config fit in an
+isolated subprocess, peak = `resource.getrusage(...).ru_maxrss`, median of repeated runs,
+`--backend python` on Apple Silicon. "Before" is the pre-#561 tree; "after" is current `main`:
+
+| Config (999 bootstrap reps where applicable) | Before | After | Reduction |
+|---|---:|---:|---:|
+| CallawaySantAnna bootstrap, 500k units | 12.9 GB | 2.1 GB | **-84%** |
+| CallawaySantAnna bootstrap, 1M units | 13.5 GB | 3.0 GB | **-78%** |
+| EfficientDiD bootstrap, 500k units | 8.3 GB | 1.6 GB | **-81%** |
+| HeterogeneousAdoptionDiD event-study cband, 500k units | 7.7 GB | 1.2 GB | **-84%** |
+| TwoWayFixedEffects (hc1) fit, 500k units x 6 cov | 1.0 GB | 0.93 GB | -8% |
+| TwoWayFixedEffects (hc1) fit, 1M units x 6 cov | 1.7 GB | 1.5 GB | -9% |
+
+The bootstrap chunking removes the dominant allocation, so the previously out-of-reach
+millions-of-units x 999-rep regime now stays near the fit's memory floor; the within-transform
+copy elision is a smaller, broadly-applicable win on the TWFE-family fit path. Single-run
+`ru_maxrss` on these transient-heavy paths is allocator-dependent (the un-chunked 1M run varied
+~12.7-15.0 GB across repeats), so the table reports medians - the reduction ratios are stable.
+
+Deferred (see `TODO.md`): tiling the *stratified* survey-PSU weight generator (few PSUs, rarely
+OOMs), and vectorizing `ImputationDiD` / `TwoStageDiD` `_iterative_demean` (a speed/churn win
+that is not bit-identical on pandas 3.0).
+
+---
+
 ## Practitioner Workflow Baseline (v3.1.3, April 2026)
 
 Earlier sections of this document (v1.4.0, v2.0.3) measured isolated `fit()`

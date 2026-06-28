@@ -31,7 +31,11 @@ benchmarks/speed_review/
 │                                       #   for BRFSS-1M (standalone)
 ├── bench_callaway.py                   # pre-existing CS scaling sweep
 ├── baseline_results.json               # pre-existing CS baseline
+├── bench_memory_scaling.py             # peak-RSS sweep for the memory-scaling
+│                                       #   work (B1 #561 / B2 #563 / C #567);
+│                                       #   subprocess-isolated ru_maxrss, median
 └── baselines/                          # this effort's output
+    ├── memory_scaling_{before,after}.json  # peak RSS pre-#561 vs current
     ├── <scenario>_<backend>.json       # phase-level wall-clock + peak RSS
     ├── mem_profile_brfss_large_<backend>.txt   # tracemalloc top-N sites
     └── profiles/                       # flame HTMLs (gitignored)
