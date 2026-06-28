@@ -326,8 +326,6 @@ class StaggeredTripleDifference(
         ):
             df_survey = 0  # Forces NaN inference for undefined replicate df
 
-        has_survey = resolved_survey is not None
-
         treatment_groups = precomputed["treatment_groups"]
         time_periods = precomputed["time_periods"]
         all_units = precomputed["all_units"]
@@ -337,8 +335,6 @@ class StaggeredTripleDifference(
         n_units = len(all_units)
 
         pscore_cache: Dict = {}
-        # Skip Cholesky OR cache when survey weights present (X'WX != X'X)
-        cho_cache: Dict = {} if not has_survey else None
 
         group_time_effects: Dict[Tuple, Dict[str, Any]] = {}
         influence_func_info: Dict[Tuple, Dict[str, Any]] = {}
@@ -421,7 +417,6 @@ class StaggeredTripleDifference(
                         base_period_val,
                         covariates,
                         pscore_cache,
-                        cho_cache,
                         epv_diagnostics=epv_diagnostics,
                     )
                     if result is None:
@@ -1095,7 +1090,6 @@ class StaggeredTripleDifference(
         base_period_val: Any,
         covariates: Optional[List[str]],
         pscore_cache: Dict,
-        cho_cache: Optional[Dict],
         epv_diagnostics: Optional[Dict] = None,
     ) -> Optional[Tuple[float, np.ndarray, float]]:
         """
@@ -1185,8 +1179,6 @@ class StaggeredTripleDifference(
             covariate_matrix,
             pscore_cache,
             (g, g, 0, base_period_val),
-            cho_cache,
-            ("a", g, g, base_period_val),
             survey_weights=survey_weights,
             context_label=f"cohort g={g}, DiD_A (g_c={g_c})",
             epv_diagnostics_out=epv_diag_a,
@@ -1202,8 +1194,6 @@ class StaggeredTripleDifference(
             covariate_matrix,
             pscore_cache,
             (g, g_c, 1, base_period_val),
-            cho_cache,
-            ("b", g, g_c, base_period_val),
             survey_weights=survey_weights,
             context_label=f"cohort g={g}, DiD_B (g_c={g_c})",
             epv_diagnostics_out=epv_diag_b,
@@ -1219,8 +1209,6 @@ class StaggeredTripleDifference(
             covariate_matrix,
             pscore_cache,
             (g, g_c, 0, base_period_val),
-            cho_cache,
-            ("c", g, g_c, base_period_val),
             survey_weights=survey_weights,
             context_label=f"cohort g={g}, DiD_C (g_c={g_c})",
             epv_diagnostics_out=epv_diag_c,
@@ -1298,8 +1286,6 @@ class StaggeredTripleDifference(
         covariate_matrix: Optional[np.ndarray],
         pscore_cache: Dict,
         pscore_key: Any,
-        cho_cache: Optional[Dict],
-        cho_key: Any,
         survey_weights: Optional[np.ndarray] = None,
         context_label: str = "",
         epv_diagnostics_out: Optional[dict] = None,
@@ -1353,13 +1339,10 @@ class StaggeredTripleDifference(
             )
 
         if self.estimation_method in ("reg", "dr") and covX is not None:
-            # Skip Cholesky cache when survey weights present (cho_cache=None)
             or_delta = self._compute_or(
                 delta_y,
                 PAa,
                 covX,
-                cho_cache,
-                cho_key,
                 survey_weights=sw_pair,
             )
 
@@ -1595,15 +1578,14 @@ class StaggeredTripleDifference(
         delta_y: np.ndarray,
         PAa: np.ndarray,
         covX: np.ndarray,
-        cho_cache: Optional[Dict],
-        cho_key: Any,
         survey_weights: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Fit OLS on control outcome changes. Returns or_delta for all pair units.
 
-        Honors self.rank_deficient_action for collinear covariates.
-        When survey_weights is provided, uses WLS via solve_ols(weights=...).
-        Cholesky cache is disabled for the survey path (cho_cache=None).
+        Honors self.rank_deficient_action for collinear covariates. The outcome
+        regression is fit through the shared scale-robust solver
+        (``solve_ols`` -> column-equilibrated SVD; matches TripleDifference and
+        R's lm()/QR), with optional WLS via ``solve_ols(weights=...)``.
         """
         from diff_diff.linalg import solve_ols as _solve_ols
 
@@ -1616,43 +1598,20 @@ class StaggeredTripleDifference(
         y_control = delta_y[control_mask]
         sw_control = survey_weights[control_mask] if survey_weights is not None else None
 
-        # Try Cholesky cache for fast path (full-rank only)
-        # Skipped when cho_cache is None (survey weights present)
-        beta = None
-        if cho_cache is not None:
-            cached_cho = cho_cache.get(cho_key)
-            if cached_cho is False:
-                pass  # Previously detected rank-deficient; skip Cholesky
-            elif cached_cho is not None:
-                from scipy import linalg as sp_linalg
-
-                Xty = X_control.T @ y_control
-                beta = sp_linalg.cho_solve(cached_cho, Xty)
-                if np.any(~np.isfinite(beta)):
-                    beta = None
-            elif cho_key not in cho_cache:
-                XtX = X_control.T @ X_control
-                try:
-                    from scipy import linalg as sp_linalg
-
-                    cho_factor = sp_linalg.cho_factor(XtX)
-                    cho_cache[cho_key] = cho_factor
-                    Xty = X_control.T @ y_control
-                    beta = sp_linalg.cho_solve(cho_factor, Xty)
-                    if np.any(~np.isfinite(beta)):
-                        beta = None
-                except np.linalg.LinAlgError:
-                    cho_cache[cho_key] = False
-
-        if beta is None:
-            # Fallback (or survey path): use solve_ols with optional weights
-            beta, _, _ = _solve_ols(
-                X_control,
-                y_control,
-                rank_deficient_action=self.rank_deficient_action,
-                weights=sw_control,
-            )
-            beta = np.where(np.isfinite(beta), beta, 0.0)
+        # Outcome regression via the shared scale-robust solver (`solve_ols` ->
+        # column-equilibrated SVD/gelsd; matches TripleDifference and R's
+        # lm()/QR). Replaces the prior `cho_solve(X'X)` cache fast path, which
+        # was NOT scale-equilibrated (a large-scale covariate would corrupt the
+        # OR fit via the normal-equations Cholesky). We only need beta for the
+        # OR prediction, so zero the NaN (dropped-column) coefficients.
+        beta, _, _ = _solve_ols(
+            X_control,
+            y_control,
+            rank_deficient_action=self.rank_deficient_action,
+            weights=sw_control,
+            return_vcov=False,
+        )
+        beta = np.where(np.isnan(beta), 0.0, beta)
 
         return covX @ beta
 

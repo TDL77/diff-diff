@@ -1924,3 +1924,64 @@ class TestMPDTARComparison:
         assert np.isclose(py_crit, r_crit, rtol=0.30), \
             f"Cband crit value mismatch: Python={py_crit:.4f}, " \
             f"R={r_crit:.4f}, rtol={abs(py_crit - r_crit) / r_crit:.2%}"
+
+
+class TestCSCovariateScaleEquilibration:
+    """CallawaySantAnna covariate outcome-regression is scale-robust.
+
+    The OR nuisance is fit through the shared scale-equilibrated ``solve_ols``
+    (column-equilibrated SVD/gelsd), matching ``TripleDifference`` and R's
+    ``lm()``/QR. Adding a large constant offset to a covariate is absorbed by the
+    regression intercept and MUST NOT change ATT(g,t) (the fitted values are
+    offset-invariant). The prior ``cho_solve(X'X)`` / ``lstsq(cond=1e-7)`` path
+    lost accuracy on such ill-conditioned designs (overall ATT drifted ~3.8e-6 at
+    an offset of 1e6, growing with the offset); the equilibrated SVD is invariant
+    to ~1e-11. Anchored on ``est_method="reg"`` so the perturbation routes purely
+    through the OR fit (``dr``/``ipw`` also fit a propensity logit, which is out of
+    scope for this change).
+    """
+
+    @staticmethod
+    def _panel(offset, seed=42, n_units=200, n_periods=6):
+        rng = np.random.default_rng(seed)
+        cohorts = rng.choice([3, 4, 5, 0], size=n_units, p=[0.25, 0.25, 0.2, 0.3])
+        unit_fe = rng.normal(size=n_units)
+        x = rng.normal(size=n_units)
+        rows = []
+        for i in range(n_units):
+            g = int(cohorts[i])
+            for t in range(1, n_periods + 1):
+                post = 1 if (g != 0 and t >= g) else 0
+                y = unit_fe[i] + 0.5 * t + 0.3 * x[i] + 2.0 * post + rng.normal(scale=0.5)
+                rows.append(
+                    {"unit": i, "period": t, "first_treat": g, "outcome": y, "X": offset + x[i]}
+                )
+        return pd.DataFrame(rows)
+
+    def _fit(self, offset):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return CallawaySantAnna(estimation_method="reg").fit(
+                self._panel(offset),
+                outcome="outcome",
+                unit="unit",
+                time="period",
+                first_treat="first_treat",
+                covariates=["X"],
+            )
+
+    def test_or_fit_offset_invariant(self):
+        """A 1e6 constant offset on the covariate (absorbed by the intercept)
+        leaves ATT(g,t), overall ATT, and SE unchanged."""
+        base = self._fit(0.0)
+        shifted = self._fit(1e6)
+        # New (equilibrated SVD) is invariant to ~1e-11; the prior normal-
+        # equations path drifted ~3.8e-6 at this offset, so 1e-7 cleanly
+        # separates the two.
+        assert base.overall_att == pytest.approx(shifted.overall_att, abs=1e-7)
+        assert base.overall_se == pytest.approx(shifted.overall_se, abs=1e-6)
+        for gt, eff in base.group_time_effects.items():
+            if np.isfinite(eff["effect"]) and gt in shifted.group_time_effects:
+                assert eff["effect"] == pytest.approx(
+                    shifted.group_time_effects[gt]["effect"], abs=1e-7
+                ), f"ATT{gt} not offset-invariant"
