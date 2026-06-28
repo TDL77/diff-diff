@@ -3542,14 +3542,20 @@ class LinearRegression:
                 )
 
         if _fit_vcov_type != "classical" or effective_cluster_ids is not None:
-            # Use solve_ols with robust/cluster SEs
-            # When survey vcov will be used, skip standard vcov computation
+            # Use solve_ols with robust/cluster SEs.
+            # When survey vcov will be used, skip standard vcov computation.
+            # For hc2_bm (non-survey), ALSO skip solve_ols's vcov: the CR2
+            # sandwich produces (vcov, dof) together, so the block below gets
+            # BOTH from a single compute_robust_vcov(return_dof=True) call
+            # instead of computing the vcov here and recomputing the whole
+            # sandwich a second time just for the dof (#475).
+            _is_bm_path = _fit_vcov_type == "hc2_bm" and not _use_survey_vcov
             coefficients, residuals, fitted, vcov = solve_ols(
                 X,
                 y,
                 cluster_ids=effective_cluster_ids,
                 return_fitted=True,
-                return_vcov=not _use_survey_vcov,
+                return_vcov=(not _use_survey_vcov) and not _is_bm_path,
                 rank_deficient_action=self.rank_deficient_action,
                 weights=_fit_weights,
                 weight_type=_fit_weight_type,
@@ -3562,22 +3568,24 @@ class LinearRegression:
                 conley_unit=self.conley_unit,
                 conley_lag_cutoff=self.conley_lag_cutoff,
             )
-            # For hc2_bm, compute per-coefficient Bell-McCaffrey DOF. Both
-            # the one-way HC2+BM case and the cluster CR2 case are supported,
-            # including the weighted clustered CR2 path via the clubSandwich
-            # WLS-CR2 port. The dispatcher already rejects non-pweight weight
-            # types for hc2_bm + weights, so reaching this block guarantees
-            # `_compute_cr2_bm` returns a finite per-coefficient DOF.
-            if (
-                _fit_vcov_type == "hc2_bm"
-                and not _use_survey_vcov
-                and vcov is not None
-                and not np.all(np.isnan(coefficients))
-            ):
-                # Identified columns for DOF (rank-deficient case sets NaN coefs).
+            # For hc2_bm (non-survey), compute the CR2 vcov AND per-coefficient
+            # Bell-McCaffrey DOF together in a SINGLE compute_robust_vcov call
+            # (solve_ols skipped its vcov above via `_is_bm_path`). Both the
+            # one-way HC2+BM case and the (weighted) clustered CR2 case route
+            # through the same `_compute_robust_vcov_numpy`/`_compute_cr2_bm`, so
+            # this is bit-identical to the prior two-call form while computing the
+            # O(n^2 k) sandwich once instead of twice (#475). The dispatcher
+            # already rejects non-pweight weight types for hc2_bm + weights.
+            if _is_bm_path:
+                # Rank-deficient solves set NaN coefficients for dropped columns.
                 nan_mask = np.isnan(coefficients)
-                if not np.any(nan_mask):
-                    _, self._bm_dof = compute_robust_vcov(
+                if np.all(nan_mask):
+                    # All columns dropped: NaN vcov (matches solve_ols's
+                    # rank-deficient all-drop) and no BM DOF (n-k fallback).
+                    vcov = np.full((X.shape[1], X.shape[1]), np.nan)
+                    self._bm_dof = None
+                elif not np.any(nan_mask):
+                    vcov, self._bm_dof = compute_robust_vcov(
                         X,
                         residuals,
                         cluster_ids=effective_cluster_ids,
@@ -3587,23 +3595,23 @@ class LinearRegression:
                         return_dof=True,
                     )
                 else:
-                    # Per-coef DOF only for identified coefficients; set NaN for dropped.
+                    # Rank-deficient: compute on identified columns only, then
+                    # expand BOTH vcov and per-coef DOF with NaN for dropped
+                    # columns (mirrors solve_ols's `_expand_vcov_with_nan` path).
                     kept = np.where(~nan_mask)[0]
-                    if len(kept) > 0:
-                        _, dof_kept = compute_robust_vcov(
-                            X[:, kept],
-                            residuals,
-                            cluster_ids=effective_cluster_ids,
-                            weights=_fit_weights,
-                            weight_type=_fit_weight_type,
-                            vcov_type="hc2_bm",
-                            return_dof=True,
-                        )
-                        full = np.full(X.shape[1], np.nan)
-                        full[kept] = dof_kept
-                        self._bm_dof = full
-                    else:
-                        self._bm_dof = np.full(X.shape[1], np.nan)
+                    vcov_reduced, dof_kept = compute_robust_vcov(
+                        X[:, kept],
+                        residuals,
+                        cluster_ids=effective_cluster_ids,
+                        weights=_fit_weights,
+                        weight_type=_fit_weight_type,
+                        vcov_type="hc2_bm",
+                        return_dof=True,
+                    )
+                    vcov = _expand_vcov_with_nan(vcov_reduced, X.shape[1], kept)
+                    full = np.full(X.shape[1], np.nan)
+                    full[kept] = dof_kept
+                    self._bm_dof = full
             else:
                 self._bm_dof = None
         else:
