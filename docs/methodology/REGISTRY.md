@@ -1829,7 +1829,7 @@ Weights are **always non-negative** (the central result). Via Frisch-Waugh-Lovel
 
 ### Edge Cases
 
-- **Composition effects (Section 3.6):** the treated/clean-control set can change across horizons. `no_composition` tightens the clean-control condition to `D_{i,t+H}=0` at all horizons (and excludes cohorts with `p_g > T-H` to fix the treated set). Costs statistical power.
+- **Composition effects (Section 3.6):** the treated/clean-control set can change across horizons. `no_composition` tightens the clean-control condition to `D_{i,t+H}=0` at all horizons (and excludes cohorts with `p_g > T-H` to fix the treated set). Costs statistical power. **Implementation note:** this fixes the *post-treatment* composition (every post horizon shares the same realized sample, even on unbalanced panels); pre-treatment placebo horizons use whatever pre-period data is available. Reweighting denominators and the regression-adjustment counterfactual are computed from the realized post-drop sample (not the pre-drop panel) so they stay consistent with the regression's risk set on unbalanced panels.
 - **Bias-variance (Sections 3.3, 5.3):** variance weighting (default) -> lower variance, some bias; equal weighting (`reweight`) -> unbiased, higher variance. Variance won at short horizons, equal at long horizons in the paper's simulation.
 - **PMD vs first-lag (Section 3.4):** PMD gains efficiency under low autocorrelation but can amplify bias if PT holds only in some pretreatment periods; first-lag relies on weaker PT (Marcus & Sant'Anna 2021). Choose the base period ex-ante.
 - **Covariate-weight positivity (online Appendix B.2):** direct covariate inclusion keeps non-negative weights ONLY under linear + homogeneous covariate effects (B.2.1; main-text Assumption 6); in the general case (B.2.2) weights are not guaranteed positive -> prefer the RA covariate path (the direct path should carry a homogeneity-assumption warning).
@@ -1837,20 +1837,28 @@ Weights are **always non-negative** (the central result). Via Frisch-Waugh-Lovel
 
 ### Deviations from the paper / from R / library extensions
 
-*To be populated in PR-B (source + tests). Anticipated entries: (1) the analytical/cluster SE convention (paper specifies none - implementation choice vs Stata `lpdid` `vce(cluster unit)`); (2) any RA-path influence-function variance; (3) the `pmd="max"` / integer-`k` panel-start edge behavior vs the package; (4) absorbing-only scope in the first release, with non-absorbing (Section 4.2) deferred.*
+The paper specifies no standard-error formula (Section 1 defers to "standard, well-understood techniques"); the reference Stata `lpdid` uses `vce(cluster unit)`. The entries below document diff-diff's inference and scope choices.
+
+1. **Note:** Standard errors are **cluster-robust at the unit level by default** - `cluster=None` auto-clusters at the unit identifier and the results record `cluster_name`/`n_clusters` - with a `t(G-1)` reference distribution (G = realized clusters in each horizon's clean-control sample). Matches Stata `lpdid` `vce(cluster unit)`; the paper prescribes no SE.
+2. **Note:** The regression-adjustment (RA) covariate path (`reweight=True` with covariates/absorb) reports an **influence-function cluster variance** `sum_c (sum_{i in c} psi_i)^2 / n^2`, in the same family as `ImputationDiD`'s Theorem-3 / BJS variance (see "IF-based variance estimators vs analytical-sandwich estimators" above). Its single Gram inversion is routed through `linalg._rank_guarded_inv` (finite SE on the identified subspace under near-collinearity; NaN at rank 0). Unlike the default/weighted `solve_ols` `hc1`-cluster path - which applies the `(G/(G-1))*((n-1)/(n-k))` finite-sample factor - the RA IF variance currently carries **no finite-sample factor** (the ImputationDiD convention), while both paths share the `t(G-1)` reference. This RA-vs-default small-sample-scaling asymmetry is documented here and will be validated against the reference R packages and reconciled in the R-parity follow-up (PR-B2).
+3. **Note:** Direct covariate inclusion (`reweight=False` with covariates/absorb) emits a `UserWarning`: per online Appendix B.2.2 it preserves the non-negative LP-DiD weighting result only under linear and homogeneous covariate effects, so the regression-adjustment path (`reweight=True`) is preferred.
+4. **Deviation from R:** Scope - this release implements the **absorbing-treatment main path only** (the estimator raises on non-absorbing input). Non-absorbing treatment (Section 4.2) and survey-design support are deferred to later PRs; the reference `lpdid` packages support non-absorbing treatment.
+5. **Note:** LP-DiD's per-unit quantities (outcome lags `ylags`, first-difference lags `dylags`, integer-`pmd` premean baselines, treatment-entry detection) are **calendar** quantities (`t-1`, `t-k`), so the estimator requires integer-valued, globally consecutive `time` labels. A unit with an **interior time gap** is handled by reindexing that unit to its complete interior calendar grid `[min_t, max_t]`, computing the features on the grid, then **restricting back to the observed rows** - so a lag/first-difference spanning a gap is NaN and the observation fails closed (never the previous-*observed* row), and no synthetic gap row enters a regression. A gap-free panel skips this entirely and is bit-identical. **Entry = first OBSERVED treated period** (`min(t | D_it=1)`): an unobserved pre-onset gap cannot move a cohort earlier, the only well-defined convention when the true switch falls in an unobserved period.
+6. **Note (pooled estimand):** The pooled pre/post ATT (the headline `results.att` is the pooled-post row) is the **unit-equal-weighted average of each unit-event-time's mean long difference** over the window - `mean_h(y_{i,t+h}) - baseline_{i,t}`, one observation per (unit, event-time), regressed on the treatment-switch indicator with event-time fixed effects on the **fixed-composition** sample (only units observing *every* pooled target, with clean controls required through `max(h)`). This equals the mean of the per-horizon event-study coefficients on a balanced panel; under cross-horizon composition changes it differs from the authors' horizon-**stacked** pooled regression (each (unit, event-time, horizon) long difference as a separate observation). It is therefore reported as a fixed-composition pooled ATT, and exact parity with the reference `lpdid` pooled specification is validated/reconciled in the R-parity follow-up (PR-B2).
 
 ### Implementation Checklist
 
-- [ ] Per-horizon long-difference OLS with time FE, no unit FE; `h=-1` reference fixed at 0 (PR-B)
-- [ ] Clean-control sample restriction (absorbing: `D_{i,t+h}=0`) (PR-B)
-- [ ] Variance-weighted (default) + reweighted (equal-weight) estimands (PR-B)
-- [ ] Regression-adjustment covariate path (recommended) + direct-inclusion path with homogeneity warning (PR-B)
-- [ ] PMD base period; pooled pre/post estimands (PR-B)
-- [ ] `no_composition` option (PR-B)
-- [ ] Cluster-robust SE at unit level by default; NaN-consistent inference via `safe_inference` (PR-B)
-- [ ] `LPDiDResults` with `summary()` / `to_dict()` / cluster metadata (PR-B)
-- [ ] Layered tests: analytical DGPs + cross-estimator equivalence (CS / BJS / Stacked / DiD) + self-generated R-parity (PR-B)
-- [ ] doc-deps.yaml mapping for `diff_diff/lpdid.py` + `lpdid_results.py`; llms.txt catalog entry (PR-B, test-enforced)
+- [x] Per-horizon long-difference OLS with time FE, no unit FE; `h=-1` reference fixed at 0 (PR-B1)
+- [x] Clean-control sample restriction (absorbing: `D_{i,t+h}=0`) (PR-B1)
+- [x] Variance-weighted (default) + reweighted (equal-weight) estimands (PR-B1)
+- [x] Regression-adjustment covariate path (recommended) + direct-inclusion path with homogeneity warning (PR-B1)
+- [x] PMD base period; pooled pre/post estimands (PR-B1)
+- [x] `no_composition` option (PR-B1)
+- [x] Cluster-robust SE at unit level by default; NaN-consistent inference via `safe_inference` (PR-B1)
+- [x] `LPDiDResults` with `summary()` / `to_dict()` / cluster metadata (PR-B1)
+- [x] doc-deps.yaml mapping for `diff_diff/lpdid.py` + `lpdid_results.py`; llms.txt / llms-full.txt catalog entries (PR-B1, test-enforced)
+- [x] B1 pure-Python tests: analytical DGPs + cross-estimator equivalence (CS / BJS / DiD; Cengiz-stacked dropped, documented) + unbalanced / interior-gap / RA-overlap / pmd-missing edge cases (PR-B1)
+- [ ] B2: self-generated R-parity (authors' `danielegirardi/lpdid` + `alexCardazzi/lpdid` cross-check)
 - [ ] Non-absorbing extension (Section 4.2) - deferred to a later PR
 - [ ] Survey-design support - deferred to a later PR
 
