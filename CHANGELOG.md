@@ -44,6 +44,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   floating-point reassociation of the BLAS reductions (~1 ULP, far below bootstrap Monte-Carlo
   error). Stratified survey designs (few PSUs) are unchanged (full generation + sliced blocks);
   see TODO.md for the deferred per-stratum tiling.
+- **EfficientDiD and HeterogeneousAdoptionDiD multiplier bootstraps now tile weight generation
+  over draws too, via the same `diff_diff/bootstrap_chunking.py` helper.** Both built the same
+  dense `(n_bootstrap × n_units)` multiplier-weight matrix CallawaySantAnna did — EfficientDiD
+  in its per-`(g,t)` EIF perturbation, HAD in its event-study sup-t band — the dominant
+  allocation at large `n_units` (~40 GB at 5M units × 999 reps). It is now generated and
+  consumed one draw-block at a time, capping peak memory at `O(block × n_units)`, so these
+  estimators reach the same millions-of-units scale as the chunked CallawaySantAnna path. The
+  weight *stream* is bit-identical on both backends; end-to-end bootstrap SEs and sup-t
+  critical values match the un-chunked path to within floating-point reassociation of the BLAS
+  reductions (~1 ULP, far below bootstrap Monte-Carlo error). As with CallawaySantAnna,
+  stratified survey designs (few PSUs) are unchanged — full generation + sliced blocks — with
+  the deferred per-stratum tiling tracked in TODO.md.
 - **`run_placebo_test`'s `fake_group` path now filters ever-treated units by default.** The
   dispatcher threads its `treatment` column into `placebo_group_test`, so the fake-group
   placebo runs on never-treated units only (a more-correct placebo). Calling

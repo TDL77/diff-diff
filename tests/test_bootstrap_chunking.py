@@ -10,13 +10,14 @@ chunk-invariance (to floating-point reassociation) through CallawaySantAnna,
 under whatever ``DIFF_DIFF_BACKEND`` the CI matrix selects.
 """
 
+import warnings
 from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from diff_diff import CallawaySantAnna
+from diff_diff import CallawaySantAnna, EfficientDiD, HeterogeneousAdoptionDiD
 from diff_diff.bootstrap_chunking import (
     compute_block_size,
     iter_survey_multiplier_weight_blocks,
@@ -321,3 +322,185 @@ class TestSurveyWeightBlocks:
         strata = np.array([0, 0, 0, 1, 1, 1])
         design = _design(psu=psu, strata=strata, weights=np.ones(6))
         self._assert_matches_full(design, "rademacher", seed=7, block_size=9)
+
+
+class TestEfficientDiDBootstrapChunkInvariance:
+    """EfficientDiD multiplier bootstrap is invariant to the chunk size.
+
+    Mirrors ``TestCSBootstrapChunkInvariance``: the weight stream is bit-identical
+    across chunk sizes; the ``weights @ eif`` matmuls reassociate under BLAS, so
+    SEs match to ~1 ULP (assert_allclose, not bit-for-bit). Covers all four
+    bootstrap paths: unit (cluster=None), cluster (genuine many-units-to-cluster
+    fan-out), survey-PSU, and weights-only ``SurveyDesign`` -- the last exercises
+    the unit_level_weights / weight-path decoupling (unit weight generation but
+    eif_scaled perturbation), which a "survey vs non-survey" mis-keying would
+    silently break.
+    """
+
+    @staticmethod
+    def _panel():
+        rng = np.random.default_rng(2)
+        n_states, units_per_state, nt = 10, 6, 6
+        nu = n_states * units_per_state
+        units = np.repeat(np.arange(nu), nt)
+        periods = np.tile(np.arange(nt), nu)
+        n = nu * nt
+        cohort = rng.integers(0, 3, nu)
+        ft_unit = np.where(cohort == 0, 0, np.where(cohort == 1, 3, 4))
+        ft = np.repeat(ft_unit, nt)
+        post = (periods >= ft) & (ft > 0)
+        y = rng.standard_normal(n) + 0.1 * periods + 2.0 * post + 0.5 * np.repeat(cohort, nt)
+        state = np.repeat(np.repeat(np.arange(n_states), units_per_state), nt)
+        w = np.repeat(1.0 + 0.3 * np.abs(rng.standard_normal(nu)), nt)
+        return pd.DataFrame(
+            {"unit": units, "period": periods, "y": y, "first_treat": ft, "state": state, "w": w}
+        )
+
+    def _fit(self, cluster=None, survey_design=None):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return EfficientDiD(n_bootstrap=200, seed=42, cluster=cluster).fit(
+                self._panel(),
+                "y",
+                "unit",
+                "period",
+                "first_treat",
+                aggregate="all",
+                survey_design=survey_design,
+            )
+
+    @staticmethod
+    def _ses(r):
+        # Flatten every bootstrap SE (overall + group_time + event_study + group)
+        # into one vector, ordered by sorted keys, for an nan-safe comparison.
+        gt = [r.group_time_effects[k]["se"] for k in sorted(r.group_time_effects)]
+        es = (
+            [r.event_study_effects[k]["se"] for k in sorted(r.event_study_effects)]
+            if r.event_study_effects
+            else []
+        )
+        gp = [r.group_effects[k]["se"] for k in sorted(r.group_effects)] if r.group_effects else []
+        return np.array([r.overall_se, *gt, *es, *gp], dtype=float)
+
+    def _run(self, monkeypatch, **fit_kwargs):
+        base = self._fit(**fit_kwargs)
+        base_ses = self._ses(base)
+        # Guard the equal_nan comparison below: require the path actually produced
+        # finite bootstrap inference (overall SE + at least one cell SE), so a
+        # regression that NaN-outs both base and tiny chunk paths cannot pass.
+        assert np.isfinite(base_ses[0]) and np.isfinite(base_ses[1:]).any()
+        # Force many tiny blocks on every weight path: bootstrap_chunking covers
+        # iter_weight_blocks' internal sizing (unit/cluster); the module-level
+        # efficient_did_bootstrap target covers the survey-path block_size call.
+        monkeypatch.setattr("diff_diff.bootstrap_chunking.compute_block_size", lambda *a, **k: 7)
+        monkeypatch.setattr(
+            "diff_diff.efficient_did_bootstrap.compute_block_size", lambda *a, **k: 7
+        )
+        tiny = self._fit(**fit_kwargs)
+        np.testing.assert_allclose(self._ses(tiny), base_ses, rtol=1e-9, atol=1e-12, equal_nan=True)
+
+    def test_unit_path(self, monkeypatch):
+        self._run(monkeypatch)
+
+    def test_cluster_path(self, monkeypatch):
+        self._run(monkeypatch, cluster="state")
+
+    def test_survey_psu_path(self, monkeypatch):
+        from diff_diff.survey import SurveyDesign
+
+        self._run(monkeypatch, survey_design=SurveyDesign(psu="state", weights="w"))
+
+    def test_weights_only_survey_path(self, monkeypatch):
+        # weights-only SurveyDesign: _use_survey_bootstrap is False (unit weight
+        # generation) but unit_level_weights is set (eif_scaled perturbation).
+        from diff_diff.survey import SurveyDesign
+
+        self._run(monkeypatch, survey_design=SurveyDesign(weights="w"))
+
+
+class TestHADBootstrapChunkInvariance:
+    """HAD event-study sup-t bootstrap is invariant to the chunk size.
+
+    The ``weights @ influence`` perturbations are tiled over draws into the small
+    ``(B, n_horizons)`` matrix; the sup-t reduction (nanmax over horizons, then
+    quantile) runs post-loop. The weight stream is bit-identical across chunk
+    sizes; the simultaneous-band critical value matches to ~1 ULP. Covers the
+    non-survey (iter_weight_blocks) and survey (iter_survey_multiplier_weight_blocks)
+    paths.
+    """
+
+    @staticmethod
+    def _panel():
+        rng = np.random.default_rng(73)
+        G, T = 150, 4
+        d_post = rng.uniform(0.0, 1.0, G)
+        rows = []
+        for t in range(T):
+            for g in range(G):
+                dose = d_post[g] if t == T - 1 else 0.0
+                y = 0.2 * t + (2.0 * dose if t == T - 1 else 0.0) + 0.5 * rng.standard_normal()
+                rows.append((g, t, dose, y))
+        panel = pd.DataFrame(rows, columns=["unit", "period", "dose", "outcome"])
+        # HAD's continuous path requires unit-CONSTANT sampling weights.
+        w_unit = 1.0 + 0.3 * np.abs(rng.standard_normal(G))
+        panel["w"] = panel["unit"].map(lambda g: w_unit[g])
+        return panel
+
+    def _fit(self):
+        from diff_diff.survey import SurveyDesign
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return HeterogeneousAdoptionDiD(
+                design="continuous_at_zero", seed=42, n_bootstrap=400
+            ).fit(
+                self._panel(),
+                "outcome",
+                "dose",
+                "period",
+                "unit",
+                aggregate="event_study",
+                survey_design=SurveyDesign(weights="w"),
+            )
+
+    def test_survey_path(self, monkeypatch):
+        # Public event-study cband always routes through the survey-aware branch
+        # (iter_survey_multiplier_weight_blocks); a weights-only design makes
+        # n_psu == n_units, the large-allocation case the chunking targets.
+        base = self._fit()
+        assert np.isfinite(base.cband_crit_value)
+        monkeypatch.setattr("diff_diff.bootstrap_chunking.compute_block_size", lambda *a, **k: 9)
+        monkeypatch.setattr("diff_diff.had.compute_block_size", lambda *a, **k: 9)
+        tiny = self._fit()
+        assert tiny.cband_crit_value == pytest.approx(base.cband_crit_value, rel=1e-8, abs=1e-10)
+
+    def test_nonsurvey_branch_chunk_invariant(self, monkeypatch):
+        # The iid (resolved_survey=None) else-branch is unreachable end-to-end --
+        # the cband path always builds a (possibly synthetic) survey design, even
+        # for the weights= shortcut -- so the refactored iter_weight_blocks path is
+        # exercised by a direct call.
+        from diff_diff.had import _sup_t_multiplier_bootstrap
+
+        rng = np.random.default_rng(5)
+        n_units, n_h = 80, 4
+        infl = rng.standard_normal((n_units, n_h))
+        att = rng.standard_normal(n_h) * 0.1
+        se = np.abs(rng.standard_normal(n_h)) + 0.5
+
+        def _crit():
+            return _sup_t_multiplier_bootstrap(
+                infl,
+                att,
+                se,
+                None,
+                n_bootstrap=400,
+                alpha=0.05,
+                seed=42,
+                bootstrap_weights="rademacher",
+            )[0]
+
+        base = _crit()
+        assert np.isfinite(base)
+        monkeypatch.setattr("diff_diff.bootstrap_chunking.compute_block_size", lambda *a, **k: 9)
+        tiny = _crit()
+        assert tiny == pytest.approx(base, rel=1e-8, abs=1e-10)

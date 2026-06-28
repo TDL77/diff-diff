@@ -71,6 +71,11 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 
+from diff_diff.bootstrap_chunking import (
+    compute_block_size,
+    iter_survey_multiplier_weight_blocks,
+    iter_weight_blocks,
+)
 from diff_diff.local_linear import (
     BandwidthResult,
     BiasCorrectedFit,
@@ -2096,11 +2101,7 @@ def _sup_t_multiplier_bootstrap(
         n_valid)`` when fewer than half the draws are finite — warns the
         caller.
     """
-    from diff_diff.bootstrap_utils import (
-        apply_stratum_centering,
-        generate_bootstrap_weights_batch,
-        generate_survey_multiplier_weights_batch,
-    )
+    from diff_diff.bootstrap_utils import apply_stratum_centering
 
     influence_matrix = np.asarray(influence_matrix, dtype=np.float64)
     att_per_horizon = np.asarray(att_per_horizon, dtype=np.float64)
@@ -2159,8 +2160,15 @@ def _sup_t_multiplier_bootstrap(
                     "contributions; matches the 'remove' analytical target) "
                     "or pass cband=False to skip the simultaneous band."
                 )
-        psu_weights, psu_ids = generate_survey_multiplier_weights_batch(
-            n_bootstrap, resolved_survey, bootstrap_weights, rng
+        # PSU-level multiplier weights, generated one draw-block at a time so the
+        # (n_bootstrap, n_psu) matrix is never materialized in full (n_psu ==
+        # n_units when each unit is its own PSU). Unstratified designs tile the
+        # generation; stratified / degenerate designs fall back to full
+        # generation + slicing. Weight stream bit-identical to the un-chunked
+        # generate_survey_multiplier_weights_batch.
+        _block_size = compute_block_size(n_units, n_bootstrap)
+        psu_ids, _psu_blocks = iter_survey_multiplier_weight_blocks(
+            n_bootstrap, resolved_survey, bootstrap_weights, rng, block_size=_block_size
         )
         # Aggregate Psi to PSU level, stratum-demean, and apply the
         # small-sample correction so Var_xi(xi @ Psi_psu_scaled) matches
@@ -2171,7 +2179,7 @@ def _sup_t_multiplier_bootstrap(
         # (1 - f_h) FPC factor into the multipliers, so we only need to
         # pre-process Psi at the PSU level (aggregate → stratum-demean →
         # sqrt(n_h / (n_h - 1)) rescale).
-        n_psu = int(psu_weights.shape[1])
+        n_psu = len(psu_ids)
         psu_id_to_col = {int(p): c for c, p in enumerate(psu_ids)}
         Psi_psu = np.zeros((n_psu, n_horizons), dtype=np.float64)
         if resolved_survey.psu is not None:
@@ -2191,21 +2199,23 @@ def _sup_t_multiplier_bootstrap(
         # § "Note (Stute stratified survey-bootstrap calibration)".
         apply_stratum_centering(Psi_psu, resolved_survey, psu_ids, psu_axis=0)
 
-        # PSU-level perturbations: (B, H) = (B, n_psu) @ (n_psu, H).
-        # No (1/n) prefactor — Psi_psu_scaled is already on the θ̂-scale
-        # matched to the analytical variance.
-        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            perturbations = psu_weights @ Psi_psu  # (B, H)
+        # PSU-level perturbations: (B, H) = (B, n_psu) @ (n_psu, H), accumulated
+        # one draw-block at a time (output is the small (B, H), so only the weight
+        # block is large). No (1/n) prefactor — Psi_psu_scaled is already on the
+        # θ̂-scale matched to the analytical variance.
+        perturbations = np.empty((n_bootstrap, n_horizons), dtype=np.float64)
+        for _cs, _psu_block in _psu_blocks:
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                perturbations[_cs : _cs + _psu_block.shape[0]] = _psu_block @ Psi_psu
     else:
-        all_bootstrap_weights = generate_bootstrap_weights_batch(
-            n_bootstrap, n_units, bootstrap_weights, rng
-        )  # (B, G)
-        # Unit-level iid multipliers: no stratum centering needed.
-        # Var(xi @ Psi) = sum_g psi_g² matches the trivial analytical
-        # variance from compute_survey_if_variance at the IF-scale-
-        # invariant tolerance (PR #359 convention).
-        with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
-            perturbations = all_bootstrap_weights @ influence_matrix  # (B, H)
+        # Unit-level iid multipliers, generated one draw-block at a time at unit
+        # width (no stratum centering). Var(xi @ Psi) = sum_g psi_g² matches the
+        # trivial analytical variance from compute_survey_if_variance at the
+        # IF-scale-invariant tolerance (PR #359 convention).
+        perturbations = np.empty((n_bootstrap, n_horizons), dtype=np.float64)
+        for _cs, _w_block in iter_weight_blocks(n_bootstrap, n_units, bootstrap_weights, rng):
+            with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
+                perturbations[_cs : _cs + _w_block.shape[0]] = _w_block @ influence_matrix
 
     # t-statistics via per-horizon analytical SE.
     with np.errstate(divide="ignore", invalid="ignore", over="ignore"):
