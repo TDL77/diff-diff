@@ -2667,10 +2667,17 @@ def within_transform(
     time : str
         Column name for time period identifier.
     inplace : bool, default False
-        If True, modifies the original columns. If False, creates new columns
-        with the specified suffix.
+        Controls how the demeaned columns are attached. If False (default), they
+        are concatenated onto the input as a single block and a new frame is
+        returned; the input frame is not mutated (no defensive deep copy is taken
+        — the demean is read-only and ``concat`` does not mutate its inputs). If
+        True, they are written onto the passed frame in place (the caller must own
+        it) and that frame is returned. Independent of ``suffix``.
     suffix : str, default "_demeaned"
-        Suffix for new column names when inplace=False.
+        Column naming, independent of ``inplace``. A non-empty suffix writes the
+        demeaned values to new ``f"{var}{suffix}"`` columns (originals preserved);
+        ``suffix=""`` overwrites the source columns. Assigning to an existing
+        column name overwrites it rather than appending a duplicate label.
     weights : np.ndarray, optional
         Observation weights for weighted group means.
     max_iter : int, default 100
@@ -2699,8 +2706,12 @@ def within_transform(
     >>> df = within_transform(df, ['y', 'x'], 'unit_id', 'year')
     >>> # df now has 'y_demeaned' and 'x_demeaned' columns
     """
-    if not inplace:
-        data = data.copy()
+    # Column naming (``suffix``) is independent of how the demeaned columns are
+    # attached (``inplace``): an empty suffix targets the source column (overwrite),
+    # a non-empty suffix a new ``f"{var}{suffix}"`` column. The demean below only
+    # reads ``data``, so no defensive copy is taken up front.
+    target_cols = [var if not suffix else f"{var}{suffix}" for var in variables]
+    demeaned_values: List[np.ndarray] = []
 
     if weights is not None:
         # Weighted within-transformation via iterative alternating projections
@@ -2717,37 +2728,19 @@ def within_transform(
             return x - wx_sum / w_sum
 
         non_converged_vars: List[str] = []
-        if inplace:
-            for var in variables:
-                x = data[var].values.astype(np.float64)
-                converged = False
-                for _iter in range(max_iter):
-                    x_old = x.copy()
-                    x = _weighted_group_demean(x, unit_groups, w, unit_w_sum)
-                    x = _weighted_group_demean(x, time_groups, w, time_w_sum)
-                    if np.max(np.abs(x - x_old)) < tol:
-                        converged = True
-                        break
-                if not converged:
-                    non_converged_vars.append(var)
-                data[var] = x
-        else:
-            demeaned_data = {}
-            for var in variables:
-                x = data[var].values.astype(np.float64)
-                converged = False
-                for _iter in range(max_iter):
-                    x_old = x.copy()
-                    x = _weighted_group_demean(x, unit_groups, w, unit_w_sum)
-                    x = _weighted_group_demean(x, time_groups, w, time_w_sum)
-                    if np.max(np.abs(x - x_old)) < tol:
-                        converged = True
-                        break
-                if not converged:
-                    non_converged_vars.append(var)
-                demeaned_data[f"{var}{suffix}"] = x
-            demeaned_df = pd.DataFrame(demeaned_data, index=data.index)
-            data = pd.concat([data, demeaned_df], axis=1)
+        for var in variables:
+            x = data[var].values.astype(np.float64)
+            converged = False
+            for _iter in range(max_iter):
+                x_old = x.copy()
+                x = _weighted_group_demean(x, unit_groups, w, unit_w_sum)
+                x = _weighted_group_demean(x, time_groups, w, time_w_sum)
+                if np.max(np.abs(x - x_old)) < tol:
+                    converged = True
+                    break
+            if not converged:
+                non_converged_vars.append(var)
+            demeaned_values.append(x)
         if non_converged_vars:
             warn_if_not_converged(
                 False,
@@ -2760,22 +2753,34 @@ def within_transform(
         unit_grouper = data.groupby(unit, sort=False)
         time_grouper = data.groupby(time, sort=False)
 
-        if inplace:
-            for var in variables:
-                unit_means = unit_grouper[var].transform("mean")
-                time_means = time_grouper[var].transform("mean")
-                grand_mean = data[var].mean()
-                data[var] = data[var] - unit_means - time_means + grand_mean
-        else:
-            demeaned_data = {}
-            for var in variables:
-                unit_means = unit_grouper[var].transform("mean")
-                time_means = time_grouper[var].transform("mean")
-                grand_mean = data[var].mean()
-                demeaned_data[f"{var}{suffix}"] = (
-                    data[var] - unit_means - time_means + grand_mean
-                ).values
-            demeaned_df = pd.DataFrame(demeaned_data, index=data.index)
-            data = pd.concat([data, demeaned_df], axis=1)
+        for var in variables:
+            unit_means = unit_grouper[var].transform("mean")
+            time_means = time_grouper[var].transform("mean")
+            grand_mean = data[var].mean()
+            demeaned_values.append((data[var] - unit_means - time_means + grand_mean).values)
 
-    return data
+    if inplace:
+        # Write onto the passed frame (the caller must own it); an existing
+        # same-named column is overwritten. Used for the in-place overwrite
+        # callers (small column sets); large suffixed sets take the concat path
+        # below to avoid per-column block fragmentation.
+        for col, vals in zip(target_cols, demeaned_values):
+            data[col] = vals
+        return data
+
+    # Default (non-inplace): attach the demeaned columns as a single consolidated
+    # block via ``pd.concat``. No defensive copy of ``data`` is taken — the demean
+    # above is read-only and concat does not mutate its inputs, so the caller's
+    # frame is preserved (and shared rather than copied under copy-on-write). This
+    # both drops the redundant copy the old code took before the concat and avoids
+    # the ``DataFrame is highly fragmented`` warning of N per-column inserts.
+    new_block = pd.DataFrame(dict(zip(target_cols, demeaned_values)), index=data.index)
+    # Honor the overwrite contract: if a target name already exists (``suffix=""``,
+    # or re-demeaning a frame that already carries the suffix), drop it first so the
+    # concat replaces it instead of producing a duplicate label. ``drop`` returns a
+    # new frame (the input is not mutated). The common case — fresh suffixed targets
+    # — has no collision and skips straight to the concat.
+    collisions = [c for c in target_cols if c in data.columns]
+    if collisions:
+        data = data.drop(columns=collisions)
+    return pd.concat([data, new_block], axis=1)

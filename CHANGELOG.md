@@ -70,6 +70,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tests, and the full Python⇄Rust equivalence suite (`tests/test_rust_backend.py`).
 
 ### Performance
+- **`within_transform` no longer takes a redundant full-frame copy.** The two-way within
+  (fixed-effects) demeaning helper — shared by `TwoWayFixedEffects`, `SunAbraham`,
+  `WooldridgeDiD`, and `BaconDecomposition` — copied the entire input frame defensively before
+  `pd.concat`-ing the demeaned columns onto it, even though the demean is read-only and
+  `concat` does not mutate its inputs. That copy is removed: the demeaned columns are attached
+  as a single consolidated block via `pd.concat` (under pandas copy-on-write the original
+  columns are shared, not copied). Peak RSS of a wide `TwoWayFixedEffects(vcov_type="hc1")` fit
+  drops ~8% (e.g. 964 → 886 MB at 400k units × 6 covariates); the win scales with panel width.
+  **Bit-identical** (proven at `atol=0` for TWFE incl. the replicate-weight path, SunAbraham,
+  Wooldridge, and Bacon) — frame assembly only, the demean arithmetic is unchanged.
 - **`ImputationDiD` conservative-variance: cache the untreated-projection factorization per
   fit.** The exact imputation projection `v_untreated = -A_0 (A_0'[W]A_0)^{-1} A_1'w` has a
   target-invariant design (`A_0`/`A_1`/factorization) and a target-specific RHS (`A_1'w`), but
