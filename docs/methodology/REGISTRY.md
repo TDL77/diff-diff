@@ -19,6 +19,7 @@ This document provides the academic foundations and key implementation requireme
    - [TwoStageDiD](#twostagedid)
    - [StackedDiD](#stackeddid)
    - [WooldridgeDiD (ETWFE)](#wooldridgedid-etwfe)
+   - [LPDiD](#lpdid)
 3. [Advanced Estimators](#advanced-estimators)
    - [SyntheticDiD](#syntheticdid)
    - [SyntheticControl](#syntheticcontrol)
@@ -1780,6 +1781,78 @@ Consolidated list of substantive deviations from the W2025 paper and from R `etw
 5. **Logit cohort+time additive dummies** (not unit FE) to avoid incidental-parameters bias in short panels. Matches Stata `jwdid method(logit)`. See § Edge cases Note.
 6. **Anticipation + aggregation**: `aggregate(type="simple", weights="cell")` uses `t >= g` as the post-treatment threshold regardless of `anticipation`. Anticipation-window leads are estimated as placebos but excluded from `overall_att`. See § Edge cases Note.
 7. **Response-scale ATT vs R `etwfe` log-link coefficients** (Poisson + logit): diff-diff's `WooldridgeDiD(method="poisson" | "logit")` returns ATT on the response scale (counterfactual mean difference per paper W2023 ASF / APE framework); R `etwfe(family="poisson" | "logit")` returns the cell-level log-link / log-odds coefficient. Numerical cell-level R-parity for nonlinear paths requires either `emfx()`-based APE extraction on the R side or link-function inversion with baseline-mean adjustment; deferred (TODO row added in PR-B). See `tests/test_methodology_wooldridge.py::TestWooldridgeParityRPoisson` / `TestWooldridgeParityRLogit` for the current surface-test scope.
+
+---
+
+## LPDiD
+
+**Primary source:** [Dube, A., Girardi, D., Jordà, Ò., & Taylor, A. M. (2025). "A Local Projections Approach to Difference-in-Differences." *Journal of Applied Econometrics*, 40(5), 741-758.](https://doi.org/10.1002/jae.70000) (Open Access; NBER Working Paper 31184; FRBSF Working Paper 2023-12.) Paper review on file: `docs/methodology/papers/dube-2025-review.md` (main article + official online appendix; equation/section numbering pinned to the JAE 2025 version).
+
+**Reference implementations:** Stata `lpdid` (SSC `s459273`, the authors' reference); R `alexCardazzi/lpdid` (third-party; absorbing + non-absorbing); authors' example scripts `danielegirardi/lpdid` (R + Stata).
+
+### Identification
+
+Model-based DiD: untreated potential outcomes follow the two-way fixed-effects DGP `E[y_it(0)|i,t] = alpha_i + delta_t` (paper Eq. 1), under two assumptions:
+
+- **No anticipation (Assumption 1):** `E[y_it(p) - y_it(0)] = 0` for all `t < p`.
+- **Parallel trends (Assumption 2):** `E[y_it(0) - y_{i1}(0) | p_i = p] = E[y_it(0) - y_{i1}(0)]` for all `t in {2..T}`, `p in {1..T, inf}` - untreated potential-outcome trends are common across cohorts, stated relative to the first period (`t = 1`). The base period used for LP-DiD's long difference (first-lag `t-1` vs premean) is a separate efficiency/robustness choice, NOT part of this identification assumption (see the PMD edge case).
+
+Treatment is binary; the main path assumes **absorbing** treatment (`D_{is} <= D_{it}` for `s < t`). Target parameter: the cohort-specific dynamic ATT `tau_h^g = E[y_{i,p_g+h}(p_g) - y_{i,p_g+h}(0) | p_i = p_g]`, h periods after group g enters at p_g. Treatment effects may be dynamic and heterogeneous across cohorts.
+
+The key device is the **clean-control restriction**: each horizon-h regression keeps only newly-treated obs (`Delta_D_it = 1`) and not-yet-treated "clean" controls (`D_{i,t+h} = 0`, absorbing case). Excluding already-treated units from the control group is what eliminates the negative-weighting bias of naive TWFE/LP (paper Eqs. 6-7). Only the entry-period rows (`t = p_g`) identify each `beta_h` (online Appendix A.2).
+
+### Key Equations
+
+**LP-DiD regression (paper Eq. 4 restricted by Eq. 8), run separately per horizon `h in {-Q..H}`, `h != -1`:**
+
+    y_{i,t+h} - y_{i,t-1} = beta_h^{LP-DiD} * Delta_D_it + delta_t^h + e_it^h
+    sample:  Delta_D_it = 1 (newly treated)   OR   D_{i,t+h} = 0 (clean control)
+
+`delta_t^h` = calendar-time fixed effects; **no unit FE** (differenced out). `h = -1` is the reference (coefficient fixed at 0); negative h give pre-trend placebos.
+
+**Estimand = variance-weighted ATT (paper Eqs. 9-10; online Appendix B):**
+
+    E(beta_h^{LP-DiD}) = sum_{g != 0} omega_{g,h} * tau_h^g
+    omega_{g,h} = N_CCS_{g,h} * n_{g,h} * (1 - n_{g,h}) / sum_{g != 0}[...],   n_{g,h} = N_g / N_CCS_{g,h}
+
+Weights are **always non-negative** (the central result). Via Frisch-Waugh-Lovell, the residualized treatment dummy is the per-group constant `Delta_D~_g = 1 - N_g/N_CCS_{g,h}` (online Appendix Eqs. B.4-B.6) - the hook for the reweighting implementation.
+
+**Equally-weighted ATT (paper Section 3.3) - two equivalent routes:**
+- `reweight=True`: weight each observation in the clean-control sample `CCS_{g,h}` (the newly-treated obs and their clean controls) by `(omega_{g,h}/N_g)^{-1}`. Numerically equivalent to **Callaway-Sant'Anna (2021)**.
+- Regression adjustment (RA): fit the long difference on time FE using clean controls only, predict each treated obs's counterfactual, average residuals: `beta_h^{RA} = N_TR^{-1} sum_{TR}[(y_{i,t+h}-y_{i,t-1}) - Ehat((y_{i,t+h}-y_{i,t-1}) | D_{i,t+h}=0)]`. An imputation estimator in the **BJS (2024)** sense.
+
+**Covariates (paper Section 4.1):** recommended RA path `beta_{h,x}^{RA} = N_TR^{-1} sum_{TR}[(y_{i,t+h}-y_{i,t-1}) - gamma~^h x_i - delta~_t^h]`, with `gamma~^h, delta~_t^h` from a clean-control-only regression. **PMD base period (Section 3.4):** replace `y_{i,t-1}` with the mean of the last `k` pretreatment periods (`k=t-1` = all); single-cohort `k=t-1` == BJS. **Pooled estimand (Section 3.5):** posttreatment-mean long difference `(1/(H+1)) sum_{h=0}^H y_{i,t+h} - y_{i,t-1}` as the dependent variable.
+
+### Standard Errors
+
+**The paper specifies no SE formula** - Section 1 defers to "standard, well-understood techniques." The reference Stata uses **cluster-robust SEs at the unit level** (`vce(cluster unit)`, footnote 9); pooled / joint tests stack the per-horizon regressions (`suest`). No bootstrap is discussed. Any analytical SE the library ships - and in particular an influence-function cluster variance for the RA path - is therefore an **implementation choice validated against the reference package, not against the paper**, and must be documented under Deviations once implemented (PR-B).
+
+### Edge Cases
+
+- **Composition effects (Section 3.6):** the treated/clean-control set can change across horizons. `no_composition` tightens the clean-control condition to `D_{i,t+H}=0` at all horizons (and excludes cohorts with `p_g > T-H` to fix the treated set). Costs statistical power.
+- **Bias-variance (Sections 3.3, 5.3):** variance weighting (default) -> lower variance, some bias; equal weighting (`reweight`) -> unbiased, higher variance. Variance won at short horizons, equal at long horizons in the paper's simulation.
+- **PMD vs first-lag (Section 3.4):** PMD gains efficiency under low autocorrelation but can amplify bias if PT holds only in some pretreatment periods; first-lag relies on weaker PT (Marcus & Sant'Anna 2021). Choose the base period ex-ante.
+- **Covariate-weight positivity (online Appendix B.2):** direct covariate inclusion keeps non-negative weights ONLY under linear + homogeneous covariate effects (B.2.1; main-text Assumption 6); in the general case (B.2.2) weights are not guaranteed positive -> prefer the RA covariate path (the direct path should carry a homogeneity-assumption warning).
+- **Non-absorbing (Section 4.2, online Appendix C):** few/no never-treated units handled via the effect-stabilization assumption (Assumption 9, window `L`) with a modified clean-control window (Eq. 13). Two distinct estimands - first-time entry (Eq. 12) and effect-stabilization (Eq. 13). Deferred to a later PR; the absorbing main path rejects non-absorbing input.
+
+### Deviations from the paper / from R / library extensions
+
+*To be populated in PR-B (source + tests). Anticipated entries: (1) the analytical/cluster SE convention (paper specifies none - implementation choice vs Stata `lpdid` `vce(cluster unit)`); (2) any RA-path influence-function variance; (3) the `pmd="max"` / integer-`k` panel-start edge behavior vs the package; (4) absorbing-only scope in the first release, with non-absorbing (Section 4.2) deferred.*
+
+### Implementation Checklist
+
+- [ ] Per-horizon long-difference OLS with time FE, no unit FE; `h=-1` reference fixed at 0 (PR-B)
+- [ ] Clean-control sample restriction (absorbing: `D_{i,t+h}=0`) (PR-B)
+- [ ] Variance-weighted (default) + reweighted (equal-weight) estimands (PR-B)
+- [ ] Regression-adjustment covariate path (recommended) + direct-inclusion path with homogeneity warning (PR-B)
+- [ ] PMD base period; pooled pre/post estimands (PR-B)
+- [ ] `no_composition` option (PR-B)
+- [ ] Cluster-robust SE at unit level by default; NaN-consistent inference via `safe_inference` (PR-B)
+- [ ] `LPDiDResults` with `summary()` / `to_dict()` / cluster metadata (PR-B)
+- [ ] Layered tests: analytical DGPs + cross-estimator equivalence (CS / BJS / Stacked / DiD) + self-generated R-parity (PR-B)
+- [ ] doc-deps.yaml mapping for `diff_diff/lpdid.py` + `lpdid_results.py`; llms.txt catalog entry (PR-B, test-enforced)
+- [ ] Non-absorbing extension (Section 4.2) - deferred to a later PR
+- [ ] Survey-design support - deferred to a later PR
 
 ---
 
