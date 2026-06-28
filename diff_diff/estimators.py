@@ -1754,6 +1754,27 @@ class MultiPeriodDiD(DifferenceInDifferences):
         # Remap implicit "classical" + cluster to CR1 (legacy backward compat).
         _fit_vcov_type = self._resolve_effective_vcov_type(effective_cluster_ids)
 
+        # Cluster + CR2 Bell-McCaffrey (non-survey, unweighted) shares the SAME
+        # expensive CR2 precomputes (per-cluster A_g eigendecompositions, S_W,
+        # the residual-maker M) between the vcov and the per-coef/avg-ATT
+        # contrast DOF. Rather than let `solve_ols` build them for the vcov and
+        # then rebuild them for the contrast DOF below, skip solve_ols's vcov on
+        # this path and compute vcov + DOF together via one
+        # `_compute_cr2_bm_vcov_and_dof` call (see the hc2_bm DOF block). The
+        # `survey_weights is None` clause keeps the bypass byte-identical to
+        # solve_ols: solve_ols would pass `weights=survey_weights`, and the
+        # one-call path passes `weights=None`, so they only agree when
+        # survey_weights is None (the documented contract on this path — survey
+        # designs route through the TSL/replicate paths). If a future weighted
+        # entry point set survey_weights here, the flag is False and the code
+        # falls back to the original two-call behavior.
+        _is_mpd_cr2_path = (
+            _fit_vcov_type == "hc2_bm"
+            and effective_cluster_ids is not None
+            and not _use_survey_vcov
+            and survey_weights is None
+        )
+
         # Resolve Conley arrays from column names (init-time) plus the
         # estimator's `time` / `unit` columns. CRITICAL: read from the
         # ORIGINAL `data` frame, NOT `working_data` — if absorb is used
@@ -1790,7 +1811,7 @@ class MultiPeriodDiD(DifferenceInDifferences):
             X,
             y,
             return_fitted=True,
-            return_vcov=not _use_survey_vcov,
+            return_vcov=(not _use_survey_vcov) and not _is_mpd_cr2_path,
             cluster_ids=effective_cluster_ids,
             column_names=var_names,
             rank_deficient_action=self.rank_deficient_action,
@@ -1945,15 +1966,22 @@ class MultiPeriodDiD(DifferenceInDifferences):
         # rather than the shared n-k fallback.
         _bm_dof_per_coef: Optional[np.ndarray] = None
         _bm_dof_avg: Optional[float] = None
+        # On the `_is_mpd_cr2_path` bypass, solve_ols did not compute vcov
+        # (return_vcov=False). If every coefficient was dropped, synthesize the
+        # all-NaN vcov solve_ols would have returned (linalg.py:1230/1019); the
+        # BM DOF block below is skipped (no identified coefficients).
+        if _is_mpd_cr2_path and vcov is None and np.all(np.isnan(coefficients)):
+            vcov = np.full((X.shape[1], X.shape[1]), np.nan)
         if (
             self.vcov_type == "hc2_bm"
             and not _use_survey_vcov
-            and vcov is not None
+            and (vcov is not None or _is_mpd_cr2_path)
             and not np.all(np.isnan(coefficients))
         ):
             from diff_diff.linalg import (
                 _compute_bm_dof_from_contrasts,
                 _compute_cr2_bm_contrast_dof,
+                _compute_cr2_bm_vcov_and_dof,
                 _compute_hat_diagonals,
             )
 
@@ -1989,16 +2017,37 @@ class MultiPeriodDiD(DifferenceInDifferences):
                         contrasts,
                         weights=survey_weights,
                     )
+                elif _is_mpd_cr2_path:
+                    # Cluster-aware CR2 BM: vcov AND the per-coefficient +
+                    # post-period-average compound contrast (Gate 6 lift) DOF
+                    # from a SINGLE precompute build — the perf dedup. solve_ols
+                    # bypassed vcov on this path, so compute it here from the
+                    # same (X_kept, residuals, cluster_ids, bread_kept) it would
+                    # have used internally (→ byte-identical vcov), then expand
+                    # with NaN for dropped columns. weights=None per the
+                    # _is_mpd_cr2_path guard (survey_weights is None here; survey
+                    # designs route through the TSL path).
+                    _vcov_reduced, _dof_all = _compute_cr2_bm_vcov_and_dof(
+                        X_kept,
+                        effective_cluster_ids,
+                        bread_kept,
+                        contrasts,
+                        residuals=residuals,
+                        weights=None,
+                    )
+                    vcov = _expand_vcov_with_nan(_vcov_reduced, X.shape[1], _kept)
                 else:
-                    # Cluster-aware CR2 BM Satterthwaite DOF for per-coefficient
-                    # AND post-period-average compound contrast (Gate 6 lift).
-                    # This branch is guarded above by `not _use_survey_vcov`,
-                    # so when reached, `survey_weights` is None (survey designs
-                    # always route through the TSL path). The clubSandwich
-                    # WLS-CR2 port lifted `_compute_cr2_bm_contrast_dof` to
-                    # accept `weights=`, but no MPD entry point currently
-                    # passes non-None weights here — `weights=None` is the
-                    # de facto contract on this code path today.
+                    # Defensive fallback, currently UNREACHABLE: reaching the
+                    # cluster sub-branch requires `not _use_survey_vcov`, and any
+                    # non-None `survey_weights` comes from a SurveyDesign whose
+                    # `needs_survey_vcov` is True — so `_use_survey_vcov` would be
+                    # True and the whole hc2_bm block is skipped. Hence
+                    # `_is_mpd_cr2_path` is always satisfied here in practice (it
+                    # already requires `survey_weights is None`), and this branch
+                    # only fails safe for a future weighted-cluster entry point.
+                    # It mirrors the pre-refactor call EXACTLY (solve_ols's vcov is
+                    # kept; DOF is computed weights-free, exactly as the prior code
+                    # did) so it adds no new, untested weighted-CR2 DOF behavior.
                     _dof_all = _compute_cr2_bm_contrast_dof(
                         X_kept,
                         effective_cluster_ids,

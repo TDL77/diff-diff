@@ -233,13 +233,15 @@ where V is the VCV sub-matrix for post-treatment δ_e coefficients.
   `Wald_test(constraints=matrix(c, 1), test="HTZ")$df_denom`. Weighted CR2-BM
   (`survey_design=` paths) is still gated separately; see the rows in `TODO.md`
   under Methodology/Correctness.
-- **Note:** the cluster-aware contrast-DOF path currently recomputes the CR2 hat
-  matrix and per-cluster adjustment matrices that `solve_ols` already built for the
-  vcov dispatch — clustered `hc2_bm` MPD fits pay the O(n²) CR2 setup twice in
-  exchange for a clean call-site contract. Acceptable for typical cluster-robust
-  DiD panel sizes (n ≤ few thousand); tracked in `TODO.md` under Performance for
-  a follow-up that plumbs the contrast DOF through the existing CR2 vcov path or
-  shares precomputes.
+- **Note:** the cluster-aware MPD `hc2_bm` path computes the CR2 hat matrix,
+  per-cluster adjustment matrices, the sandwich vcov, AND the per-coefficient +
+  post-period-average contrast DOF together from a single shared precompute build
+  (`_compute_cr2_bm_vcov_and_dof` in `diff_diff/linalg.py`); the fit bypasses
+  `solve_ols`'s separate vcov dispatch on this path so the O(n²) CR2 setup is built
+  once per fit rather than twice. `_compute_cr2_bm` (per-coefficient vcov + DOF) and
+  `_compute_cr2_bm_contrast_dof` (DOF-only for arbitrary contrasts) are thin wrappers
+  over that shared core, so every CR2 caller routes through one implementation. The
+  consolidation is bit-identical to the prior two-call path (proven at atol=0).
 - **Note:** `LinearRegression.get_se()` / `get_inference()` clamp the vcov diagonal at 0
   before `sqrt`. A high-leverage / degenerate coefficient (an absorbed-FE dummy
   near-collinear with the treatment, whose Satterthwaite DOF already hits the noise-floor

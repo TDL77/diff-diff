@@ -1709,55 +1709,48 @@ def _cr2_adjustment_matrix(G_g: np.ndarray, tol: float = 1e-10) -> np.ndarray:
     return (eigvecs * inv_sqrt) @ eigvecs.T
 
 
-def _compute_cr2_bm(
+def _compute_cr2_bm_vcov_and_dof(
     X: np.ndarray,
-    residuals: np.ndarray,
     cluster_ids: np.ndarray,
     bread_matrix: np.ndarray,
+    contrasts: np.ndarray,
+    residuals: Optional[np.ndarray] = None,
     weights: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """CR2 Bell-McCaffrey cluster-robust variance with per-coefficient DOF.
+) -> Tuple[Optional[np.ndarray], np.ndarray]:
+    """Shared CR2 Bell-McCaffrey core — build precomputes once, return ``(vcov, dof)``.
 
-    Implements ``clubSandwich::vcovCR(..., type="CR2") + coef_test(test=
-    "Satterthwaite")`` for both unweighted and weighted ``lm`` fits. The
-    weighted form uses clubSandwich's specific WLS-CR2 algebra (which is
-    NOT a textbook PT2018 §3.3 transform-once derivation; see
-    docs/methodology/REGISTRY.md for the algorithm details).
-
-    For each cluster ``g`` (with normalized weights ``W_norm = w / mean(w)``):
-      - ``H_gg = X_g M_U X_g' W_g`` (asymmetric weighted hat; W not sqrt(W))
-      - ``S_W = sum_g X_g' W_g² X_g`` (W² in the bias-correction term)
-      - ``G_g = I - H_gg - H_gg' + X_g M_U S_W M_U X_g'``
-      - ``A_g = G_g^{-1/2}`` via symmetric eigendecomposition with
-        pseudoinverse handling (see :func:`_cr2_adjustment_matrix`).
-      - Per-cluster score ``s_g = X_g' W_g A_g u_g`` (u_g = raw residual)
-
-    Unweighted special case (``weights=None``): ``W_norm=1``, ``S_W=X'X``,
-    ``M_U @ S_W @ M_U = M_U``, so ``G_g`` collapses to ``I - H_gg`` (the
-    symmetric form). Bit-equal to the prior unweighted behavior at machine
-    precision (atol=1e-14 regression-safety).
-
-    Meat = ``sum_g s_g s_g'``; VCOV = ``M_U meat M_U`` (where ``M_U`` is the
-    normalized bread inverse; ``w_scale`` cancels in the final vcov).
-
-    Per-coefficient Satterthwaite DOF: see :func:`_cr2_bm_dof_inner` for the
-    unweighted simple formula and the weighted full P_array construction.
+    Single source of truth for the CR2 sandwich and the Satterthwaite DOF.
+    Both :func:`_compute_cr2_bm` (per-coefficient vcov + DOF) and
+    :func:`_compute_cr2_bm_contrast_dof` (DOF-only for arbitrary contrasts) are
+    thin wrappers over this function, so the expensive precomputes
+    (``bread_inv``, ``S_W``, ``MUWTWUM``, the per-cluster ``A_g`` eigendecompositions,
+    and the unweighted residual-maker ``M``) are defined in exactly one place.
+    Consolidating the two formerly-duplicated precompute blocks lets a caller
+    that needs both vcov and contrast DOF (e.g. :class:`MultiPeriodDiD` under
+    ``cluster + hc2_bm``) build them once instead of twice.
 
     Parameters
     ----------
     X : ndarray of shape (n, k)
-    residuals : ndarray of shape (n,)
-        Raw residuals ``y - X beta_hat`` from the (weighted) fit.
     cluster_ids : ndarray of shape (n,)
     bread_matrix : ndarray of shape (k, k)
         ``X'WX`` if weighted, ``X'X`` if unweighted.
+    contrasts : ndarray of shape (k, m)
+        Each column is a contrast vector for the Satterthwaite DOF. The
+        per-coefficient case is recovered with ``contrasts=np.eye(k)``.
+    residuals : ndarray of shape (n,), optional
+        Raw residuals ``y - X beta_hat`` from the (weighted) fit. When ``None``
+        the meat / vcov is skipped and ``vcov`` is returned as ``None``
+        (DOF-only callers); the per-cluster precomputes and DOF are unaffected.
     weights : ndarray of shape (n,), optional
         Original (un-normalized) weights. ``None`` for unweighted.
 
     Returns
     -------
-    vcov : ndarray of shape (k, k)
-    dof_vec : ndarray of shape (k,)
+    vcov : ndarray of shape (k, k) or None
+        ``None`` when ``residuals is None``.
+    dof_vec : ndarray of shape (m,)
+        Satterthwaite DOF per contrast column.
     """
     n, k = X.shape
     cluster_ids_arr = np.asarray(cluster_ids)
@@ -1777,7 +1770,11 @@ def _compute_cr2_bm(
         positive_mask = weights_arr > 0
         if not np.all(positive_mask):
             X = X[positive_mask]
-            residuals = residuals[positive_mask]
+            # DOF-only callers pass `residuals=None`; guard the subscript so the
+            # shared filter does not blow up on them (e.g. StackedDiD's weighted
+            # contrast-DOF path and the weighted singleton-cluster dispatch).
+            if residuals is not None:
+                residuals = residuals[positive_mask]
             cluster_ids_arr = cluster_ids_arr[positive_mask]
             weights_arr = weights_arr[positive_mask]
             weights = weights_arr  # Rebind for downstream w_scale/W_norm logic
@@ -1801,6 +1798,8 @@ def _compute_cr2_bm(
     G = len(unique_clusters)
     if G < 2:
         raise ValueError(f"Need at least 2 clusters for cluster-robust SEs, got {G}")
+    if contrasts.ndim != 2 or contrasts.shape[0] != k:
+        raise ValueError(f"contrasts must have shape (k={k}, m); got {contrasts.shape}")
 
     try:
         bread_inv = np.linalg.solve(bread_matrix, np.eye(k))
@@ -1853,27 +1852,32 @@ def _compute_cr2_bm(
         G_g = I_g - H_gg - H_gg.T + bias_term
         A_g_matrices[g] = _cr2_adjustment_matrix(G_g)
 
-    # --- VCOV (meat) ---
+    # --- VCOV (meat) --- only when residuals are supplied (DOF-only callers
+    # pass residuals=None and skip this).
     # Per-cluster score: s_g = X_g' diag(W_norm_g) A_g u_g.
-    cluster_scores = np.zeros((G, k))
-    for gi, g in enumerate(unique_clusters):
-        idx_g = cluster_idx[g]
-        u_g = residuals[idx_g]
-        A_g = A_g_matrices[g]
-        adjusted = A_g @ u_g
-        cluster_scores[gi] = X[idx_g].T @ (W_norm[idx_g] * adjusted)
-    meat = cluster_scores.T @ cluster_scores
-    vcov = M_U @ meat @ M_U
+    vcov: Optional[np.ndarray]
+    if residuals is not None:
+        cluster_scores = np.zeros((G, k))
+        for gi, g in enumerate(unique_clusters):
+            idx_g = cluster_idx[g]
+            u_g = residuals[idx_g]
+            A_g = A_g_matrices[g]
+            adjusted = A_g @ u_g
+            cluster_scores[gi] = X[idx_g].T @ (W_norm[idx_g] * adjusted)
+        meat = cluster_scores.T @ cluster_scores
+        vcov = M_U @ meat @ M_U
+    else:
+        vcov = None
 
-    # --- Per-coefficient Bell-McCaffrey cluster DOF ---
-    # Delegate to the contrast-aware helper. The helper branches on `weights`:
-    # unweighted uses the simple `(tr B)² / tr(B²)` form (bit-equal to prior);
-    # weighted uses the full clubSandwich P_array construction.
+    # --- Per-contrast Bell-McCaffrey cluster DOF ---
+    # The inner helper branches on `weights`: unweighted uses the simple
+    # `(tr B)² / tr(B²)` form (bit-equal to prior); weighted uses the full
+    # clubSandwich P_array construction.
     if weights is None:
         # Build the symmetric residual-maker M = I - H for the simple formula.
         H = X @ M_U @ X.T
         M = np.eye(n) - H
-        dof_vec = _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, M_U, np.eye(k))
+        dof_vec = _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, M_U, contrasts)
     else:
         dof_vec = _cr2_bm_dof_inner_weighted(
             X,
@@ -1882,10 +1886,75 @@ def _compute_cr2_bm(
             M_U,
             MUWTWUM,
             W_norm,
-            np.eye(k),
+            contrasts,
             w_scale=w_scale,
         )
 
+    return vcov, dof_vec
+
+
+def _compute_cr2_bm(
+    X: np.ndarray,
+    residuals: np.ndarray,
+    cluster_ids: np.ndarray,
+    bread_matrix: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """CR2 Bell-McCaffrey cluster-robust variance with per-coefficient DOF.
+
+    Implements ``clubSandwich::vcovCR(..., type="CR2") + coef_test(test=
+    "Satterthwaite")`` for both unweighted and weighted ``lm`` fits. The
+    weighted form uses clubSandwich's specific WLS-CR2 algebra (which is
+    NOT a textbook PT2018 §3.3 transform-once derivation; see
+    docs/methodology/REGISTRY.md for the algorithm details).
+
+    For each cluster ``g`` (with normalized weights ``W_norm = w / mean(w)``):
+      - ``H_gg = X_g M_U X_g' W_g`` (asymmetric weighted hat; W not sqrt(W))
+      - ``S_W = sum_g X_g' W_g² X_g`` (W² in the bias-correction term)
+      - ``G_g = I - H_gg - H_gg' + X_g M_U S_W M_U X_g'``
+      - ``A_g = G_g^{-1/2}`` via symmetric eigendecomposition with
+        pseudoinverse handling (see :func:`_cr2_adjustment_matrix`).
+      - Per-cluster score ``s_g = X_g' W_g A_g u_g`` (u_g = raw residual)
+
+    Unweighted special case (``weights=None``): ``W_norm=1``, ``S_W=X'X``,
+    ``M_U @ S_W @ M_U = M_U``, so ``G_g`` collapses to ``I - H_gg`` (the
+    symmetric form). Bit-equal to the prior unweighted behavior at machine
+    precision (atol=1e-14 regression-safety).
+
+    Meat = ``sum_g s_g s_g'``; VCOV = ``M_U meat M_U`` (where ``M_U`` is the
+    normalized bread inverse; ``w_scale`` cancels in the final vcov).
+
+    Per-coefficient Satterthwaite DOF: see :func:`_cr2_bm_dof_inner` for the
+    unweighted simple formula and the weighted full P_array construction.
+
+    Parameters
+    ----------
+    X : ndarray of shape (n, k)
+    residuals : ndarray of shape (n,)
+        Raw residuals ``y - X beta_hat`` from the (weighted) fit.
+    cluster_ids : ndarray of shape (n,)
+    bread_matrix : ndarray of shape (k, k)
+        ``X'WX`` if weighted, ``X'X`` if unweighted.
+    weights : ndarray of shape (n,), optional
+        Original (un-normalized) weights. ``None`` for unweighted.
+
+    Returns
+    -------
+    vcov : ndarray of shape (k, k)
+    dof_vec : ndarray of shape (k,)
+    """
+    # Thin wrapper: per-coefficient vcov + DOF is the shared core with
+    # `contrasts = I_k`. See :func:`_compute_cr2_bm_vcov_and_dof` for the
+    # single-source-of-truth implementation.
+    vcov, dof_vec = _compute_cr2_bm_vcov_and_dof(
+        X,
+        cluster_ids,
+        bread_matrix,
+        np.eye(X.shape[1]),
+        residuals=residuals,
+        weights=weights,
+    )
+    assert vcov is not None  # residuals provided ⇒ vcov computed
     return vcov, dof_vec
 
 
@@ -2180,93 +2249,18 @@ def _compute_cr2_bm_contrast_dof(
     _compute_cr2_bm : per-coefficient DOF (calls this helper internally
         with ``contrasts=np.eye(k)``).
     """
-    n, k = X.shape
-    cluster_ids_arr = np.asarray(cluster_ids)
-    unique_clusters = np.unique(cluster_ids_arr)
-    # Subpopulation invariance: physically filter `weights > 0` rows before
-    # building per-cluster matrices. Mirrors the same fix in `_compute_cr2_bm`
-    # (CI codex P0 on PR #475 round 2). Zero-weight rows must be inert; the
-    # caller's bread_matrix = X.T @ (X * w[:, None]) is invariant to their
-    # removal, so no bread rebuild is needed.
-    if weights is not None:
-        weights_arr_eff = np.asarray(weights, dtype=np.float64)
-        positive_mask = weights_arr_eff > 0
-        if not np.all(positive_mask):
-            X = X[positive_mask]
-            cluster_ids_arr = cluster_ids_arr[positive_mask]
-            weights_arr_eff = weights_arr_eff[positive_mask]
-            weights = weights_arr_eff
-            n = X.shape[0]
-            unique_clusters = np.unique(cluster_ids_arr)
-        eff_clusters = np.array(
-            [g for g in unique_clusters if float(np.sum(weights_arr_eff[cluster_ids_arr == g])) > 0]
-        )
-        if len(eff_clusters) < 2:
-            raise ValueError(
-                f"Need at least 2 clusters with positive total weight for "
-                f"cluster-robust SEs, got {len(eff_clusters)} effective "
-                f"clusters out of {len(unique_clusters)} unique."
-            )
-        unique_clusters = eff_clusters
-    if len(unique_clusters) < 2:
-        raise ValueError(
-            f"Need at least 2 clusters for cluster-robust SEs, got " f"{len(unique_clusters)}"
-        )
-    if contrasts.ndim != 2 or contrasts.shape[0] != k:
-        raise ValueError(f"contrasts must have shape (k={k}, m); got {contrasts.shape}")
-
-    try:
-        bread_inv = np.linalg.solve(bread_matrix, np.eye(k))
-    except np.linalg.LinAlgError as e:
-        if "Singular" in str(e):
-            raise ValueError(
-                "Design matrix is rank-deficient (singular X'X matrix). "
-                "Cannot compute CR2 Bell-McCaffrey variance."
-            ) from e
-        raise
-
-    # Normalize weights (clubSandwich convention; w_scale cancels in DOF ratio).
-    # Use M_U = (X' W_norm X)^{-1} = w_scale * bread_inv throughout, matching
-    # clubSandwich's internal matrix used in the P_array construction.
-    if weights is not None:
-        weights_arr = np.asarray(weights, dtype=np.float64)
-        pos = weights_arr > 0
-        w_scale = float(np.mean(weights_arr[pos])) if np.any(pos) else 1.0
-        W_norm = weights_arr / w_scale
-        M_U = w_scale * bread_inv
-    else:
-        W_norm = np.ones(n, dtype=np.float64)
-        M_U = bread_inv
-
-    cluster_idx = {g: np.where(cluster_ids_arr == g)[0] for g in unique_clusters}
-
-    # S_W = sum_g X_g' diag(W_norm_g²) X_g. For unweighted: S_W = X'X = bread_matrix.
-    S_W = np.zeros((k, k))
-    for g in unique_clusters:
-        idx_g = cluster_idx[g]
-        X_g = X[idx_g]
-        S_W += X_g.T @ (X_g * (W_norm[idx_g] ** 2)[:, np.newaxis])
-    MUWTWUM = M_U @ S_W @ M_U
-
-    A_g_matrices: Dict[Any, np.ndarray] = {}
-    for g in unique_clusters:
-        idx_g = cluster_idx[g]
-        X_g = X[idx_g]
-        # Asymmetric weighted hat (collapses to symmetric when W_norm=1).
-        H_gg = (X_g @ M_U @ X_g.T) * W_norm[idx_g][np.newaxis, :]
-        I_g = np.eye(len(idx_g))
-        bias_term = X_g @ MUWTWUM @ X_g.T
-        G_g = I_g - H_gg - H_gg.T + bias_term
-        A_g_matrices[g] = _cr2_adjustment_matrix(G_g)
-
-    if weights is None:
-        # Bit-equal to prior unweighted path: simple (tr B)² / tr(B²) form.
-        H = X @ M_U @ X.T
-        M = np.eye(n) - H
-        return _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, M_U, contrasts)
-    return _cr2_bm_dof_inner_weighted(
-        X, A_g_matrices, cluster_idx, M_U, MUWTWUM, W_norm, contrasts, w_scale=w_scale
+    # Thin wrapper: DOF-only is the shared core with `residuals=None` (the meat
+    # / vcov is skipped). See :func:`_compute_cr2_bm_vcov_and_dof` for the
+    # single-source-of-truth implementation of the per-cluster precomputes.
+    _, dof_vec = _compute_cr2_bm_vcov_and_dof(
+        X,
+        cluster_ids,
+        bread_matrix,
+        contrasts,
+        residuals=None,
+        weights=weights,
     )
+    return dof_vec
 
 
 def _compute_bm_dof_from_contrasts(
