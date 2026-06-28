@@ -256,6 +256,17 @@ Multi-Period and Staggered Adoption
 
   Source for the 8-step practitioner workflow surfaced via ``diff_diff.get_llm_guide("practitioner")`` and the README ``## Practitioner Workflow`` section. See ``docs/methodology/REGISTRY.md`` for the diff-diff renumbering and per-step deviations.
 
+Local Projections DiD
+---------------------
+
+- **Dube, A., Girardi, D., Jordà, Ò., & Taylor, A. M. (2025).** "A Local Projections Approach to Difference-in-Differences." *Journal of Applied Econometrics*, 40(5), 741-758. https://doi.org/10.1002/jae.70000 (Open Access; NBER Working Paper 31184; FRBSF Working Paper 2023-12.)
+
+  Primary source for the ``LPDiD`` estimator: per-horizon long-difference local-projection regressions estimated on a "clean control" sample, yielding non-negatively-weighted event-study and pooled ATTs (variance-weighted by default; reweighted regression or regression adjustment for the equally-weighted ATT; premean-differenced base periods; covariates; non-absorbing extension). Reference Stata package ``lpdid`` (SSC s459273); R ``alexCardazzi/lpdid``. Paper review on file at ``docs/methodology/papers/dube-2025-review.md``.
+
+- **Jordà, Ò. (2005).** "Estimation and Inference of Impulse Responses by Local Projections." *American Economic Review*, 95(1), 161-182. https://doi.org/10.1257/0002828053828518
+
+  Origin of the local-projections method that LP-DiD adapts to the difference-in-differences setting.
+
 Continuous Treatment DiD
 ------------------------
 
