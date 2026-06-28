@@ -68,6 +68,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   #groups)` factorizations to one. **Bit-identical** to the prior per-target `spsolve` (proven
   at `atol=0` across FE-only, covariate, survey-weighted, and bootstrap paths); no methodology,
   numerical, or public-API change.
+- **`LinearRegression(vcov_type="hc2_bm")`: compute the CR2 sandwich once, not twice.** The fit
+  path previously computed the CR2/HC2-BM vcov inside `solve_ols`, then recomputed the entire
+  Bell-McCaffrey sandwich (per-cluster `A_g`, the `O(n²k)` Satterthwaite loop) a second time via
+  `compute_robust_vcov(return_dof=True)` just to extract the per-coefficient DOF. The vcov **and**
+  DOF now come from a single combined call (the CR2 helper returns both together), halving the
+  per-coefficient CR2 sandwich cost on every `hc2_bm` fit (weighted one-way WLS-CR2,
+  weighted/unweighted clustered CR2-BM — i.e. `DiD`/`TWFE`/`MPD` with `vcov_type="hc2_bm"`).
+  (`MultiPeriodDiD`'s separate post-period-average contrast DOF still has its own recomputation,
+  tracked as an open follow-up in `TODO.md`.) **Bit-identical** SEs and DOF
+  (proven at `atol=0`); no methodology, numerical, or public-API change. Minor side effect: the
+  HC2→HC1 high-leverage-fallback `UserWarning` now fires once per fit instead of twice.
 
 ### Fixed
 - **Corrected the Korn & Graubard (1990) citation venue** in `docs/methodology/REGISTRY.md`

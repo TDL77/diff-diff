@@ -461,6 +461,101 @@ class TestLinearRegressionWeightedClusterHC2BM:
             err_msg="One-way LinearRegression _bm_dof must match helper Satterthwaite DOF",
         )
 
+    def test_lr_hc2_bm_vcov_value_matches_helper(self):
+        """#475 dedup: the fit-level ``self.vcov_`` is now sourced from the same
+        combined ``compute_robust_vcov(return_dof=True)`` call as ``_bm_dof``. It
+        must match an independently-computed CR2 vcov, and each coefficient's SE
+        must equal its sqrt-diagonal. Pins the vcov VALUE directly (the other LR
+        tests only pin ``_bm_dof`` end-to-end)."""
+        from diff_diff.linalg import LinearRegression, compute_robust_vcov
+
+        rng = np.random.default_rng(4751)
+        n = 36
+        X = np.column_stack([np.ones(n), rng.normal(size=n), rng.normal(size=n)])
+        y = X @ np.array([1.0, 0.5, -0.3]) + rng.normal(0, 0.5, n)
+        w = rng.uniform(0.5, 2.0, n)
+        cl = np.arange(n) % 6
+
+        for kw in (
+            {"weights": w, "weight_type": "pweight", "cluster_ids": cl},
+            {"weights": w, "weight_type": "pweight"},
+            {},  # unweighted one-way
+        ):
+            if "weights" in kw:
+                coef = np.linalg.solve(X.T @ (X * w[:, None]), X.T @ (w * y))
+            else:
+                coef = np.linalg.solve(X.T @ X, X.T @ y)
+            resid = y - X @ coef
+            helper_vcov, _ = compute_robust_vcov(
+                X,
+                resid,
+                cluster_ids=kw.get("cluster_ids"),
+                weights=kw.get("weights"),
+                weight_type=kw.get("weight_type", "pweight"),
+                vcov_type="hc2_bm",
+                return_dof=True,
+            )
+
+            lr = LinearRegression(include_intercept=False, vcov_type="hc2_bm", **kw)
+            lr.fit(X, y)
+            np.testing.assert_allclose(
+                lr.vcov_,
+                helper_vcov,
+                atol=1e-9,
+                rtol=1e-9,
+                err_msg=f"LinearRegression.vcov_ must match the CR2 helper vcov (kw={kw})",
+            )
+            for i in range(X.shape[1]):
+                inf_i = lr.get_inference(index=i)
+                np.testing.assert_allclose(
+                    inf_i.se,
+                    np.sqrt(lr.vcov_[i, i]),
+                    rtol=1e-12,
+                    err_msg=f"SE must be sqrt(vcov_[{i},{i}]) (kw={kw})",
+                )
+
+    def test_lr_hc2_bm_cr2_sandwich_computed_once(self):
+        """#475 dedup mechanism proof: the CR2 sandwich
+        (``_compute_robust_vcov_numpy``) is computed ONCE per hc2_bm fit, not
+        twice (previously once inside ``solve_ols`` for the vcov + once via
+        ``compute_robust_vcov`` for the dof). Patching ``_compute_robust_vcov_numpy``
+        covers BOTH the ``_compute_cr2_bm`` (weighted / clustered) and the
+        unweighted-one-way ``_compute_bm_dof_oneway`` sub-paths."""
+        import diff_diff.linalg as _linalg
+        from diff_diff.linalg import LinearRegression
+
+        rng = np.random.default_rng(4752)
+        n = 36
+        X = np.column_stack([np.ones(n), rng.normal(size=n), rng.normal(size=n)])
+        y = X @ np.array([1.0, 0.5, -0.3]) + rng.normal(0, 0.5, n)
+        w = rng.uniform(0.5, 2.0, n)
+        cl = np.arange(n) % 6
+
+        orig = _linalg._compute_robust_vcov_numpy
+        for kw in (
+            {"weights": w, "weight_type": "pweight"},  # weighted one-way
+            {"weights": w, "weight_type": "pweight", "cluster_ids": cl},  # weighted cluster
+            {},  # unweighted one-way (-> _compute_bm_dof_oneway)
+            {"cluster_ids": cl},  # unweighted cluster
+        ):
+            calls = {"n": 0}
+
+            def _counting(*a, _orig=orig, _calls=calls, **k):
+                _calls["n"] += 1
+                return _orig(*a, **k)
+
+            _linalg._compute_robust_vcov_numpy = _counting
+            try:
+                lr = LinearRegression(include_intercept=False, vcov_type="hc2_bm", **kw)
+                lr.fit(X, y)
+            finally:
+                _linalg._compute_robust_vcov_numpy = orig
+            assert lr._bm_dof is not None, f"_bm_dof must be set (kw={kw})"
+            assert calls["n"] == 1, (
+                f"CR2 sandwich must run once, not {calls['n']}x (kw={kw}); the #475 "
+                "dedup collapses solve_ols's vcov + the separate dof recompute."
+            )
+
 
 class TestWLSCR2FEDoFNoiseGuard:
     """Regression for R6 P1: weighted CR2-BM Satterthwaite DOF for high-
