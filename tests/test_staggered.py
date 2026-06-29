@@ -1064,6 +1064,9 @@ class TestCallawaySantAnnaCovariates:
             assert np.isnan(
                 results.group_time_effects[(g, t)]["se"]
             ), f"NaN cell ({g},{t}) must have NaN SE"
+            assert (
+                results.group_time_effects[(g, t)]["skip_reason"] == "non_finite_regression"
+            ), f"NaN cell ({g},{t}) must carry skip_reason='non_finite_regression'"
 
         # Overall ATT should still be finite (NaN cells excluded from aggregation)
         assert np.isfinite(results.overall_att)
@@ -1278,6 +1281,292 @@ class TestCallawaySantAnnaCovariates:
             "underdetermined reg fit must use the rank-reduced column-drop solve, "
             "not the minimum-norm full-design solve"
         )
+
+
+def _cs_nonestimable_data(panel: bool, n: int = 25, seed: int = 0) -> pd.DataFrame:
+    """Staggered data (cohorts 2,3,4; periods 1-4; NO never-treated) where, with
+    ``control_group="not_yet_treated"``, every post cell at the final period t=4
+    has no not-yet-treated controls (no cohort treated after 4) -> deterministic
+    non-estimable cells (e.g. (4, 4)). Earlier-period post cells (g=2/3 at t=2/3)
+    stay estimable, so aggregates remain finite.
+
+    panel=True  -> each unit observed in all 4 periods (true panel).
+    panel=False -> each row is a distinct unit (true repeated cross-section).
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    uid = 0
+    for g in (2, 3, 4):
+        for _ in range(n):
+            x = rng.normal(0, 1)  # unit-level covariate (for IPW/DR/reg covariate paths)
+            if panel:
+                fe = rng.normal(0, 1)
+                for t in range(1, 5):
+                    post = 1.0 if t >= g else 0.0
+                    rows.append(
+                        {
+                            "unit": uid,
+                            "time": t,
+                            "outcome": fe + 0.3 * t + 1.5 * post + 0.5 * x + rng.normal(0, 0.5),
+                            "first_treat": g,
+                            "x": x,
+                        }
+                    )
+                uid += 1
+            else:
+                for t in range(1, 5):
+                    post = 1.0 if t >= g else 0.0
+                    x_t = rng.normal(0, 1)
+                    rows.append(
+                        {
+                            "unit": uid,
+                            "time": t,
+                            "outcome": rng.normal(0, 1) + 0.3 * t + 1.5 * post + 0.5 * x_t,
+                            "first_treat": g,
+                            "x": x_t,
+                        }
+                    )
+                    uid += 1
+    return pd.DataFrame(rows)
+
+
+class TestCallawaySantAnnaNonEstimableMaterialization:
+    """Non-estimable (g,t) cells are materialized as NaN entries carrying a
+    machine-readable ``skip_reason``, uniformly across estimation paths, and are
+    excluded from every aggregation so aggregates/SEs stay finite (the prior
+    omit behavior; exact aggregate values are pinned by test_methodology_callaway).
+    """
+
+    _KNOWN_REASONS = {
+        "missing_period",
+        "zero_treated_control",
+        "zero_weight_mass",
+        "non_finite_regression",
+    }
+
+    @pytest.mark.parametrize(
+        "method,panel,covariates",
+        [
+            ("reg", True, None),  # no-covariate vectorized path
+            ("ipw", True, None),  # general path, no covariates
+            ("dr", True, None),  # general path, no covariates
+            ("reg", False, None),  # repeated cross-section path
+            ("reg", True, ["x"]),  # covariate-regression vectorized path
+            ("ipw", True, ["x"]),  # general path, covariate IPW
+            ("dr", True, ["x"]),  # general path, covariate DR
+            ("dr", False, ["x"]),  # repeated cross-section, covariate DR
+        ],
+    )
+    def test_materializes_nan_cell_with_skip_reason(self, method, panel, covariates):
+        """Each previously-omitting path now stores the non-estimable cell as NaN."""
+        data = _cs_nonestimable_data(panel=panel, seed=0)
+        cs = CallawaySantAnna(
+            n_bootstrap=0,
+            control_group="not_yet_treated",
+            estimation_method=method,
+            panel=panel,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            results = cs.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                covariates=covariates,
+            )
+
+        # The (g=4, t=4) cell has no not-yet-treated controls -> materialized, not omitted.
+        key = (4, 4)
+        assert (
+            key in results.group_time_effects
+        ), f"non-estimable cell must be materialized (path={method}, panel={panel}), not omitted"
+        cell = results.group_time_effects[key]
+        assert np.isnan(cell["effect"]) and np.isnan(cell["se"])
+        assert np.isnan(cell["t_stat"]) and np.isnan(cell["p_value"])
+        assert all(np.isnan(b) for b in cell["conf_int"])
+        assert cell["skip_reason"] == "zero_treated_control"
+        # The cell genuinely has treated observations but no controls -> the
+        # materialized counts must reflect that, not a hardcoded (0, 0).
+        assert cell["n_treated"] > 0
+        assert cell["n_control"] == 0
+
+        # Every NaN cell carries a known reason + NaN SE; every estimable cell None.
+        n_finite = 0
+        for (g, t), v in results.group_time_effects.items():
+            if np.isnan(v["effect"]):
+                assert v["skip_reason"] in self._KNOWN_REASONS, (g, t, v["skip_reason"])
+                assert np.isnan(v["se"])
+            else:
+                assert v["skip_reason"] is None
+                n_finite += 1
+
+        # Non-empty dict mixing NaN + finite cells fits without raising, and the
+        # NaN cells are excluded from aggregation (the aggregation invariant).
+        assert n_finite > 0, "expected some estimable cells"
+        assert np.isfinite(results.overall_att), "NaN cells must be excluded from aggregation"
+        assert np.isfinite(results.overall_se)
+
+    def test_estimable_cells_have_skip_reason_none(self):
+        """A well-posed fit carries skip_reason=None on every cell."""
+        data = generate_staggered_data(n_units=200, seed=42)
+        cs = CallawaySantAnna(n_bootstrap=0)
+        results = cs.fit(
+            data, outcome="outcome", unit="unit", time="time", first_treat="first_treat"
+        )
+        assert len(results.group_time_effects) > 0
+        assert all(np.isfinite(v["effect"]) for v in results.group_time_effects.values())
+        assert all(v["skip_reason"] is None for v in results.group_time_effects.values())
+
+    def test_to_dataframe_includes_nan_row_and_skip_reason_column(self):
+        """to_dataframe('group_time') surfaces the NaN cell + a skip_reason column."""
+        data = _cs_nonestimable_data(panel=True, seed=0)
+        cs = CallawaySantAnna(n_bootstrap=0, control_group="not_yet_treated")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            results = cs.fit(
+                data, outcome="outcome", unit="unit", time="time", first_treat="first_treat"
+            )
+        df = results.to_dataframe("group_time")
+        assert "skip_reason" in df.columns
+
+        nan_row = df[(df["group"] == 4) & (df["time"] == 4)]
+        assert len(nan_row) == 1, "the non-estimable cell must appear as a row"
+        assert np.isnan(nan_row["effect"].iloc[0])
+        assert nan_row["skip_reason"].iloc[0] == "zero_treated_control"
+
+        # Estimable rows carry a null skip_reason.
+        estimable = df[df["effect"].notna()]
+        assert len(estimable) > 0
+        assert estimable["skip_reason"].isna().all()
+
+    def test_general_path_nonfinite_att_materialized_as_nan_no_inf(self):
+        """A non-finite ATT(g,t) in the general (IPW/DR) path must surface as a NaN
+        cell with skip_reason, NOT a finite-but-non-finite (inf) effect carrying an
+        IF entry. Regression guard for the per-cell contract."""
+        from unittest.mock import patch
+
+        data = generate_staggered_data(n_units=120, seed=7)
+        real = CallawaySantAnna._compute_att_gt_fast
+        state = {"poisoned": None}
+
+        def wrapped(self, precomputed, g, t, covariates, **kw):
+            res = real(self, precomputed, g, t, covariates, **kw)
+            att = res[0]
+            # Poison the first estimable post cell: return inf ATT WITH a real IF
+            # entry (res[4]), mimicking a degenerate IPW/DR solve that returns a
+            # non-finite point estimate without a None sentinel.
+            if state["poisoned"] is None and att is not None and np.isfinite(att) and t >= g:
+                state["poisoned"] = (g, t)
+                return (np.inf,) + res[1:6] + (None,)
+            return res
+
+        cs = CallawaySantAnna(n_bootstrap=0, estimation_method="ipw")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with patch.object(CallawaySantAnna, "_compute_att_gt_fast", wrapped):
+                results = cs.fit(
+                    data, outcome="outcome", unit="unit", time="time", first_treat="first_treat"
+                )
+
+        assert state["poisoned"] is not None, "poison hook never fired (test is vacuous)"
+        cell = results.group_time_effects[state["poisoned"]]
+        # The non-finite ATT must be materialized as NaN (not inf) with the reason.
+        assert np.isnan(cell["effect"]), "non-finite ATT must surface as NaN, not inf"
+        assert not np.isinf(cell["effect"])
+        assert cell["skip_reason"] == "non_finite_regression"
+        # Excluded from aggregation -> overall ATT still finite.
+        assert np.isfinite(results.overall_att)
+
+    def test_no_covariate_path_nonfinite_att_materialized_as_nan(self):
+        """No-covariate vectorized path: an inf outcome (passes the NaN-only valid
+        mask) yields a non-finite ATT, which must be materialized as a NaN cell
+        with skip_reason -- not stored as inf with an IF entry / batch inference."""
+        data = generate_staggered_data(n_units=200, seed=11)
+        # Inject inf into one treated unit's outcome at its treatment period; inf is
+        # not NaN so it survives the valid mask and makes that cohort's cell ATT inf.
+        fin = data[np.isfinite(data["first_treat"]) & (data["first_treat"] > 0)]
+        u = fin["unit"].iloc[0]
+        g = int(data.loc[data["unit"] == u, "first_treat"].iloc[0])
+        data.loc[(data["unit"] == u) & (data["time"] == g), "outcome"] = np.inf
+
+        cs = CallawaySantAnna(n_bootstrap=0, estimation_method="reg")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            results = cs.fit(
+                data, outcome="outcome", unit="unit", time="time", first_treat="first_treat"
+            )
+
+        nf = [
+            (k, v)
+            for k, v in results.group_time_effects.items()
+            if v["skip_reason"] == "non_finite_regression"
+        ]
+        assert nf, "an inf outcome must yield a non_finite_regression cell"
+        for _, v in nf:
+            assert np.isnan(v["effect"]) and not np.isinf(v["effect"])
+            assert np.isnan(v["se"]) and np.isnan(v["t_stat"]) and np.isnan(v["p_value"])
+        assert np.isfinite(results.overall_att)
+
+    def test_event_study_omits_all_nonestimable_relative_time(self):
+        """An event-time bucket whose cells are ALL non-estimable is omitted from
+        event_study_effects (matches the prior omit behavior / R did::aggte),
+        not emitted as an all-NaN row."""
+        data = _cs_nonestimable_data(panel=True, seed=0)
+        cs = CallawaySantAnna(n_bootstrap=0, control_group="not_yet_treated")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            results = cs.fit(
+                data,
+                outcome="outcome",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+                aggregate="event_study",
+            )
+        es = results.event_study_effects
+        # Relative time e=2 contains only (g=2, t=4), which is non-estimable (no
+        # not-yet-treated controls at t=4) -> the whole bucket must be omitted.
+        assert 2 not in es, "all-non-estimable relative time must be omitted, not a NaN row"
+        # Every emitted relative time has a finite effect and >=1 contributing group.
+        for e, d in es.items():
+            assert np.isfinite(d["effect"]), f"e={e} effect should be finite"
+            assert d["n_groups"] >= 1, f"e={e} should have >=1 contributing group"
+
+    def test_all_nonestimable_raises_with_materialized_cells(self):
+        """All cells non-estimable (dict non-empty, all NaN) -> ValueError via the
+        no-finite-effect guard (distinct from the empty-dict case)."""
+        rng = np.random.default_rng(3)
+        rows = []
+        uid = 0
+        # Two treated cohorts (passes the not_yet_treated >=2-cohort upfront check
+        # is N/A here since control_group is never_treated) ...
+        for g in (2, 3):
+            for _ in range(20):
+                fe = rng.normal(0, 1)
+                for t in range(1, 5):
+                    rows.append(
+                        {
+                            "unit": uid,
+                            "time": t,
+                            "outcome": fe + 0.3 * t + (1.5 if t >= g else 0.0),
+                            "first_treat": g,
+                        }
+                    )
+                uid += 1
+        # Never-treated controls present (passes the upfront control check) but with
+        # all-NaN outcomes -> every cell has zero VALID controls -> all cells NaN.
+        for _ in range(20):
+            for t in range(1, 5):
+                rows.append({"unit": uid, "time": t, "outcome": np.nan, "first_treat": np.inf})
+                uid += 1
+        data = pd.DataFrame(rows)
+        cs = CallawaySantAnna(n_bootstrap=0, control_group="never_treated")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pytest.raises(ValueError, match="Could not estimate any group-time effects"):
+                cs.fit(data, outcome="outcome", unit="unit", time="time", first_treat="first_treat")
 
 
 class TestRankGuardedAnalyticalSE:
