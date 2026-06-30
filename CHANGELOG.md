@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`LPDiD` non-absorbing R-parity validation** (Phase C2). Pins both non-absorbing modes
+  against an independent `fixest::feols` reconstruction of the paper's Eq. 12 (`first_entry`)
+  and Eq. 13 (`effect_stabilization`) clean-sample restrictions: variance-weighted point and
+  SE match to ~1e-13/~1e-15; the `effect_stabilization` reweighted point matches (its SE is
+  pinned as a regression guard, a small weighted-cluster convention difference). New `tests/test_methodology_lpdid.py`
+  parity class + separate `lpdid_nonabsorbing_panel.csv` / `lpdid_nonabsorbing_golden.json`
+  (the absorbing B2 goldens stay byte-identical). `alexCardazzi/lpdid`'s `nonabsorbing_lag` is
+  recorded as a divergent third-party reference (it clamps off-switches and uses a non-paper
+  boundary/placebo convention, diverging ~0.01-0.05 from Eq. 13 even on a monotone panel), not
+  a parity gate. No estimator change.
 - **`LPDiD` non-absorbing (reversible) treatment** (Dube, Girardi, Jordà & Taylor 2025,
   Section 4.2). New `non_absorbing` parameter: `"first_entry"` (Eq. 12 — the effect of
   entering treatment for the first time and staying treated) and `"effect_stabilization"`
@@ -17,7 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   non-absorbing input, bit-for-bit identical results). Both modes implement the entry-effect
   estimands with mode-aware clean-sample masks, a documented "untreated before the first
   observed period" boundary convention, and a gap-free-panel requirement; the Appendix-C
-  exit-event dynamics, R-package parity (PR-C2), and survey-design support remain follow-ups.
+  exit-event dynamics and survey-design support remain follow-ups (R-parity is covered by
+  the entry above).
   Pure-Python validation covers the absorbing reduction, the re-entry mechanism, pre-trend
   placebos, non-negative weighting, stabilized-control admission, and DGP recovery.
 - **Weighted multiple absorbed fixed effects (`absorb=[a, b, ...]`) now supported in

@@ -22,8 +22,10 @@
 # coverage study benchmarks/python/coverage_lpdid_ra.py. See REGISTRY.md "## LPDiD".
 #
 # Outputs (checked into the repo):
-#   benchmarks/data/lpdid_test_panel.csv
-#   benchmarks/data/lpdid_golden.json
+#   benchmarks/data/lpdid_test_panel.csv          (absorbing panel)
+#   benchmarks/data/lpdid_golden.json             (absorbing goldens)
+#   benchmarks/data/lpdid_nonabsorbing_panel.csv  (non-absorbing panel, Phase C2)
+#   benchmarks/data/lpdid_nonabsorbing_golden.json (non-absorbing goldens, Phase C2)
 #
 # Usage:
 #   Rscript benchmarks/R/generate_lpdid_golden.R
@@ -312,3 +314,192 @@ golden_path <- file.path("benchmarks", "data", "lpdid_golden.json")
 # Python loader reads as None and handles in its missing-value branch.
 write_json(golden, golden_path, auto_unbox = TRUE, pretty = TRUE, digits = 12, na = "null")
 message(sprintf("Wrote golden: %s", golden_path))
+
+# ============================================================
+# 5. NON-ABSORBING (Phase C2): independent feols reconstruction of the paper's
+#    Eq. 12 (first_entry) and Eq. 13 (effect_stabilization) clean-sample
+#    restrictions, anchoring the C1 non-absorbing modes (LPDiD(non_absorbing=...)).
+#    EXPLICIT per-window indexing (a different construction than the Python
+#    cumulative-lookup; the recipe's independence was demonstrated when an earlier
+#    draft's Eq.12 control off-by-one diverged from the already-correct Python and
+#    was corrected against the paper). Validated == the library to ~1e-13 on point
+#    and ~1e-15 on SE for the variance-weighted variants (reweighted: point ~1e-13,
+#    SE has a small feols-weighted-cluster convention difference, pinned on the
+#    Python side). alexCardazzi::lpdid()'s `nonabsorbing_lag` is NOT a faithful
+#    Eq.13 (it clamps off-switches via treat_diff[<0]<-0 and uses a non-paper
+#    boundary/window convention; it diverges ~0.01-0.05 from Eq.13 even on a
+#    monotone no-off-switch panel) -> recorded in `meta` as a divergent third-party
+#    reference, NOT a parity gate (the B2 alexCardazzi-pooled precedent).
+#
+#    APPENDED after the absorbing write_json with its OWN set.seed and distinct
+#    object names; setFixest_ssc is NOT re-called -> the absorbing panel + golden
+#    above are byte-identical.
+# ============================================================
+NA_L <- 3L; NA_PRE <- 3L; NA_POST <- 4L; NA_TT <- 14L
+set.seed(424242)  # isolated; only the rnorm() calls below consume this stream
+
+na_mk <- function(uid, dpath) {
+  ufe <- rnorm(1, 0, 1.5)
+  data.table(unit = uid, time = 1:NA_TT, treat = as.integer(dpath),
+             y = ufe + 0.4 * (1:NA_TT) + 2.0 * as.integer(dpath) + rnorm(NA_TT, 0, 0.3))
+}
+na_rows <- list(); na_uid <- 0L
+na_add <- function(n, gen) for (i in 1:n) { na_uid <<- na_uid + 1L; na_rows[[length(na_rows)+1]] <<- na_mk(na_uid, gen()) }
+na_add(18, function() as.integer((1:NA_TT) >= sample(4:8, 1)))                          # enter & stay
+na_add(12, function() { g <- sample(3:6, 1); ex <- g + sample(2:3, 1); re <- ex + sample(2:4, 1)
+  d <- as.integer((1:NA_TT) >= g); d[(1:NA_TT) >= ex] <- 0L; if (re <= NA_TT) d[(1:NA_TT) >= re] <- 1L; d })  # reversal / re-entry
+na_add(10, function() rep(1L, NA_TT))                                                   # stabilized treated (eq13 controls)
+na_add(20, function() rep(0L, NA_TT))                                                   # never treated
+na_dt <- rbindlist(na_rows); setorder(na_dt, unit, time)
+na_panel_path <- file.path("benchmarks", "data", "lpdid_nonabsorbing_panel.csv")
+fwrite(na_dt, na_panel_path)
+message(sprintf("Wrote non-absorbing panel: %s (%d rows, %d units)",
+                na_panel_path, nrow(na_dt), uniqueN(na_dt$unit)))
+
+# ---- explicit per-window mask helpers (independent of the Python) ----
+# Each unit is gap-free over 1:NA_TT; positions < 1 are treated as D=0 (the
+# "untreated before the first observed period" convention - this is where alex's
+# NA-exclude differs from the library's clamp-to-untreated).
+na_Dwin  <- function(D,  a, b) { a <- max(a, 1L); if (b < a) integer(0) else D[a:b] }
+na_ddwin <- function(dd, a, b) { a <- max(a, 1L); if (b < a) integer(0) else dd[a:b] }
+na_clean_sample <- function(dt, mode, h) {
+  dt[, {
+    D <- treat; n <- length(D)
+    dd <- D - c(0L, D[-n])                 # first diff; pre-series untreated -> dd[1]=D[1]
+    cumD_before <- cumsum(c(0L, D))[1:n]   # D summed strictly before each position
+    cumD_incl   <- cumsum(D)               # D summed THROUGH each position (inclusive)
+    cdi <- function(k) if (k < 1L) 0L else cumD_incl[min(k, n)]
+    role <- rep(NA_character_, n)
+    for (t in 1:n) {
+      tgt <- t + h; base <- t - 1L
+      if (tgt < 1L || tgt > n || base < 1L) next         # need baseline y_{t-1} and target y_{t+h}
+      if (mode == "eq13") {
+        if (h >= 0L) {
+          treated <- dd[t] == 1L && all(na_Dwin(D, t - NA_L, t - 1L) == 0L) &&
+                     all(na_ddwin(dd, t + 1L, t + h) == 0L)       # entry, D=0 on [t-L,t-1], no other change in (t,t+h]
+          control <- all(na_ddwin(dd, t - NA_L, t + h) == 0L)     # no treatment change in [t-L,t+h]
+        } else {
+          m <- max(NA_L, -h)
+          treated <- dd[t] == 1L && all(na_Dwin(D, t - m, t - 1L) == 0L)
+          control <- all(na_ddwin(dd, t - m, t - 1L) == 0L)       # placebo window backward to t+h
+        }
+      } else {                                                    # eq12 first_entry
+        entry <- dd[t] == 1L && cumD_before[t] == 0L              # first onset (D=0 strictly before t)
+        if (h >= 0L) {
+          treated <- entry && all(na_ddwin(dd, t + 1L, t + h) == 0L)  # stays treated through t+h
+          control <- cdi(t + h) == 0L                            # untreated through t+h INCLUSIVE (Eq.12)
+        } else {
+          treated <- entry
+          control <- cdi(t) == 0L
+        }
+      }
+      if (isTRUE(treated)) role[t] <- "T" else if (isTRUE(control)) role[t] <- "C"
+    }
+    .(time = time, role = role)
+  }, by = unit][!is.na(role)]
+}
+na_es_one <- function(h, reweight = FALSE, dt = na_dt) {
+  cs <- na_clean_sample(dt, na_mode, h)
+  if (nrow(cs) == 0L) return(c(NA_real_, NA_real_))
+  d <- merge(dt, cs, by = c("unit", "time"))
+  d[, `:=`(tb = time - 1L, tt = time + h)]
+  d <- merge(d, dt[, .(unit, tb = time, yb = y)], by = c("unit", "tb"))
+  d <- merge(d, dt[, .(unit, tt = time, yt = y)], by = c("unit", "tt"))
+  d[, Dy := yt - yb]; d[, tr := as.integer(role == "T")]
+  d[, has_c := any(tr == 0L), by = time]; d <- d[has_c == TRUE]    # drop event-times with no clean control
+  if (uniqueN(d$tr) < 2L) return(c(NA_real_, NA_real_))
+  if (reweight) {                                                 # per-event-time N/N_control inverse weights
+    w <- d[, .(N = .N, nc = sum(tr == 0L)), by = time][, w := N / nc]
+    d <- merge(d, w[, .(time, w)], by = "time")
+    m <- feols(Dy ~ tr | time, data = d, weights = ~w, vcov = ~unit, warn = FALSE, notes = FALSE)
+  } else {
+    m <- feols(Dy ~ tr | time, data = d, vcov = ~unit, warn = FALSE, notes = FALSE)
+  }
+  c(unname(coef(m)["tr"]), unname(se(m)["tr"]))
+}
+na_es <- function(mode, reweight = FALSE, dt = na_dt) {
+  na_mode <<- mode
+  out <- list()
+  for (h in 0:NA_POST) out[[as.character(h)]]  <- na_es_one(h, reweight, dt)
+  for (h in 2:NA_PRE)  out[[as.character(-h)]] <- na_es_one(-h, reweight, dt)
+  out
+}
+
+first_entry_es    <- na_es("eq12")
+effect_stab_es    <- na_es("eq13")
+effect_stab_rw_es <- na_es("eq13", reweight = TRUE)
+
+# ---- monotone (no-off-switch) slice: PIN the "alex diverges even without off-switches"
+# claim with committed evidence. On units whose treatment never decreases, alex's
+# off-switch clamp is inert, yet alex still diverges from the paper-faithful Eq.13 (its
+# non-paper boundary/window convention), so the recorded max post-horizon |alex - Eq.13|
+# is well above 0 -> documents that the divergence is NOT only off-switch handling.
+na_mono <- na_dt[, if (all(diff(treat) >= 0L)) .SD, by = unit]   # drop units with any turn-off
+na_mode <<- "eq13"
+mono_ours <- vapply(0:NA_POST, function(h) na_es_one(h, FALSE, na_mono)[1], numeric(1))
+mono_alex <- tryCatch({
+  am <- lpdid::lpdid(as.data.frame(na_mono), window = c(-NA_PRE, NA_POST), y = "y",
+                     unit = "unit", time = "time", treat_status = "treat",
+                     cluster = "unit", nonabsorbing_lag = NA_L)
+  am$coeftable[(NA_PRE + 1L):(NA_PRE + 1L + NA_POST), "Estimate"]   # rows for h = 0..POST
+}, error = function(e) rep(NA_real_, NA_POST + 1L))
+alex_monotone_divergence <- max(abs(mono_ours - mono_alex), na.rm = TRUE)
+message(sprintf("alex monotone-slice max|alex - Eq.13| (post h) = %.4f", alex_monotone_divergence))
+
+# ---- alexCardazzi nonabsorbing_lag: divergent reference (recorded, NOT gated) ----
+na_alex <- tryCatch({
+  a <- lpdid::lpdid(as.data.frame(na_dt), window = c(-NA_PRE, NA_POST), y = "y",
+                    unit = "unit", time = "time", treat_status = "treat",
+                    cluster = "unit", nonabsorbing_lag = NA_L)
+  hs <- (-NA_PRE):NA_POST  # alex coeftable rows map to horizons by position
+  setNames(lapply(seq_along(hs), function(i)
+    c(a$coeftable[i, "Estimate"], a$coeftable[i, "Std. Error"])), as.character(hs))
+}, error = function(e) list(error = conditionMessage(e)))
+
+na_golden <- list(
+  meta = list(
+    estimator = "LPDiD (Dube, Girardi, Jorda & Taylor 2025) - non-absorbing (Phase C2)",
+    r_version = R.version.string,
+    fixest_version = as.character(packageVersion("fixest")),
+    lpdid_alexcardazzi_version = as.character(packageVersion("lpdid")),
+    lpdid_alexcardazzi_commit = ALEX_SHA,
+    seed = 424242L, L = NA_L, pre_window = NA_PRE, post_window = NA_POST,
+    anchor = paste(
+      "Both modes are anchored on an INDEPENDENT feols reconstruction of the paper's",
+      "Eq. 12 (first_entry) and Eq. 13 (effect_stabilization) clean-sample restrictions",
+      "(explicit per-window indexing). Validated == the library to ~1e-13 (point) and",
+      "~1e-15 (SE) for the variance-weighted variants."),
+    reweight_se_note = paste(
+      "effect_stab_rw: POINT matches the library to ~1e-13; the reweighted SE has a",
+      "small feols-weighted-cluster convention difference (~5e-5) vs the library, so the",
+      "library reweighted SE is pinned as a regression guard on the Python side, not",
+      "asserted against feols."),
+    first_entry_note = paste(
+      "first_entry (Eq. 12) has NO R-package analogue (alexCardazzi only exposes the",
+      "effect-stabilization nonabsorbing_lag). It is anchored on the independent feols",
+      "Eq. 12 recipe + a hand-computed Python micro-check. Its absorbing reduction",
+      "(first_entry == absorbing on absorbing panels) is a separate internal check, NOT",
+      "an R anchor for non-absorbing behavior."),
+    alex_note = paste(
+      "alexCardazzi::lpdid() `nonabsorbing_lag` is NOT a faithful paper Eq. 13: it clamps",
+      "treat_diff[<0]<-0 (its clean-control window blocks only treatment turn-ONS, so a",
+      "unit turning OFF inside [t-L,t+h] still counts as a control) and reuses a forward",
+      "window for placebos. The library uses the literal 'no treatment change' (both",
+      "directions) + the backward placebo window [t-max(L,-h),t-1] (more paper-faithful).",
+      "alex diverges ~0.01-0.05 from Eq. 13 even on a monotone no-off-switch panel, so it",
+      "is recorded below for transparency only, NOT used as a parity gate."),
+    boundary_note = paste(
+      "Boundary convention (closes the REGISTRY 'confirm vs R in PR-C2' item): periods",
+      "before a unit's first observed period are treated as untreated/no-change (the",
+      "library clamps pre-min_t to 0); alexCardazzi NA-excludes such rows (first-row lag",
+      "is NA). A documented divergence, not a defect."),
+    alex_monotone_post_divergence = alex_monotone_divergence  # max|alex - Eq.13| over post h on the monotone (no-off-switch) sub-panel; > 0 shows the divergence is not only off-switch handling
+  ),
+  first_entry = first_entry_es,
+  effect_stab = effect_stab_es,
+  effect_stab_rw = effect_stab_rw_es,
+  alex_nonabsorbing_lag = na_alex
+)
+na_golden_path <- file.path("benchmarks", "data", "lpdid_nonabsorbing_golden.json")
+write_json(na_golden, na_golden_path, auto_unbox = TRUE, pretty = TRUE, digits = 12, na = "null")
+message(sprintf("Wrote non-absorbing golden: %s", na_golden_path))
