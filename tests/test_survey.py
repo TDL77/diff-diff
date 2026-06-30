@@ -15,6 +15,7 @@ from diff_diff import (
 from diff_diff.linalg import LinearRegression, compute_robust_vcov, solve_ols
 from diff_diff.survey import (
     ResolvedSurveyDesign,
+    _compute_stratified_psu_meat,
     compute_survey_metadata,
     compute_survey_vcov,
 )
@@ -2144,6 +2145,175 @@ class TestRound7Fixes:
         # Should NOT raise
         coef, resid, vcov = solve_ols(X, y, weights=w)
         assert coef is not None
+
+
+class TestZeroWeightPsuConventionWaiver:
+    """Lock the waived decision on the survey TSL finite-sample correction.
+
+    ``_compute_stratified_psu_meat`` intentionally keeps genuine-subpopulation
+    zero-weight PSUs in its per-stratum correction
+    ``(1 - f_h)*n_PSU_h/(n_PSU_h - 1)`` and PSU-mean centering — the full-design
+    domain estimator of Lumley (2004 §3.4) / R ``survey::svyrecvar(subset())``.
+    A former TODO proposed "count only positive-weight PSUs" to force the survey
+    SE to be invariant to zero-weight rows; that was **waived** (TODO
+    § "Won't-fix / waived"; REGISTRY § "Subpopulation Analysis") because it would
+    break the documented R parity. These tests trip if that change is ever made:
+    the proposed fix would collapse the subpopulation SE onto the naive-subset SE.
+    """
+
+    @staticmethod
+    def _panel():
+        rng = np.random.default_rng(20260630)
+        rows = []
+        uid = 0
+        for h in range(3):  # strata
+            for p in range(4):  # PSUs per stratum (>=2 so a drop leaves the path live)
+                psu_id = f"s{h}_p{p}"
+                for _ in range(2):  # units per PSU
+                    treated = int(rng.random() < 0.5)
+                    for t in (0, 1):  # periods
+                        y = 2.0 * treated * t + 0.5 * h + 0.3 * p + rng.normal()
+                        rows.append(
+                            dict(
+                                unit=uid,
+                                stratum=h,
+                                psu=psu_id,
+                                treated=treated,
+                                post=t,
+                                outcome=y,
+                                w=rng.uniform(0.5, 2.0),
+                            )
+                        )
+                    uid += 1
+        return pd.DataFrame(rows)
+
+    def _fit(self, df):
+        sd = SurveyDesign(weights="w", strata="stratum", psu="psu")
+        res = DifferenceInDifferences().fit(
+            df, outcome="outcome", treatment="treated", time="post", survey_design=sd
+        )
+        return res.att, res.se
+
+    def test_inert_padding_reusing_existing_psu_is_bit_invariant(self):
+        """Zero-weight rows under an EXISTING PSU label are inert: ATT and SE
+        bit-identical. (Their weighted score is 0, so the PSU-score sum and the
+        PSU count are both unchanged.)"""
+        base = self._panel()
+        att0, se0 = self._fit(base)
+
+        pad = []
+        for _ in range(8):
+            for t in (0, 1):
+                pad.append(
+                    dict(
+                        unit=8000,
+                        stratum=0,
+                        psu="s0_p1",  # reuse an existing PSU
+                        treated=0,
+                        post=t,
+                        outcome=99.0,  # arbitrary; weight 0 makes it inert
+                        w=0.0,
+                    )
+                )
+        padded = pd.concat([base, pd.DataFrame(pad)], ignore_index=True)
+        att1, se1 = self._fit(padded)
+
+        np.testing.assert_allclose(att1, att0, atol=1e-12)
+        np.testing.assert_allclose(se1, se0, atol=1e-12)
+
+    def test_subpopulation_zeroing_keeps_full_psu_structure(self):
+        """Genuine subpopulation (zero a full PSU's weights) is NOT a naive
+        physical subset. The WLS fit is identical (zero-weight rows drop out of
+        X'WX), so the ATT is exactly invariant; but the TSL SE intentionally
+        differs from the dropped-rows SE because the zeroed PSU still counts in
+        the finite-sample correction (Lumley full-design convention).
+
+        The proposed "count only positive-weight PSUs" change would make the
+        zeroed SE equal the dropped SE; this assertion guards against it.
+        """
+        base = self._panel()
+        victim = "s0_p0"
+
+        zeroed = base.copy()
+        zeroed.loc[zeroed["psu"] == victim, "w"] = 0.0
+        att_zero, se_zero = self._fit(zeroed)
+
+        dropped = base[base["psu"] != victim].copy()
+        att_drop, se_drop = self._fit(dropped)
+
+        # ATT is exactly invariant: zero-weight rows contribute nothing to the
+        # weighted normal equations, so the point estimate matches the subset.
+        np.testing.assert_allclose(att_zero, att_drop, atol=1e-10)
+
+        # SE is deliberately NOT invariant: the zeroed PSU stays in n_PSU_h and
+        # the centering (the Lumley domain gap, ~5e-3 rel here). A positive-
+        # weight-only correction would drive this to ~0.
+        rel_gap = abs(se_zero - se_drop) / se_drop
+        assert rel_gap > 1e-3, (
+            f"survey SE became invariant to subpopulation zeroing "
+            f"(rel_gap={rel_gap:.2e}); the full-design Lumley convention "
+            f"(TODO § Won't-fix / waived) appears to have been reverted."
+        )
+
+    def test_stratified_meat_counts_zero_score_psu_in_full_design(self):
+        """Direct unit test on ``_compute_stratified_psu_meat``: an all-zero-score
+        PSU (a fully zeroed subpopulation PSU) stays in ``n_PSU_h``, the stratum
+        PSU-mean, and the centering. Asserts the **exact** full-design meat and
+        that it is NOT the positive-weight-only meat (which would drop the zero
+        PSU). This guards against partial edits the SE-level test could miss —
+        e.g. changing only the finite-sample denominator while still centering
+        over the zero PSU.
+        """
+        # Two strata; stratum 0 has an all-zero PSU (psu 2 = two zeroed rows).
+        scores = np.array(
+            [
+                [1.5, -0.5],  # stratum 0, psu 0
+                [0.5, 2.0],  # stratum 0, psu 1
+                [0.0, 0.0],  # stratum 0, psu 2 (all-zero subpop PSU), row 1
+                [0.0, 0.0],  # stratum 0, psu 2, row 2
+                [-1.0, 0.7],  # stratum 1, psu 3
+                [0.3, -1.2],  # stratum 1, psu 4
+            ]
+        )
+        strata = np.array([0, 0, 0, 0, 1, 1])
+        psu = np.array([0, 1, 2, 2, 3, 4])
+        # PSU 2's rows carry zero weight as well as zero score, so the fixture
+        # models a *true* fully zero-weight subpopulation PSU. The current meat
+        # ignores `weights` (it operates on scores), so this does not change the
+        # expected value — but it hardens the lock against a future denominator-
+        # only edit that reads `resolved.weights` to drop positive-weight PSUs.
+        resolved = ResolvedSurveyDesign(
+            weights=np.array([1.0, 1.0, 0.0, 0.0, 1.0, 1.0]),
+            weight_type="pweight",
+            strata=strata,
+            psu=psu,
+            fpc=None,
+            n_strata=2,
+            n_psu=5,
+            lonely_psu="remove",
+        )
+
+        meat, variance_computed, _ = _compute_stratified_psu_meat(scores, resolved)
+        assert variance_computed
+
+        def _stratum_meat(psu_scores):
+            # Full-design per-stratum meat with fpc=None: (n_h/(n_h-1)) * S'S.
+            n_h = psu_scores.shape[0]
+            centered = psu_scores - psu_scores.mean(axis=0, keepdims=True)
+            return (n_h / (n_h - 1)) * (centered.T @ centered)
+
+        # Full-design reference INCLUDES the all-zero PSU in stratum 0 (n_h=3).
+        s0_full = np.array([[1.5, -0.5], [0.5, 2.0], [0.0, 0.0]])
+        s1 = np.array([[-1.0, 0.7], [0.3, -1.2]])
+        expected_full = _stratum_meat(s0_full) + _stratum_meat(s1)
+        np.testing.assert_allclose(meat, expected_full, atol=1e-12)
+
+        # The positive-weight-only meat would DROP the zero PSU from stratum 0
+        # (n_h=2, mean over the two nonzero PSUs) — exactly the change the waived
+        # TODO proposed. The full-design meat must NOT equal it.
+        s0_pos = np.array([[1.5, -0.5], [0.5, 2.0]])
+        positive_only = _stratum_meat(s0_pos) + _stratum_meat(s1)
+        assert not np.allclose(meat, positive_only, atol=1e-8)
 
 
 class TestRound8Fixes:
