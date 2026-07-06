@@ -279,11 +279,17 @@ Universal Rollout (No Untreated Markets)
 ----------------------------------------
 
 **Your situation:** Every market got the campaign at the same time - there is no
-holdout group - but spending levels varied across markets. ``ContinuousDiD`` cannot
-help here because it requires an untreated comparison group; standard DiD has no
-control to anchor the contrast.
+holdout group - but spending levels varied across markets. ``ContinuousDiD``'s
+default control groups require an untreated (zero-dose) comparison group; standard
+DiD likewise has no control to anchor the contrast. The choice hinges on whether
+the lowest spending level forms a genuine group (a mass point, ``>= 2`` markets at
+the minimum).
 
-**Recommended method:** :class:`~diff_diff.HeterogeneousAdoptionDiD`
+**Recommended method:** :class:`~diff_diff.ContinuousDiD` with
+``control_group="lowest_dose"`` **when a lowest-dose group exists** and you want the
+per-dose curve relative to that anchor (CGBS Remark 3.1, estimand
+``ATT(d) - ATT(d_L)``); otherwise :class:`~diff_diff.HeterogeneousAdoptionDiD` for
+the Weighted Average Slope target below.
 
 This estimator implements de Chaisemartin, Ciccia, D'Haultfoeuille and Knau (2026)
 and resolves to one of two estimands depending on whether the smallest-dose
