@@ -2714,3 +2714,123 @@ class TestRankGuardedInv:
         # Rank 0 -> every coordinate dropped.
         _, nd0, _, dropped0 = _rank_guarded_inv(np.zeros((3, 3)), return_dropped=True)
         assert nd0 == 3 and dropped0.all()
+
+
+class TestCR2BMScoresBasedDOF:
+    """Frozen-oracle parity for the scores-based Satterthwaite DOF evaluation
+    (algebraic identity; PT2018 §3.1 Satterthwaite DOF):
+    B = diag(||omega_g||^2) - P' M_U P must agree with
+    the previous explicit-residual-maker cluster-pair contraction to float64
+    accumulation tolerance, without materializing the n x n M."""
+
+    @staticmethod
+    def _oracle_pairloop_dof(X, cluster_ids, bread_matrix, contrasts):
+        """The PREVIOUS implementation, frozen: dense M = I - H + explicit
+        cluster-pair loop (no NaN guards — raw trace ratio)."""
+        from diff_diff.linalg import _cr2_adjustment_matrix
+
+        n, k = X.shape
+        bread_inv = np.linalg.solve(bread_matrix, np.eye(k))
+        unique = list(np.unique(cluster_ids))
+        idx = {g: np.where(cluster_ids == g)[0] for g in unique}
+        S_W = bread_matrix
+        MUWTWUM = bread_inv @ S_W @ bread_inv
+        A = {}
+        for g in unique:
+            X_g = X[idx[g]]
+            H_gg = X_g @ bread_inv @ X_g.T
+            G_g = np.eye(len(idx[g])) - H_gg - H_gg.T + X_g @ MUWTWUM @ X_g.T
+            A[g] = _cr2_adjustment_matrix(G_g)
+        M = np.eye(n) - X @ bread_inv @ X.T
+        m = contrasts.shape[1]
+        out = np.empty(m)
+        for j in range(m):
+            c = contrasts[:, j]
+            q = X @ bread_inv @ c
+            tr_B = float(np.sum(q * q))
+            omega = {g: A[g] @ X[idx[g]] @ bread_inv @ c for g in unique}
+            tr_B2 = 0.0
+            for g in unique:
+                for h in unique:
+                    val = float(omega[g] @ M[np.ix_(idx[g], idx[h])] @ omega[h])
+                    tr_B2 += val * val
+            out[j] = (tr_B * tr_B) / tr_B2 if tr_B2 > 0 else np.nan
+        return out
+
+    def test_scores_based_matches_pairloop_oracle(self):
+        from diff_diff.linalg import _compute_cr2_bm
+
+        rng = np.random.default_rng(11)
+        n, k, G = 240, 4, 12
+        X = np.column_stack([np.ones(n), rng.normal(size=(n, k - 1))])
+        cl = np.repeat(np.arange(G), n // G)
+        beta = rng.normal(size=k)
+        y = X @ beta + rng.normal(size=n) * (1 + 0.3 * np.abs(X[:, 1]))
+        resid = y - X @ np.linalg.lstsq(X, y, rcond=None)[0]
+        bread = X.T @ X
+
+        vcov, dof = _compute_cr2_bm(X, resid, cl, bread)
+        oracle = self._oracle_pairloop_dof(X, cl, bread, np.eye(k))
+        np.testing.assert_allclose(dof, oracle, rtol=1e-10)
+        assert np.all(np.isfinite(dof)) and np.all(dof > 0) and np.all(dof <= G)
+
+    def test_compound_contrast_matches_oracle(self):
+        from diff_diff.linalg import _compute_cr2_bm_contrast_dof
+
+        rng = np.random.default_rng(13)
+        n, k, G = 180, 5, 9
+        X = np.column_stack([np.ones(n), rng.normal(size=(n, k - 1))])
+        cl = np.repeat(np.arange(G), n // G)
+        bread = X.T @ X
+        # Compound averaging contrast (post-period-average style) + a unit vector.
+        c1 = np.zeros(k)
+        c1[2:] = 1.0 / (k - 2)
+        c2 = np.zeros(k)
+        c2[1] = 1.0
+        contrasts = np.column_stack([c1, c2])
+        dof = _compute_cr2_bm_contrast_dof(X, cl, bread, contrasts)
+        oracle = self._oracle_pairloop_dof(X, cl, bread, contrasts)
+        np.testing.assert_allclose(dof, oracle, rtol=1e-10)
+
+    def test_unbalanced_clusters_match_oracle(self):
+        from diff_diff.linalg import _compute_cr2_bm
+
+        rng = np.random.default_rng(17)
+        sizes = [5, 40, 12, 3, 25, 60, 8, 18]
+        cl = np.concatenate([np.full(sz, g) for g, sz in enumerate(sizes)])
+        n = len(cl)
+        k = 3
+        X = np.column_stack([np.ones(n), rng.normal(size=(n, k - 1))])
+        y = X @ rng.normal(size=k) + rng.normal(size=n)
+        resid = y - X @ np.linalg.lstsq(X, y, rcond=None)[0]
+        bread = X.T @ X
+        _, dof = _compute_cr2_bm(X, resid, cl, bread)
+        oracle = self._oracle_pairloop_dof(X, cl, bread, np.eye(k))
+        np.testing.assert_allclose(dof, oracle, rtol=1e-10)
+
+    def test_contrast_chunking_invariant(self, monkeypatch):
+        """CI-review P2: the per-cluster product buffer is contrast-chunked
+        (bounded by _CR2_BM_CONTRAST_CHUNK_BYTES) instead of O(G*k*m).
+        Forcing one-contrast chunks reproduces the single-chunk DOF to
+        ~1 ULP: each contrast's B is computed independently, but the
+        per-cluster GEMM runs over a width-c slice and BLAS kernels may
+        accumulate a column differently at width 1 vs width m (observed
+        exact on Accelerate, 1-ULP drift on OpenBLAS/arm + Windows CI —
+        the documented chunking-reassociation caveat). The same tiny cap
+        also forces the (G, G) pairwise matrix into multiple row blocks
+        (row_chunk = cap // (G*8) = 6 < G = 10 here), so this run covers
+        both chunk axes against the unchunked single-pass result."""
+        import diff_diff.linalg as la
+
+        rng = np.random.default_rng(23)
+        n, k, G = 200, 6, 10
+        X = np.column_stack([np.ones(n), rng.normal(size=(n, k - 1))])
+        cl = np.repeat(np.arange(G), n // G)
+        y = X @ rng.normal(size=k) + rng.normal(size=n)
+        resid = y - X @ np.linalg.lstsq(X, y, rcond=None)[0]
+        bread = X.T @ X
+
+        _, dof_one = la._compute_cr2_bm(X, resid, cl, bread)
+        monkeypatch.setattr(la, "_CR2_BM_CONTRAST_CHUNK_BYTES", G * k * 8)  # 1 contrast/chunk
+        _, dof_many = la._compute_cr2_bm(X, resid, cl, bread)
+        np.testing.assert_allclose(dof_many, dof_one, rtol=1e-13)

@@ -1917,8 +1917,8 @@ def _compute_cr2_bm_vcov_and_dof(
     Both :func:`_compute_cr2_bm` (per-coefficient vcov + DOF) and
     :func:`_compute_cr2_bm_contrast_dof` (DOF-only for arbitrary contrasts) are
     thin wrappers over this function, so the expensive precomputes
-    (``bread_inv``, ``S_W``, ``MUWTWUM``, the per-cluster ``A_g`` eigendecompositions,
-    and the unweighted residual-maker ``M``) are defined in exactly one place.
+    (``bread_inv``, ``S_W``, ``MUWTWUM``, and the per-cluster ``A_g``
+    eigendecompositions) are defined in exactly one place.
     Consolidating the two formerly-duplicated precompute blocks lets a caller
     that needs both vcov and contrast DOF (e.g. :class:`MultiPeriodDiD` under
     ``cluster + hc2_bm``) build them once instead of twice.
@@ -2065,13 +2065,11 @@ def _compute_cr2_bm_vcov_and_dof(
 
     # --- Per-contrast Bell-McCaffrey cluster DOF ---
     # The inner helper branches on `weights`: unweighted uses the simple
-    # `(tr B)² / tr(B²)` form (bit-equal to prior); weighted uses the full
-    # clubSandwich P_array construction.
+    # `(tr B)² / tr(B²)` form (algebraically identical to the prior
+    # pair-loop evaluation; oracle parity within floating-point tolerance);
+    # weighted uses the full clubSandwich P_array construction.
     if weights is None:
-        # Build the symmetric residual-maker M = I - H for the simple formula.
-        H = X @ M_U @ X.T
-        M = np.eye(n) - H
-        dof_vec = _cr2_bm_dof_inner(X, M, A_g_matrices, cluster_idx, M_U, contrasts)
+        dof_vec = _cr2_bm_dof_inner(X, A_g_matrices, cluster_idx, M_U, contrasts)
     else:
         dof_vec = _cr2_bm_dof_inner_weighted(
             X,
@@ -2112,8 +2110,10 @@ def _compute_cr2_bm(
 
     Unweighted special case (``weights=None``): ``W_norm=1``, ``S_W=X'X``,
     ``M_U @ S_W @ M_U = M_U``, so ``G_g`` collapses to ``I - H_gg`` (the
-    symmetric form). Bit-equal to the prior unweighted behavior at machine
-    precision (atol=1e-14 regression-safety).
+    symmetric form). The vcov is bit-equal to the prior unweighted behavior
+    at machine precision (atol=1e-14 regression-safety); the per-contrast
+    DOF uses the scores-based evaluation (algebraically identical, parity
+    within floating-point tolerance — see `_cr2_bm_dof_inner`).
 
     Meat = ``sum_g s_g s_g'``; VCOV = ``M_U meat M_U`` (where ``M_U`` is the
     normalized bread inverse; ``w_scale`` cancels in the final vcov).
@@ -2152,9 +2152,22 @@ def _compute_cr2_bm(
     return vcov, dof_vec
 
 
+# Contrast-chunk byte budget for the scores-based CR2-BM DOF pass: bounds the
+# (G, k, chunk) per-cluster product buffer so a batched per-coefficient sweep
+# (contrasts=eye(k), i.e. m == k) cannot allocate O(G*k*m) at once on
+# full-dummy / absorbed-FE designs with many clusters and coefficients.
+# Each contrast's B matrix is computed independently, so chunking never
+# reassociates a contrast's OWN sums — but the per-cluster GEMM
+# `X_g' omega_g[:, c0:c1]` runs over a width-c slice, and BLAS kernels
+# (GEMV vs GEMM, platform-dependent) may accumulate a column differently at
+# different widths: chunk-count invariance holds to ~1 ULP (observed exact
+# on Accelerate, 1-ULP drift on OpenBLAS/arm + Windows), NOT bit-for-bit.
+# Module-level so tests can monkeypatch it to force the multi-chunk path.
+_CR2_BM_CONTRAST_CHUNK_BYTES = 64 * 1024 * 1024
+
+
 def _cr2_bm_dof_inner(
     X: np.ndarray,
-    M: np.ndarray,
     A_g_matrices: Dict[Any, np.ndarray],
     cluster_idx: Dict[Any, np.ndarray],
     bread_inv: np.ndarray,
@@ -2163,10 +2176,10 @@ def _cr2_bm_dof_inner(
     """Inner DOF loop, parameterized by an arbitrary contrast matrix.
 
     Computes the CR2 Bell-McCaffrey Satterthwaite DOF for each column of
-    ``contrasts`` (shape ``(k, m)``), using the precomputed residual-maker
-    ``M``, per-cluster adjustment matrices ``A_g_matrices``, cluster index
-    map ``cluster_idx``, and ``bread_inv``. The per-coefficient case is
-    recovered with ``contrasts=np.eye(k)``; compound contrasts (e.g., a
+    ``contrasts`` (shape ``(k, m)``), using the per-cluster adjustment
+    matrices ``A_g_matrices``, cluster index map ``cluster_idx``, and
+    ``bread_inv``. The per-coefficient case is recovered with
+    ``contrasts=np.eye(k)``; compound contrasts (e.g., a
     post-period-average ATT) are handled by the same algebra without
     duplication.
 
@@ -2178,6 +2191,37 @@ def _cr2_bm_dof_inner(
       trace_B2 = sum_{g, h} (omega_g' M_{g, h} omega_h)**2
       DOF(c)  = trace_B**2 / trace_B2
 
+    SCORES-BASED EVALUATION (algebraic identity; the DOF itself is
+    Pustejovsky-Tipton 2018's scalar Satterthwaite t-test — the one-row
+    case of their HTZ small-sample correction, §3.1): the
+    cluster-pair contraction is never evaluated against an explicit
+    residual-maker. With ``Omega`` the ``(n, G)`` matrix stacking the
+    ``omega_g`` on their (disjoint) cluster supports and
+    ``M = I - X bread_inv X'``, the pairwise matrix
+    ``B[g, h] = omega_g' M_{g, h} omega_h`` collapses to
+
+      B = Omega' M Omega = diag(||omega_g||^2) - P' bread_inv P,
+      P = X' Omega  (k, G; column g is X_g' omega_g)
+
+    so ``trace_B2 = ||B||_F^2`` costs ``O(n k + G^2 k)`` per contrast. Peak
+    memory = two ``O(n k)`` score precomputes (``X_bi`` and the per-cluster
+    ``A_g_Xbi`` blocks — input-scale, same order as ``X`` itself) plus
+    working buffers capped by ``_CR2_BM_CONTRAST_CHUNK_BYTES`` subject to a
+    one-contrast lower bound (a single contrast intrinsically needs the
+    ``O(n)`` q vector and ``O(G k)`` P_j/PB buffers): the q vectors,
+    per-cluster omegas, and product buffers are contrast-chunked with all
+    width-scaled buffers counted in the chunk denominator, and the
+    ``(G, G)`` pairwise matrix is row-chunked (its Frobenius sum and max
+    are row-separable), so none of ``O(n m)``, ``O(G k m)``, or ``O(G^2)``
+    is ever held at once (chunk-count invariant to ~1 ULP, BLAS
+    kernels may accumulate a GEMM column differently at different slice
+    widths) — the previous form
+    materialized the dense ``n x n``
+    ``M`` and looped cluster pairs at ``O(n^2)`` per contrast, the exact
+    large-``n`` blowup the TODO row tracked. The two evaluations are
+    algebraically identical; floating-point agreement is ~1e-12 relative
+    (different accumulation order), locked by the frozen-oracle parity test.
+
     Returns
     -------
     dof_vec : ndarray of shape (m,)
@@ -2186,40 +2230,72 @@ def _cr2_bm_dof_inner(
     """
     m = contrasts.shape[1]
     unique_clusters = list(cluster_idx.keys())
+    n_g_clusters = len(unique_clusters)
     # Precompute once: q-matrix (n, m) and A_g_Xbi (n_g, k) per cluster.
     # For unit-contrast inputs (contrasts=I_k), this matches the prior
     # inline implementation exactly: q[:, j] == X_bi[:, j] == X @ bread_inv @ e_j.
     X_bi = X @ bread_inv  # (n, k)
-    Q = X_bi @ contrasts  # (n, m) — q vectors as columns
     A_g_Xbi = {
         g: A_g_matrices[g] @ X[cluster_idx[g]] @ bread_inv for g in unique_clusters
     }  # each (n_g, k)
-    # Omega per cluster per contrast: (n_g, m) = A_g_Xbi[g] @ contrasts
-    omega_all = {g: A_g_Xbi[g] @ contrasts for g in unique_clusters}
+    # The q vectors (X_bi @ contrasts) and per-cluster omegas
+    # (A_g_Xbi[g] @ contrasts) are computed per contrast chunk below, never
+    # at full width m, so no O(n*m) array is ever held.
 
+    # Scores-based precomputes (see docstring): per cluster g,
+    # normsq[g, j] = ||omega_g^{(j)}||^2 and P_all[g, :, j] = X_g' omega_g^{(j)}.
+    k_X = X.shape[1]
     dof_vec = np.empty(m)
     # Retain max|B_{g,h}| per contrast so we can NaN-guard noise-floor
     # degeneracies in a second pass (mirrors `_cr2_bm_dof_inner_weighted`).
     max_abs_B_arr = np.zeros(m)
-    for j in range(m):
-        q = Q[:, j]
-        trace_B = float(np.sum(q * q))
-        trace_B2 = 0.0
-        max_abs_B = 0.0
-        omega_cache = {g: omega_all[g][:, j] for g in unique_clusters}
-        for g in unique_clusters:
-            idx_g = cluster_idx[g]
-            omega_g = omega_cache[g]
-            for h in unique_clusters:
-                idx_h = cluster_idx[h]
-                omega_h = omega_cache[h]
-                M_gh = M[np.ix_(idx_g, idx_h)]
-                val = float(omega_g @ M_gh @ omega_h)
-                trace_B2 += val * val
-                if abs(val) > max_abs_B:
-                    max_abs_B = abs(val)
-        max_abs_B_arr[j] = max_abs_B
-        dof_vec[j] = (trace_B * trace_B) / trace_B2 if trace_B2 > 0 else np.nan
+    # Chunk the contrasts so every width-scaled working buffer stays under
+    # _CR2_BM_CONTRAST_CHUNK_BYTES: per unit of contrast width we allocate a
+    # Q_chunk column (n), a transient per-cluster omega (largest cluster
+    # n_g_max), a P_all slab (G*k), and a normsq row (G) — a full-m sweep
+    # would be O((n + G*k)*m). The cap is subject to a one-contrast lower
+    # bound: a single contrast intrinsically needs the O(n) q vector and the
+    # O(G*k) P_j / PB buffers. Each contrast's B is computed independently;
+    # chunk-count invariance holds to ~1 ULP (BLAS width-dependent column
+    # accumulation), not bit-for-bit.
+    n = X.shape[0]
+    n_g_max = max((idx.size for idx in cluster_idx.values()), default=0)
+    per_width_bytes = (n + n_g_max + n_g_clusters * k_X + n_g_clusters) * 8
+    chunk = max(1, int(_CR2_BM_CONTRAST_CHUNK_BYTES // max(per_width_bytes, 1)))
+    for c0 in range(0, m, chunk):
+        c1 = min(c0 + chunk, m)
+        width = c1 - c0
+        contrasts_c = contrasts[:, c0:c1]
+        Q_chunk = X_bi @ contrasts_c  # (n, width) — q vectors as columns
+        normsq = np.zeros((n_g_clusters, width))
+        P_all = np.zeros((n_g_clusters, k_X, width))
+        for gi, g in enumerate(unique_clusters):
+            om = A_g_Xbi[g] @ contrasts_c  # (n_g, width)
+            normsq[gi] = np.einsum("ij,ij->j", om, om)
+            P_all[gi] = X[cluster_idx[g]].T @ om
+        # Row-chunk the (G, G) pairwise matrix B_j under the same byte cap:
+        # a full B_j is O(G^2) per contrast, which can dominate on
+        # many-cluster designs (G in the tens of thousands). trace_B2 is a
+        # row-separable Frobenius sum and max|B| a row-separable max, so
+        # row blocks accumulate both without ever holding all of B_j.
+        row_chunk = max(1, int(_CR2_BM_CONTRAST_CHUNK_BYTES // max(n_g_clusters * 8, 1)))
+        for jj in range(width):
+            j = c0 + jj
+            q = Q_chunk[:, jj]
+            trace_B = float(np.sum(q * q))
+            P_j = P_all[:, :, jj]  # (G, k)
+            PB = P_j @ bread_inv  # (G, k)
+            trace_B2 = 0.0
+            max_abs_B = 0.0
+            for r0 in range(0, n_g_clusters, row_chunk):
+                r1 = min(r0 + row_chunk, n_g_clusters)
+                B_rows = -(PB[r0:r1] @ P_j.T)  # (rows, G)
+                B_rows[np.arange(r0, r1) - r0, np.arange(r0, r1)] += normsq[r0:r1, jj]
+                trace_B2 += float(np.sum(B_rows * B_rows))
+                if B_rows.size:
+                    max_abs_B = max(max_abs_B, float(np.max(np.abs(B_rows))))
+            max_abs_B_arr[j] = max_abs_B
+            dof_vec[j] = (trace_B * trace_B) / trace_B2 if trace_B2 > 0 else np.nan
 
     # Noise-floor NaN-guard (unweighted analogue of the guard in
     # `_cr2_bm_dof_inner_weighted`). For a high-leverage FE-dummy / collinear
@@ -2511,8 +2587,10 @@ def _compute_cr2_bm_contrast_dof(
         ``contrasts=np.eye(k)``.
     weights : ndarray of shape (n,), optional
         Original (un-normalized) weights. ``None`` for unweighted; routes
-        through the bit-equal simple ``(tr B)² / tr(B²)`` formula. When
-        provided, routes through the clubSandwich WLS-CR2 P_array form.
+        through the simple ``(tr B)² / tr(B²)`` formula (algebraically
+        identical to the prior evaluation, parity within floating-point
+        tolerance). When provided, routes through the clubSandwich WLS-CR2
+        P_array form.
 
     Returns
     -------
@@ -2559,7 +2637,9 @@ def _compute_bm_dof_from_contrasts(
     matches the numerator. Allocates an ``(n, n)`` temporary for ``M`` so the
     cost is ``O(n^2 k)`` for the hat build plus ``O(n^2 m)`` for the per-
     contrast sums. Practical for ``n < 10_000``; larger designs should switch
-    to a scores-based formulation (tracked in TODO.md).
+    to a scores-based formulation like the clustered CR2-BM path
+    (`_cr2_bm_dof_inner`) now uses — tracked as its own TODO.md row (the
+    original CR2-BM row this note pointed at is resolved).
 
     **Weighted** (``weights is not None``): dispatches to the clubSandwich
     singleton-cluster CR2 reduction (each observation is its own cluster)
@@ -2605,8 +2685,9 @@ def _compute_bm_dof_from_contrasts(
             X, cluster_ids_singleton, bread_matrix, contrasts, weights=weights
         )
 
-    # Unweighted: keep the simple (tr B)² / tr(B²) formula for bit-equal
-    # backward compatibility with prior unweighted Bell-McCaffrey output.
+    # Unweighted: keep the simple (tr B)² / tr(B²) formula — algebraically
+    # identical backward compatibility with prior unweighted Bell-McCaffrey
+    # output (dense prior evaluation; floating-point-tolerance parity).
     try:
         bread_inv_c = np.linalg.solve(bread_matrix, contrasts)
     except np.linalg.LinAlgError as e:
