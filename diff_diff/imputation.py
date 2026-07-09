@@ -62,9 +62,9 @@ class _UntreatedProjection(NamedTuple):
     A_0: sparse.csr_matrix
     A_1: sparse.csr_matrix
     # solver(rhs) -> z; None when the factorization was exactly singular (the
-    # solve path then routes to a dense lstsq fallback).
+    # solve path then routes to the sparse LSMR least-squares fallback).
     solver: Optional[Callable[[np.ndarray], np.ndarray]]
-    A0tA0_csc: sparse.csc_matrix  # retained for the dense-lstsq fallback
+    A0tA0_csc: sparse.csc_matrix  # retained for the LSMR fallback
     survey_weights_0: Optional[np.ndarray]
     singular: bool
 
@@ -72,6 +72,70 @@ class _UntreatedProjection(NamedTuple):
 # =============================================================================
 # Main Estimator
 # =============================================================================
+
+
+class _LSMRUnconvergedError(RuntimeError):
+    """LSMR failed to certify a solution on the singular-variance fallback.
+
+    Raised (not returned as NaN) so the variance boundary can fail closed:
+    a NaN vector would be laundered into zeros by the missing-FE
+    ``nan_to_num`` in the psi product — producing a finite, WRONG variance —
+    whereas this exception is caught in ``_compute_conservative_variance``
+    and converted to a NaN SE (the all-or-nothing NaN inference convention).
+    """
+
+
+def _lsmr_minnorm_normal_solve(A0tA0_csc, rhs: np.ndarray) -> np.ndarray:
+    """Least-squares solve of the (possibly singular) normal equations
+    ``(A_0'[W]A_0) z = rhs`` WITHOUT densifying the sparse matrix.
+
+    Replaces the previous ``np.linalg.lstsq(A0tA0.toarray(), ...)`` fallback,
+    whose dense materialization scales ``O((U+T+K)^2)`` — an OOM risk on
+    large panels (the TODO row this resolves). ``scipy.sparse.linalg.lsmr``
+    handles singular symmetric systems, converging to the minimum-norm
+    least-squares solution (the same solution family as ``lstsq``'s
+    pseudo-inverse solution).
+
+    Solver choice cannot change the estimator output: any two least-squares
+    solutions differ by a ``null(A_0'[W]A_0) = null(sqrt(W) A_0)`` component,
+    which the downstream projection ``v_untreated = -[W_0] A_0 z``
+    annihilates (unweighted: ``null = null(A_0)`` so ``A_0 z`` is invariant;
+    weighted: the weight multiplication zeroes exactly the rows where the
+    null component can be nonzero). Locked by the singular-system parity
+    test against a dense-lstsq oracle.
+
+    CONVERGENCE IS VALIDATED (fail-closed): ``istop`` in ``{0, 1, 2, 4, 5}``
+    means LSMR certified an (approximate) solution / least-squares solution
+    within ``atol``/``btol`` (4 and 5 are the machine-precision analogues of
+    1 and 2 per SciPy's documentation); anything else (condition-limit stop,
+    max-iteration exhaustion) gets ONE retry with an uncapped condition
+    limit and a generous iteration budget, and if still uncertified raises
+    :class:`_LSMRUnconvergedError` — caught at the variance boundary and
+    converted to a NaN SE — rather than feeding a finite-but-unverified
+    solution into the Theorem 3 weights.
+    """
+    import scipy.sparse.linalg as spla
+
+    _certified = (0, 1, 2, 4, 5)
+    result = spla.lsmr(A0tA0_csc, rhs, atol=1e-14, btol=1e-14)
+    z, istop = result[0], int(result[1])
+    if istop not in _certified or not np.all(np.isfinite(z)):
+        dim = A0tA0_csc.shape[0]
+        result = spla.lsmr(
+            A0tA0_csc, rhs, atol=1e-14, btol=1e-14, conlim=1e16, maxiter=max(50 * dim, 10_000)
+        )
+        z, istop = result[0], int(result[1])
+        if istop not in _certified or not np.all(np.isfinite(z)):
+            warnings.warn(
+                "ImputationDiD variance: the LSMR fallback solve of "
+                f"(A_0'[W]A_0) z = rhs did not converge (istop={istop}); "
+                "the affected variance is reported as NaN rather than from "
+                "an unverified solution.",
+                UserWarning,
+                stacklevel=3,
+            )
+            raise _LSMRUnconvergedError(f"LSMR uncertified (istop={istop})")
+    return z
 
 
 class ImputationDiD(ImputationDiDBootstrapMixin):
@@ -1466,25 +1530,31 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
             Standard error.
         """
         sw_0 = survey_weights[omega_0_mask.values] if survey_weights is not None else None
-        cluster_psi_sums, _, ve_product = self._compute_cluster_psi_sums(
-            df=df,
-            outcome=outcome,
-            unit=unit,
-            time=time,
-            first_treat=first_treat,
-            covariates=covariates,
-            omega_0_mask=omega_0_mask,
-            omega_1_mask=omega_1_mask,
-            unit_fe=unit_fe,
-            time_fe=time_fe,
-            grand_mean=grand_mean,
-            delta_hat=delta_hat,
-            weights=weights,
-            cluster_var=cluster_var,
-            kept_cov_mask=kept_cov_mask,
-            survey_weights_0=sw_0,
-            proj_cache=proj_cache,
-        )
+        try:
+            cluster_psi_sums, _, ve_product = self._compute_cluster_psi_sums(
+                df=df,
+                outcome=outcome,
+                unit=unit,
+                time=time,
+                first_treat=first_treat,
+                covariates=covariates,
+                omega_0_mask=omega_0_mask,
+                omega_1_mask=omega_1_mask,
+                unit_fe=unit_fe,
+                time_fe=time_fe,
+                grand_mean=grand_mean,
+                delta_hat=delta_hat,
+                weights=weights,
+                cluster_var=cluster_var,
+                kept_cov_mask=kept_cov_mask,
+                survey_weights_0=sw_0,
+                proj_cache=proj_cache,
+            )
+        except _LSMRUnconvergedError:
+            # Solver failure is GLOBAL (the untreated projection is invalid),
+            # unlike per-observation missing-FE NaNs — fail the whole SE
+            # closed instead of letting nan_to_num launder it to zeros.
+            return np.nan
 
         if resolved_survey is not None:
             # Design-based variance with strata/PSU/FPC support
@@ -1525,7 +1595,9 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         Uses scipy.sparse for FE dummy columns to reduce memory from O(N*(U+T))
         to O(N) for the FE portion. An exactly singular ``A_0'[W]A_0`` makes
         ``sparse_factorized`` raise ``RuntimeError``; we emit a UserWarning (once
-        per fit) and record ``singular=True`` so the solve routes to dense lstsq.
+        per fit) and record ``singular=True`` so the solve routes to the sparse
+        LSMR least-squares fallback (no dense materialization; see
+        :func:`_lsmr_minnorm_normal_solve`).
         """
         # Exclude rank-deficient covariates from design matrices
         if kept_cov_mask is not None and not np.all(kept_cov_mask):
@@ -1593,21 +1665,22 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
         # Factorize once (factorize-once / solve-many). An exactly singular
         # matrix makes sparse_factorized raise RuntimeError -- the same condition
         # that previously surfaced as spsolve's MatrixRankWarning -> non-finite
-        # solution. Mirror the TwoStageDiD GMM-sandwich pattern: warn once and
-        # fall back to dense lstsq per target. (Bit-identical to the prior
-        # per-target spsolve for a single dense RHS -- both use the SuperLU
-        # simple driver with the same defaults.)
+        # solution. Warn once and fall back to the sparse LSMR least-squares
+        # solve per target (no dense materialization). (The factorized path is
+        # bit-identical to the prior per-target spsolve for a single dense
+        # RHS -- both use the SuperLU simple driver with the same defaults.)
         try:
             solver: Optional[Callable[[np.ndarray], np.ndarray]] = sparse_factorized(A0tA0_csc)
             singular = False
         except RuntimeError as exc:
             # Silent-failure audit axis C: emit a UserWarning on fallback instead
-            # of swallowing the error. Keep the "dense lstsq" substring (asserted
+            # of swallowing the error. Keep the "sparse LSMR" substring (asserted
             # by tests).
             warnings.warn(
                 "ImputationDiD variance: sparse factorization of (A_0' [W] A_0) "
-                f"failed ({type(exc).__name__}); falling back to dense lstsq. This "
-                "may indicate a rank-deficient or near-singular normal-equations "
+                f"failed ({type(exc).__name__}); falling back to a sparse LSMR "
+                "least-squares solve (no dense materialization). This may "
+                "indicate a rank-deficient or near-singular normal-equations "
                 "matrix and variance estimates may be less reliable.",
                 UserWarning,
                 stacklevel=2,
@@ -1634,23 +1707,24 @@ class ImputationDiD(ImputationDiDBootstrapMixin):
 
         if ctx.singular:
             # Factorization was singular at build time (warned once already).
-            z, _, _, _ = np.linalg.lstsq(ctx.A0tA0_csc.toarray(), A1_w, rcond=None)
+            z = _lsmr_minnorm_normal_solve(ctx.A0tA0_csc, A1_w)
         else:
             assert ctx.solver is not None
             z = ctx.solver(A1_w)
             if not np.all(np.isfinite(z)):
                 # Defensive, target-specific: a non-finite solve on an otherwise
-                # factorizable matrix routes this RHS to dense lstsq. Warn per
+                # factorizable matrix routes this RHS to the LSMR fallback. Warn per
                 # target (silent-failure audit axis C) -- distinct from the
                 # once-per-fit build-time singular warning.
                 warnings.warn(
                     "ImputationDiD variance: sparse solve of (A_0' [W] A_0) z = "
-                    "A_1' w returned a non-finite solution; falling back to dense "
-                    "lstsq for this target. Variance estimates may be less reliable.",
+                    "A_1' w returned a non-finite solution; falling back to a "
+                    "sparse LSMR least-squares solve for this target. Variance "
+                    "estimates may be less reliable.",
                     UserWarning,
                     stacklevel=2,
                 )
-                z, _, _, _ = np.linalg.lstsq(ctx.A0tA0_csc.toarray(), A1_w, rcond=None)
+                z = _lsmr_minnorm_normal_solve(ctx.A0tA0_csc, A1_w)
 
         # v_untreated = -[W_0] A_0 z (WLS projection requires per-obs weight)
         v_untreated = -(ctx.A_0 @ z)
