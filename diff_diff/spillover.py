@@ -40,7 +40,7 @@ from diff_diff.conley import (
 )
 from diff_diff.linalg import _rank_guarded_inv, solve_ols
 from diff_diff.results import SpilloverDiDResults
-from diff_diff.two_stage import _compute_gmm_corrected_meat
+from diff_diff.two_stage import _compute_gmm_corrected_meat, _LSMRUnconvergedError
 from diff_diff.utils import _iterative_fe_solve, safe_inference
 
 # Type alias mirroring diff_diff.conley.ConleyMetric so callers can supply
@@ -1589,7 +1589,7 @@ def _build_butts_fe_design_csr(
     -----
     Rank-deficient ``X_10' X_10`` (e.g. warn-and-drop units with no
     Omega_0 rows) is detected downstream by ``_compute_gmm_corrected_meat``
-    via ``sparse_factorized`` failure → ``np.linalg.lstsq`` fallback with
+    via ``sparse_factorized`` failure → certified sparse-LSMR fallback with
     a documented ``UserWarning``.
 
     **Re-factorization on entry:** when callers pass pre-mask integer
@@ -1597,9 +1597,8 @@ def _build_butts_fe_design_csr(
     supported warn-and-drop fit), the input code arrays can be sparse —
     e.g. ``unit_codes = [0, 1, 3, 4]`` with code 2 dropped. Building
     ``X_10`` on the raw codes would materialize an all-zero FE column at
-    index 2, forcing ``sparse_factorized`` onto the dense
-    ``lstsq``/``XtX_10.toarray()`` fallback unnecessarily (large-memory
-    path on big panels). To avoid this, re-factorize via
+    index 2, forcing ``sparse_factorized`` onto the certified sparse-LSMR
+    fallback unnecessarily (a warned degraded path). To avoid this, re-factorize via
     :func:`pd.factorize` on entry to compact the code space to
     ``0..n_unique-1`` (no-op when codes are already contiguous; mirrors
     the column-space convention of ``TwoStageDiD._build_fe_design``).
@@ -3179,7 +3178,7 @@ class SpilloverDiD:
         # / time code; if the dropped unit sorts first, the fit-length and
         # full-length builds produce DIFFERENT column spaces (an all-zero
         # X_10 column for the dropped unit in the full-length build →
-        # rank-deficient `X_10' W X_10` → lstsq fallback → different
+        # rank-deficient `X_10' W X_10` → LSMR fallback → different
         # `gamma_hat`). The zero-pad invariant is preserved by zero-padding
         # the constructed Psi inside `_compute_gmm_corrected_meat` AFTER
         # the fit-sample gamma_hat / Psi build, NOT by rebuilding the FE
@@ -3333,25 +3332,30 @@ class SpilloverDiD:
         # arrays — survey-finite-mask subset of fit-sample inputs — plus
         # `X_*_sparse_fit` / `eps_10_fit` which are already built on
         # survey_finite_mask above).
-        meat_kept = _compute_gmm_corrected_meat(
-            X_1_sparse=X_1_sparse_fit,
-            X_10_sparse=X_10_sparse_fit,
-            eps_10=eps_10_fit,
-            X_2=X_2_kept_gamma,
-            eps_2=eps_2_fit_gamma,
-            vcov_type=_wave_d_vcov_mode,
-            cluster_ids=cluster_ids_for_meat,
-            conley_coords=conley_coords_for_meat,
-            conley_cutoff_km=_conley_cutoff_arg,
-            conley_metric=_conley_metric_arg,
-            conley_kernel="bartlett",
-            conley_time=conley_time_for_meat,
-            conley_unit=conley_unit_for_meat,
-            conley_lag_cutoff=_conley_lag_arg,
-            survey_weights=survey_weights_fit_gamma,
-            resolved_survey=resolved_survey_fit,
-            score_pad_mask=score_pad_mask_arg,
-        )
+        # An uncertified LSMR Stage-1 fallback solve inside the meat helper
+        # fails closed: NaN meat -> NaN SEs (the helper already warned).
+        try:
+            meat_kept = _compute_gmm_corrected_meat(
+                X_1_sparse=X_1_sparse_fit,
+                X_10_sparse=X_10_sparse_fit,
+                eps_10=eps_10_fit,
+                X_2=X_2_kept_gamma,
+                eps_2=eps_2_fit_gamma,
+                vcov_type=_wave_d_vcov_mode,
+                cluster_ids=cluster_ids_for_meat,
+                conley_coords=conley_coords_for_meat,
+                conley_cutoff_km=_conley_cutoff_arg,
+                conley_metric=_conley_metric_arg,
+                conley_kernel="bartlett",
+                conley_time=conley_time_for_meat,
+                conley_unit=conley_unit_for_meat,
+                conley_lag_cutoff=_conley_lag_arg,
+                survey_weights=survey_weights_fit_gamma,
+                resolved_survey=resolved_survey_fit,
+                score_pad_mask=score_pad_mask_arg,
+            )
+        except _LSMRUnconvergedError:
+            meat_kept = np.full((X_2_kept_gamma.shape[1], X_2_kept_gamma.shape[1]), np.nan)
 
         # Bread sandwich: A_22^{-1} = (X_2' W X_2)^{-1} via the shared rank-guarded
         # generalized inverse `_rank_guarded_inv` (column-drop on a near-singular
