@@ -13,7 +13,7 @@
 
 ## CiC with Covariates (Melly-Santangelo)
 
-**Status: NOT shipping in diff-diff CiC/QDiD v1 (scope decision 2026-07-12).** Covariates are explicitly deferred from v1; this review documents the covariate extension so the deferral is informed and any future covariates PR starts from a reviewed scope.
+**Status: the qte-style SIMPLIFIED form of this pipeline SHIPPED in the covariates PR (2026-07-13)** - per-cell linear quantile regressions on qte's fixed 99-tau grid, raw (un-rearranged) `predict.rqs` conditional CDF/quantile step functions, per-observation imputation integrated over the treated PRE-period covariates, and qte's bootstrap. The FULL estimator this paper develops (monotonized integrated-indicator CDFs, `F_{X|11}` treated-post integration, exchangeable bootstrap with variance-weighted KS bands, tail trimming, specification test) remains unimplemented; this review is its scoped reference.
 
 **Primary source:** Melly, B., & Santangelo, G. (2015). The Changes-in-Changes Model with Covariates. *Working paper*, Bern University and European Commission - JRC. Distributed via https://sites.google.com/site/blaisemelly/home/computer-programs/cic_stata.
 - Layout: Sections 1 (Introduction, pp. 2-3), 2 (Model and identification, pp. 4-9), 3 (Estimation, pp. 10-12), 4 (Asymptotic results, pp. 12-21; 4.4 "Inference" pp. 19-21 includes the time-invariance specification test), 5 (Application, pp. 21-24), 6 (Conclusion, pp. 24-25); Figures 1-5 on pp. 26-30; References pp. 31-32.
@@ -437,9 +437,9 @@ All quantiles and covariate values must be considered to detect deviations; Kolm
 
 - Stata: Blaise Melly's website (https://sites.google.com/site/blaisemelly/home/computer-programs/cic_stata) distributes a Stata implementation accompanying this paper. The paper's Conclusion says only "we provide codes that implement the estimation and inference procedures developed in this paper" (p. 24) and names no command on the reviewed pages - the command-name attribution comes from the website, not the paper.
 - **IMPORTANT disambiguation:** this is DISTINCT from Kranker's SSC `cic` Stata module, which implements Athey-Imbens 2006 (unconditional CiC with analytical SEs and discrete bounds). Verify the provenance of any Stata artifact before using it as a parity reference in a future covariates PR.
-- No R implementation is known to the initiative for covariate CiC. A future PR would need simulation-based validation - this motivated deferring covariates from v1.
+- ~~No R implementation is known to the initiative for covariate CiC.~~ **Correction (2026-07-13):** this was wrong - qte 1.3.1's `CiC()`/`QDiD()` support covariates via `xformla`, implementing a simplified form of this paper's QR pipeline (fixed 99-tau grid, per-observation imputation, treated-PRE integration, no monotonization). That branch is now diff-diff's R parity target for covariates (see REGISTRY). The FULL Melly-Santangelo estimator still has no R implementation and would need simulation-based validation.
 
-**Requirements checklist (for the future covariates PR, not v1):**
+**Requirements checklist (for a future FULL-Melly-Santangelo PR; the qte simplified branch shipped 2026-07-13 covers none of the rows below except as noted in the validation row):**
 - [ ] Four per-cell QR coefficient processes on a fine mesh `u_1..u_S` with `delta*sqrt(n) -> 0`; Koenker-Bassett check-function objective per (g,t) cell
 - [ ] Monotonized conditional CDFs via the integrated-indicator representation (pp. 10-11, CFG 2010); never invert raw QR processes directly
 - [ ] Conditional CiC composition per eq. (7); covariate integration over the empirical `F_{X|11}` per the p. 12 displays (resolving the printed index/mesh-weight typos); treated side either empirical CDF or symmetric QR-based integration (application uses the latter)
@@ -451,17 +451,17 @@ All quantiles and covariate values must be considered to detect deviations; Kolm
 - [ ] Support diagnostic: test `Y_10x subset Y_00x` (Assumption 4's observable implication); warn and restrict to the overlap if violated
 - [ ] Staggered adoption: pairwise-period estimates averaged with weights representative of treated units; pooled QR with period and group dummies when covariates are interacted with trends (Section 5 strategy - application-level, no general theorem)
 - [ ] Error on discrete outcomes (authors advise against; only partial identification)
-- [ ] Validation strategy: simulation-based (no R reference exists); verify any Stata parity artifact is Melly's covariate-CiC code, NOT Kranker's SSC `cic` (Athey-Imbens unconditional)
+- [ ] Validation strategy for the FULL estimator: simulation-based (no R reference exists for the full pipeline; qte's `xformla` branch anchors only the simplified form and is already parity-tested); verify any Stata parity artifact is Melly's covariate-CiC code, NOT Kranker's SSC `cic` (Athey-Imbens unconditional)
 
 ---
 
 ## Implementation Notes
 
-**Relevance to diff-diff CiC/QDiD v1 (2026-07-12):**
-- (i) v1 ships covariate-free CiC, and this paper's Figures 1-2 bias analysis of DiD (and the analogous concern for unconditional CiC when group compositions differ) is the documented motivation for the covariates deferral being explicit rather than silent - unconditional CiC assumptions can fail when conditional ones hold.
-- (ii) The four-step QR pipeline (estimate conditional CDFs by quantile regression for all four group-period cells, apply CiC transformations conditionally, integrate over the treated-group covariate distribution, invert) is the blueprint for a future covariates PR.
-- (iii) The exchangeable bootstrap + KS-band machinery is shared with Callaway-Li-Oka 2018 and reinforces the bootstrap-first inference choice for v1.
-- (iv) The monotonization/rearrangement step for QR-estimated conditional CDFs is the key extra numerical ingredient v1 does not need.
+**Relevance to diff-diff CiC/QDiD (2026-07-12 v1; updated 2026-07-13 covariates PR):**
+- (i) This paper's Figures 1-2 bias analysis of DiD (and the analogous concern for unconditional CiC when group compositions differ) is the documented motivation for covariate support - unconditional CiC assumptions can fail when conditional ones hold. v1 shipped covariate-free; the covariates PR shipped the qte-`xformla` simplified form of this paper's pipeline.
+- (ii) The four-step QR pipeline (estimate conditional CDFs by quantile regression, apply CiC transformations conditionally, integrate over the treated covariate distribution, invert) IS the implemented blueprint, in qte's simplified form (fixed 99-tau grid, per-observation imputation, treated PRE-period integration, raw un-rearranged step functions).
+- (iii) The exchangeable bootstrap + KS-band machinery is shared with Callaway-Li-Oka 2018 and reinforces the bootstrap-first inference choice; the implemented covariate bootstrap is qte's (unit-block / pooled-row), not this paper's exchangeable weights.
+- (iv) The monotonization/rearrangement step for QR-estimated conditional CDFs is the key numerical ingredient of the FULL estimator that the implemented qte form deliberately omits (qte uses the raw QR process; documented REGISTRY Note).
 
 ### Data Structure Requirements
 - Repeated cross sections with four (g,t) cells, each with positive probability `alpha_gt` (Assumption 5). Panel data requires modified theory (AI Section 5.3-style within-group over-time correlation terms) that the paper does not develop.
@@ -516,7 +516,7 @@ All quantiles and covariate values must be considered to detect deviations; Kolm
 **Version and coverage gaps:**
 - **Preliminary working paper.** The reviewed October 2015 draft is flagged "Preliminary!" and contains the printed typos above. All equation/assumption/theorem numbers are pinned to this draft; later drafts, if any, may renumber or repair the typos. The paper remains unpublished as of 2026-07-12.
 - **No Stata command name in the paper.** The Conclusion (p. 24) says "we provide codes" without naming a command anywhere on the reviewed pages; the command-name attribution rests on Melly's website. Verify provenance before parity use, and do not confuse it with Kranker's SSC `cic` module (Athey-Imbens 2006 unconditional CiC).
-- **No R implementation and no Monte Carlo.** The paper reports no simulations (only the analytic DiD-bias illustration, pp. 22-23), and no R implementation of covariate CiC is known to the initiative - a future PR needs simulation-based validation and possibly a purpose-built oracle.
+- **No R implementation of the FULL estimator, and no Monte Carlo.** The paper reports no simulations (only the analytic DiD-bias illustration, pp. 22-23). qte 1.3.1's `xformla` branch is an R implementation of the SIMPLIFIED pipeline and shipped as diff-diff's parity-tested covariate route (2026-07-13); the full estimator developed here (monotonized CDFs, treated-post integration, exchangeable bootstrap, uniform bands, specification test) still has no R reference - implementing it would need simulation-based validation and possibly a purpose-built oracle.
 - **Number of resampling draws unreported.** No B is stated for the application's subsampling (500 of 3,000+ counties per draw, footnote 11; draw count absent).
 - **Tail spikes unexplained.** Figures 3 and 5 show large QTE spikes at both extremes; the paper offers no boundary-artifact discussion, no quantile-grid trimming, and no tail-truncation rule for the application. The density-in-denominator structure of (11)-(13) is a plausible mechanical explanation but is not drawn by the paper.
 - **Staggered-adoption aggregation is informal.** The pairwise-averaging weights ("representative of the treated counties") and the pooled-QR-with-dummies device are described in prose (p. 23) without formulas or dedicated asymptotic theory; the formal results cover only the 2x2 case.
