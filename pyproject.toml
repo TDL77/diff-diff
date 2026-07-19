@@ -64,9 +64,9 @@ dev = [
     # Lint CI workflow (.github/workflows/lint.yml) — update both together.
     # NOTE: black/mypy require Python >= 3.10 (dev tooling only; the library
     # floor stays 3.9).
-    "black==26.3.1",
-    "ruff==0.15.13",
-    "mypy==2.1.0",
+    "black==26.5.1",
+    "ruff==0.15.21",
+    "mypy==2.3.0",
     "maturin>=1.4,<2.0",
     "matplotlib>=3.5",
     "nbmake>=1.5",
@@ -150,7 +150,11 @@ ignore = ["E501"]
 "tests/test_t19_marketing_pulse_drift.py" = ["E741"]
 
 [tool.mypy]
-python_version = "3.9"
+# mypy >= 2.2 cannot target Python 3.9 (python_version must be >= 3.10), so
+# static checking runs against 3.10 even though the library floor stays 3.9.
+# The floor is guarded at runtime instead: the gated test matrix carries a
+# dedicated Python 3.9 leg (.github/workflows/rust-test.yml).
+python_version = "3.10"
 warn_return_any = false
 warn_unused_configs = true
 ignore_missing_imports = true
