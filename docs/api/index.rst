@@ -6,7 +6,8 @@ This section provides complete API documentation for all diff-diff modules.
 Estimators
 ----------
 
-Core estimator classes for DiD analysis:
+Core causal-inference estimator classes - the DiD family plus synthetic control,
+regression discontinuity, and the Goodman-Bacon decomposition diagnostic:
 
 .. autosummary::
    :toctree: _autosummary
@@ -35,6 +36,7 @@ Core estimator classes for DiD analysis:
    diff_diff.QDiD
    diff_diff.BaconDecomposition
    diff_diff.StaggeredTripleDifference
+   diff_diff.RegressionDiscontinuity
 
 Results Classes
 ---------------
@@ -78,11 +80,13 @@ Result containers returned by estimators:
    diff_diff.Comparison2x2
    diff_diff.StaggeredTripleDiffResults
    diff_diff.TWFEWeightsResult
+   diff_diff.RegressionDiscontinuityResults
+   diff_diff.RDPlotResult
 
 Visualization
 -------------
 
-Plotting functions for results:
+Plotting functions and plot builders:
 
 .. autosummary::
    :toctree: _autosummary
@@ -92,6 +96,7 @@ Plotting functions for results:
    diff_diff.plot_group_effects
    diff_diff.plot_sensitivity
    diff_diff.plot_honest_event_study
+   diff_diff.RDPlot
    diff_diff.plot_bacon
    diff_diff.plot_power_curve
    diff_diff.plot_pretrends_power
