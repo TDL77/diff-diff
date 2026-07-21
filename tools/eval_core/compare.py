@@ -92,6 +92,10 @@ def _render_ground_truth(snap: dict) -> str:
         ]
         for topic in snap.get("known_fp_topics") or []:
             desc = topic.get("topic") or topic.get("description") or str(topic)
+            if topic.get("id"):
+                # Graders exempt a matching finding by citing this id — it must
+                # be visible in the (blinded) bundle, not only in case.json.
+                desc = f"[{topic['id']}] {desc}"
             extra = []
             if topic.get("file"):
                 extra.append(f"in `{topic['file']}`")
@@ -178,6 +182,15 @@ _MODEL_FAMILY_PATTERNS = (
     r"gpt[\s._-]?5(?:\.\d+)?(?:-[a-z0-9]+)*",
     r"\b(?:sol|terra|luna)\b",
     r"\b5\.[0-9]\b",
+    # Claude-family MODEL tokens only: "claude" followed by a version/family
+    # tail ("claude-fable-5", "Claude 3.5", "claude_sonnet"). A bare "claude"
+    # is deliberately NOT redacted: every plan-review arm runs the claude CLI,
+    # so generic mentions carry no arm signal — and a broader pattern mangles
+    # the very repository paths evidence quotes must preserve (`.claude/hooks/
+    # check-plan-review.py`, `CLAUDE.md`), turning genuine catches into graded
+    # misses. Family words alone still redact via the standalone pattern.
+    r"\bclaude[\s._-]+(?:\d[a-z0-9.-]*|fable|sonnet|opus|haiku)[a-z0-9.-]*",
+    r"\b(?:fable|sonnet|opus|haiku)\b",
 )
 
 
@@ -258,7 +271,11 @@ def _snapshot_key(snap: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:8]
 
 
-def build_bundle(runs: Iterable[RunResult], redact_meta: bool = False) -> str:
+def build_bundle(
+    runs: Iterable[RunResult],
+    redact_meta: bool = False,
+    header_text: "str | None" = None,
+) -> str:
     """Render the full comparison bundle from the stored run artifacts.
 
     Each run carries its own ``case_snapshot`` (the case AS REVIEWED), so the
@@ -272,6 +289,10 @@ def build_bundle(runs: Iterable[RunResult], redact_meta: bool = False) -> str:
     ``redact_meta`` drops the per-review model/latency/cli meta (used for blinded
     bundles — pass runs through ``apply_blinding`` first; this flag only controls
     the renderer's own meta line and label).
+
+    ``header_text`` replaces the default (codex-reviewer) grading header, letting
+    another harness supply its own grading instructions while reusing the
+    grouping/rendering/blinding machinery unchanged. ``None`` keeps the default.
     """
     runs_by_group: dict[tuple[str, str], list[RunResult]] = {}
     for rr in runs:
@@ -295,7 +316,8 @@ def build_bundle(runs: Iterable[RunResult], redact_meta: bool = False) -> str:
     has_repeats = any(rr.repeat_idx for rr in all_runs)
 
     n_cases = len({cid for cid, _ in group_keys})
-    parts = [_render_header(config_ids, has_repeats), f"\n_{n_cases} cases._\n"]
+    header = header_text if header_text is not None else _render_header(config_ids, has_repeats)
+    parts = [header, f"\n_{n_cases} cases._\n"]
     for gkey in group_keys:
         cid, skey = gkey
         case_runs = sorted(runs_by_group[gkey], key=lambda r: (r.config_id, r.repeat_idx))
