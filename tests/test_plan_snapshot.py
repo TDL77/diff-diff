@@ -90,6 +90,30 @@ def test_snapshots_are_invocation_unique(tmp_path):
     assert pathlib.Path(b["snapshot_path"]).exists()
 
 
+def test_snapshot_emits_and_cleans_work_dir(tmp_path):
+    """work_dir is a helper-emitted per-invocation dir UNDER the snapshots dir
+    (safe-charset leaf, NOT built from the repo/worktree path — round-6 path
+    injection fix), created at snapshot and removed by both persist and abort."""
+    plan = _mk_plan(tmp_path)
+    out = _snapshot(tmp_path, plan)
+    work = pathlib.Path(out["work_dir"])
+    assert work.is_dir(), "work_dir must be created"
+    assert work.parent.name == ".snapshots", "work_dir lives under the snapshots dir"
+    assert work.name.endswith(".work")
+    (work / "reviewer_prompt.txt").write_text("intermediate")  # a stray file in it
+    _persist(tmp_path, out)
+    assert not work.exists(), "persist must remove work_dir and its contents"
+
+
+def test_abort_cleans_work_dir(tmp_path):
+    plan = _mk_plan(tmp_path)
+    out = _snapshot(tmp_path, plan)
+    work = pathlib.Path(out["work_dir"])
+    (work / "review_a.md").write_text("y")
+    _run("abort", "--state-file", out["state_path"], home=tmp_path)
+    assert not work.exists(), "abort must remove work_dir"
+
+
 def test_persist_certifies_reviewed_bytes(tmp_path):
     plan = _mk_plan(tmp_path)
     out = _snapshot(tmp_path, plan)
@@ -102,7 +126,7 @@ def test_persist_certifies_reviewed_bytes(tmp_path):
     text = review.read_text()
     assert f"plan_sha256: {out['plan_sha256']}" in text
     assert f"plan: {out['plan_path']}" in text
-    for key in ("snapshot_path", "state_path", "meta_path", "body_path"):
+    for key in ("snapshot_path", "state_path", "meta_path", "body_path", "work_dir"):
         assert not pathlib.Path(out[key]).exists(), f"{key} must be cleaned up"
 
 
@@ -172,9 +196,56 @@ def test_abort_cleans_up_invocation(tmp_path):
     pathlib.Path(out["meta_path"]).write_text("{}")
     pathlib.Path(out["body_path"]).write_text("b\n")
     _run("abort", "--state-file", out["state_path"], home=tmp_path)
-    for key in ("snapshot_path", "state_path", "meta_path", "body_path"):
+    for key in ("snapshot_path", "state_path", "meta_path", "body_path", "work_dir"):
         assert not pathlib.Path(out[key]).exists(), f"{key} survived abort"
     assert not pathlib.Path(out["review_path"]).exists()
+
+
+def test_persist_self_cleans_the_whole_invocation_on_failure(tmp_path):
+    """CI round: persist self-cleans the ENTIRE invocation (snapshot + work_dir +
+    sidecars) on a post-load failure — e.g. a malformed meta — so the caller never
+    runs an abort AFTER persist (which could mask a wrong token). Exit 3 (plan
+    changed) is the same story, covered by test_persist_exit3_..."""
+    plan = _mk_plan(tmp_path)
+    out = _snapshot(tmp_path, plan)
+    pathlib.Path(out["meta_path"]).write_text("{ not valid json")
+    pathlib.Path(out["body_path"]).write_text("b\n")
+    cp = _run("persist", "--state-file", out["state_path"], home=tmp_path, check=False)
+    assert cp.returncode == 2
+    for key in ("snapshot_path", "state_path", "meta_path", "body_path", "work_dir"):
+        assert not pathlib.Path(out[key]).exists(), f"{key} must be self-cleaned on persist failure"
+
+
+def test_abort_fails_on_missing_state(tmp_path):
+    """abort is a PRE-persist cleanup only (persist self-cleans its own failures),
+    so a nonexistent (mistyped / cross-wired / stale) state token must FAIL rather
+    than report success while a real snapshot is left behind (round-5 + CI: the
+    `--allow-missing` escape hatch was removed since it is no longer needed)."""
+    snap_dir = tmp_path / ".claude" / "plans" / ".snapshots"
+    snap_dir.mkdir(parents=True)
+    ghost = str(snap_dir / "deadbeef0000.00000000.state.json")  # well-formed, nonexistent
+    cp = _run("abort", "--state-file", ghost, home=tmp_path, check=False)
+    assert cp.returncode == 2
+    assert "does not exist" in cp.stderr
+
+
+def test_snapshot_refuses_shell_unsafe_home(tmp_path):
+    """CI round (fail-closed validation gate): the plans dir is HOME-derived and
+    every generated path is pasted into the caller's shell as a quoted literal.
+    If HOME contains a shell metacharacter those paths would execute under command
+    substitution, so the helper REFUSES to emit them (fails closed). Covers BOTH
+    `$()` and backtick command-substitution forms (CI: don't test only `$()`)."""
+    for i, home_name in enumerate(("home$(touch pwned)", "home`touch pwned`")):
+        unsafe_home = tmp_path / f"h{i}" / home_name
+        plan = unsafe_home / ".claude" / "plans" / "p.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# p\n")
+        pf = _write_file(tmp_path, f"plan-path-{i}.txt", str(plan))
+        cp = _run("snapshot", "--plan-path-file", str(pf), home=unsafe_home, check=False)
+        assert cp.returncode == 2, f"{home_name!r}: expected fail-closed refusal"
+        assert "shell metacharacter" in cp.stderr
+        # nothing executed (the helper never shells out — this guards the CALLER)
+        assert not (unsafe_home / "pwned").exists()
 
 
 def test_persist_rejects_rewritten_snapshot(tmp_path):

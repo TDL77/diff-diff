@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Internal tooling: plan-review engine → dual-reviewer skill (no library
+  change).** `/review-plan` + `/revise-plan` are retired for a
+  `.claude/skills/plan-review/` skill that runs the **dual** review engine
+  Campaign 1's exploratory run selected — two blind reviewers (Claude @ Opus 4.8
+  + codex `gpt-5.6-sol`) then a merge/verify pass — which reliably caught **7/9**
+  must-catch plan defects vs **1/9** for any single reviewer: a strong
+  sensitivity signal that selects dual as the default. The campaign itself was
+  **NON-GATING** (base_sha-contaminated negative controls + a criteria
+  regression, so its own pre-registered gates did not apply); a clean
+  re-validation is a tracked follow-up
+  (`tools/plan-review-eval/verdicts/campaign-1.md`). Codex-unavailable degrades
+  loudly to a single-Claude review. The content-hash `ExitPlanMode` gate
+  (`check-plan-review.py`) is engine-agnostic and unchanged; the snapshot
+  helper's (`plan_snapshot.py`) hash-gate and snapshot/persist contract are
+  unchanged, and it now also emits and cleans a per-invocation work dir (under
+  its own safe-charset snapshots dir) for the reviewer's intermediate files, and
+  fails closed if the resolved snapshots path itself carries a shell
+  metacharacter — so no path composed into a shell command can execute. `persist`
+  self-cleans the whole invocation on any failure (no post-persist cleanup
+  needed) and `abort` is strict (a missing state token is an error).
 - **Docs: navigation and SEO polish.** A stable/latest version switcher in the navbar
   (`docs/_static/switcher.json`); a custom `robots.txt` that keeps the ~60 thin
   `_modules/` source-view pages out of crawlers (documentation pages allowed as
