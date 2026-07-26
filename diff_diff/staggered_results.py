@@ -5,17 +5,38 @@ This module provides dataclass containers for storing and presenting
 group-time average treatment effects and their aggregations.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
+from diff_diff.aggregation import AggregationMixin, AggregationResult, resolve_inference_df
 from diff_diff.results import _format_survey_block, _get_significance_stars
-from diff_diff.results_base import BaseResults
+from diff_diff.results_base import BaseResults, build_event_study_surface
+from diff_diff.staggered_aggregation import CallawaySantAnnaAggregationMixin
 
 if TYPE_CHECKING:
     from diff_diff.staggered_bootstrap import CSBootstrapResults
+
+
+class _KitAggregator(CallawaySantAnnaAggregationMixin):
+    """Runs the CallawaySantAnna aggregation mixin off a retained kit.
+
+    The aggregation methods are ESTIMATOR-bound but read exactly two attributes
+    from their host - ``alpha`` and ``anticipation`` - so a post-fit caller
+    needs neither the estimator nor a reference to it, only those two values.
+    (Verified by enumerating every ``self.<attr>`` access in
+    ``staggered_aggregation.py``: the rest are internal method calls.)
+
+    This is what keeps ``aggregate()`` off an ``_estimator_ref``, which would
+    otherwise drag the whole fitted estimator - and its source frame - onto
+    every results object.
+    """
+
+    def __init__(self, alpha: float, anticipation: int) -> None:
+        self.alpha = alpha
+        self.anticipation = anticipation
 
 
 @dataclass
@@ -67,7 +88,7 @@ class GroupTimeEffect:
 
 
 @dataclass
-class CallawaySantAnnaResults(BaseResults):
+class CallawaySantAnnaResults(BaseResults, AggregationMixin):
     """
     Results from Callaway-Sant'Anna (2021) staggered DiD estimation.
 
@@ -213,6 +234,13 @@ class CallawaySantAnnaResults(BaseResults):
     # with the original resolved_survey.df_survey.
     df_inference: Optional[int] = None
 
+    # Post-fit re-aggregation payload (spec section 6, rows M-020/M-117),
+    # attached by fit() because nothing it needs survives the call. Declared
+    # here rather than set dynamically so it is a typed part of the contract.
+    # Excluded from repr and equality: it is internal bookkeeping, not a
+    # reportable result, and its arrays would make `==` raise.
+    _aggregation_kit: Optional[Any] = field(default=None, repr=False, compare=False)
+
     # --- Inference-field aliases (balance/external-adapter compatibility) ---
     @property
     def att(self) -> float:
@@ -252,6 +280,153 @@ class CallawaySantAnnaResults(BaseResults):
         if not np.isfinite(self.overall_att) or self.overall_att == 0:
             return np.nan
         return self.overall_se / abs(self.overall_att)
+
+    # ------------------------------------------------------------------ #
+    # Post-fit aggregation (spec section 6; ledger rows M-020 / M-117)
+    # ------------------------------------------------------------------ #
+
+    #: CS implements simple / event-study / group. ``"calendar"`` is part of
+    #: the library-wide vocabulary but CS has no calendar aggregator (the
+    #: DEFERRED "Calendar-time aggregation" row), so asking for it raises.
+    _AGGREGATE_SUPPORTED = ("simple", "event_study", "group")
+
+    def _aggregate_compute(
+        self, level: str, *, weights: Optional[str], balance_e: Optional[int]
+    ) -> Any:
+        kit = getattr(self, "_aggregation_kit", None)
+        if kit is None:
+            raise ValueError(
+                "This result carries no aggregation kit, so it cannot be "
+                "re-aggregated. Kits are attached by CallawaySantAnna.fit(); a "
+                "result unpickled from an older release will not have one."
+            )
+        if self.bootstrap_results is not None:
+            # Fail closed rather than silently handing back analytical numbers:
+            # a bootstrapped fit's se/p/CI are percentile statistics, and
+            # reproducing them post-fit needs retained draws (BootstrapReplaySpec).
+            raise NotImplementedError(
+                "aggregate() is not yet available on a bootstrapped fit "
+                "(n_bootstrap > 0): its inference is percentile-bootstrap based "
+                "and cannot be reproduced from the analytical state retained "
+                "here. Re-fit with the aggregation you need, or use "
+                "n_bootstrap=0 for analytical inference."
+            )
+
+        # Shallow copy: shares every array (no data is duplicated) but gives the
+        # aggregators a scratch dict to memoize `_agg_cache` into, so the kit
+        # itself is never written to. Mirrors what StaggeredTripleDifference
+        # already does when it aggregates through a modified copy.
+        precomputed = dict(kit.bookkeeping)
+        agg = _KitAggregator(kit.alpha, kit.anticipation)
+
+        if level == "simple":
+            return self._aggregate_simple_result(kit)
+        if level == "group":
+            effects = agg._aggregate_by_group(
+                self.group_time_effects,
+                kit.influence,
+                self.groups,
+                precomputed=precomputed,
+                df=None,
+                unit=None,
+            )
+            return self._group_effects_to_aggregation(effects, kit)
+
+        # event_study -> the unified EventStudyResults container (row M-092)
+        es = agg._aggregate_event_study(
+            self.group_time_effects,
+            kit.influence,
+            self.groups,
+            self.time_periods,
+            balance_e,
+            None,
+            None,
+            precomputed,
+        )
+        # `build_event_study_surface` reads the surface off a RESULTS object.
+        # Under the immutability contract we cannot populate `self`, so a
+        # throwaway carrier holds the freshly computed values.
+        carrier = replace(
+            self,
+            event_study_effects=es.effects,
+            event_study_vcov=es.vcov,
+            event_study_vcov_index=es.vcov_index,
+            event_study_df=es.df_used,
+        )
+        return build_event_study_surface(carrier)
+
+    def _aggregate_simple_result(self, kit: Any) -> AggregationResult:
+        """The overall ATT as a one-row table.
+
+        ``_aggregate_simple`` runs unconditionally in ``fit()``, so the numbers
+        are already stored - this is a view, not a recomputation, and is
+        therefore bit-identical to the fit by construction.
+        """
+        # n_treated_units / n_control_units are UNITS on a panel fit but
+        # OBSERVATIONS on a declared repeated cross-section, where fit() counts
+        # rows because there is no unit tracking (staggered.py, the panel/RCS
+        # branch). n_kind must say which - conflating the two is exactly what
+        # the shared vocabulary forbids.
+        is_panel = kit.bookkeeping.get("is_panel", True)
+        n_kind = "units" if is_panel else "obs"
+        ci = self.overall_conf_int or (np.nan, np.nan)
+        return AggregationResult(
+            level="simple",
+            label=np.array(["overall"], dtype=object),
+            target=np.array(["att"], dtype=object),
+            att=np.array([self.overall_att], dtype=float),
+            se=np.array([self.overall_se], dtype=float),
+            t_stat=np.array([self.overall_t_stat], dtype=float),
+            p_value=np.array([self.overall_p_value], dtype=float),
+            conf_int_lower=np.array([ci[0]], dtype=float),
+            conf_int_upper=np.array([ci[1]], dtype=float),
+            n=np.array([float(self.n_treated_units + self.n_control_units)], dtype=float),
+            # NOT ``df_inference``: that field is documented to stay None on
+            # explicit ``survey_design=`` fits, where the df that actually
+            # governed ``overall_p_value`` lives on ``survey_metadata``.
+            # Reading it directly reported df=NaN for survey fits whose CI
+            # was built on a finite t-reference.
+            df=resolve_inference_df(self),
+            alpha=self.alpha,
+            n_kind=n_kind,
+            weight=np.array([1.0], dtype=float),
+            estimator=type(self).__name__.replace("Results", ""),
+        )
+
+    def _group_effects_to_aggregation(
+        self, effects: Dict[Any, Dict[str, Any]], kit: Any
+    ) -> AggregationResult:
+        """Per-cohort aggregation as a table.
+
+        ``weight`` is left unset: ``_aggregate_by_group`` weights ``(g, t)``
+        cells equally WITHIN each cohort and never forms a cross-cohort mass,
+        so there is no per-row weight to report and inventing one would be a
+        fabricated number. ``n`` is the cohort's finite-contributing cell
+        count, hence ``n_kind="cells"`` rather than units.
+        """
+        labels = list(effects.keys())
+        rows = [effects[g] for g in labels]
+        cis = [r.get("conf_int") or (np.nan, np.nan) for r in rows]
+        return AggregationResult(
+            level="group",
+            label=np.array(labels, dtype=object),
+            target=np.array(["att"] * len(labels), dtype=object),
+            att=np.array([r["effect"] for r in rows], dtype=float),
+            se=np.array([r["se"] for r in rows], dtype=float),
+            t_stat=np.array([r["t_stat"] for r in rows], dtype=float),
+            p_value=np.array([r["p_value"] for r in rows], dtype=float),
+            conf_int_lower=np.array([c[0] for c in cis], dtype=float),
+            conf_int_upper=np.array([c[1] for c in cis], dtype=float),
+            n=np.array([float(r.get("n_periods", np.nan)) for r in rows], dtype=float),
+            # The df the GROUP aggregation's own inference used, recorded by
+            # ``_aggregate_by_group``. Previously this read ``event_study_df``
+            # - a different aggregation's df, and None after a plain fit.
+            df=rows[0].get("df_used") if rows else None,
+            alpha=kit.alpha,
+            n_kind="cells",
+            weight=None,
+            estimator=type(self).__name__.replace("Results", ""),
+        )
 
     def summary(self, alpha: Optional[float] = None) -> str:
         """
@@ -504,7 +679,11 @@ class CallawaySantAnnaResults(BaseResults):
 
         elif level == "event_study":
             if self.event_study_effects is None:
-                raise ValueError("Event study effects not computed. Use aggregate='event_study'.")
+                raise ValueError(
+                    "Event study effects not computed. "
+                    "Call results.aggregate('event_study') to compute them post-fit "
+                    "(no refit required)."
+                )
             rows = []
             for rel_t, data in sorted(self.event_study_effects.items()):
                 cband_ci = data.get("cband_conf_int", (np.nan, np.nan))
@@ -525,7 +704,11 @@ class CallawaySantAnnaResults(BaseResults):
 
         elif level == "group":
             if self.group_effects is None:
-                raise ValueError("Group effects not computed. Use aggregate='group'.")
+                raise ValueError(
+                    "Group effects not computed. "
+                    "Call results.aggregate('group') to compute them post-fit "
+                    "(no refit required)."
+                )
             rows = []
             for group, data in sorted(self.group_effects.items()):
                 rows.append(

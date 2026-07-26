@@ -129,6 +129,20 @@ EVENT_STUDY_SCHEMA: Tuple[str, ...] = (
     "is_reference",
 )
 
+#: Closed vocabulary for the ``n_kind`` field, SHARED by every container that
+#: reports a count alongside an estimate (``EventStudyResults`` and
+#: ``AggregationResult``), so a consumer can route on ``n_kind`` uniformly
+#: across the two. Each value names what one unit of ``n`` counts; never
+#: conflate them.
+N_KIND_VOCABULARY: Tuple[str, ...] = (
+    "groups",
+    "switcher_cells",
+    "cells",
+    "units",
+    "obs",
+    "clusters",
+)
+
 
 @dataclass
 class EventStudyResults(BaseResults):
@@ -166,13 +180,17 @@ class EventStudyResults(BaseResults):
         Per-event-time count as float, NaN where the producer records none
         (and on the reference row - no estimation happened there).
     n_kind : str or None
-        Semantic of ``n`` for this producer: ``"groups"`` (a group-level
-        count - cohorts for CallawaySantAnna/SunAbraham, eligible switcher
-        groups per horizon for de Chaisemartin-D'Haultfoeuille with
-        ``L_max >= 1``), ``"switcher_cells"`` (dCDH legacy ``L_max is None``
-        path: switching ``(g, t)`` cells, where one group may contribute
-        several), ``"obs"`` (observations), ``"clusters"``, or None when no
-        count is recorded. Never conflate these units.
+        Semantic of ``n`` for this producer, drawn from the shared
+        :data:`N_KIND_VOCABULARY`: ``"groups"`` (a group-level count -
+        cohorts for CallawaySantAnna/SunAbraham, eligible switcher groups
+        per horizon for de Chaisemartin-D'Haultfoeuille with ``L_max >= 1``),
+        ``"switcher_cells"`` (dCDH legacy ``L_max is None`` path: switching
+        ``(g, t)`` cells, where one group may contribute several),
+        ``"cells"`` (``(g, t)`` cells generally - what CallawaySantAnna's
+        ``"group"`` aggregation counts), ``"units"`` (distinct units, as in
+        the overall/simple aggregation), ``"obs"`` (observations),
+        ``"clusters"``, or None when no count is recorded. Never conflate
+        these units.
     reference_period : Any or None
         Convenience scalar echo of the marked row's ``event_time`` label when
         there is EXACTLY ONE reference row; None when there are zero or
@@ -351,6 +369,15 @@ class EventStudyResults(BaseResults):
                     f"expected ({n_rows},) to align with event_time."
                 )
         df_arr[~np.isfinite(self.p_value)] = np.nan
+        # n_kind is a routing key consumers share with AggregationResult, so an
+        # off-vocabulary value is a contract break, not a free-form label. Both
+        # containers validate it - enforcing on only one would let an unknown
+        # value reach a consumer through the unchecked side.
+        if self.n_kind is not None and self.n_kind not in N_KIND_VOCABULARY:
+            raise ValueError(
+                f"EventStudyResults n_kind {self.n_kind!r} is not in the shared "
+                f"vocabulary {N_KIND_VOCABULARY}."
+            )
         self.df = df_arr
 
         if (self.vcov is None) != (self.vcov_index is None):
@@ -515,7 +542,8 @@ class EventStudyResults(BaseResults):
 
 #: Per-producer remediation for an absent event-study surface.
 _ABSENT_SURFACE_HINTS: Dict[str, str] = {
-    "CallawaySantAnnaResults": "refit with aggregate='event_study' (or 'all')",
+    # Migrated to the post-fit surface (row M-020): no refit needed.
+    "CallawaySantAnnaResults": "call results.aggregate('event_study')",
     "ImputationDiDResults": "refit with aggregate='event_study' (or 'all')",
     "TwoStageDiDResults": "refit with aggregate='event_study' (or 'all')",
     "StackedDiDResults": "refit with aggregate='event_study'",
