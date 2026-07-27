@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -148,9 +148,11 @@ def _require_complete_cell_set(
     builder deliberately never emitted (the reference, unobserved pairs) are not
     in ``requested_keys`` and so are not counted as losses.
 
-    The same-period comparison-support diagnostic that would catch this BEFORE
-    the solve, with a better message, is tracked in TODO.md; this is the
-    correctness backstop that must hold regardless.
+    The same-period comparison-support filter now catches the most common cause
+    BEFORE the solve, with a better message: periods where no unit is untreated
+    are removed from the estimation sample and reported. This remains the
+    correctness backstop for what that filter cannot see -- cohorts sharing no
+    comparison period, and covariate collinearity.
     """
     missing = [
         k
@@ -168,11 +170,13 @@ def _require_complete_cell_set(
         "the survivors identify whatever contrast the reduced design supports "
         "(e.g. a difference between two treated cohorts), so reporting them "
         "under their original labels, or averaging them into the overall ATT, "
-        "would be silently wrong. This usually means those periods have no "
-        "eligible comparison group: every unit is already treated, or the "
-        "never-treated units are not observed then. Restrict the panel to "
-        "periods with an available comparison group, or add never-treated "
-        "observations covering them."
+        "would be silently wrong. Periods with no eligible comparison group are "
+        "already removed before the solve, so this points at one of two other "
+        "causes: treated cohorts that share no comparison period with each "
+        "other, or a covariate collinear with the treatment cells. Check your "
+        "covariates first if any were supplied; otherwise restrict the panel to "
+        "cohorts observed over a common window, or add never-treated "
+        "observations."
     )
 
 
@@ -208,10 +212,12 @@ def _require_estimable_overall_att(
     no-silent-NaN convention, ledger row ``M-124``).
 
     NOT every branch is a final answer. Cause (2) discards anticipation-window
-    ATT(g, t) that ARE identified, and cause (3) is a post-hoc stand-in for the
-    same-period comparison-support diagnostic this estimator does not yet
-    compute. Both are STOPGAPS with follow-up rows in ``TODO.md``; only cause
-    (1) and the zero-weight case are terminal.
+    ATT(g, t) that ARE identified, and remains a STOPGAP with a follow-up row in
+    ``TODO.md``. Cause (3) was a post-hoc stand-in for the comparison-support
+    diagnostic, which the estimator now computes BEFORE the solve -- so it is
+    reached only by what that filter cannot see (cohorts sharing no comparison
+    period, covariate collinearity). Cause (1) and the zero-weight case are
+    terminal.
     """
     if np.isfinite(overall.get("att", float("nan"))):
         return
@@ -227,10 +233,11 @@ def _require_estimable_overall_att(
         raise ValueError(
             "No treatment effect is identified: every cohort-time cell was "
             "removed from the design, so the overall ATT is undefined. This "
-            "usually means the treatment cells are collinear with the absorbed "
-            f"fixed effects -- with control_group={control_group!r}, a single "
-            "treated cohort and no never-treated units leaves every post-period "
-            f"cell equal to a time indicator. {hint}"
+            "means the treatment cells are collinear with the absorbed "
+            f"fixed effects even after unsupported periods were removed -- with "
+            f"control_group={control_group!r}, this happens when the surviving "
+            "cohorts share no comparison period, or when a supplied covariate is "
+            f"collinear with the cells. {hint}"
         )
     if not post:
         raise ValueError(
@@ -551,6 +558,98 @@ class InteractionDiagnostics:
     disconnected: List[Tuple[Any, Any]]
 
 
+def _compute_cell_support(
+    cohort_vals: np.ndarray,
+    time_vals: np.ndarray,
+    weights: Optional[np.ndarray] = None,
+) -> Set[Tuple[Any, Any]]:
+    """The set of (cohort, period) cells carrying POSITIVE total weight.
+
+    A cell "exists" only if it carries positive total weight. Survey weights
+    scale the design by sqrt(w) (`solve_ols`), so a cell whose rows all carry
+    zero pweight is absent from the effective regression even though its rows
+    are present in the frame - and a reference chosen from raw presence would
+    then omit nothing, leaving the cohort's block spanning the absorbed cohort
+    dummy and QR free to drop a real post-treatment cell (issue #724 again,
+    this time on the survey path). Weight NORMALIZATION is multiplicative, so
+    a raw zero stays zero and reading the pre-resolution column here is
+    equivalent FOR ZEROS -- which is the whole of what that argument covers.
+    It says nothing about NaN / negative / Inf, and `nansum` would read those
+    cells as unsupported, silently reshaping the sample. `fit()` therefore
+    runs `survey.validate_raw_weights` on the raw column before it reaches
+    this function, so by here the vector is finite and non-negative.
+
+    Computed ONCE by grouped accumulation rather than per (g, t). The naive
+    form allocated an n-row boolean mask for every cohort-period pair during
+    reference selection and again while building columns -- O(n*G*T) on top of
+    the matrix construction, material on large staggered panels (codex R7).
+    `nan_to_num` reproduces the previous `np.nansum` semantics: a NaN weight
+    contributes 0 rather than poisoning the cell's total. (`fit()` rejects NaN
+    weights upstream; direct callers of this function may still pass them.)
+    """
+    totals = (
+        pd.Series(
+            np.ones(len(cohort_vals))
+            if weights is None
+            else np.nan_to_num(np.asarray(weights, dtype=float), nan=0.0)
+        )
+        .groupby([pd.Series(cohort_vals), pd.Series(time_vals)], sort=False)
+        .sum()
+    )
+    return {key for key, total in totals.items() if total > 0}
+
+
+def _compute_references(
+    groups: List[Any],
+    cohort_vals: np.ndarray,
+    time_vals: np.ndarray,
+    anticipation: int,
+    supported: Set[Tuple[Any, Any]],
+) -> Dict[Any, Any]:
+    """Per-cohort ETWFE reference period, or ``None`` when unidentified.
+
+    W2025 Eq. 6.1/6.4: the ``g-1`` cell is EXCLUDED so it serves as the
+    reference. Computed over each cohort's OWN observed support, never the
+    panel-wide period list: a cohort unobserved at the globally-latest
+    pre-period would otherwise have an all-zero column omitted, leaving its
+    cell block spanning the unit-FE-absorbed cohort dummy and letting QR drop
+    an arbitrary -- possibly post-treatment -- cell instead (issue #724).
+    ``None`` marks a cohort with no pre-treatment support at all, whose ATTs
+    are unidentified; the caller excludes it.
+
+    Callable on the PRE-filter frame so `fit()` can detect a reference that
+    moves when unsupported periods are dropped (branch 1) or assert that none
+    can move (branch 2).
+    """
+    references: Dict[Any, Any] = {}
+    for g in groups:
+        observed = np.unique(time_vals[cohort_vals == g])
+        # latest SUPPORTED pre-period, not merely the latest observed one
+        pre = [t for t in observed if t < g - anticipation and (g, t) in supported]
+        references[g] = max(pre) if pre else None
+    return references
+
+
+def _cells_derived_groups(gt_effects: Dict) -> List[Any]:
+    """Cohorts carrying at least one ESTIMATED cell, for results metadata.
+
+    Distinct from the fit-level ``groups`` list, which is the cohorts PRESENT in
+    the estimation frame. The two diverge whenever a cohort is retained purely
+    as a control: cohort ``G_max`` on an all-eventually-treated panel receives
+    no cells by the W2025 Section 5.4 normalization, and a cohort can lose every
+    row to comparison-support filtering. Reporting either as an estimated cohort
+    produces the "phantom zero-member cohort" the results contract forbids
+    (``set(results.groups) == {g for (g, t) in group_time_effects}``).
+
+    Use for ``results.groups`` and ``_n_g_per_cohort`` ONLY. The design-side
+    readers of ``groups`` -- the covariate blocks (``_prepare_covariates``,
+    ``D_g × X``) and the cohort-trend block -- require the PRESENT list: a
+    cells-derived list there drops ``D_{G_max} × X``, silently applying a
+    normalization this release deliberately defers, and shifts every ATT.
+    """
+    return sorted({g for (g, _t) in gt_effects})
+
+
 def _build_interaction_matrix(
     data: pd.DataFrame,
     cohort: str,
@@ -595,54 +694,15 @@ def _build_interaction_matrix(
     # not_yet_treated: post-treatment only (always)
     include_pre = control_group == "never_treated" and method == "ols"
 
-    # ETWFE reference period, per cohort (W2025 Eq. 6.1/6.4: the `g-1` cell is
-    # EXCLUDED so it serves as the reference). Computed over each cohort's OWN
-    # observed support, never the panel-wide `times`: a cohort unobserved at the
-    # globally-latest pre-period would otherwise have an all-zero column omitted,
-    # leaving its cell block spanning the unit-FE-absorbed cohort dummy and
-    # letting QR drop an arbitrary — possibly post-treatment — cell instead
-    # (issue #724). ``None`` marks a cohort with no pre-treatment support at all,
-    # whose ATTs are unidentified; the caller excludes it.
-    # A cell "exists" only if it carries POSITIVE total weight. Survey weights
-    # scale the design by sqrt(w) (`solve_ols`), so a cell whose rows all carry
-    # zero pweight is absent from the effective regression even though its rows
-    # are present in the frame - and a reference chosen from raw presence would
-    # then omit nothing, leaving the cohort's block spanning the absorbed cohort
-    # dummy and QR free to drop a real post-treatment cell (issue #724 again,
-    # this time on the survey path). Weight NORMALIZATION is multiplicative, so
-    # a raw zero stays zero and reading the pre-resolution column here is
-    # equivalent FOR ZEROS -- which is the whole of what that argument covers.
-    # It says nothing about NaN / negative / Inf, and `nansum` would read those
-    # cells as unsupported, silently reshaping the sample. `fit()` therefore
-    # runs `survey.validate_raw_weights` on the raw column before it reaches
-    # this function, so by here the vector is finite and non-negative.
-    # Computed ONCE by grouped accumulation rather than per (g, t). The naive
-    # form allocated an n-row boolean mask for every cohort-period pair during
-    # reference selection and again while building columns -- O(n*G*T) on top of
-    # the matrix construction, material on large staggered panels (codex R7).
-    # `nan_to_num` reproduces the previous `np.nansum` semantics: a NaN weight
-    # contributes 0 rather than poisoning the cell's total. (`fit()` rejects NaN
-    # weights upstream; direct callers of this function may still pass them.)
-    _cell_totals = (
-        pd.Series(
-            np.ones(len(data))
-            if weights is None
-            else np.nan_to_num(np.asarray(weights, dtype=float), nan=0.0)
-        )
-        .groupby([pd.Series(cohort_vals), pd.Series(time_vals)], sort=False)
-        .sum()
-    )
-    _supported_pairs = {key for key, total in _cell_totals.items() if total > 0}
+    # Cell support and per-cohort references live in module-level helpers so
+    # `fit()` can compute both on the PRE-filter frame (comparison-support
+    # filtering needs the references before this matrix is built).
+    _supported_pairs = _compute_cell_support(cohort_vals, time_vals, weights)
 
     def _cell_supported(g: Any, t: Any) -> bool:
         return (g, t) in _supported_pairs
 
-    references: Dict[Any, Any] = {}
-    for g in groups:
-        observed = np.unique(time_vals[cohort_vals == g])
-        # latest SUPPORTED pre-period, not merely the latest observed one
-        pre = [t for t in observed if t < g - anticipation and _cell_supported(g, t)]
-        references[g] = max(pre) if pre else None
+    references = _compute_references(groups, cohort_vals, time_vals, anticipation, _supported_pairs)
 
     cols = []
     col_names = []
@@ -788,8 +848,21 @@ class WooldridgeDiD:
         switch; suppress via ``warnings.filterwarnings``.
     control_group : {"not_yet_treated", "never_treated"}
         Which units serve as the comparison group.  "not_yet_treated" (jwdid
-        default) uses all untreated observations at each time period;
-        "never_treated" uses only units never treated throughout the sample.
+        default) uses all untreated observations at each time period.
+
+        "never_treated" restricts the comparison pool to never-treated units
+        ON THE OLS PATH ONLY, where every ``(g, t)`` cell except each cohort's
+        reference is emitted, so treated units' pre-treatment rows sit in their
+        own indicators rather than the baseline.  On the **nonlinear** paths
+        (``method="logit"`` / ``"poisson"``) only post-treatment cells are
+        emitted -- including all cells would make each cohort dummy collinear
+        with the sum of its own indicators -- so treated units' pre-treatment
+        rows ARE part of the identifying comparison there, exactly as under
+        ``"not_yet_treated"``.  This asymmetry is pre-existing and structural;
+        see the REGISTRY note.  Note that ``n_control_units`` counts
+        never-treated UNITS on this setting regardless of method, so on the
+        nonlinear paths it under-reports the rows actually doing the
+        comparison (tracked in ``TODO.md``).
     anticipation : int
         Number of periods before treatment onset to include as treatment cells
         (anticipation effects).  0 means no anticipation.
@@ -849,15 +922,17 @@ class WooldridgeDiD:
         only: ``cohort_trends=True`` + ``method ∈ {"logit","poisson"}``
         raises ``NotImplementedError`` at ``__init__``. Auto-routes to
         the full-dummy design regardless of ``vcov_type`` (matching the
-        absorb→fixed_effects auto-route). Each treated cohort must have
-        ≥ 2 observed pre-periods in the analysis sample for ``dg_i · t``
-        to be separately identified from cohort + time FE; ``fit()``
-        raises ``ValueError`` otherwise. On all-eventually-treated
-        panels the last cohort's trend column is dropped per paper
-        Section 5.4 -- but note such panels currently RAISE before that
-        matters, because the corresponding cell-level normalization is
-        not implemented and the design is rank-deficient at
-        fully-treated periods (see REGISTRY, tracked in TODO.md). ``cohort_trends=True`` + ``survey_design`` raises
+        absorb→fixed_effects auto-route). Each cohort that RECEIVES a
+        trend column must have ≥ 2 observed pre-periods in the final
+        analysis sample for ``dg_i · t`` to be separately identified
+        from cohort + time FE; ``fit()`` raises ``ValueError``
+        otherwise. The check runs after comparison-support filtering and
+        unidentified-cohort exclusion, and skips the last cohort on
+        all-eventually-treated panels because that cohort gets no trend
+        column. On such panels the last cohort's trend column is dropped
+        per paper Section 5.4, matching the cell-level normalization
+        applied to the design, so ``cohort_trend_coefs`` carries ``G-1``
+        entries. ``cohort_trends=True`` + ``survey_design`` raises
         ``NotImplementedError`` at ``fit()`` (deferred follow-up).
         ``cohort_trends=True`` + ``control_group="never_treated"``
         also raises ``NotImplementedError`` at ``fit()``. The
@@ -1298,38 +1373,9 @@ class WooldridgeDiD:
                     "time periods. Use 'never_treated' with a never-treated group."
                 )
 
-        # 1c. Identification check for cohort_trends=True (paper W2025 Section 8 /
-        # Eq. 8.1). Each treated cohort needs at least 2 distinct pre-treatment
-        # periods (``t < g - anticipation``) for the cohort-specific linear trend
-        # ``dg_i · t`` to be separately identified from cohort + time FE. With
-        # only 1 pre-period the linear trend is observationally equivalent to
-        # cohort FE on that single point.
-        #
-        # Counts pre-treatment periods OBSERVED FOR THIS COHORT (per-cohort
-        # sample subset) rather than the global panel time set — on
-        # unbalanced panels a cohort can have only one observed pre-period
-        # even when the global panel has many, and the linear trend is
-        # still underidentified (per codex R2 P1 fix).
-        if self.cohort_trends:
-            for g in groups:
-                cohort_pre_times = sample.loc[
-                    (sample[cohort] == g) & (sample[time] < g - self.anticipation),
-                    time,
-                ].unique()
-                n_pre_periods = len(cohort_pre_times)
-                if n_pre_periods < 2:
-                    raise ValueError(
-                        f"cohort_trends=True requires at least 2 pre-treatment "
-                        f"periods OBSERVED FOR EACH TREATED COHORT (paper W2025 "
-                        f"Section 8 / Eq. 8.1 identification). Cohort g={g} has "
-                        f"only {n_pre_periods} pre-treatment period(s) observed "
-                        f"in the analysis sample (t < g - anticipation = "
-                        f"{g - self.anticipation}); the cohort-specific linear "
-                        f"trend dg_i · t is not separately identified from "
-                        f"cohort + time fixed effects on a single point. Drop "
-                        f"cohort_trends=True or use a panel where each treated "
-                        f"cohort has at least 2 observed pre-periods."
-                    )
+        # 1c. The cohort_trends=True identification check MOVED -- it now runs on
+        # the FINAL sample and final `groups`, after period filtering and
+        # unidentified-cohort exclusion. See "1c (relocated)" below.
 
         # 2. Build interaction matrix.
         #
@@ -1382,6 +1428,181 @@ class WooldridgeDiD:
                 # cells cleanly, so this does not apply to them.
                 if self.method == "ols":
                     _reject_zero_weight_groups(_cell_w, sample, unit, time)
+
+        # ---- Per-period comparison support (W2025 Section 5.4) -------------
+        #
+        # A period is retained only if some unit is UNTREATED there, i.e. only
+        # if ATT(g, t) at that period has an eligible comparison outcome. The
+        # eligible set differs by path, because the regression baseline does:
+        #
+        #   include_pre  -> cohort == 0 only. On `never_treated` + OLS the
+        #       builder emits a cell for every (g, t) except each cohort's
+        #       reference, so a later cohort's rows sit in their OWN indicator,
+        #       not the baseline. The omitted reference rows ARE in the
+        #       baseline, but they do not IDENTIFY the period: cohort h's
+        #       indicator is absorbed by the unit FE
+        #       (1{h,t} = D_h - sum_{t' != t} h_{t'}), so the period dummy stays
+        #       reproducible from the emitted cells and the design is still
+        #       collinear. Counting reference rows as support therefore makes a
+        #       period look identified when it is not.
+        #   otherwise    -> cohort == 0 OR not-yet-treated rows, which carry no
+        #       emitted cell below t = g - anticipation and so are baseline.
+        #
+        # Weight-aware: a zero-weight row is absent from the sqrt(w)-scaled
+        # regression, so it cannot supply support.
+        _include_pre = self.control_group == "never_treated" and self.method == "ols"
+        _cohort_arr = sample[cohort].to_numpy()
+        _time_arr = sample[time].to_numpy()
+        _w_arr = (
+            np.ones(len(sample))
+            if _cell_w is None
+            else np.nan_to_num(np.asarray(_cell_w, dtype=float), nan=0.0)
+        )
+
+        _eligible = _cohort_arr == 0
+        if not _include_pre:
+            _eligible = _eligible | ((_cohort_arr - self.anticipation) > _time_arr)
+        _eligible = _eligible & (_w_arr > 0)
+
+        _supported_periods = set(np.unique(_time_arr[_eligible]).tolist())
+        _unsupported_periods = sorted(set(np.unique(_time_arr).tolist()) - _supported_periods)
+
+        # References are needed BEFORE the filter -- not by the predicate above,
+        # which reads only cohort/time/anticipation and row weights, but to tell
+        # a legitimate reference move (branch 1) from a silent renormalization.
+        _pre_refs = _compute_references(
+            groups,
+            _cohort_arr,
+            _time_arr,
+            self.anticipation,
+            _compute_cell_support(_cohort_arr, _time_arr, _cell_w),
+        )
+        _pre_filter_groups = list(groups)
+        # Cohorts surviving the period filter, captured BEFORE unidentified-cohort
+        # exclusion recomputes `groups` again. Warning (b) differences against
+        # THIS list: a cohort removed later by exclusion already has its own
+        # warning, and naming it here too would double-report it.
+        _post_filter_groups = list(groups)
+        # Per-cohort unit counts on the PRE-filter frame. `_n_g_per_cohort` (the
+        # W2025 Eq. 7.4/7.6 cohort-share weight) is read off the FINAL sample,
+        # and period filtering is the first thing in this estimator that can
+        # remove SOME units of a RETAINED cohort -- `_filter_sample` keeps every
+        # row of every treated unit, and unidentified-cohort exclusion removes
+        # whole cohorts. On an unbalanced panel a unit observed only at
+        # unsupported periods vanishes entirely, shrinking N_g and silently
+        # reweighting the aggregate (measured: a cohort supplied with 100 units
+        # of which 90 appear only at a dropped period is counted as 10, moving
+        # aggregate(weights="cohort_share") from 1.8078 to 3.8157). Which N_g
+        # the paper intends is genuinely ambiguous there -- W2025 Section 7
+        # assumes a balanced panel -- so the count is carried to the results
+        # object and `aggregate` fails closed rather than picking one silently.
+        _pre_filter_unit_counts = {
+            g: int(sample.loc[sample[cohort] == g, unit].nunique()) for g in groups
+        }
+
+        if _unsupported_periods:
+            if survey_design is not None:
+                # Same naive-subsetting problem the unidentified-cohort path
+                # refuses below: deleting rows removes their PSUs and strata
+                # from the Taylor-linearized meat and from
+                # `df_survey = n_PSU - n_strata`. Decided and raised BEFORE any
+                # row is removed. `SurveyDesign.subpopulation()` is NOT the
+                # remedy here -- it zero-pads the excluded rows, which
+                # `_reject_zero_weight_groups` then refuses on the OLS path.
+                _plabels = ", ".join(str(t) for t in _unsupported_periods)
+                raise NotImplementedError(
+                    f"Period(s) {_plabels} have no eligible comparison group, so "
+                    "they carry no identified ATT(g, t) and would be dropped from "
+                    "the estimation sample. Deleting rows under `survey_design=` "
+                    "is naive subsetting: it removes their PSUs and strata from "
+                    "the TSL variance and from `df_survey = n_PSU - n_strata`, so "
+                    "the surviving estimates would be reported with a variance "
+                    "computed on a design you never specified. Restrict the frame "
+                    "to the supported periods explicitly and re-fit -- but first "
+                    "confirm every PSU and stratum survives that restriction. On "
+                    "an unbalanced panel a PSU observed only at these periods "
+                    "disappears with them, which changes the variance in exactly "
+                    "the way this refusal exists to prevent."
+                )
+
+            _keep_rows = ~pd.Series(_time_arr, index=sample.index).isin(_unsupported_periods)
+            _n_dropped = int((~_keep_rows).sum())
+            _n_total = len(sample)
+            _n_periods_total = len(set(np.unique(_time_arr).tolist()))
+            sample = sample.loc[_keep_rows.to_numpy()].copy()
+            if _cell_w is not None:
+                _cell_w = _cell_w[_keep_rows.to_numpy()]
+
+            if _include_pre:
+                _cause = (
+                    "no never-treated units are observed at those periods, so "
+                    "ATT(g, t) there is not identified against any untreated "
+                    "outcome"
+                )
+            else:
+                _cause = (
+                    "every unit is already treated (accounting for "
+                    f"`anticipation={self.anticipation}`), so ATT(g, t) there is "
+                    "not identified against any untreated outcome"
+                )
+            warnings.warn(
+                f"Dropped {_n_dropped} of {_n_total} observations "
+                f"({len(_unsupported_periods)} of {_n_periods_total} periods: "
+                f"{', '.join(str(t) for t in _unsupported_periods)}) from the "
+                f"estimation sample: no eligible comparison group exists at those "
+                f"periods -- {_cause}. To estimate those periods, add "
+                "never-treated units or restrict the panel.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+            # `groups` is fixed pre-filter and otherwise refreshed only inside
+            # the unidentified-cohort branch. A cohort can lose EVERY row here,
+            # which would leave `_prepare_covariates` emitting an all-zero
+            # D{g}_x_{cov} column for a cohort no longer present.
+            groups = sorted(g for g in sample[cohort].unique() if g > 0)
+            _post_filter_groups = list(groups)
+
+            # Reference movement. Branch 2 cannot move a reference (eligibility
+            # `t < g - anticipation` IS the predicate's second disjunct, so any
+            # reference period is supported by construction) -- assert that.
+            # Branch 1 CAN, legitimately: the ATTs stay correctly labelled and
+            # validly identified, just normalized against a different baseline
+            # period, so warn instead of raising.
+            _post_refs = _compute_references(
+                groups,
+                sample[cohort].to_numpy(),
+                sample[time].to_numpy(),
+                self.anticipation,
+                _compute_cell_support(sample[cohort].to_numpy(), sample[time].to_numpy(), _cell_w),
+            )
+            _moved = [
+                (g, _pre_refs[g], _post_refs[g])
+                for g in _post_refs
+                if g in _pre_refs
+                and _pre_refs[g] is not None
+                and _post_refs[g] is not None
+                and _pre_refs[g] != _post_refs[g]
+            ]
+            if _moved and not _include_pre:
+                _detail = "; ".join(f"cohort {g}: {old} -> {new}" for g, old, new in _moved)
+                raise ValueError(
+                    "Internal invariant violated: filtering unsupported periods "
+                    f"moved a reference period on the not-yet-treated path ({_detail}). "
+                    "Reference eligibility is the support predicate's own second "
+                    "disjunct, so this cannot happen; the ATTs would be silently "
+                    "renormalized (issue #724). Please report this panel."
+                )
+            for _g, _old, _new in _moved:
+                warnings.warn(
+                    f"Cohort {_g}'s reference period moved from {_old} to {_new} "
+                    f"because period {_old} has no never-treated observations. "
+                    f"ATT({_g}, .) are normalized against t={_new}.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            # A reference that became None is NOT a move: the cohort is now
+            # unidentified and `_exclude_unidentified_cohorts` warns by name.
 
         def _build(frame: pd.DataFrame, w: Optional[np.ndarray]):
             return _build_interaction_matrix(
@@ -1445,6 +1666,112 @@ class WooldridgeDiD:
                 _cell_w = _cell_w[keep_mask.to_numpy()]
             groups = sorted(g for g in sample[cohort].unique() if g > 0)
             X_int, int_col_names, gt_keys, interaction_diagnostics = _build(sample, _cell_w)
+
+        # 1c (relocated). Identification check for cohort_trends=True (paper
+        # W2025 Section 8 / Eq. 8.1). Each cohort that RECEIVES a trend column
+        # needs at least 2 distinct pre-treatment periods (``t < g -
+        # anticipation``) for ``dg_i · t`` to be separately identified from
+        # cohort + time FE; with 1 pre-period the trend is observationally
+        # equivalent to cohort FE on that single point.
+        #
+        # Counts pre-treatment periods OBSERVED FOR THIS COHORT rather than the
+        # global panel time set -- on unbalanced panels a cohort can have one
+        # observed pre-period even when the panel has many (codex R2 P1).
+        #
+        # Runs HERE, not before the filter, for two reasons measured during
+        # review: (a) a cohort whose only observation is a to-be-filtered period
+        # would be rejected instead of filtered, making the auto-filtered fit
+        # diverge from the same frame filtered by hand; (b) on `{3,5,8}` at
+        # anticipation=2 a cohort can keep its rows but have no reference, so
+        # the guard would fire before exclusion removes it.
+        #
+        # Iterates `trend_groups`, NOT every present cohort: with no
+        # never-treated group the last cohort's trend column is deliberately
+        # dropped (the Section 5.4 normalization, see the trend block below), so
+        # demanding two pre-periods of a cohort that receives no trend column is
+        # a spurious refusal.
+        if self.cohort_trends:
+            _has_nt_trend = bool((sample[cohort] == 0).any())
+            _trend_check_groups = groups if _has_nt_trend else groups[:-1]
+            for g in _trend_check_groups:
+                cohort_pre_times = sample.loc[
+                    (sample[cohort] == g) & (sample[time] < g - self.anticipation),
+                    time,
+                ].unique()
+                n_pre_periods = len(cohort_pre_times)
+                if n_pre_periods < 2:
+                    raise ValueError(
+                        f"cohort_trends=True requires at least 2 pre-treatment "
+                        f"periods OBSERVED FOR EACH TREATED COHORT (paper W2025 "
+                        f"Section 8 / Eq. 8.1 identification). Cohort g={g} has "
+                        f"only {n_pre_periods} pre-treatment period(s) observed "
+                        f"in the analysis sample (t < g - anticipation = "
+                        f"{g - self.anticipation}); the cohort-specific linear "
+                        f"trend dg_i · t is not separately identified from "
+                        f"cohort + time fixed effects on a single point. Drop "
+                        f"cohort_trends=True or use a panel where each treated "
+                        f"cohort has at least 2 observed pre-periods."
+                    )
+
+        # Warning (b): cohorts left with NO estimated cells, and cohorts that
+        # lost every row to period filtering. Emitted after the FINAL build --
+        # the zero-cell set differs between the two builds whenever
+        # unidentified-cohort exclusion also fires, and reading the first build
+        # would double-report a cohort that already has its own exclusion
+        # warning. Not gated on `rank_deficient_action`: that governs how rank
+        # warnings surface, not whether the estimation sample changed.
+        _emitted_cohorts = {g for g, _t in gt_keys}
+        _zero_cell = [g for g in groups if g not in _emitted_cohorts]
+        _fully_dropped = [g for g in _pre_filter_groups if g not in _post_filter_groups]
+        if _zero_cell or _fully_dropped:
+            _parts = []
+            if _zero_cell:
+                _parts.append(
+                    f"Cohort(s) {', '.join(str(g) for g in _zero_cell)} have NO "
+                    "estimated cells and are excluded from `results.groups`"
+                )
+            if _fully_dropped:
+                _parts.append(
+                    f"cohort(s) {', '.join(str(g) for g in _fully_dropped)} lost "
+                    "every observation to comparison-support filtering"
+                )
+            # The Section 5.4 normalization explains exactly ONE zero-cell
+            # cohort: the LAST one, and only when no never-treated group is
+            # present. Every other zero-cell cohort has a different cause -- a
+            # cohort not treated within the observed periods is the common one
+            # -- and attributing it to a deliberate normalization would tell the
+            # user the wrong thing about their own panel (measured: cohorts
+            # {0, 3, 7} over t=1..5 warns on cohort 7, which is zero-cell only
+            # because t never reaches 7, on a panel that HAS never-treated
+            # units). Explain each cause against the cohorts it actually covers.
+            _ref_cohort = groups[-1] if groups and not bool((sample[cohort] == 0).any()) else None
+            _normalized = [g for g in _zero_cell if g == _ref_cohort]
+            _other_zero = [g for g in _zero_cell if g != _ref_cohort]
+            _why = []
+            if _normalized:
+                _why.append(
+                    f"Cohort {_normalized[0]} is the W2025 Section 5.4 reference: "
+                    "with no never-treated group the last cohort serves as the "
+                    "comparison and receives no cells of its own."
+                )
+            if _other_zero:
+                _why.append(
+                    f"Cohort(s) {', '.join(str(g) for g in _other_zero)} yielded no "
+                    "estimable cell -- typically the cohort is not treated within "
+                    "the observed periods, or each of its cells falls at a period "
+                    "with no eligible comparison group."
+                )
+            if _fully_dropped:
+                _why.append(
+                    "Cohorts that lost every observation were observed only at "
+                    "periods with no eligible comparison group."
+                )
+            warnings.warn(
+                "; ".join(_parts) + ". Their ATT(g, t) are not estimated. " + " ".join(_why),
+                UserWarning,
+                stacklevel=2,
+            )
+
         if interaction_diagnostics.skipped_unobserved and self.rank_deficient_action != "silent":
             _pairs = ", ".join(
                 f"({g}, {t})" for g, t in interaction_diagnostics.skipped_unobserved[:8]
@@ -1659,6 +1986,21 @@ class WooldridgeDiD:
                 survey_design=survey_design,
             )
 
+        # Units a RETAINED, ESTIMATED cohort lost to comparison-support
+        # filtering. Attached here rather than threaded through three fitter
+        # signatures: all three paths converge on this line, and every one of
+        # them builds `_n_g_per_cohort` from the post-filter sample. Empty
+        # whenever nothing was filtered, so the balanced all-eventually-treated
+        # deliverable -- which drops whole PERIODS and no units at all -- is
+        # untouched.
+        results._cohort_units_dropped = {
+            g: _pre_filter_unit_counts[g] - results._n_g_per_cohort[g]
+            for g in results.groups
+            if g in _pre_filter_unit_counts
+            and g in results._n_g_per_cohort
+            and _pre_filter_unit_counts[g] > results._n_g_per_cohort[g]
+        }
+
         self._results = results
         self.is_fitted_ = True
         return results
@@ -1807,13 +2149,18 @@ class WooldridgeDiD:
                 # "all variables in regression (5.3) involving dT_i get
                 # dropped" when the last cohort serves as control). Drop
                 # the LAST cohort's trend column deterministically — that
-                # cohort then acts as the trend baseline. NOTE: the
-                # matching last-cohort handling for cohort × time CELLS
-                # is NOT implemented in ``_build_interaction_matrix``, so
-                # this branch is currently unreachable end-to-end -- such
-                # panels are rank-deficient at fully-treated periods and
-                # fail the completeness gate. Kept because implementing
-                # the cell half is what restores them (TODO.md).
+                # cohort then acts as the trend baseline. The matching
+                # last-cohort handling for cohort × time CELLS is the
+                # comparison-support filter in ``fit()``, so this branch
+                # is now reachable end-to-end: the fully-treated periods
+                # are removed before the solve rather than sinking the
+                # design, and ``cohort_trend_coefs`` surfaces G-1 entries.
+                #
+                # `groups` here MUST be the PRESENT-cohort list, not the
+                # cells-derived one used for results metadata: the trend
+                # baseline is exactly the zero-cell cohort G_max, so a
+                # cells-derived list would drop the second-to-last
+                # cohort's trend column instead and shift every ATT.
                 has_never_treated = (sample[cohort] == 0).any()
                 trend_groups = groups if has_never_treated else groups[:-1]
                 trend_cols: List[np.ndarray] = []
@@ -2223,7 +2570,12 @@ class WooldridgeDiD:
         all_times = sorted(sample[time].unique().tolist())
         # Per-cohort unit counts ``N_g`` (paper Eqs. 7.4, 7.6) — needed by
         # ``aggregate(weights="cohort_share")``.
-        n_g_per_cohort = {g: int(sample[sample[cohort] == g][unit].nunique()) for g in groups}
+        # Results metadata is CELLS-derived (see `_cells_derived_groups`); the
+        # design-side `groups` above stays PRESENT-cohort.
+        result_groups = _cells_derived_groups(gt_effects)
+        n_g_per_cohort = {
+            g: int(sample[sample[cohort] == g][unit].nunique()) for g in result_groups
+        }
 
         _require_complete_cell_set(gt_keys, gt_effects)
         _require_estimable_overall_att(overall, gt_effects, self.anticipation, self.control_group)
@@ -2237,7 +2589,7 @@ class WooldridgeDiD:
             overall_conf_int=overall["conf_int"],
             method=self.method,
             control_group=self.control_group,
-            groups=groups,
+            groups=result_groups,
             time_periods=all_times,
             n_obs=len(sample),
             n_treated_units=n_treated,
@@ -2565,7 +2917,7 @@ class WooldridgeDiD:
             overall_conf_int=overall["conf_int"],
             method=self.method,
             control_group=self.control_group,
-            groups=groups,
+            groups=_cells_derived_groups(gt_effects),
             time_periods=sorted(sample[time].unique().tolist()),
             n_obs=len(sample),
             n_treated_units=int(sample[sample[cohort] > 0][unit].nunique()),
@@ -2585,7 +2937,10 @@ class WooldridgeDiD:
             cluster_name=(None if _has_survey else cluster_col),
             n_clusters=(None if _has_survey else int(np.unique(cluster_ids).size)),
             _gt_weights=gt_weights,
-            _n_g_per_cohort={g: int(sample[sample[cohort] == g][unit].nunique()) for g in groups},
+            _n_g_per_cohort={
+                g: int(sample[sample[cohort] == g][unit].nunique())
+                for g in _cells_derived_groups(gt_effects)
+            },
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
             _df_survey=df_inf,
@@ -2821,7 +3176,7 @@ class WooldridgeDiD:
             overall_conf_int=overall["conf_int"],
             method=self.method,
             control_group=self.control_group,
-            groups=groups,
+            groups=_cells_derived_groups(gt_effects),
             time_periods=sorted(sample[time].unique().tolist()),
             n_obs=len(sample),
             n_treated_units=int(sample[sample[cohort] > 0][unit].nunique()),
@@ -2839,7 +3194,10 @@ class WooldridgeDiD:
             cluster_name=(None if _has_survey else cluster_col),
             n_clusters=(None if _has_survey else int(np.unique(cluster_ids).size)),
             _gt_weights=gt_weights,
-            _n_g_per_cohort={g: int(sample[sample[cohort] == g][unit].nunique()) for g in groups},
+            _n_g_per_cohort={
+                g: int(sample[sample[cohort] == g][unit].nunique())
+                for g in _cells_derived_groups(gt_effects)
+            },
             _gt_vcov=gt_vcov,
             _gt_keys=gt_keys_ordered,
             _df_survey=df_inf,
