@@ -394,7 +394,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   event-study surface) and M-093 (4.0 sentinel retirement, phase 5) are added.
   **Estimator equations, weighting, variance, and numerical output are unchanged.**
 
+### Fixed
+- **Legacy dataset loaders no longer silently present synthetic observations as
+  canonical data.** `load_card_krueger()`, `load_castle_doctrine()`, and
+  `load_mpdta()` now use commit-pinned, SHA-256-verified sources with schema and
+  panel-invariant validation; successful frames expose a dataset-specific
+  `df.attrs["source"]`. When neither a verified cache entry nor a verified fresh
+  download is available, the loader emits exactly one `UserWarning` containing
+  `SYNTHETIC` and marks the frame `source="synthetic_fallback"`. Every way a fresh
+  download can fail verification - transport error, size limit, or checksum
+  mismatch - falls back to a checksum-valid cache entry when one exists, including
+  under `force_download=True`, so a tampered or moved upstream can never downgrade
+  a user holding verified canonical bytes to generated data. A checksum mismatch
+  additionally warns that the upstream no longer matches the pin (a distinct
+  warning that deliberately does not contain `SYNTHETIC`, since no synthetic data
+  is involved). `load_divorce_laws()` now follows that explicit
+  fallback path because no verified source currently reproduces its composite
+  public schema without additional analytical choices. Verified fresh downloads
+  are returned even when best-effort cache persistence fails.
+
 ### Changed
+- **Castle Doctrine now exposes first-year treatment intensity.** The loader
+  retains the source's fractional adoption-year `cdl` value as
+  `treatment_exposure`, while preserving the existing binary `treated` field.
+  Canonical frames carry the fractional value; synthetic fallback frames carry a
+  binary 0/1 copy of `treated`. Reproducing Cheng-Hoekstra requires regressing
+  `log(homicide_rate)` on `treatment_exposure`, not on `treated` - see
+  `docs/methodology/REGISTRY.md`.
+
+- **`load_card_krueger()` returns the canonical 410-store survey, which is
+  incomplete.** 12 stores have no `emp_pre`, 14 no `emp_post`, and `wage_pre` /
+  `wage_post` are missing for 20 and 21 stores. The synthetic frame this loader
+  previously returned was complete, so code that reshapes to long format and
+  fits without dropping missing outcomes estimated fine before and now raises
+  `ValueError: Column '<outcome>' contains missing values`. Drop the missing
+  outcome rows before fitting; the loader docstring and
+  `docs/api/datasets.rst` examples show the pattern. Note that the same code
+  still succeeds offline, where the loader falls back to the complete synthetic
+  frame.
+
 - **dCDH Phase 1 (`L_max=None`) event-study row is now re-synced by the final-df
   refresh.** Under replicate-weight designs the refresh recomputes `overall_*` with the
   final effective df, but the Phase 1 event-study row is a VALUE COPY of that inference

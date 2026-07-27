@@ -1,12 +1,29 @@
 Datasets
 ========
 
-Built-in real-world datasets from published studies for examples, tutorials, and testing.
+Built-in datasets from published studies for examples, tutorials, and testing.
 
-All datasets are downloaded from public sources on first use and cached locally
-at ``~/.cache/diff_diff/datasets/``. Pass ``force_download=True`` to any loader
-to refresh the cache. If the download fails and a cached copy exists, the cached
-version is used automatically.
+Canonical data are downloaded from public sources and verified against a pinned SHA-256
+on every download and cache read, then cached locally at
+``~/.cache/diff_diff/datasets/``. Pass ``force_download=True`` to any loader to refresh
+the cache. ``load_card_krueger()``, ``load_castle_doctrine()`` and ``load_mpdta()`` pin an
+immutable upstream commit, so the URL itself cannot change under them;
+``load_prop99()`` and ``load_walmart()`` read a mutable SSC path over plain HTTP, where
+the checksum alone establishes integrity.
+
+Every loader reports its provenance through ``df.attrs["source"]``. A fresh download that
+fails verification - transport error, size limit, or checksum mismatch - falls back to a
+checksum-valid cache entry when one exists, so canonical data is never downgraded to
+generated data while verified bytes are on disk. A checksum mismatch additionally emits a
+``UserWarning`` naming the integrity failure, since it means the upstream file no longer
+matches the pin. When no verified copy is available at all, the loader emits one
+``UserWarning`` containing ``SYNTHETIC`` and returns a generated fallback frame marked
+``df.attrs["source"] == "synthetic_fallback"``. For
+``load_card_krueger()``, ``load_castle_doctrine()`` and ``load_mpdta()`` that fallback
+also covers parse and schema-validation failures; ``load_prop99()`` and ``load_walmart()``
+run their validation outside the fallback boundary and raise instead. Numbers computed on
+a fallback frame are not replications of the published study. ``load_divorce_laws()`` has
+no verified source configured and returns synthetic data on every call.
 
 Dataset Loaders
 ---------------
@@ -37,6 +54,10 @@ Example
        var_name='period', value_name='employment'
    )
    ck_long['post'] = (ck_long['period'] == 'emp_post').astype(int)
+
+   # 26 store-waves have no employment reading in the source survey; estimators
+   # reject missing outcomes rather than dropping them silently
+   ck_long = ck_long.dropna(subset=['employment'])
 
    did = DifferenceInDifferences()
    results = did.fit(ck_long, outcome='employment', treatment='treated', time='post')
@@ -71,9 +92,11 @@ Example
 load_divorce_laws
 ~~~~~~~~~~~~~~~~~
 
-Unilateral (no-fault) divorce law reforms. Staggered adoption across U.S.
-states (1968--1988) from Stevenson & Wolfers (2006), with outcomes for divorce
-rate, female labor force participation, and female suicide rate.
+Always-synthetic teaching panel of unilateral (no-fault) divorce law reforms,
+modelled on the staggered adoption studied by Stevenson & Wolfers (2006), with
+outcomes for divorce rate, female labor force participation, and female suicide
+rate. No verified source is configured for this loader, so it warns and returns
+generated data on every call and is not suitable for replication.
 
 .. autofunction:: diff_diff.load_divorce_laws
 
@@ -98,9 +121,9 @@ Example
 load_mpdta
 ~~~~~~~~~~
 
-Minimum wage panel data for training (Callaway & Sant'Anna 2021). Simulated
-county-level employment data with staggered minimum wage increases (2003--2007),
-from the R ``did`` package.
+County teen-employment panel (Callaway & Sant'Anna 2021): the canonical
+2,500-row ``mpdta`` dataset distributed with the R ``did`` package, covering
+staggered minimum wage increases (2003--2007).
 
 .. autofunction:: diff_diff.load_mpdta
 

@@ -5,6 +5,7 @@ These tests verify that the dataset loading functions work correctly,
 including both the download/cache mechanism and the fallback data generation.
 """
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -21,7 +22,10 @@ from diff_diff.datasets import (
     clear_cache,
     list_datasets,
     load_card_krueger,
+    load_castle_doctrine,
     load_dataset,
+    load_divorce_laws,
+    load_mpdta,
     load_prop99,
     load_walmart,
 )
@@ -55,6 +59,11 @@ class TestListDatasets:
             assert isinstance(desc, str)
             assert len(desc) > 0
 
+    def test_divorce_laws_catalogue_marks_synthetic_only(self):
+        """Discovery metadata should not imply divorce_laws is canonical data."""
+        result = list_datasets()
+        assert "synthetic fallback only" in result["divorce_laws"]
+
 
 class TestLoadDataset:
     """Tests for load_dataset function."""
@@ -63,8 +72,11 @@ class TestLoadDataset:
         """load_dataset should load datasets by name."""
         # Use fallback data to avoid network dependency
         with patch("diff_diff.datasets._download_with_cache") as mock:
-            mock.side_effect = RuntimeError("No network")
-            df = load_dataset("card_krueger")
+            from diff_diff.datasets import _DatasetSourceError
+
+            mock.side_effect = _DatasetSourceError("No network")
+            with pytest.warns(UserWarning, match="SYNTHETIC"):
+                df = load_dataset("card_krueger")
             assert isinstance(df, pd.DataFrame)
 
     def test_load_by_name_binary(self):
@@ -125,9 +137,13 @@ class TestCardKrueger:
     def test_load_uses_fallback_on_network_error(self):
         """load_card_krueger should use fallback when network fails."""
         with patch("diff_diff.datasets._download_with_cache") as mock:
-            mock.side_effect = RuntimeError("Network error")
-            df = load_card_krueger()
+            from diff_diff.datasets import _DatasetSourceError
+
+            mock.side_effect = _DatasetSourceError("Network error")
+            with pytest.warns(UserWarning, match="SYNTHETIC"):
+                df = load_card_krueger()
             assert isinstance(df, pd.DataFrame)
+            assert df.attrs["source"] == "synthetic_fallback"
             assert "treated" in df.columns
 
 
@@ -240,6 +256,648 @@ class TestMPDTA:
         # 500 counties * 5 years = 2500 rows
         assert len(df) == 2500
         assert df["countyreal"].nunique() == 500
+
+
+class TestLegacyLoaderProvenance:
+    """Legacy loaders must never silently present synthetic data as canonical."""
+
+    LOADERS = (
+        (
+            load_card_krueger,
+            _construct_card_krueger_data,
+            "_load_card_krueger_source",
+            "card_krueger_public_data",
+        ),
+        (
+            load_castle_doctrine,
+            _construct_castle_doctrine_data,
+            "_load_castle_doctrine_source",
+            "cheng_hoekstra_castle_data",
+        ),
+        (
+            load_divorce_laws,
+            _construct_divorce_laws_data,
+            None,
+            None,
+        ),
+        (
+            load_mpdta,
+            _construct_mpdta_data,
+            "_load_mpdta_source",
+            "callaway_santanna_mpdta",
+        ),
+    )
+
+    @staticmethod
+    def _valid_card_source_frame():
+        n = 410
+        df = pd.DataFrame(
+            {
+                "store_id": np.arange(1, n + 1),
+                "state": ["NJ"] * 331 + ["PA"] * 79,
+                "chain": np.resize(["bk", "kfc", "roys", "wendys"], n),
+                "emp_pre": np.full(n, 20.0),
+                "emp_post": np.full(n, 21.0),
+                "wage_pre": np.full(n, 4.5),
+                "wage_post": np.full(n, 5.0),
+            }
+        )
+        df.loc[:11, "emp_pre"] = np.nan
+        df.loc[12:25, "emp_post"] = np.nan
+        df.loc[:19, "wage_pre"] = np.nan
+        df.loc[20:40, "wage_post"] = np.nan
+        df["treated"] = (df["state"] == "NJ").astype(int)
+        df["emp_change"] = df["emp_post"] - df["emp_pre"]
+        return df
+
+    @staticmethod
+    def _valid_castle_source_frame():
+        import diff_diff.datasets as datasets_mod
+
+        states = [code for code in datasets_mod._CASTLE_STATE_BY_SID.values() if code != "_"]
+        cohorts = dict(zip(states[:5], [2005, 2006, 2007, 2008, 2009]))
+        rows = []
+        for state in states:
+            first_treat = cohorts.get(state, 0)
+            for year in range(2000, 2011):
+                rows.append(
+                    {
+                        "state": state,
+                        "year": year,
+                        "first_treat": first_treat,
+                        "homicide_rate": 5.0,
+                        "population": 1_000_000,
+                        "income": 40_000,
+                        "treated": int(first_treat > 0 and year >= first_treat),
+                        "treatment_exposure": float(first_treat > 0 and year >= first_treat),
+                        "cohort": first_treat,
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    @pytest.mark.parametrize(("loader", "fallback", "source_loader", "_source"), LOADERS)
+    def test_network_failure_warns_and_marks_synthetic_fallback(
+        self, loader, fallback, source_loader, _source, monkeypatch
+    ):
+        import diff_diff.datasets as datasets_mod
+
+        if source_loader is not None:
+            monkeypatch.setattr(
+                datasets_mod,
+                source_loader,
+                MagicMock(side_effect=datasets_mod._DatasetSourceError("Network error")),
+            )
+        with pytest.warns(UserWarning, match="SYNTHETIC") as caught:
+            result = loader()
+
+        assert len(caught) == 1
+        assert caught[0].filename.endswith("test_datasets.py")
+        assert result.attrs["source"] == "synthetic_fallback"
+        assert result.shape == fallback().shape
+
+    @pytest.mark.parametrize(("loader", "fallback", "source_loader", "_source"), LOADERS)
+    def test_malformed_download_warns_and_uses_marked_fallback(
+        self, loader, fallback, source_loader, _source, monkeypatch
+    ):
+        import diff_diff.datasets as datasets_mod
+
+        if source_loader is not None:
+            monkeypatch.setattr(
+                datasets_mod,
+                source_loader,
+                lambda _force_download: pd.DataFrame({"bad": [1]}),
+            )
+        with pytest.warns(UserWarning, match="SYNTHETIC") as caught:
+            result = loader()
+
+        assert len(caught) == 1
+        assert result.attrs["source"] == "synthetic_fallback"
+        assert result.shape == fallback().shape
+
+    @pytest.mark.parametrize(
+        ("loader", "fallback", "source_loader", "source"),
+        [case for case in LOADERS if case[2] is not None],
+    )
+    def test_verified_download_is_marked_with_source(
+        self, loader, fallback, source_loader, source, monkeypatch
+    ):
+        import diff_diff.datasets as datasets_mod
+
+        valid_frame = {
+            load_card_krueger: self._valid_card_source_frame,
+            load_castle_doctrine: self._valid_castle_source_frame,
+            load_mpdta: _construct_mpdta_data,
+        }[loader]()
+        monkeypatch.setattr(
+            datasets_mod,
+            source_loader,
+            lambda _force_download: valid_frame,
+        )
+        result = loader()
+
+        assert result.attrs["source"] == source
+
+    def test_verified_download_survives_cache_write_failure(self, tmp_path, monkeypatch):
+        """A verified mpdta download should be returned even if caching fails."""
+        import hashlib
+
+        import diff_diff.datasets as datasets_mod
+
+        content = _construct_mpdta_data().to_csv(index=False).encode("utf-8")
+        sha256 = hashlib.sha256(content).hexdigest()
+        fake_response = MagicMock()
+        fake_response.read.return_value = content
+        fake_response.__enter__ = lambda self: self
+        fake_response.__exit__ = lambda self, *a: False
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(datasets_mod, "_MPDTA_SOURCE_SHA256", sha256)
+        with (
+            patch("diff_diff.datasets.urlopen", return_value=fake_response),
+            patch("diff_diff.datasets.os.replace", side_effect=OSError("disk full")),
+        ):
+            result = load_mpdta(force_download=True)
+
+        assert result.attrs["source"] == "callaway_santanna_mpdta"
+        assert result.shape == _construct_mpdta_data().shape
+        assert not (tmp_path / "mpdta.csv").exists()
+
+    def test_verified_download_survives_unwritable_cache_directory(self, tmp_path, monkeypatch):
+        """A cache-directory failure must not discard verified download bytes."""
+        import hashlib
+
+        import diff_diff.datasets as datasets_mod
+
+        content = _construct_mpdta_data().to_csv(index=False).encode("utf-8")
+        cache_dir = tmp_path / "unwritable-cache"
+        sha256 = hashlib.sha256(content).hexdigest()
+        fake_response = MagicMock()
+        fake_response.read.return_value = content
+        fake_response.__enter__ = lambda self: self
+        fake_response.__exit__ = lambda self, *a: False
+        original_mkdir = Path.mkdir
+
+        def deny_cache_directory(path, *args, **kwargs):
+            if path == cache_dir:
+                raise PermissionError("read-only cache directory")
+            return original_mkdir(path, *args, **kwargs)
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", cache_dir)
+        monkeypatch.setattr(datasets_mod, "_MPDTA_SOURCE_SHA256", sha256)
+        monkeypatch.setattr(Path, "mkdir", deny_cache_directory)
+        with patch("diff_diff.datasets.urlopen", return_value=fake_response):
+            result = load_mpdta(force_download=True)
+
+        assert result.attrs["source"] == "callaway_santanna_mpdta"
+        assert result.shape == _construct_mpdta_data().shape
+        assert not cache_dir.exists()
+
+    def test_incomplete_download_warns_and_uses_marked_fallback(self, tmp_path, monkeypatch):
+        """Truncated responses must follow the same explicit fallback path."""
+        from http.client import IncompleteRead
+
+        import diff_diff.datasets as datasets_mod
+
+        fake_response = MagicMock()
+        fake_response.read.side_effect = IncompleteRead(b"partial", 100)
+        fake_response.__enter__ = lambda self: self
+        fake_response.__exit__ = lambda self, *a: False
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+        with patch("diff_diff.datasets.urlopen", return_value=fake_response):
+            with pytest.warns(UserWarning, match="SYNTHETIC"):
+                result = load_mpdta(force_download=True)
+
+        assert result.attrs["source"] == "synthetic_fallback"
+
+    def test_protocol_level_http_errors_warn_and_use_marked_fallback(self, tmp_path, monkeypatch):
+        """Every ``HTTPException``, not just ``IncompleteRead``, stays inside the boundary.
+
+        ``BadStatusLine`` and its siblings derive from ``HTTPException`` rather than
+        ``OSError``, so naming individual subclasses in the handler would let the rest
+        escape the documented warn-and-fall-back contract.
+        """
+        from http.client import BadStatusLine, LineTooLong
+
+        import diff_diff.datasets as datasets_mod
+
+        for exc in (BadStatusLine("garbage status"), LineTooLong("header line")):
+            fake_response = MagicMock()
+            fake_response.read.side_effect = exc
+            fake_response.__enter__ = lambda self: self
+            fake_response.__exit__ = lambda self, *a: False
+
+            monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path / type(exc).__name__)
+            with patch("diff_diff.datasets.urlopen", return_value=fake_response):
+                with pytest.warns(UserWarning, match="SYNTHETIC"):
+                    result = load_mpdta(force_download=True)
+
+            assert result.attrs["source"] == "synthetic_fallback"
+            assert result.shape == _construct_mpdta_data().shape
+
+    def test_production_mpdta_bytes_load_end_to_end_offline(self, tmp_path, monkeypatch):
+        """Drive the real pinned bytes through the whole loader, with no network.
+
+        Every other canonical test substitutes an already-normalized fabricated frame,
+        so the actual parse of the production file - column naming, ``first.treat``
+        renaming, dtype handling - is only ever exercised by a live download. The
+        canonical bytes are already committed for the benchmarks, and their digest is
+        the pin, so the full path can be covered offline for free.
+
+        Doubles as a guard on the pin itself: re-pinning to a revision that does not
+        match the committed fixture fails here rather than silently at runtime.
+        """
+        import hashlib
+        import warnings
+
+        import diff_diff.datasets as datasets_mod
+
+        fixture = Path(__file__).resolve().parent.parent / "benchmarks/data/real/mpdta.csv"
+        if not fixture.exists():
+            pytest.skip(f"{fixture.name} not committed (partial checkout)")
+
+        payload = fixture.read_bytes()
+        assert (
+            hashlib.sha256(payload).hexdigest() == datasets_mod._MPDTA_SOURCE_SHA256
+        ), "pinned mpdta digest no longer matches the committed canonical fixture"
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+        response = MagicMock()
+        response.__enter__ = lambda self: self
+        response.__exit__ = lambda self, *a: False
+        response.read.return_value = payload
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with patch("diff_diff.datasets.urlopen", return_value=response):
+                df = load_mpdta(force_download=True)
+
+        assert not caught, "production bytes must load without warning"
+        assert df.attrs["source"] == "callaway_santanna_mpdta"
+        # Anchors from the R `did` package's documented panel.
+        assert df.shape == (2500, 7)
+        assert df["countyreal"].nunique() == 500
+        assert set(df["year"]) == {2003, 2004, 2005, 2006, 2007}
+        assert set(df["first_treat"]) == {0, 2004, 2006, 2007}
+        assert (df["cohort"] == df["first_treat"]).all()
+        assert (df["treat"] == (df["first_treat"] > 0).astype(int)).all()
+        assert df.notna().all().all()
+
+    @pytest.mark.parametrize(
+        "failure",
+        ["transport", "checksum", "oversized"],
+    )
+    def test_verified_cache_survives_every_fresh_download_failure(
+        self, failure, tmp_path, monkeypatch
+    ):
+        """Canonical cached bytes must never be downgraded to the synthetic fallback.
+
+        The transport path already recovered from cache, but the size-limit and
+        checksum paths raised straight through, so a tampered or moved upstream
+        replaced verified real data with generated data for every user holding a
+        valid cache. A checksum mismatch additionally warns, since that is an
+        integrity event rather than a transport hiccup.
+        """
+        import hashlib
+        import warnings
+
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+        source = _construct_mpdta_data().rename(columns={"first_treat": "first.treat"})
+        payload = (
+            source[["year", "countyreal", "lpop", "lemp", "first.treat", "treat"]]
+            .to_csv(index=False)
+            .encode()
+        )
+        monkeypatch.setattr(
+            datasets_mod, "_MPDTA_SOURCE_SHA256", hashlib.sha256(payload).hexdigest()
+        )
+        # Binary write: text mode would translate newlines on Windows, so the bytes
+        # on disk would not match the digest the loader verifies them against.
+        (tmp_path / "mpdta.csv").write_bytes(payload)
+
+        response = MagicMock()
+        response.__enter__ = lambda self: self
+        response.__exit__ = lambda self, *a: False
+        if failure == "transport":
+            response.read.side_effect = TimeoutError("network down")
+        elif failure == "checksum":
+            response.read.return_value = b"upstream was tampered with"
+        else:
+            response.read.return_value = b"x" * (datasets_mod._MAX_DATASET_BYTES + 1)
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with patch("diff_diff.datasets.urlopen", return_value=response):
+                result = load_mpdta(force_download=True)
+
+        assert result.attrs["source"] == "callaway_santanna_mpdta"
+        assert not [w for w in caught if "SYNTHETIC" in str(w.message)]
+
+        integrity = [w for w in caught if "no longer matches the pinned" in str(w.message)]
+        if failure == "checksum":
+            assert len(integrity) == 1, "a pin mismatch must not pass unnoticed"
+            assert "diff_diff" not in integrity[0].filename, "warning must blame the caller"
+        else:
+            assert not integrity
+
+    def test_tampered_upstream_without_cache_still_falls_back_to_synthetic(
+        self, tmp_path, monkeypatch
+    ):
+        """With no cache to recover, a pin mismatch must still take the SYNTHETIC path."""
+        import warnings
+
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+        response = MagicMock()
+        response.__enter__ = lambda self: self
+        response.__exit__ = lambda self, *a: False
+        response.read.return_value = b"upstream was tampered with"
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with patch("diff_diff.datasets.urlopen", return_value=response):
+                result = load_mpdta(force_download=True)
+
+        assert result.attrs["source"] == "synthetic_fallback"
+        assert len([w for w in caught if "SYNTHETIC" in str(w.message)]) == 1
+
+    def test_clear_cache_removes_interrupted_atomic_write_scratch_files(
+        self, tmp_path, monkeypatch
+    ):
+        """``clear_cache()`` must clear the hidden scratch files atomic writes can strand.
+
+        ``_write_cache_atomically`` creates ``.<name>.<ext>.<suffix>`` next to the entry.
+        A hard kill between creation and ``os.replace`` leaves one behind, and it matches
+        neither ``*.csv`` nor ``*.dta``, so it would otherwise survive the one remedy the
+        docs offer and accumulate across runs.
+        """
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+        (tmp_path / "mpdta.csv").write_text("cached")
+        (tmp_path / "prop99.dta").write_bytes(b"cached")
+        (tmp_path / ".mpdta.csv.ab12cd34").write_bytes(b"orphaned")
+        (tmp_path / ".prop99.dta.ef56gh78").write_bytes(b"orphaned")
+        keep = tmp_path / "notes.txt"
+        keep.write_text("unrelated file must survive")
+
+        datasets_mod.clear_cache()
+
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["notes.txt"]
+        assert keep.read_text() == "unrelated file must survive"
+
+    def test_clear_cache_tolerates_missing_cache_directory(self, tmp_path, monkeypatch):
+        """The cache directory is only created on write, so clearing must not require it."""
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path / "never-created")
+        datasets_mod.clear_cache()  # must not raise
+
+    def test_verified_cache_recovers_canonical_data_on_download_failure(
+        self, tmp_path, monkeypatch
+    ):
+        """A dead network with a checksum-valid cache returns canonical data, silently.
+
+        This is the one failure path that must NOT warn or fall back: the cached bytes
+        already passed the pinned SHA-256, so they are the canonical data. It holds even
+        under ``force_download=True``, which bypasses the cache on the way in but still
+        falls back to it when the download fails.
+        """
+        import hashlib
+        import warnings
+
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+
+        source_csv = _construct_mpdta_data().rename(columns={"first_treat": "first.treat"})
+        payload = (
+            source_csv[["year", "countyreal", "lpop", "lemp", "first.treat", "treat"]]
+            .to_csv(index=False)
+            .encode()
+        )
+        digest = hashlib.sha256(payload).hexdigest()
+        monkeypatch.setattr(datasets_mod, "_MPDTA_SOURCE_SHA256", digest)
+        # Binary write: text mode would translate newlines on Windows, so the bytes
+        # on disk would not match the digest the loader verifies them against.
+        (tmp_path / "mpdta.csv").write_bytes(payload)
+
+        for force in (False, True):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                with patch("diff_diff.datasets.urlopen", side_effect=TimeoutError("network down")):
+                    result = load_mpdta(force_download=force)
+
+            assert result.attrs["source"] == "callaway_santanna_mpdta", f"force={force}"
+            assert not [w for w in caught if "SYNTHETIC" in str(w.message)], f"force={force}"
+
+    def test_documented_card_workflow_runs_on_canonical_frame(self):
+        """The docstring/API example must survive the canonical data's missing outcomes.
+
+        The real Card-Krueger survey is incomplete (12 missing ``emp_pre``, 14 missing
+        ``emp_post``), while the synthetic fallback is complete. Without the documented
+        ``dropna``, the published workflow estimates fine offline and raises as soon as
+        the canonical source becomes reachable.
+        """
+        from diff_diff import DifferenceInDifferences
+
+        ck = self._valid_card_source_frame()
+        assert ck["emp_pre"].isna().sum() == 12
+        assert ck["emp_post"].isna().sum() == 14
+
+        ck_long = ck.melt(
+            id_vars=["store_id", "state", "treated"],
+            value_vars=["emp_pre", "emp_post"],
+            var_name="period",
+            value_name="employment",
+        )
+        ck_long["post"] = (ck_long["period"] == "emp_post").astype(int)
+
+        # Without the documented dropna the estimator rejects the frame outright.
+        with pytest.raises(ValueError, match="missing values"):
+            DifferenceInDifferences().fit(
+                ck_long, outcome="employment", treatment="treated", time="post"
+            )
+
+        ck_long = ck_long.dropna(subset=["employment"])
+        results = DifferenceInDifferences().fit(
+            ck_long, outcome="employment", treatment="treated", time="post"
+        )
+        assert np.isfinite(results.att)
+        assert np.isfinite(results.se)
+
+    def test_failed_cache_write_leaves_no_partial_file(self, tmp_path, monkeypatch):
+        """A write that fails mid-flight must not strand a ``delete=False`` temp file."""
+        import diff_diff.datasets as datasets_mod
+
+        real_ntf = datasets_mod.NamedTemporaryFile
+
+        class FailingWrite:
+            """Create the temp file for real, then fail the write (e.g. ENOSPC)."""
+
+            def __init__(self, *args, **kwargs):
+                self._f = real_ntf(*args, **kwargs)
+
+            def __enter__(self):
+                self._f.__enter__()
+                return self
+
+            def __exit__(self, *args):
+                return self._f.__exit__(*args)
+
+            @property
+            def name(self):
+                return self._f.name
+
+            def write(self, data):
+                raise OSError(28, "No space left on device")
+
+        cache_path = tmp_path / "mpdta.csv"
+        monkeypatch.setattr(datasets_mod, "NamedTemporaryFile", FailingWrite)
+
+        with pytest.raises(datasets_mod._DatasetSourceError, match="Failed to cache"):
+            datasets_mod._write_cache_atomically(cache_path, b"x" * 100, "mpdta")
+
+        assert list(tmp_path.iterdir()) == [], "partial cache file was not cleaned up"
+
+    def test_source_specific_dimensions_are_enforced(self):
+        """Synthetic frames cannot pass as Card or Castle canonical data."""
+        from diff_diff.datasets import (
+            _validate_card_krueger_source,
+            _validate_castle_doctrine_source,
+        )
+
+        with pytest.raises(RuntimeError, match="410 stores"):
+            _validate_card_krueger_source(_construct_card_krueger_data())
+        with pytest.raises(RuntimeError, match="50 states and 550 rows"):
+            _validate_castle_doctrine_source(_construct_castle_doctrine_data())
+
+    def test_card_source_transform_uses_fte_and_stable_duplicate_ids(self):
+        """The public flat-file projection follows the published FTE formula."""
+        from diff_diff.datasets import _prepare_card_krueger
+
+        raw = pd.DataFrame(
+            {
+                "sheet": [407, 407],
+                "state": [0, 1],
+                "chain": [2, 4],
+                "empft": [2.0, 5.0],
+                "emppt": [10.0, 8.0],
+                "nmgrs": [1.0, 2.0],
+                "wage_st": [4.75, 5.75],
+                "empft2": [1.0, 8.0],
+                "emppt2": [12.0, 6.0],
+                "nmgrs2": [2.0, 2.0],
+                "wage_st2": [4.25, 5.50],
+            }
+        )
+
+        result = _prepare_card_krueger(raw)
+
+        assert result["store_id"].tolist() == [407, 408]
+        assert result["state"].tolist() == ["PA", "NJ"]
+        assert result["chain"].tolist() == ["kfc", "wendys"]
+        assert result["emp_pre"].tolist() == [8.0, 11.0]
+        assert result["emp_post"].tolist() == [9.0, 13.0]
+
+    def test_castle_source_transform_preserves_fractional_cdl_exposure(self):
+        """The binary treatment flag and fractional source exposure are distinct."""
+        from diff_diff.datasets import _prepare_castle_doctrine
+
+        raw = pd.DataFrame(
+            {
+                "state": ["Alabama", "Alabama"],
+                "sid": [1, 1],
+                "year": [2005, 2006],
+                "effyear": [2006.0, 2006.0],
+                "cdl": [0.0, 0.580822],
+                "homicide": [7.0, 7.5],
+                "population": [4_300_000, 4_350_000],
+                "income": [44_000, 45_000],
+            }
+        )
+
+        result = _prepare_castle_doctrine(raw)
+
+        assert result["state"].tolist() == ["AL", "AL"]
+        assert result["treated"].tolist() == [0, 1]
+        assert result["treatment_exposure"].tolist() == [0.0, 0.580822]
+        assert result["first_treat"].tolist() == [2006, 2006]
+
+    def test_castle_adoption_year_has_binary_treatment_and_partial_exposure(self):
+        """Real-source adoption rows retain their partial first-year exposure."""
+        from diff_diff.datasets import _prepare_castle_doctrine
+
+        raw = pd.DataFrame(
+            {
+                "sid": [1] * 11,
+                "year": list(range(2000, 2011)),
+                "effyear": [2006.0] * 11,
+                "cdl": [0.0] * 6 + [0.580822] + [1.0] * 4,
+                "homicide": [7.0] * 11,
+                "population": [4_300_000] * 11,
+                "income": [44_000] * 11,
+            }
+        )
+        result = _prepare_castle_doctrine(raw)
+        adoption_year = result.loc[result["year"] == 2006].iloc[0]
+
+        assert adoption_year["treated"] == 1
+        assert 0 < adoption_year["treatment_exposure"] < 1
+
+    def test_card_source_rejects_unknown_chain_code(self):
+        from diff_diff.datasets import _DatasetSourceError, _prepare_card_krueger
+
+        raw = pd.DataFrame(
+            {
+                "sheet": [407, 407],
+                "state": [0, 1],
+                "chain": [2, 99],
+                "empft": [2.0, 5.0],
+                "emppt": [10.0, 8.0],
+                "nmgrs": [1.0, 2.0],
+                "wage_st": [4.75, 5.75],
+                "empft2": [1.0, 8.0],
+                "emppt2": [12.0, 6.0],
+                "nmgrs2": [2.0, 2.0],
+                "wage_st2": [4.25, 5.50],
+            }
+        )
+
+        with pytest.raises(_DatasetSourceError, match="unknown chain"):
+            _prepare_card_krueger(raw)
+
+    def test_semantically_invalid_source_values_are_rejected(self):
+        from diff_diff.datasets import (
+            _DatasetSourceError,
+            _validate_card_krueger_source,
+            _validate_castle_doctrine_source,
+            _validate_mpdta,
+        )
+
+        card = self._valid_card_source_frame()
+        card.loc[100, "emp_change"] += 1
+        with pytest.raises(_DatasetSourceError, match="emp_change"):
+            _validate_card_krueger_source(card)
+
+        card = self._valid_card_source_frame()
+        card.loc[100, "emp_pre"] = np.inf
+        card.loc[100, "emp_change"] = card.loc[100, "emp_post"] - np.inf
+        with pytest.raises(_DatasetSourceError, match="emp_pre"):
+            _validate_card_krueger_source(card)
+
+        castle = self._valid_castle_source_frame()
+        castle.loc[0, "homicide_rate"] = -1
+        with pytest.raises(_DatasetSourceError, match="invalid outcome"):
+            _validate_castle_doctrine_source(castle)
+
+        mpdta = _construct_mpdta_data()
+        mpdta["lemp"] = np.nan
+        with pytest.raises(_DatasetSourceError, match="missing required"):
+            _validate_mpdta(mpdta)
 
 
 class TestProp99:
@@ -514,12 +1172,136 @@ class TestBinaryDownloadIntegrity:
         assert (tmp_path / "x.dta").read_bytes() == good
 
 
+class TestCsvDownloadIntegrity:
+    """CSV downloads receive the same trust-on-bytes contract as binary data."""
+
+    def test_checksum_mismatch_raises_without_caching(self, tmp_path, monkeypatch):
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+
+        fake_response = MagicMock()
+        fake_response.read.return_value = b"tampered bytes"
+        fake_response.__enter__ = lambda self: self
+        fake_response.__exit__ = lambda self, *a: False
+
+        with patch("diff_diff.datasets.urlopen", return_value=fake_response):
+            with pytest.raises(RuntimeError, match="Checksum mismatch"):
+                datasets_mod._download_with_cache(
+                    "https://example.invalid/x.csv",
+                    "x",
+                    sha256="0" * 64,
+                )
+
+        assert not (tmp_path / "x.csv").exists()
+
+    def test_stale_cache_triggers_verified_redownload(self, tmp_path, monkeypatch):
+        import hashlib
+
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+        good = b"a,b\n1,2\n"
+        good_sha = hashlib.sha256(good).hexdigest()
+        (tmp_path / "x.csv").write_bytes(b"stale bytes")
+
+        fake_response = MagicMock()
+        fake_response.read.return_value = good
+        fake_response.__enter__ = lambda self: self
+        fake_response.__exit__ = lambda self, *a: False
+
+        with patch("diff_diff.datasets.urlopen", return_value=fake_response):
+            content = datasets_mod._download_with_cache(
+                "https://example.invalid/x.csv",
+                "x",
+                sha256=good_sha,
+            )
+
+        assert content == good.decode("utf-8")
+        assert (tmp_path / "x.csv").read_bytes() == good
+
+    def test_oversized_response_is_rejected_without_caching(self, tmp_path, monkeypatch):
+        """A source cannot bypass checksum handling with an unbounded response."""
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(datasets_mod, "_MAX_DATASET_BYTES", 4)
+        fake_response = MagicMock()
+        fake_response.read.return_value = b"12345"
+        fake_response.__enter__ = lambda self: self
+        fake_response.__exit__ = lambda self, *a: False
+
+        with patch("diff_diff.datasets.urlopen", return_value=fake_response):
+            with pytest.raises(RuntimeError, match="safety limit"):
+                datasets_mod._download_with_cache(
+                    "https://example.invalid/x.csv",
+                    "x",
+                    sha256="0" * 64,
+                )
+
+        assert not (tmp_path / "x.csv").exists()
+
+    def test_oversized_cache_is_not_read(self, tmp_path, monkeypatch):
+        """An oversized local cache cannot bypass the response-size limit."""
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(datasets_mod, "_MAX_DATASET_BYTES", 4)
+        (tmp_path / "x.csv").write_bytes(b"12345")
+
+        with patch("diff_diff.datasets.urlopen", side_effect=TimeoutError("offline")):
+            with pytest.raises(datasets_mod._DatasetSourceError, match="Failed to download"):
+                datasets_mod._download_with_cache(
+                    "https://example.invalid/x.csv",
+                    "x",
+                    sha256="0" * 64,
+                )
+
+    def test_failed_atomic_replace_returns_verified_download(self, tmp_path, monkeypatch):
+        """An interrupted replacement must not discard verified fresh bytes."""
+        import hashlib
+
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path)
+        good = b"a,b\n1,2\n"
+        good_sha = hashlib.sha256(good).hexdigest()
+        cache_path = tmp_path / "x.csv"
+        cache_path.write_bytes(good)
+        fake_response = MagicMock()
+        fake_response.read.return_value = good
+        fake_response.__enter__ = lambda self: self
+        fake_response.__exit__ = lambda self, *a: False
+
+        with (
+            patch("diff_diff.datasets.urlopen", return_value=fake_response),
+            patch("diff_diff.datasets.os.replace", side_effect=OSError("interrupted")),
+        ):
+            content = datasets_mod._download_with_cache(
+                "https://example.invalid/x.csv",
+                "x",
+                sha256=good_sha,
+                force_download=True,
+            )
+
+        assert content == good.decode("utf-8")
+        assert cache_path.read_bytes() == good
+        assert list(tmp_path.glob(".x.csv.*")) == []
+
+
 class TestClearCache:
     """Tests for cache management."""
 
-    def test_clear_cache_creates_directory(self):
-        """clear_cache should handle non-existent cache gracefully."""
-        # This should not raise even if cache doesn't exist
+    def test_clear_cache_creates_directory(self, tmp_path, monkeypatch):
+        """clear_cache should handle non-existent cache gracefully.
+
+        Pinned to a temporary directory: unpatched, this ran against the real
+        ``~/.cache/diff_diff/datasets`` and deleted the developer's canonical
+        downloads every time the suite ran.
+        """
+        import diff_diff.datasets as datasets_mod
+
+        monkeypatch.setattr(datasets_mod, "_CACHE_DIR", tmp_path / "absent")
         try:
             clear_cache()
         except Exception as e:
