@@ -76,6 +76,7 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
+from diff_diff._deprecation import NOT_SUPPLIED, require_arg, resolve_renamed_kwarg
 from diff_diff.bootstrap_utils import (
     apply_stratum_centering,
     generate_survey_multiplier_weights_batch,
@@ -2459,12 +2460,12 @@ def _validate_multi_period_panel(
     Thin wrapper over :func:`_validate_had_panel_event_study` (had.py) that
     inherits the full contract:
 
-    - ``first_treat_col=None`` combined with a staggered panel → raises
+    - ``first_treat=None`` combined with a staggered panel → raises
       ``ValueError`` (the had.py helper does NOT silently accept; it
       requires an explicit first-treatment column to identify cohorts).
-    - ``first_treat_col`` provided but identifies only one cohort → no
+    - ``first_treat`` provided but identifies only one cohort → no
       auto-filter, proceeds.
-    - ``first_treat_col`` provided with multiple cohorts → auto-filters
+    - ``first_treat`` provided with multiple cohorts → auto-filters
       to last-cohort + never-treated, emits ``UserWarning`` with
       ``filter_info`` summary.
     - Requires ≥ 3 time periods, balanced panel, ordered time dtype, and
@@ -2564,7 +2565,7 @@ def _aggregate_for_joint_test(
     missing_periods = [t for t in needed_periods if t not in data_periods]
     if missing_periods:
         raise ValueError(
-            f"Period(s) {missing_periods} not found in time_col "
+            f"Period(s) {missing_periods} not found in the time column "
             f"{time_col!r}. Available periods: "
             f"{sorted(data_periods, key=lambda x: (x is None, x))}."
         )
@@ -3372,19 +3373,24 @@ def _resolve_pretest_unit_weights(
 
 def joint_pretrends_test(
     data: pd.DataFrame,
-    outcome_col: str,
-    dose_col: str,
-    time_col: str,
-    unit_col: str,
-    pre_periods: list,
-    base_period: Any,
-    first_treat_col: Optional[str] = None,
+    outcome: Any = NOT_SUPPLIED,
+    dose: Any = NOT_SUPPLIED,
+    time: Any = NOT_SUPPLIED,
+    unit: Any = NOT_SUPPLIED,
+    pre_periods: Any = NOT_SUPPLIED,
+    base_period: Any = NOT_SUPPLIED,
+    first_treat: Any = NOT_SUPPLIED,
     *,
     alpha: float = 0.05,
     n_bootstrap: int = 999,
     seed: Optional[int] = None,
     survey_design: Any = None,
     trends_lin: bool = False,
+    outcome_col: Any = NOT_SUPPLIED,
+    dose_col: Any = NOT_SUPPLIED,
+    time_col: Any = NOT_SUPPLIED,
+    unit_col: Any = NOT_SUPPLIED,
+    first_treat_col: Any = NOT_SUPPLIED,
 ) -> StuteJointResult:
     """Joint Stute pre-trends test (paper Section 4.2 step 2).
 
@@ -3404,7 +3410,7 @@ def joint_pretrends_test(
     Parameters
     ----------
     data : pd.DataFrame
-    outcome_col, dose_col, time_col, unit_col : str
+    outcome, dose, time, unit : str
     pre_periods : list
         Non-empty list of pre-period labels (all ``< base_period``, all
         with ``D = 0`` across every unit). Empty list raises; the
@@ -3416,7 +3422,7 @@ def joint_pretrends_test(
         satisfy ``D = 0`` across every unit (reciprocal of the pre-period
         HAD invariant - base is itself a pre-period in the four-step
         workflow).
-    first_treat_col : str or None
+    first_treat : str or None
         Forwarded to the underlying panel validator; matched cohort
         handling follows the HAD contract (staggered auto-filter warns
         and proceeds on last cohort; solo cohort proceeds).
@@ -3454,6 +3460,28 @@ def joint_pretrends_test(
     -------
     StuteJointResult with ``null_form = "mean_independence"``.
     """
+    _q = "joint_pretrends_test"
+    outcome = resolve_renamed_kwarg(
+        _q, "outcome_col", outcome_col, "outcome", outcome, default=NOT_SUPPLIED
+    )
+    require_arg(_q, "outcome", outcome)
+    dose = resolve_renamed_kwarg(_q, "dose_col", dose_col, "dose", dose, default=NOT_SUPPLIED)
+    require_arg(_q, "dose", dose)
+    time = resolve_renamed_kwarg(_q, "time_col", time_col, "time", time, default=NOT_SUPPLIED)
+    require_arg(_q, "time", time)
+    unit = resolve_renamed_kwarg(_q, "unit_col", unit_col, "unit", unit, default=NOT_SUPPLIED)
+    require_arg(_q, "unit", unit)
+    require_arg(_q, "pre_periods", pre_periods)
+    require_arg(_q, "base_period", base_period)
+    first_treat = resolve_renamed_kwarg(
+        _q, "first_treat_col", first_treat_col, "first_treat", first_treat, default=None
+    )
+    # Body-local names; the public parameters are the bare names.
+    outcome_col = outcome
+    dose_col = dose
+    time_col = time
+    unit_col = unit
+    first_treat_col = first_treat
     # Internal variable naming: downstream code reads `survey` (Phase 4.5 C
     # convention).
     survey = survey_design
@@ -3492,7 +3520,7 @@ def joint_pretrends_test(
     period_rank = _build_period_rank(data, time_col)
     if base_period not in period_rank:
         raise ValueError(
-            f"base_period={base_period!r} not found in time_col "
+            f"base_period={base_period!r} not found in the time column "
             f"{time_col!r}. Available: "
             f"{sorted(period_rank.keys(), key=lambda t: period_rank[t])!r}."
         )
@@ -3500,7 +3528,7 @@ def joint_pretrends_test(
     if missing_pre_in_data:
         raise ValueError(
             f"pre_periods entries {missing_pre_in_data!r} not found in "
-            f"time_col {time_col!r}. Available: "
+            f"the time column {time_col!r}. Available: "
             f"{sorted(period_rank.keys(), key=lambda t: period_rank[t])!r}."
         )
     base_rank = period_rank[base_period]
@@ -3758,19 +3786,24 @@ def joint_pretrends_test(
 
 def joint_homogeneity_test(
     data: pd.DataFrame,
-    outcome_col: str,
-    dose_col: str,
-    time_col: str,
-    unit_col: str,
-    post_periods: list,
-    base_period: Any,
-    first_treat_col: Optional[str] = None,
+    outcome: Any = NOT_SUPPLIED,
+    dose: Any = NOT_SUPPLIED,
+    time: Any = NOT_SUPPLIED,
+    unit: Any = NOT_SUPPLIED,
+    post_periods: Any = NOT_SUPPLIED,
+    base_period: Any = NOT_SUPPLIED,
+    first_treat: Any = NOT_SUPPLIED,
     *,
     alpha: float = 0.05,
     n_bootstrap: int = 999,
     seed: Optional[int] = None,
     survey_design: Any = None,
     trends_lin: bool = False,
+    outcome_col: Any = NOT_SUPPLIED,
+    dose_col: Any = NOT_SUPPLIED,
+    time_col: Any = NOT_SUPPLIED,
+    unit_col: Any = NOT_SUPPLIED,
+    first_treat_col: Any = NOT_SUPPLIED,
 ) -> StuteJointResult:
     """Joint Stute homogeneity-linearity test (paper Section 4.3 joint).
 
@@ -3791,7 +3824,7 @@ def joint_homogeneity_test(
     Parameters
     ----------
     data : pd.DataFrame
-    outcome_col, dose_col, time_col, unit_col : str
+    outcome, dose, time, unit : str
     post_periods : list
         Non-empty list of post-period labels (all strictly ``>
         base_period`` by chronological order; each with ``D > 0`` for
@@ -3799,7 +3832,7 @@ def joint_homogeneity_test(
     base_period : period label
         The reference period (last pre-period in the event-study
         convention). Must not be in ``post_periods``.
-    first_treat_col : str or None
+    first_treat : str or None
         Forwarded to the underlying panel validator.
     alpha, n_bootstrap, seed : as in :func:`stute_test`.
     survey_design : SurveyDesign or None, keyword-only, default None
@@ -3826,6 +3859,28 @@ def joint_homogeneity_test(
     -------
     StuteJointResult with ``null_form = "linearity"``.
     """
+    _q = "joint_homogeneity_test"
+    outcome = resolve_renamed_kwarg(
+        _q, "outcome_col", outcome_col, "outcome", outcome, default=NOT_SUPPLIED
+    )
+    require_arg(_q, "outcome", outcome)
+    dose = resolve_renamed_kwarg(_q, "dose_col", dose_col, "dose", dose, default=NOT_SUPPLIED)
+    require_arg(_q, "dose", dose)
+    time = resolve_renamed_kwarg(_q, "time_col", time_col, "time", time, default=NOT_SUPPLIED)
+    require_arg(_q, "time", time)
+    unit = resolve_renamed_kwarg(_q, "unit_col", unit_col, "unit", unit, default=NOT_SUPPLIED)
+    require_arg(_q, "unit", unit)
+    require_arg(_q, "post_periods", post_periods)
+    require_arg(_q, "base_period", base_period)
+    first_treat = resolve_renamed_kwarg(
+        _q, "first_treat_col", first_treat_col, "first_treat", first_treat, default=None
+    )
+    # Body-local names; the public parameters are the bare names.
+    outcome_col = outcome
+    dose_col = dose
+    time_col = time
+    unit_col = unit
+    first_treat_col = first_treat
     # Internal variable naming: downstream code reads `survey` (Phase 4.5 C
     # convention).
     survey = survey_design
@@ -3862,7 +3917,7 @@ def joint_homogeneity_test(
     period_rank = _build_period_rank(data, time_col)
     if base_period not in period_rank:
         raise ValueError(
-            f"base_period={base_period!r} not found in time_col "
+            f"base_period={base_period!r} not found in the time column "
             f"{time_col!r}. Available: "
             f"{sorted(period_rank.keys(), key=lambda t: period_rank[t])!r}."
         )
@@ -3870,7 +3925,7 @@ def joint_homogeneity_test(
     if missing_post_in_data:
         raise ValueError(
             f"post_periods entries {missing_post_in_data!r} not found in "
-            f"time_col {time_col!r}. Available: "
+            f"the time column {time_col!r}. Available: "
             f"{sorted(period_rank.keys(), key=lambda t: period_rank[t])!r}."
         )
     base_rank = period_rank[base_period]
@@ -4192,11 +4247,11 @@ def _compose_verdict_event_study_survey(
 
 def did_had_pretest_workflow(
     data: pd.DataFrame,
-    outcome_col: str,
-    dose_col: str,
-    time_col: str,
-    unit_col: str,
-    first_treat_col: Optional[str] = None,
+    outcome: Any = NOT_SUPPLIED,
+    dose: Any = NOT_SUPPLIED,
+    time: Any = NOT_SUPPLIED,
+    unit: Any = NOT_SUPPLIED,
+    first_treat: Any = NOT_SUPPLIED,
     alpha: float = 0.05,
     n_bootstrap: int = 999,
     seed: Optional[int] = None,
@@ -4204,6 +4259,11 @@ def did_had_pretest_workflow(
     aggregate: str = "overall",
     survey_design: Any = None,
     trends_lin: bool = False,
+    outcome_col: Any = NOT_SUPPLIED,
+    dose_col: Any = NOT_SUPPLIED,
+    time_col: Any = NOT_SUPPLIED,
+    unit_col: Any = NOT_SUPPLIED,
+    first_treat_col: Any = NOT_SUPPLIED,
 ) -> HADPretestReport:
     """Run the HAD pre-test workflow (paper Section 4.2-4.3).
 
@@ -4251,8 +4311,8 @@ def did_had_pretest_workflow(
         >= 3 periods, an ordered time dtype (numeric, datetime, or
         ordered categorical), and the pre-period D=0 invariant across
         all pre-periods.
-    outcome_col, dose_col, time_col, unit_col : str
-    first_treat_col : str or None, default None
+    outcome, dose, time, unit : str
+    first_treat : str or None, default None
         Optional first-treatment-period column. Required on the
         ``aggregate="event_study"`` path when the panel is staggered
         (multi-cohort); the panel validator auto-filters to the last
@@ -4378,6 +4438,26 @@ def did_had_pretest_workflow(
     de Chaisemartin et al. (2026), Section 4.2-4.3, Theorem 4, Appendix
     D, Theorem 7.
     """
+    _q = "did_had_pretest_workflow"
+    outcome = resolve_renamed_kwarg(
+        _q, "outcome_col", outcome_col, "outcome", outcome, default=NOT_SUPPLIED
+    )
+    require_arg(_q, "outcome", outcome)
+    dose = resolve_renamed_kwarg(_q, "dose_col", dose_col, "dose", dose, default=NOT_SUPPLIED)
+    require_arg(_q, "dose", dose)
+    time = resolve_renamed_kwarg(_q, "time_col", time_col, "time", time, default=NOT_SUPPLIED)
+    require_arg(_q, "time", time)
+    unit = resolve_renamed_kwarg(_q, "unit_col", unit_col, "unit", unit, default=NOT_SUPPLIED)
+    require_arg(_q, "unit", unit)
+    first_treat = resolve_renamed_kwarg(
+        _q, "first_treat_col", first_treat_col, "first_treat", first_treat, default=None
+    )
+    # Body-local names; the public parameters are the bare names.
+    outcome_col = outcome
+    dose_col = dose
+    time_col = time
+    unit_col = unit
+    first_treat_col = first_treat
     if aggregate not in _VALID_AGGREGATES:
         raise ValueError(
             f"aggregate must be one of {list(_VALID_AGGREGATES)!r}; " f"got {aggregate!r}."
@@ -4492,13 +4572,13 @@ def did_had_pretest_workflow(
         if len(earlier_pre) >= 1:
             pretrends_joint = joint_pretrends_test(
                 data_filtered,
-                outcome_col=outcome_col,
-                dose_col=dose_col,
-                time_col=time_col,
-                unit_col=unit_col,
+                outcome=outcome_col,
+                dose=dose_col,
+                time=time_col,
+                unit=unit_col,
                 pre_periods=earlier_pre,
                 base_period=base_period,
-                first_treat_col=first_treat_col,
+                first_treat=first_treat_col,
                 alpha=alpha,
                 n_bootstrap=n_bootstrap,
                 seed=seed,
@@ -4511,13 +4591,13 @@ def did_had_pretest_workflow(
         # Step 3: joint homogeneity-linearity on post-periods.
         homogeneity_joint = joint_homogeneity_test(
             data_filtered,
-            outcome_col=outcome_col,
-            dose_col=dose_col,
-            time_col=time_col,
-            unit_col=unit_col,
+            outcome=outcome_col,
+            dose=dose_col,
+            time=time_col,
+            unit=unit_col,
             post_periods=list(t_post_list),
             base_period=base_period,
-            first_treat_col=first_treat_col,
+            first_treat=first_treat_col,
             alpha=alpha,
             n_bootstrap=n_bootstrap,
             seed=seed,
