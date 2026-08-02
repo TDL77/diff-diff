@@ -20,6 +20,11 @@ import numpy as np
 import pandas as pd
 
 from diff_diff._base import BaseEstimator
+from diff_diff._deprecation import (
+    NOT_SUPPLIED,
+    resolve_renamed_kwarg,
+    warn_deprecated_kwarg,
+)
 from diff_diff.linalg import (
     LinearRegression,
     _absorbed_fe_vcov_scale,
@@ -59,11 +64,13 @@ class DifferenceInDifferences(BaseEstimator):
     formula : str, optional
         R-style formula for the model (e.g., "outcome ~ treated * post").
         If provided, overrides column name parameters.
-    robust : bool, default=True
-        Legacy alias for ``vcov_type``. ``robust=True`` maps to
-        ``vcov_type="hc1"``; ``robust=False`` maps to ``vcov_type="classical"``.
-        Explicit ``vcov_type`` overrides ``robust`` unless the pair is
-        contradictory (e.g. ``robust=False, vcov_type="hc2"`` raises).
+    robust : bool, optional
+        DEPRECATED legacy alias for ``vcov_type`` (row M-045; warns with
+        ``FutureWarning``, removed in 4.0 - use ``vcov_type=``).
+        ``robust=True`` maps to ``vcov_type="hc1"``; ``robust=False`` maps
+        to ``vcov_type="classical"``. Explicit ``vcov_type`` overrides
+        ``robust`` unless the pair is contradictory (e.g.
+        ``robust=False, vcov_type="hc2"`` raises).
     cluster : str, optional
         Column name for cluster-robust standard errors. Combined with
         ``vcov_type``: with ``"hc1"`` dispatches to CR1 (Liang-Zeger); with
@@ -178,7 +185,7 @@ class DifferenceInDifferences(BaseEstimator):
     >>>
     >>> # Fit the model
     >>> did = DifferenceInDifferences()
-    >>> results = did.fit(data, outcome='outcome', treatment='treated', time='post')
+    >>> results = did.fit(data, outcome='outcome', treatment='treated', post='post')
     >>>
     >>> # View results
     >>> print(results.att)  # ATT estimate
@@ -204,7 +211,7 @@ class DifferenceInDifferences(BaseEstimator):
 
     def __init__(
         self,
-        robust: bool = True,
+        robust: Optional[bool] = None,
         cluster: Optional[str] = None,
         vcov_type: Optional[str] = None,
         alpha: float = 0.05,
@@ -227,7 +234,16 @@ class DifferenceInDifferences(BaseEstimator):
 
         validate_df_convention(df_convention)
 
-        self.robust = robust
+        # `robust` is deprecated (rows M-045..M-047; removed in 4.0). None is
+        # the not-supplied sentinel: default constructions and get_params
+        # round-trips stay silent, only an explicit robust= warns. The raw
+        # arg lives at `_robust_arg` (what get_params returns); the PUBLIC
+        # `self.robust` keeps the RESOLVED legacy bool so pre-3.9 attribute
+        # readers keep seeing True/False until the 4.0 removal.
+        if robust is not None:
+            warn_deprecated_kwarg(type(self).__name__, "robust", "use vcov_type= instead")
+        self._robust_arg = robust
+        self.robust = robust if robust is not None else True
         self.cluster = cluster
         self.vcov_type = resolve_vcov_type(robust, vcov_type)
         # Preserve the raw constructor arg (possibly None) alongside the
@@ -276,13 +292,14 @@ class DifferenceInDifferences(BaseEstimator):
         data: pd.DataFrame,
         outcome: Optional[str] = None,
         treatment: Optional[str] = None,
-        time: Optional[str] = None,
+        post: Any = NOT_SUPPLIED,
         formula: Optional[str] = None,
         covariates: Optional[List[str]] = None,
         fixed_effects: Optional[List[str]] = None,
         absorb: Optional[List[str]] = None,
         survey_design=None,
         unit: Optional[str] = None,
+        time: Any = NOT_SUPPLIED,
     ) -> DiDResults:
         """
         Fit the Difference-in-Differences model.
@@ -295,11 +312,11 @@ class DifferenceInDifferences(BaseEstimator):
             Name of the outcome variable column.
         treatment : str
             Name of the treatment group indicator column (0/1).
-        time : str
+        post : str
             Name of the post-treatment period indicator column (0/1).
         formula : str, optional
             R-style formula (e.g., "outcome ~ treated * post").
-            If provided, overrides outcome, treatment, and time parameters.
+            If provided, overrides outcome, treatment, and post parameters.
         covariates : list, optional
             List of covariate column names to include as linear controls.
             Names must not collide with reserved structural terms (``const``,
@@ -346,20 +363,29 @@ class DifferenceInDifferences(BaseEstimator):
         --------
         Using fixed effects (dummy variables):
 
-        >>> did.fit(data, outcome='sales', treatment='treated', time='post',
+        >>> did.fit(data, outcome='sales', treatment='treated', post='post',
         ...         fixed_effects=['state', 'industry'])
 
         Using absorbed fixed effects (within-transformation):
 
-        >>> did.fit(data, outcome='sales', treatment='treated', time='post',
+        >>> did.fit(data, outcome='sales', treatment='treated', post='post',
         ...         absorb=['firm_id'])
+
+        The keyword-only ``time`` parameter is a deprecated alias for
+        ``post`` (row M-030); it warns with ``FutureWarning`` and will be
+        removed in 4.0.
         """
+        post = resolve_renamed_kwarg(
+            f"{type(self).__name__}.fit", "time", time, "post", post, default=None
+        )
+        # Body-local name; the public parameter is post (M-030).
+        time = post
         # Parse formula if provided
         if formula is not None:
             outcome, treatment, time, covariates = self._parse_formula(formula, data)
         elif outcome is None or treatment is None or time is None:
             raise ValueError(
-                "Must provide either 'formula' or all of 'outcome', 'treatment', and 'time'"
+                "Must provide either 'formula' or all of 'outcome', 'treatment', and 'post'"
             )
 
         # Validate inputs
@@ -1186,8 +1212,13 @@ class DifferenceInDifferences(BaseEstimator):
     # clone's `__init__` to see `vcov_type=None` (flagging
     # `_vcov_type_explicit=False`) rather than the alias-resolved
     # "classical" (which would mark it explicit and skip the CR1 remap).
-    _PARAM_ATTR_ALIASES = {"vcov_type": "_vcov_type_arg"}
-    _DERIVED_CONFIG_ATTRS = ("vcov_type", "_vcov_type_arg", "_vcov_type_explicit")
+    _PARAM_ATTR_ALIASES = {"vcov_type": "_vcov_type_arg", "robust": "_robust_arg"}
+    _DERIVED_CONFIG_ATTRS = (
+        "vcov_type",
+        "_vcov_type_arg",
+        "_vcov_type_explicit",
+        "robust",
+    )
 
     @classmethod
     def _normalize_set_params(cls, params: Dict[str, Any]) -> Dict[str, Any]:
@@ -1306,11 +1337,13 @@ class MultiPeriodDiD(DifferenceInDifferences):
 
     Parameters
     ----------
-    robust : bool, default=True
-        Legacy alias for ``vcov_type``. ``robust=True`` maps to
-        ``vcov_type="hc1"``; ``robust=False`` maps to ``vcov_type="classical"``.
-        Explicit ``vcov_type`` overrides ``robust`` unless the pair is
-        contradictory (e.g. ``robust=False, vcov_type="hc2"`` raises).
+    robust : bool, optional
+        DEPRECATED legacy alias for ``vcov_type`` (row M-045; warns with
+        ``FutureWarning``, removed in 4.0 - use ``vcov_type=``).
+        ``robust=True`` maps to ``vcov_type="hc1"``; ``robust=False`` maps
+        to ``vcov_type="classical"``. Explicit ``vcov_type`` overrides
+        ``robust`` unless the pair is contradictory (e.g.
+        ``robust=False, vcov_type="hc2"`` raises).
     cluster : str, optional
         Column name for cluster-robust standard errors. With ``vcov_type="hc1"``
         dispatches to CR1 (Liang-Zeger). With ``vcov_type="hc2_bm"`` dispatches
