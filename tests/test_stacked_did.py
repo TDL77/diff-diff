@@ -92,7 +92,6 @@ class TestStackedDiDBasic:
             unit="unit",
             time="period",
             first_treat="first_treat",
-            aggregate="event_study",
         )
         assert results.event_study_effects is not None
         assert -1 in results.event_study_effects  # reference period
@@ -107,33 +106,35 @@ class TestStackedDiDBasic:
                 assert results.event_study_effects[h]["n_obs"] > 0
 
     def test_group_aggregate_raises(self, staggered_data):
-        """aggregate='group' raises ValueError."""
+        """aggregate='group' warns (M-024 shim) then raises ValueError."""
         est = StackedDiD(kappa_pre=2, kappa_post=2)
-        with pytest.raises(ValueError, match="group.*not supported"):
-            est.fit(
-                staggered_data,
-                outcome="outcome",
-                unit="unit",
-                time="period",
-                first_treat="first_treat",
-                aggregate="group",
-            )
+        with pytest.warns(FutureWarning, match=r"fit\(aggregate=\) is deprecated"):
+            with pytest.raises(ValueError, match="group.*not supported"):
+                est.fit(
+                    staggered_data,
+                    outcome="outcome",
+                    unit="unit",
+                    time="period",
+                    first_treat="first_treat",
+                    aggregate="group",
+                )
 
     def test_all_aggregate_raises(self, staggered_data):
-        """aggregate='all' raises ValueError."""
+        """aggregate='all' warns (M-024 shim) then raises ValueError."""
         est = StackedDiD(kappa_pre=2, kappa_post=2)
-        with pytest.raises(ValueError, match="all.*not supported"):
-            est.fit(
-                staggered_data,
-                outcome="outcome",
-                unit="unit",
-                time="period",
-                first_treat="first_treat",
-                aggregate="all",
-            )
+        with pytest.warns(FutureWarning, match=r"fit\(aggregate=\) is deprecated"):
+            with pytest.raises(ValueError, match="all.*not supported"):
+                est.fit(
+                    staggered_data,
+                    outcome="outcome",
+                    unit="unit",
+                    time="period",
+                    first_treat="first_treat",
+                    aggregate="all",
+                )
 
     def test_simple_att(self, staggered_data):
-        """aggregate='simple' produces overall ATT only."""
+        """Plain fit: overall ATT plus the always-computed surface (M-024)."""
         est = StackedDiD(kappa_pre=2, kappa_post=2)
         results = est.fit(
             staggered_data,
@@ -141,10 +142,10 @@ class TestStackedDiDBasic:
             unit="unit",
             time="period",
             first_treat="first_treat",
-            aggregate="simple",
         )
         assert np.isfinite(results.overall_att)
-        assert results.event_study_effects is None
+        # The event-study surface is ALWAYS materialized on 3.9+ fits.
+        assert results.event_study_effects is not None
         assert results.group_effects is None
 
     def test_known_constant_effect(self, constant_effect_data):
@@ -171,7 +172,6 @@ class TestStackedDiDBasic:
             unit="unit",
             time="period",
             first_treat="first_treat",
-            aggregate="event_study",
         )
         assert results.event_study_effects is not None
         # Post-treatment effects should generally increase
@@ -566,7 +566,6 @@ class TestEdgeCases:
             unit="unit",
             time="period",
             first_treat="first_treat",
-            aggregate="event_study",
         )
 
         # Reference period is -2 (not -1)
@@ -761,7 +760,6 @@ class TestResultsMethods:
             unit="unit",
             time="period",
             first_treat="first_treat",
-            aggregate="event_study",
         )
         summary = results.summary()
         assert "Stacked DiD" in summary
@@ -776,7 +774,6 @@ class TestResultsMethods:
             unit="unit",
             time="period",
             first_treat="first_treat",
-            aggregate="event_study",
         )
         df = results.to_dataframe(level="event_study")
         assert isinstance(df, pd.DataFrame)
@@ -796,8 +793,8 @@ class TestResultsMethods:
         with pytest.raises(ValueError, match="Group aggregation is not supported"):
             results.to_dataframe(level="group")
 
-    def test_to_dataframe_no_event_study_raises(self, staggered_data):
-        """to_dataframe raises when event_study not computed."""
+    def test_to_dataframe_event_study_total_on_plain_fit(self, staggered_data):
+        """Plain fits carry the surface (M-024): to_dataframe is total."""
         est = StackedDiD(kappa_pre=2, kappa_post=2)
         results = est.fit(
             staggered_data,
@@ -806,8 +803,36 @@ class TestResultsMethods:
             time="period",
             first_treat="first_treat",
         )
-        with pytest.raises(ValueError, match="Event study effects not computed"):
-            results.to_dataframe(level="event_study")
+        df = results.to_dataframe(level="event_study")
+        assert sorted(df["relative_period"].tolist()) == [-2, -1, 0, 1, 2]
+
+    def test_to_dataframe_legacy_pickle_none_branch(self, staggered_data):
+        """The effects-None branch survives for pre-3.9 pickles only."""
+        import dataclasses
+
+        est = StackedDiD(kappa_pre=2, kappa_post=2)
+        results = est.fit(
+            staggered_data,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+        )
+        legacy = dataclasses.replace(results, event_study_effects=None)
+        with pytest.raises(ValueError, match=r"diff-diff >= 3\.9"):
+            legacy.to_dataframe(level="event_study")
+
+    def test_summary_prints_event_study_table_on_plain_fit(self, staggered_data):
+        """summary() renders the ES block on every 3.9+ fit (M-024)."""
+        est = StackedDiD(kappa_pre=2, kappa_post=2)
+        results = est.fit(
+            staggered_data,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+        )
+        assert "Event Study (Dynamic) Effects" in results.summary()
 
     def test_is_significant(self, staggered_data):
         """is_significant property works."""
@@ -888,17 +913,18 @@ class TestValidation:
             StackedDiD(cluster="invalid")
 
     def test_invalid_aggregate(self, staggered_data):
-        """Raises on invalid aggregate parameter."""
+        """Warns (M-024 shim) then raises on invalid aggregate parameter."""
         est = StackedDiD()
-        with pytest.raises(ValueError, match="aggregate"):
-            est.fit(
-                staggered_data,
-                outcome="outcome",
-                unit="unit",
-                time="period",
-                first_treat="first_treat",
-                aggregate="invalid",
-            )
+        with pytest.warns(FutureWarning, match=r"fit\(aggregate=\) is deprecated"):
+            with pytest.raises(ValueError, match="aggregate"):
+                est.fit(
+                    staggered_data,
+                    outcome="outcome",
+                    unit="unit",
+                    time="period",
+                    first_treat="first_treat",
+                    aggregate="invalid",
+                )
 
     def test_population_required_for_population_weighting(self, staggered_data):
         """Raises when population col not specified with weighting='population'."""
@@ -1030,7 +1056,6 @@ class TestStackedDiDVcovType:
             unit="unit",
             time="period",
             first_treat="first_treat",
-            aggregate="event_study",
         )
         res_hc1 = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc1").fit(
             staggered_data, **kwargs
@@ -1319,7 +1344,6 @@ class TestStackedDiDVcovType:
                 unit="unit",
                 time="period",
                 first_treat="first_treat",
-                aggregate="event_study",
             )
         # No fallback warning on a well-conditioned design.
         fallback_warns = [w for w in caught if "Bell-McCaffrey contrast DOF" in str(w.message)]
@@ -1414,7 +1438,6 @@ class TestStackedDiDVcovType:
                 unit="unit",
                 time="period",
                 first_treat="first_treat",
-                aggregate="event_study",
             )
         # The reduced-design code path should fire without emitting the
         # fallback warning (the helper succeeds on the kept-column subset).
@@ -1480,7 +1503,6 @@ class TestStackedDiDVcovType:
             unit="unit",
             time="period",
             first_treat="first_treat",
-            aggregate="event_study",
         )
         # All event_study_effects (except the ref period) should have NaN
         # inference but finite effect+se.
@@ -1528,7 +1550,6 @@ class TestStackedDiDVcovType:
                 unit="unit",
                 time="period",
                 first_treat="first_treat",
-                aggregate="event_study",
             )
         # Warning fired (informational that DOF was unavailable)
         warning_msgs = [str(w.message) for w in caught]
@@ -1565,7 +1586,6 @@ class TestStackedDiDVcovType:
                 unit="unit",
                 time="period",
                 first_treat="first_treat",
-                aggregate="event_study",
             )
         fallback_warns = [w for w in caught if "Bell-McCaffrey contrast DOF" in str(w.message)]
         assert (
@@ -1618,7 +1638,6 @@ class TestStackedDiDVcovType:
             time="period",
             first_treat="first_treat",
             population="pop",
-            aggregate="event_study",
         )
         assert np.isfinite(res.overall_att) and np.isfinite(res.overall_se)
         assert res.overall_se > 0
@@ -1644,7 +1663,6 @@ class TestStackedDiDVcovType:
             unit="unit",
             time="period",
             first_treat="first_treat",
-            aggregate="event_study",
         )
         assert np.isfinite(res.overall_att) and np.isfinite(res.overall_se)
         assert res.overall_se > 0
@@ -1663,7 +1681,6 @@ class TestStackedDiDVcovType:
             unit="unit",
             time="period",
             first_treat="first_treat",
-            aggregate="event_study",
         )
         res_hc1 = StackedDiD(kappa_pre=2, kappa_post=2, vcov_type="hc1", anticipation=1).fit(
             staggered_data, **kwargs
@@ -1784,7 +1801,6 @@ def _cb_fit(df, **kw):
         unit="unit",
         time="time",
         first_treat="first_treat",
-        aggregate=kw.get("aggregate", "event_study"),
         covariates=kw.get("covariates"),
         survey_design=kw.get("survey_design"),
         population=kw.get("population"),
@@ -1869,13 +1885,15 @@ class TestStackedDiDCovariateBalance:
         b = _cb_fit(df, balance="entropy", covariates=["x2"])
         assert abs(a.overall_att - b.overall_att) < 1e-8
 
-    def test_balance_on_default_aggregate_mode(self):
-        # balancing must work on the overall-ATT (aggregate=None) path, not only
-        # event_study (the BM-DOF machinery branches on aggregate).
+    def test_balance_on_plain_fit(self):
+        # balancing works on a plain fit; since M-024 the surface (and the
+        # hc2_bm BM-DOF machinery) no longer branches on fit-time
+        # aggregate, so this is the same code path as every _cb_fit case.
         df = _balance_panel(seed=8)
-        res = _cb_fit(df, balance="entropy", covariates=["x"], aggregate=None)
+        res = _cb_fit(df, balance="entropy", covariates=["x"])
         assert np.isfinite(res.overall_att)
         assert res.balance == "entropy"
+        assert res.event_study_effects is not None
 
     # ---- sklearn surface ----
     def test_get_params_includes_balance_and_clone(self):
@@ -1894,8 +1912,7 @@ class TestStackedDiDCovariateBalance:
             "first_treat",
             kappa_pre=2,
             kappa_post=2,
-            aggregate="event_study",
-            clean_control="never_treated",
+            control_group="never_treated",
             balance="entropy",
             covariates=["x"],
         )
@@ -1958,7 +1975,6 @@ class TestStackedDfConvention:
         unit="unit",
         time="period",
         first_treat="first_treat",
-        aggregate="event_study",
     )
 
     @staticmethod
@@ -2073,3 +2089,175 @@ class TestStackedDfConvention:
             est.set_params(df_convention="normal", nonexistent_param=1)
         assert est.get_params() == before
         assert StackedDiD(df_convention="normal").get_params()["df_convention"] == "normal"
+
+
+class TestPlainFitPlotting:
+    def test_plot_event_study_renders_on_plain_fit(self, staggered_data):
+        """M-024: plot_event_study flips from TypeError to rendering on a
+        plain fit - the duck-typed effects branch now matches because the
+        surface is always populated."""
+        matplotlib = pytest.importorskip("matplotlib")
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        from diff_diff import plot_event_study
+
+        est = StackedDiD(kappa_pre=2, kappa_post=2)
+        results = est.fit(
+            staggered_data,
+            outcome="outcome",
+            unit="unit",
+            time="period",
+            first_treat="first_treat",
+        )
+        ax = plot_event_study(results, show=False)
+        assert ax is not None
+        plt.close("all")
+
+
+class TestReferenceSupportGuard:
+    """M-024 follow-up (CI review): the omitted reference cell must be
+    populated - a gapped panel where every retained cohort's calendar
+    period a-1-anticipation is absent would otherwise rank-drop and
+    silently re-normalize while the surface certifies delta_0 = 0 at the
+    reference (and the container's reference_event_times provenance
+    would then mislead HonestDiD/PreTrendsPower)."""
+
+    @staticmethod
+    def _gapped_panel(periods, cohorts, n_units=90, seed=0):
+        rng = np.random.default_rng(seed)
+        rows = []
+        for u in range(n_units):
+            g = cohorts[u % len(cohorts)]
+            for t in periods:
+                d = 1 if (g and t >= g) else 0
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": u * 0.01 + 0.2 * t + 1.5 * d + rng.normal(0, 0.3),
+                        "first_treat": g,
+                    }
+                )
+        return pd.DataFrame(rows)
+
+    def test_stack_wide_missing_reference_fails_closed(self):
+        # Calendar period 4 absent; sole cohort a=5 has ref a-1=4 -> the
+        # reference cell is empty stack-wide. IC1 passes (min/max only),
+        # so without the guard this rank-drops and re-normalizes against
+        # an arbitrary horizon while synthesizing a fake e=-1 row.
+        panel = self._gapped_panel([1, 2, 3, 5, 6, 7], [0, 5])
+        est = StackedDiD(kappa_pre=2, kappa_post=2)
+        with pytest.raises(ValueError, match="would be fabricated"):
+            est.fit(
+                panel,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+            )
+
+    def test_partial_reference_support_still_fits(self):
+        # Cohort 5's own ref period (4) is absent but cohort 7's (6) is
+        # present, so the POOLED omitted category is populated: the
+        # coefficient-vector normalization at e=-1 is real (verified by
+        # execution during the CI-review triage - no rank drop, sane
+        # surface). Ragged per-cohort baseline support affects estimand
+        # composition (documented ragged-window behavior), not the
+        # normalization the container certifies.
+        panel = self._gapped_panel([1, 2, 3, 5, 6, 7, 8, 9], [0, 5, 7])
+        est = StackedDiD(kappa_pre=2, kappa_post=2)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = est.fit(
+                panel,
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+            )
+        assert not [w for w in caught if "Rank-deficient" in str(w.message)]
+        assert res.event_study_effects is not None
+        surf = res.aggregate("event_study")
+        assert surf.reference_event_times == (-1,)
+        assert np.isfinite(res.overall_att)
+
+
+class TestReferenceSupportGuardEffectiveWeights:
+    """CI review R2: Equation 3 is Q-WEIGHTED WLS, so reference support
+    means positive COMPOSED weight in both baseline cells - raw row
+    presence is not enough."""
+
+    def test_zero_q_weight_control_reference_cell_fails_closed(self):
+        # Raw rows exist in both reference cells, but the only control
+        # rows at e=-1 sit in sub-experiments whose treated rows are
+        # absent at that event time - aggregate Q-weights zero them, the
+        # effective control baseline is empty, and (pre-guard, verified
+        # by execution) the design rank-dropped and re-normalized while
+        # the container still certified reference_event_times=(-1,).
+        rng = np.random.default_rng(3)
+        rows = []
+        for u in range(120):
+            kind = ["treatA", "ctrlX", "treatB", "ctrlY"][u % 4]
+            g = {"treatA": 5, "ctrlX": 0, "treatB": 7, "ctrlY": 0}[kind]
+            for t in range(1, 11):
+                if kind == "ctrlX" and t == 4:
+                    continue  # A's controls gapped at A's ref (cal 4)
+                if kind == "treatB" and t == 6:
+                    continue  # B's treated gapped at B's ref (cal 6)
+                if kind == "ctrlY" and t == 4:
+                    continue  # Y gapped at cal 4 too
+                d = 1 if (g and t >= g) else 0
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": u * 0.01 + 0.2 * t + 1.5 * d + rng.normal(0, 0.3),
+                        "first_treat": g,
+                    }
+                )
+        est = StackedDiD(kappa_pre=2, kappa_post=2)
+        with pytest.raises(ValueError, match="positive weight.*fabricated"):
+            est.fit(
+                pd.DataFrame(rows),
+                outcome="y",
+                unit="unit",
+                time="time",
+                first_treat="first_treat",
+            )
+
+    def test_survey_zeroed_reference_cell_fails_closed(self):
+        from diff_diff.survey import SurveyDesign
+
+        rng = np.random.default_rng(3)
+        rows = []
+        for u in range(90):
+            g = [0, 5, 7][u % 3]
+            for t in range(1, 11):
+                d = 1 if (g and t >= g) else 0
+                # controls carry zero pweight at both cohorts' reference
+                # calendar periods -> the control baseline cell has rows
+                # but no effective WLS mass
+                w = 0.0 if (g == 0 and t in (4, 6)) else 1.0
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "y": u * 0.01 + 0.2 * t + 1.5 * d + rng.normal(0, 0.3),
+                        "first_treat": g,
+                        "w": w,
+                    }
+                )
+        est = StackedDiD(kappa_pre=2, kappa_post=2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            with pytest.raises(ValueError, match="positive weight.*fabricated"):
+                est.fit(
+                    pd.DataFrame(rows),
+                    outcome="y",
+                    unit="unit",
+                    time="time",
+                    first_treat="first_treat",
+                    survey_design=SurveyDesign(weights="w"),
+                )
