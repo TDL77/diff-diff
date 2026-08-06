@@ -37,6 +37,7 @@ or `round(..., 4)` pins.
 from __future__ import annotations
 
 import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -111,7 +112,6 @@ def overall_report(two_period):
         alpha=0.05,
         n_bootstrap=999,
         seed=WORKFLOW_SEED,
-        aggregate="overall",
     )
 
 
@@ -127,7 +127,6 @@ def event_study_report(panel):
         alpha=0.05,
         n_bootstrap=999,
         seed=WORKFLOW_SEED,
-        aggregate="event_study",
     )
 
 
@@ -448,3 +447,29 @@ def test_notebook_quotes_match_pinned_constants():
         "7.0076",
     ]
     assert_quotes_in_rendered(T21_NOTEBOOK, expected_quotes, surface="rendered")
+
+
+def test_notebook_prose_has_no_malformed_mode_phrases():
+    """Regression guard for the M-027/M-139 prose migration (local review
+    R2 P2): the mechanical kwarg->mode rewording must never leave doubled
+    phrases like "two-period (the overall (two-period) mode)" or a
+    pseudo-call like ``did_had_pretest_workflow(the event-study ...)`` in
+    any HAD tutorial's markdown. Paths anchor at the repo root and the
+    test skips when docs/ is absent (the isolated-install CI job copies
+    only tests/ - the ``_tutorial_drift`` loader convention)."""
+    import json
+
+    root = Path(__file__).resolve().parents[1]
+    for rel in (
+        "docs/tutorials/20_had_brand_campaign.ipynb",
+        "docs/tutorials/21_had_pretest_workflow.ipynb",
+        "docs/tutorials/22_had_survey_design.ipynb",
+    ):
+        nb = root / rel
+        if not nb.exists():
+            pytest.skip(f"Notebook {rel!r} not available in this CI environment")
+        cells = json.loads(nb.read_text())["cells"]
+        text = "\n".join("".join(c["source"]) for c in cells)
+        assert "did_had_pretest_workflow(the" not in text, rel
+        assert "the overall (two-period) mode)" not in text, rel
+        assert "the event-study (multi-period) mode)" not in text, rel

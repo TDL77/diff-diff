@@ -127,6 +127,11 @@ EVENT_STUDY_SCHEMA: Tuple[str, ...] = (
     "n",
     "df",
     "is_reference",
+    # The per-row estimand discriminator (appended with row M-027, the
+    # AggregationResult.target precedent): "att" for every ATT producer,
+    # the estimand label ("WAS"/"WAS_d_lower") where the att column is
+    # NOT an ATT - so a detached frame never mislabels its numbers.
+    "estimand",
 )
 
 #: Closed vocabulary for the ``n_kind`` field, SHARED by every container that
@@ -313,6 +318,15 @@ class EventStudyResults(BaseResults):
     # against more than one base. None when the producer records no such
     # notion (varying base, non-CS producers, hand-built surfaces).
     reference_event_times: Optional[Tuple[Any, ...]] = None
+    #: The estimand label for the ``att`` column when the producer's
+    #: per-horizon estimand is NOT an ATT - HeterogeneousAdoptionDiD's
+    #: per-horizon "WAS"/"WAS_d_lower" (row M-027; ``_from_had`` relays
+    #: ``target_parameter``). None means the column is an ATT (every other
+    #: producer), keeping their rendering byte-stable. ``summary()`` uses
+    #: it as the column heading and ``to_dict()`` serializes it, so the
+    #: numbers never silently change meaning. Optional provenance appended
+    #: last (the M-092 pre-cut amendment convention).
+    estimand: Optional[str] = None
 
     _ARRAY_FIELDS = (
         "att",
@@ -500,6 +514,9 @@ class EventStudyResults(BaseResults):
                 # scalar-accepting field type for mypy.
                 "df": cast(np.ndarray, self.df),
                 "is_reference": self.is_reference,
+                # Per-row estimand discriminator: a detached frame must not
+                # mislabel WAS-family numbers as ATT (row M-027).
+                "estimand": np.full(n_rows, self.estimand or "att", dtype=object),
             },
             columns=list(EVENT_STUDY_SCHEMA),
         )
@@ -543,6 +560,7 @@ class EventStudyResults(BaseResults):
             "df": cast(np.ndarray, self.df).tolist(),
             "base_period": self.base_period,
             "anticipation": self.anticipation,
+            "estimand": self.estimand,
             "df_survey": self.df_survey,
             "reference_event_times": (
                 # _json_safe_label per element: CS period arithmetic yields
@@ -585,19 +603,26 @@ class EventStudyResults(BaseResults):
             meta_bits.append(f"convention: {self.event_time_convention}")
         if self.n_kind:
             meta_bits.append(f"n counts: {self.n_kind}")
+        if self.estimand:
+            # A non-ATT per-horizon estimand (HAD's WAS family, M-027):
+            # name it in the metadata and use it as the column heading -
+            # the hard-coded ATT would silently relabel the numbers.
+            meta_bits.append(f"estimand: {self.estimand}")
         lines.append("  ".join(meta_bits))
         lines.append("-" * 78)
+        est_head = self.estimand or "ATT"
+        est_w = max(10, len(est_head))
         lines.append(
-            f"{'Event time':>12} {'ATT':>10} {'SE':>10} {'t':>8} "
+            f"{'Event time':>12} {est_head:>{est_w}} {'SE':>10} {'t':>8} "
             f"{'P>|t|':>8} {f'[{ci_pct}% CI]':>21}"
         )
         for i in range(self.event_time.shape[0]):
             label = f"{self.event_time[i]}"
             if self.is_reference[i]:
-                lines.append(f"{label:>12} {0.0:>10.4f} {'(reference)':>{50}}")
+                lines.append(f"{label:>12} {0.0:>{est_w}.4f} {'(reference)':>{50}}")
                 continue
             lines.append(
-                f"{label:>12} {self.att[i]:>10.4f} {self.se[i]:>10.4f} "
+                f"{label:>12} {self.att[i]:>{est_w}.4f} {self.se[i]:>10.4f} "
                 f"{self.t_stat[i]:>8.3f} {self.p_value[i]:>8.3f} "
                 f"[{self.conf_int_lower[i]:>9.4f}, {self.conf_int_upper[i]:>9.4f}]"
             )
@@ -1207,8 +1232,13 @@ def _from_had(results: Any) -> EventStudyResults:
         conf_int_lower=np.array(results.conf_int_low, dtype=float),
         conf_int_upper=np.array(results.conf_int_high, dtype=float),
         is_reference=np.zeros(n_rows, dtype=bool),
+        # "units", not "obs": ``n_obs_per_horizon`` counts the UNITS
+        # contributing at each event time (it equals ``n_units`` at every
+        # horizon under the no-NaN validator) - the field docstring says
+        # so, and N_KIND_VOCABULARY forbids conflating the two kinds.
+        # Corrected with row M-027 (the value previously read "obs").
         n=(np.asarray(n_obs, dtype=float) if n_obs is not None else np.full(n_rows, np.nan)),
-        n_kind="obs" if n_obs is not None else None,
+        n_kind="units" if n_obs is not None else None,
         time_scale="relative",
         event_time_convention="e0_first_treated",
         cband_lower=np.asarray(cband_lo, dtype=float) if cband_lo is not None else None,
@@ -1216,6 +1246,9 @@ def _from_had(results: Any) -> EventStudyResults:
         cband_crit_value=getattr(results, "cband_crit_value", None),
         alpha=getattr(results, "alpha", 0.05),
         source=type(results).__name__,
+        # The per-horizon estimand is a WAS, not an ATT (row M-027):
+        # relay the estimand label so summary()/to_dict never mislabel.
+        estimand=getattr(results, "target_parameter", None),
         **_provenance_kwargs(results),
     )
 
