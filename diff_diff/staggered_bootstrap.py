@@ -8,7 +8,7 @@ are in :mod:`diff_diff.bootstrap_utils`.
 
 import warnings
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, ClassVar, Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 
@@ -128,6 +128,15 @@ class CallawaySantAnnaBootstrapMixin:
     """
 
     # Type hints for attributes accessed from the main class
+    # Host-supplied estimator name for user-facing bootstrap warnings. Declared
+    # here because mypy type-checks the mixin independently of its hosts, so
+    # `self._BOOTSTRAP_LABEL` would otherwise be [attr-defined]. ClassVar, not a
+    # bare annotation: the hosts set it as class-level constant data, and an
+    # instance-variable declaration here would make each of those a
+    # "cannot override instance variable with class variable" [misc] error.
+    # (Contrast `_warn_frame_offset`, which IS assigned via instance and so must
+    # NOT be a ClassVar.)
+    _BOOTSTRAP_LABEL: ClassVar[str]
     n_bootstrap: int
     bootstrap_weights: str
     alpha: float
@@ -194,14 +203,18 @@ class CallawaySantAnnaBootstrapMixin:
         CSBootstrapResults
             Bootstrap inference results.
         """
-        # Warn about low bootstrap iterations
+        # Warn about low bootstrap iterations. This site is USER-attributed, and
+        # the DDD engine reaches it through one or two extra frames depending on
+        # which surface was called, so it consults the offset the engine mirrors
+        # onto the instance for the duration of a fit. CallawaySantAnna never
+        # sets the attribute, so its attribution is bit-identical to 3.x.
         if self.n_bootstrap < 50:
             warnings.warn(
                 f"n_bootstrap={self.n_bootstrap} is low. Consider n_bootstrap >= 199 "
                 "for reliable inference. Percentile confidence intervals and p-values "
                 "may be unreliable with few iterations.",
                 UserWarning,
-                stacklevel=3,
+                stacklevel=3 + getattr(self, "_warn_frame_offset", 0),
             )
 
         rng = np.random.default_rng(self.seed)
@@ -389,7 +402,7 @@ class CallawaySantAnnaBootstrapMixin:
                 import warnings as _warnings
 
                 _warnings.warn(
-                    f"CallawaySantAnna bootstrap with survey/cluster design "
+                    f"{self._BOOTSTRAP_LABEL} bootstrap with survey/cluster design "
                     f"has only {len(psu_ids)} PSU(s); bootstrap variance is "
                     "unidentified. All bootstrap inference fields "
                     "(overall_se, group_time_ses, event_study_ses, "
