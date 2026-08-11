@@ -209,7 +209,11 @@ Staggered Adoption Issues
    # Check cohort sizes
    print(data.groupby('first_treat')['unit_id'].nunique())
 
-   # Use bootstrap for better inference
+   # Use bootstrap for better inference. On a BOOTSTRAPPED fit, post-fit
+   # results.aggregate('event_study') raises - the percentile draws are not
+   # retained - so the deprecated fit-time aggregate= remains the documented
+   # route for this case until 4.0. (results.aggregate('simple') relays the
+   # stored bootstrap inference and works on any fit.)
    cs = CallawaySantAnna(n_bootstrap=999)
    results = cs.fit(data, outcome='y', unit='unit_id',
                     time='period', first_treat='first_treat',
@@ -231,19 +235,25 @@ Visualization Issues
 
 .. code-block:: python
 
-   from diff_diff import plot_event_study
+   from diff_diff import CallawaySantAnna, plot_event_study
 
-   # Check your results first
-   print(results.period_effects)  # or results.event_study_effects
-
-   # Specify reference period explicitly
-   plot_event_study(results, reference_period=-1)
-
-   # For CallawaySantAnna, fit with aggregate='event_study'
+   # For CallawaySantAnna, aggregate to an event study post-fit, then plot.
+   # base_period="universal" gives the event study explicit reference row(s),
+   # marked in the container - under the default varying base every
+   # pre-treatment point is an estimated effect with no common anchor, so
+   # renormalizing a plot around one would silently shift every point.
+   cs = CallawaySantAnna(base_period='universal')
    results = cs.fit(data, outcome='y', unit='unit_id',
-                    time='period', first_treat='first_treat',
-                    aggregate='event_study')
-   plot_event_study(results)
+                    time='period', first_treat='first_treat')
+   es = results.aggregate('event_study')
+
+   # Inspect the actual reference row(s) - on gapped period grids the
+   # positional base can sit at an event time other than -1
+   print(es.to_dataframe().query("is_reference"))
+
+   # Plot the container - it carries its own reference; no manual
+   # reference_period override is needed (or safe to hard-code)
+   plot_event_study(es)
 
 "Plot doesn't show in Jupyter"
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

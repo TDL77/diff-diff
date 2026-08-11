@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- **Narrative docs migrated off the deprecated fit-time `aggregate=`** (the
+  3.9 M-020 family; TODO "fit-time aggregate= teachings" sweep, RST half):
+  `choosing_estimator.rst`, `python_comparison.rst` and `r_comparison.rst` now
+  teach post-fit `results.aggregate(type=...)` (the r_comparison block maps
+  1:1 onto R's three `aggte()` calls; `'all'` has no post-fit counterpart),
+  and `troubleshooting.rst`'s event-study-plot remedy is rewritten to a
+  `base_period="universal"` fit whose `aggregate('event_study')` container is
+  plotted directly - the container carries its own `is_reference` marking, so
+  the example inspects the actual reference row(s) rather than hard-coding
+  `reference_period=-1` (under the varying default every pre-period point is
+  an estimated effect with no common anchor, and on gapped grids even the
+  universal base can anchor at an event time other than -1).
+  The troubleshooting bootstrap passage deliberately KEEPS fit-time
+  `aggregate='event_study'` with a comment naming it the documented until-4.0
+  exception (post-fit recompute levels raise on a bootstrapped fit;
+  `'simple'` relays). The two rewritten blocks that previously died on
+  allowlisted `NameError`s (`r_comparison:block2`, `troubleshooting:block8`)
+  are now self-contained and removed from `_CONTEXT_DEPENDENT_SNIPPETS`, so
+  `tests/test_doc_snippets.py` actually executes them.
+
 ## [3.9.0] - 2026-08-10
 
 The 3.9 shim release of the 4.0 API-unification program (`docs/v4-design.md`):
