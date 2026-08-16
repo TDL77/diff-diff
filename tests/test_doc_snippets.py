@@ -39,7 +39,13 @@ RST_FILES = [
     "api/pretrends.rst",
     "api/power.rst",
     "api/changes_in_changes.rst",
+    "api/business_report.rst",
+    "api/diagnostic_report.rst",
+    "api/estimators.rst",
     "api/mmm.rst",
+    "api/triple_diff.rst",
+    "practitioner_decision_tree.rst",
+    "practitioner_getting_started.rst",
     "python_comparison.rst",
     "r_comparison.rst",
 ]
@@ -417,6 +423,7 @@ _CONTEXT_DEPENDENT_SNIPPETS = {
     "r_comparison:block3",
     "r_comparison:block4",
     "r_comparison:block7",
+    "practitioner_getting_started:block5",
 }
 
 
@@ -475,3 +482,44 @@ def test_doc_snippet(test_id: str, code: str, skip_reason: Optional[str]):
         # raises, so this must be a finally, not a trailing statement).
         os.environ.clear()
         os.environ.update(env_snapshot)
+
+
+# ---------------------------------------------------------------------------
+# Pinned-output regression: quickstart's printed summary block
+# ---------------------------------------------------------------------------
+_TEXT_BLOCK_RE = re.compile(
+    r"^\.\.\s+code-block::\s+text\s*$\n"
+    r"(?:\s*:\w[^:]*:.*\n)*"
+    r"\n"
+    r"((?:[ \t]+\S.*\n|[ \t]*\n)+)",
+    re.MULTILINE,
+)
+
+
+def test_quickstart_pinned_summary_output():
+    """quickstart.rst's pinned ``summary()`` output matches its own example.
+
+    The snippet harness executes python blocks but ignores
+    ``code-block:: text``, so the documented output could otherwise drift
+    silently while CI stays green. The example is fully seeded, so the
+    printed block is reproducible and can be pinned exactly. Executing the
+    quickstart's own leading blocks (rather than a duplicated setup) also
+    catches the converse drift: editing the example's generator arguments
+    without re-pinning the printed block.
+    """
+    rst_path = DOCS_DIR / "quickstart.rst"
+    blocks = [textwrap.dedent(m.group(1)) for m in _TEXT_BLOCK_RE.finditer(rst_path.read_text())]
+    assert len(blocks) == 1, "expected exactly one text block in quickstart.rst"
+    documented = [ln.rstrip() for ln in blocks[0].strip().splitlines()]
+
+    # Execute the quickstart's own blocks, in order, until the basic
+    # example's ``results`` exists (the imports + seeded generate/fit block).
+    ns: dict = {"__builtins__": __builtins__}
+    for _, code in _extract_snippets(rst_path):
+        exec(compile(code, "<quickstart-pinned>", "exec"), ns)
+        if "results" in ns:
+            break
+    assert "results" in ns, "quickstart basic example no longer defines 'results'"
+
+    actual = [ln.rstrip() for ln in ns["results"].summary().strip().splitlines()]
+    assert actual == documented
