@@ -11,6 +11,7 @@ container surface the module consumes.
 """
 
 import math
+import re
 import warnings
 
 import numpy as np
@@ -1037,6 +1038,7 @@ def _make_agg(
     ses=(0.5,),
     ns=(30.0,),
     targets=None,
+    weight=None,
 ):
     """Hand-built AggregationResult mirroring the producers' field conventions."""
     k = len(labels)
@@ -1053,6 +1055,7 @@ def _make_agg(
         n=np.array(ns, dtype=float),
         df=np.full(k, np.nan),
         n_kind=n_kind,
+        weight=(None if weight is None else np.array(weight, dtype=float)),
         estimator=estimator,
     )
 
@@ -1114,7 +1117,7 @@ class TestAggregationExtraction:
 
     def test_rejects_unsupported_level(self):
         agg = _make_agg(level="calendar")
-        with pytest.raises(ValueError, match="level must be 'simple' or 'group'"):
+        with pytest.raises(ValueError, match="level must be 'simple', 'group', or 'total'"):
             to_pymc_marketing_lift_test(
                 channel="tv", x=1.0, delta_x=1.0, aggregation_result=agg, scale=1.0
             )
@@ -1693,3 +1696,147 @@ def test_public_exports():
     assert diff_diff.to_meridian_roi_prior is to_meridian_roi_prior
     assert diff_diff.meridian_calibration_mask is meridian_calibration_mask
     assert diff_diff.MeridianROIPrior is MeridianROIPrior
+
+
+class TestTotalContainerAdmission:
+    """level='total' containers: admitted with NO scale, rejected with any."""
+
+    def _tot(self, att=6.0, se=1.5, n=30.0, estimator="ImputationDiD", **kw):
+        kw.setdefault("labels", ("total",))
+        kw.setdefault("targets", ("total",))
+        kw.setdefault("weight", (1.0,))
+        return _make_agg(
+            level="total",
+            estimator=estimator,
+            atts=(att,),
+            ses=(se,),
+            ns=(n,),
+            **kw,
+        )
+
+    def test_lift_test_accepts_total_without_scale(self):
+        frame = to_pymc_marketing_lift_test(
+            channel="tv", x=100.0, delta_x=50.0, aggregation_result=self._tot()
+        )
+        assert frame["delta_y"].iloc[0] == 6.0
+        assert frame["sigma"].iloc[0] == 1.5
+
+    def test_meridian_accepts_total_without_scale(self):
+        prior = to_meridian_roi_prior(aggregation_result=self._tot(), spend=60.0)
+        assert prior.roi_mean == pytest.approx(0.1)
+
+    @pytest.mark.parametrize("scale", [2.0, "auto"])
+    def test_any_scale_with_total_rejected(self, scale):
+        with pytest.raises(ValueError, match="already totals"):
+            to_pymc_marketing_lift_test(
+                channel="tv",
+                x=100.0,
+                delta_x=50.0,
+                aggregation_result=self._tot(),
+                scale=scale,
+            )
+
+    @pytest.mark.parametrize("estimator", ["StackedDiD", "SomeNewEstimator", None])
+    def test_unaudited_provenance_rejected(self, estimator):
+        """The 'already scaled' claim is provenance-gated like scale='auto':
+        StackedDiD is staged out, and unknown/missing provenance could be any
+        hand-built container whose att is NOT a total."""
+        agg = self._tot(estimator=estimator)
+        with pytest.raises(ValueError, match="audited total adopters"):
+            to_pymc_marketing_lift_test(channel="tv", x=1.0, delta_x=1.0, aggregation_result=agg)
+        with pytest.raises(ValueError, match="audited total adopters"):
+            to_meridian_roi_prior(aggregation_result=agg, spend=10.0)
+
+    @pytest.mark.parametrize(
+        "estimator",
+        ["CallawaySantAnna", "EfficientDiD", "ImputationDiD", "TwoStageDiD"],
+    )
+    def test_all_four_adopters_admitted(self, estimator):
+        frame = to_pymc_marketing_lift_test(
+            channel="tv", x=1.0, delta_x=1.0, aggregation_result=self._tot(estimator=estimator)
+        )
+        assert frame["delta_y"].iloc[0] == 6.0
+
+    def test_drifted_producer_contract_rejected(self):
+        """label/n_kind/weight must match what aggregate('total') emits -
+        schema drift on a hand-altered container fails closed."""
+        for kw in (
+            {"n_kind": "units"},
+            {"labels": ("overall",)},
+            {"weight": None},
+            {"weight": (0.5,)},
+        ):
+            agg = self._tot(**kw)
+            with pytest.raises(ValueError, match="producer contract"):
+                to_pymc_marketing_lift_test(
+                    channel="tv", x=1.0, delta_x=1.0, aggregation_result=agg
+                )
+
+    def test_multi_row_total_rejected(self):
+        agg = _make_agg(
+            level="total",
+            labels=("total", "extra"),
+            targets=("total", "total"),
+            atts=(1.0, 2.0),
+            ses=(0.5, 0.5),
+            ns=(10.0, 10.0),
+            weight=(0.5, 0.5),
+        )
+        with pytest.raises(ValueError, match="single 'total' row"):
+            to_pymc_marketing_lift_test(channel="tv", x=1.0, delta_x=1.0, aggregation_result=agg)
+
+    def test_att_target_total_rejected(self):
+        agg = _make_agg(level="total", labels=("total",), targets=("att",), weight=(1.0,))
+        with pytest.raises(ValueError, match="target='total'"):
+            to_pymc_marketing_lift_test(channel="tv", x=1.0, delta_x=1.0, aggregation_result=agg)
+
+    def test_non_finite_total_rejected(self):
+        agg = self._tot(att=float("nan"), se=1.0)
+        with pytest.raises(ValueError, match="no usable point"):
+            to_pymc_marketing_lift_test(channel="tv", x=1.0, delta_x=1.0, aggregation_result=agg)
+
+    def test_missing_input_errors_name_the_total_route(self):
+        with pytest.raises(ValueError, match=r"aggregate\('total'\)"):
+            to_pymc_marketing_lift_test(channel="tv", x=1.0, delta_x=1.0)
+        with pytest.raises(ValueError, match=r"aggregate\('total'\)"):
+            to_meridian_roi_prior(spend=10.0)
+
+    def test_hints_keep_pins_and_name_the_total_route(self):
+        from diff_diff.mmm import _SCALE_HINTS
+
+        assert re.search(r"treated\+control", _SCALE_HINTS["CallawaySantAnna"])
+        for est in ("CallawaySantAnna", "EfficientDiD"):
+            assert re.search(r"aggregate\('total'\)", _SCALE_HINTS[est])
+        # EDiD's hint must NOT claim RC/cluster-mass failure modes (it has
+        # neither); CS's must name them.
+        assert "repeated-cross-section" not in _SCALE_HINTS["EfficientDiD"]
+        assert "repeated-cross-section" in _SCALE_HINTS["CallawaySantAnna"]
+
+    def test_end_to_end_cs_and_imputation(self):
+        from diff_diff import CallawaySantAnna, ImputationDiD
+
+        rng = np.random.default_rng(21)
+        rows = []
+        for u in range(36):
+            g = [0, 3, 4][u % 3]
+            for t in range(1, 7):
+                rows.append(
+                    {
+                        "unit": u,
+                        "time": t,
+                        "first_treat": g,
+                        "y": 1.0 + 0.1 * t + (2.0 if g and t >= g else 0.0) + rng.normal(0, 0.2),
+                    }
+                )
+        frame = pd.DataFrame(rows)
+        raw_n = int(((frame["first_treat"] > 0) & (frame["time"] >= frame["first_treat"])).sum())
+        for cls in (CallawaySantAnna, ImputationDiD):
+            res = cls().fit(frame, outcome="y", unit="unit", time="time", first_treat="first_treat")
+            tot = res.aggregate("total")
+            simple = res.aggregate("simple")
+            assert tot.n[0] == float(raw_n)
+            lift = to_pymc_marketing_lift_test(
+                channel="tv", x=100.0, delta_x=50.0, aggregation_result=tot
+            )
+            assert lift["delta_y"].iloc[0] == pytest.approx(raw_n * simple.att[0])
+            assert lift["sigma"].iloc[0] == pytest.approx(raw_n * simple.se[0])
