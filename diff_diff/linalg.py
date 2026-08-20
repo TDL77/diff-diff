@@ -1161,7 +1161,7 @@ def solve_ols(
         Type of weights: "pweight" (inverse selection probability),
         "fweight" (frequency), or "aweight" (inverse variance).
         Affects variance estimation but not coefficient computation.
-    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, default "hc1"
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "hc3", "conley"}, default "hc1"
         Variance-covariance family forwarded to :func:`compute_robust_vcov`:
 
         - ``"classical"``: non-robust OLS SE, ``sigma_hat^2 * (X'X)^{-1}``.
@@ -1177,6 +1177,11 @@ def solve_ols(
           ``fweight`` raise ``NotImplementedError`` (port matches the
           ``pweight`` convention only; aweight/fweight derivations are a
           separate methodology task).
+        - ``"hc3"``: jackknife-style leverage correction, meat
+          ``e_i^2 / (1 - h_ii)^2``. One-way only; raises with
+          ``cluster_ids``. An observation with leverage ``h_ii ~ 1`` has no
+          defined HC3 variance and the vcov fails closed (warning + NaN)
+          rather than flooring ``1 - h_ii``.
         - ``"conley"``: Conley (1999) spatial-HAC sandwich. Requires
           ``conley_coords`` (n × 2 array) and ``conley_cutoff_km`` (positive
           bandwidth, no default per Conley 1999 Section 5's sensitivity-grid
@@ -1913,7 +1918,7 @@ def _solve_ols_numpy(
         return coefficients, residuals, vcov
 
 
-_VALID_VCOV_TYPES = frozenset({"classical", "hc1", "hc2", "hc2_bm", "conley"})
+_VALID_VCOV_TYPES = frozenset({"classical", "hc1", "hc2", "hc2_bm", "hc3", "conley"})
 
 
 def _validate_vcov_args(
@@ -1936,7 +1941,7 @@ def _validate_vcov_args(
     ValueError
         If ``vcov_type`` is not in the allowed set, or if ``cluster_ids`` is
         combined with a ``vcov_type`` that is one-way only (``classical``,
-        ``hc2``).
+        ``hc2``, ``hc3``).
     NotImplementedError
         If ``vcov_type == "conley"`` is combined with ``weights`` (regardless
         of ``weight_type``: weighted Conley is not implemented on the
@@ -1956,7 +1961,7 @@ def _validate_vcov_args(
     # Mirrored K_reference-adjustment contract for direct compute_robust_vcov
     # / kernel callers (solve_ols routes enforce it at its own front door).
     _validate_cluster_k_adjustment(cluster_k_adjustment, cluster_ids, vcov_type)
-    if vcov_type in ("classical", "hc2") and cluster_ids is not None:
+    if vcov_type in ("classical", "hc2", "hc3") and cluster_ids is not None:
         msg = {
             "classical": (
                 "classical SEs are one-way only; pass vcov_type='hc1' or "
@@ -1964,6 +1969,10 @@ def _validate_vcov_args(
             ),
             "hc2": (
                 "hc2 is one-way only. Use vcov_type='hc2_bm' for " "cluster-robust Bell-McCaffrey."
+            ),
+            "hc3": (
+                "hc3 is one-way only. Use vcov_type='hc1' (CR1) or "
+                "'hc2_bm' (CR2 Bell-McCaffrey) for cluster-robust."
             ),
         }[vcov_type]
         raise ValueError(msg)
@@ -2068,7 +2077,7 @@ def resolve_vcov_type(
       ``"hc1"`` and ``robust=False`` to ``"classical"``.
     - If ``vcov_type`` is supplied: it must be one of the values in the
       module-level ``_VALID_VCOV_TYPES`` set, namely
-      ``{"classical", "hc1", "hc2", "hc2_bm", "conley"}``.
+      ``{"classical", "hc1", "hc2", "hc2_bm", "hc3", "conley"}``.
     - If ``robust=False`` is supplied together with a non-``"classical"`` ``vcov_type``,
       raise ``ValueError`` - the combination is ambiguous.
 
@@ -2086,7 +2095,8 @@ def resolve_vcov_type(
     Returns
     -------
     str
-        One of ``"classical"``, ``"hc1"``, ``"hc2"``, ``"hc2_bm"``, ``"conley"``.
+        One of ``"classical"``, ``"hc1"``, ``"hc2"``, ``"hc2_bm"``,
+        ``"hc3"``, ``"conley"``.
 
     Raises
     ------
@@ -2134,7 +2144,7 @@ def compute_robust_vcov(
     conley_lag_cutoff: Optional[int] = None,
 ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
     """
-    Compute variance-covariance matrix under one of five `vcov_type` variants.
+    Compute variance-covariance matrix under one of six `vcov_type` variants.
 
     Uses the sandwich estimator: (X'X)^{-1} * meat * (X'X)^{-1}, with the meat
     matrix determined by the ``vcov_type`` dispatch:
@@ -2149,6 +2159,9 @@ def compute_robust_vcov(
       ``sum_i (u_i^2 / (1 - h_ii)) x_i x_i'`` where ``h_ii`` are hat-matrix
       diagonals. No DOF adjustment beyond ``n - k``. One-way only; errors with
       ``cluster_ids``.
+    - ``"hc3"``: jackknife-style leverage correction, meat
+      ``sum_i (u_i^2 / (1 - h_ii)^2) x_i x_i'`` (matches ``sandwich::vcovHC``
+      type="HC3": no DOF factor). One-way only; errors with ``cluster_ids``.
     - ``"hc2_bm"``: one-way HC2 meat plus Imbens-Kolesar (2016) Bell-McCaffrey
       Satterthwaite degrees of freedom per coefficient when ``cluster_ids`` is
       ``None``. When ``cluster_ids`` is supplied, dispatches to the
@@ -2195,8 +2208,8 @@ def compute_robust_vcov(
         Weight type: "pweight", "fweight", or "aweight".
     vcov_type : str, default "hc1"
         One of ``"classical"``, ``"hc1"``, ``"hc2"``, ``"hc2_bm"``,
-        ``"conley"`` (see top-level docstring above for the dispatch
-        contract).
+        ``"hc3"``, ``"conley"`` (see top-level docstring above for the
+        dispatch contract).
     conley_coords : ndarray of shape (n, 2), optional, keyword-only
         Required when ``vcov_type="conley"``. Two-column array of
         ``[lat, lon]`` (degrees, for ``conley_metric="haversine"``) or
@@ -2221,8 +2234,9 @@ def compute_robust_vcov(
     return_dof : bool, default False
         When True, returns ``(vcov, dof_vec)`` tuple. ``dof_vec`` is a length-k
         array of per-coefficient degrees of freedom. For ``classical``,
-        ``hc1``, ``hc2``: every element is ``n_eff - k``. For ``hc2_bm``
-        one-way: Imbens-Kolesar (2016) Satterthwaite DOF per contrast.
+        ``hc1``, ``hc2``, ``hc3``: every element is ``n_eff - k``. For
+        ``hc2_bm`` one-way: Imbens-Kolesar (2016) Satterthwaite DOF per
+        contrast.
     cluster_k_adjustment : int, default 0, keyword-only
         Signed K_reference adjustment added to the visible column count in
         the CLUSTERED CR1 finite-sample factor only (absorbed FE not nested
@@ -3550,9 +3564,9 @@ def _compute_robust_vcov_numpy(
         return vcov_cr2
 
     # ------------------------------------------------------------------
-    # HC2 / HC2+BM one-way (no cluster).
+    # HC2 / HC2+BM / HC3 one-way (no cluster).
     # ------------------------------------------------------------------
-    if vcov_type in ("hc2", "hc2_bm"):
+    if vcov_type in ("hc2", "hc2_bm", "hc3"):
         # cluster path handled above; here cluster_ids is None by construction.
         # **Weighted hc2_bm one-way**: clubSandwich's CR2 with singleton clusters
         # uses the bias-corrected adjustment `A_i = 1 / sqrt(G_i)` where
@@ -3580,8 +3594,50 @@ def _compute_robust_vcov_numpy(
             if return_dof:
                 return vcov_cr2, dof_cr2
             return vcov_cr2
-        h_diag = _compute_hat_diagonals(X, bread_matrix, weights=weights)
+        # fweight semantics are REPLICATED DATA (Registry: integer counts,
+        # df = sum(w) - k, HC1 expansion parity): each replicate row's
+        # leverage in the expanded design is x_i'(X'WX)^{-1}x_i WITHOUT the
+        # w multiplier, so the leverage denominator uses the unweighted
+        # quadratic form against the weighted bread. The WLS-hat convention
+        # (w * quadform, R sandwich::vcovHC) applies to aweight/pweight
+        # only (review round 6: the weighted hat under fweight produced
+        # HC2/HC3 variances up to ~5x the literal np.repeat expansion).
+        h_diag = _compute_hat_diagonals(
+            X,
+            bread_matrix,
+            weights=None if weight_type == "fweight" else weights,
+        )
+        # Leverage-one observations make the HC3 leave-one-out residual
+        # undefined (and HC2 nearly so): flooring 1 - h_ii would fabricate
+        # an arbitrary finite variance for a perfectly-leveraged point
+        # (e.g. a single treated unit under [1, D]). HC3 fails closed with
+        # a NaN vcov instead (LWDiD fix-wave review finding); HC2/HC2-BM
+        # keep their long-standing floor behavior (released surface;
+        # pre-existing, tracked separately). This check runs BEFORE the
+        # generic over-one HC1 fallback below (round-10 review: numerically
+        # over-one leverage previously escaped into an HC1 result still
+        # labeled hc3 - h >= 1 - 1e-8 covers h > 1 + 1e-6 entirely).
+        if vcov_type == "hc3" and np.any(h_diag >= 1.0 - 1e-8):
+            n_lev1 = int(np.sum(h_diag >= 1.0 - 1e-8))
+            warnings.warn(
+                f"HC3 variance is undefined: {n_lev1} observation(s) have "
+                f"hat-matrix leverage ~1 (a perfectly-leveraged design, "
+                f"e.g. a single treated unit). Returning NaN vcov; use "
+                f"vcov_type='classical' exact inference or add treated "
+                f"units.",
+                UserWarning,
+                stacklevel=3,
+            )
+            nan_vcov = np.full((X.shape[1], X.shape[1]), np.nan)
+            if return_dof:
+                # Contract: a length-k DOF vector (round-24 review: None
+                # broke direct consumers indexing the result); NaN keeps
+                # the fail-closed semantics through safe_inference.
+                return nan_vcov, np.full(X.shape[1], np.nan)
+            return nan_vcov
         if np.any(h_diag > 1.0 + 1e-6):
+            # hc2/hc2_bm only: hc3 designs with over-one leverage are
+            # already caught by the fail-closed guard above.
             warnings.warn(
                 f"Hat-matrix diagonal exceeds 1 (max={h_diag.max():.6f}); "
                 "the design is near-singular. Falling back to HC1.",
@@ -3598,26 +3654,29 @@ def _compute_robust_vcov_numpy(
                 return_dof=return_dof,
             )
         one_minus_h = np.maximum(1.0 - h_diag, 1e-10)
-        # HC2 meat: sum_i (u_i^2 / (1 - h_ii)) x_i x_i', with pweight scaling
-        # matching the HC1 convention (w_i * u_i / sqrt(1 - h_ii) as score).
+        # HC2 meat: sum_i (u_i^2 / (1 - h_ii)) x_i x_i'; HC3 squares the
+        # leverage denominator (jackknife-style, sandwich::vcovHC type="HC3").
+        # pweight scaling matches the HC1 convention (w_i * u_i / sqrt(denom)
+        # as score).
+        lev_denom = one_minus_h**2 if vcov_type == "hc3" else one_minus_h
         if weights is not None and weight_type == "fweight":
-            factor = weights * (residuals**2) / one_minus_h
+            factor = weights * (residuals**2) / lev_denom
             meat = X.T @ (X * factor[:, np.newaxis])
         elif weights is not None and weight_type == "pweight":
-            # pweight scores carry w in the score, so meat = sum (w u / sqrt(1-h))^2 x x'
-            scaled = weights * residuals / np.sqrt(one_minus_h)
+            # pweight scores carry w in the score, so meat = sum (w u / sqrt(denom))^2 x x'
+            scaled = weights * residuals / np.sqrt(lev_denom)
             scores_hc2 = X * scaled[:, np.newaxis]
             meat = scores_hc2.T @ scores_hc2
         else:
-            # aweight / unweighted: meat = sum_i (u_i^2 / (1 - h_ii)) x_i x_i'
-            factor = (residuals**2) / one_minus_h
+            # aweight / unweighted: meat = sum_i (u_i^2 / denom_i) x_i x_i'
+            factor = (residuals**2) / lev_denom
             # Zero out zero-weight rows under aweight (subpopulation invariance)
             if weights is not None and np.any(weights == 0):
                 factor = factor * (weights > 0)
             meat = X.T @ (X * factor[:, np.newaxis])
 
-        # Sandwich without DOF adjustment for HC2 (matches sandwich::vcovHC
-        # type="HC2" convention: no (n/(n-k)) factor).
+        # Sandwich without DOF adjustment for HC2/HC3 (matches sandwich::vcovHC
+        # type="HC2"/"HC3" convention: no (n/(n-k)) factor).
         try:
             temp = np.linalg.solve(bread_matrix, meat)
             vcov = np.linalg.solve(bread_matrix, temp.T).T
@@ -3632,7 +3691,7 @@ def _compute_robust_vcov_numpy(
 
         if not return_dof:
             return vcov
-        if vcov_type == "hc2":
+        if vcov_type in ("hc2", "hc3"):
             dof_vec = np.full(k, n_eff - k, dtype=np.float64)
         else:  # hc2_bm
             dof_vec = _compute_bm_dof_oneway(X, bread_matrix, h_diag, weights=weights)
@@ -4324,7 +4383,7 @@ class LinearRegression:
         Resolved survey design for Taylor Series Linearization variance
         estimation. When provided, weights and weight_type are canonicalized
         from this object.
-    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, optional
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "hc3", "conley"}, optional
         Variance-covariance family. Defaults to the ``robust`` alias
         (``robust=True`` -> ``"hc1"``, ``robust=False`` -> ``"classical"``).
         Passing an explicit ``vcov_type`` overrides ``robust`` unless the

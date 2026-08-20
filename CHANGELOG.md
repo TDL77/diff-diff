@@ -60,6 +60,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   route on bootstrapped CS fits instead of the deprecated fit-time kwarg. The
   sibling estimators' (EfficientDiD/ImputationDiD/TwoStageDiD/ContinuousDiD)
   bootstrapped recompute gates are unchanged.
+- **`LWDiD` (Lee & Wooldridge 2025, 2026 rolling-transformation DiD).** Unit-specific
+  demean/detrend (plus quarterly `demeanq`/`detrendq`) converts panel data to
+  cross-sectional transformed outcomes; supports common timing and staggered
+  adoption with never-treated / not-yet-treated controls,
+  `estimation_method` in `'reg'`/`'ipw'`/`'dr'`/`'psm'`, analytical
+  (`vcov_type` in `'classical'`/`'hc1'`/`'hc2'`/`'hc3'`) and cluster-robust
+  (constructor `cluster=`) inference, multiplier bootstrap, wild cluster
+  bootstrap, and randomization inference. Common-timing fits expose the same
+  post-fit event-study surface as staggered ones —
+  `results.aggregate('event_study')` returns per-period effects keyed by
+  event time relative to treatment onset, so no separate per-period fit
+  option exists.
+
+### Changed
+- **`LWDiD` API canonicalized to the v4 vocabulary agreed in PR #588's review**
+  (renames relative to the PR's earlier review rounds; nothing here was ever
+  released): `estimator=` -> `estimation_method=` with values `'ra'` -> `'reg'`
+  and `'ipwra'` -> `'dr'`; `vce=` -> `vcov_type=` with no `'cluster'` value —
+  cluster-robust (CR1) inference activates via the constructor `cluster=`
+  column instead; `bootstrap_seed=` -> `seed=` (default `None`);
+  `trim_threshold=` -> `pscore_trim=`. `vcov_type='hc3'` is computed through
+  the shared `diff_diff.linalg` HC machinery used by the other estimators,
+  and the `'hc0'`/`'hc4'` values are removed from the surface.
+  Unit-constancy validation is centralized and applies uniformly to
+  covariates and the cluster column across all estimation paths.
+
+### Removed
+- **`LWDiD` pre-v4 review-round surface** (never released): the `LW` alias,
+  the functional `lwdid()` wrapper, the `lwdid_trend_diagnostics` module
+  (including `recommend_transformation`), and the `overall_att` /
+  `period_effects` result fields together with the `period_specific` fit
+  option — per-period effects are served by the post-fit
+  `results.aggregate('event_study')` surface instead.
+
+### Fixed
+- **`LWDiD` maintainer fix wave** (post-acceptance validation campaign: 43
+  execution-verified findings, all resolved):
+  - Estimand: the `tau_omega` composite is complete-case with FIXED cohort
+    weights (treated units without a finite own-cohort post average and
+    controls not observing every surviving cohort's post window are
+    dropped with warnings and counters; the pre-fix code zero-filled
+    missing control entries and silently reweighted the treated side);
+    with any drops, `.att` is the influence-weighted cohort-mass point on
+    every variance route and the composite is exposed as
+    `att_tau_omega_complete_case`. `demeanq`/`detrendq` overall ATTs now
+    aggregate seasonal cohort ATTs (the composite silently substituted
+    the non-seasonal transforms); the seasonal transforms fail closed on
+    insufficient pre-periods and unobserved seasons.
+  - Inference: one reference-distribution policy per surface (one-cell
+    aggregates use the cell's residual t; multi-cell unclustered stay
+    large-sample; clustered use contributing-cluster G-1); sub-samples
+    with <2 clusters fail closed; the common-timing bootstrap resamples
+    positionally (row order/index labels no longer corrupt SEs), honors
+    `cluster=` via whole-cluster resampling, and reports the df it used;
+    `wild_cluster_bootstrap` was rebuilt on the house WCR engine
+    (test-inversion CI, CR1 se, strict-exceedance p; the intercept-only
+    null model, ULP tie handling, and the G=2 zero-SE escape are gone;
+    API: `n_bootstrap`/`alpha`, result fields renamed). The result-level
+    `wild_cluster_bootstrap()`/`randomization_test()` methods now REPLAY
+    the fitted estimation sample and exact RA design (no data arguments;
+    RI recomputes the treated covariate mean per permutation; the
+    replayed statistic is asserted equal to `.att` before caching) - the
+    prior signatures accepted arbitrary arrays and could cache p-values
+    for a different estimand than the fitted ATT. The seeded bootstrap
+    draws identical streams for every `n_jobs`, resamples only units
+    surviving the transformation, and preserves fail-closed NaN inference
+    when fewer than 2 effective clusters survive; `aggregate(balance_e=)`
+    is rejected (was silently ignored); both RI/WCR fit through the
+    rank-aware shared solver (a duplicated treatment column previously
+    yielded a finite minimum-norm ATT).
+  - Contracts: `vcov_type` is restricted to values with real behavior
+    (`ipw`/`dr`/`psm` accept `hc1` only; `cluster=` composes only with
+    `hc1`; `psm`+`cluster` rejected); NaN covariates/clusters are rejected
+    explicitly; PSM calipers never average out-of-caliper controls;
+    cohort encodings are normalized once (`inf`/beyond-window recode with
+    warnings, negative cohorts raise, validator and `fit()` agree);
+    sensitivity results are NaN-honest (`baseline_pvalue`, NaN
+    `significant_05` for failed specs, full-frame pre-validation, unknown
+    kwargs raise); staggered sample metadata counts contributing units;
+    rank-deficient designs rebuild the influence function on kept columns.
+  - Tutorial: the contribution's `27_lwdid.ipynb` is WITHDRAWN (its
+    Walmart narrative was built on a fabricated common onset with jobs
+    figures inconsistent with the staggered estimate; a fresh notebook
+    is a tracked follow-up).
+  - Shared surfaces: `hc3` escapes closed across siblings (DiD/MP-DiD
+    `absorb=` now full-dummy-routes hc3 like hc2; TWFE no longer crashes
+    misleadingly; SpilloverDiD rejects hc3 at construction with its own
+    reason) plus a structural roster guard. `LWDiDResults.to_latex()` and
+    the `lwdid_exceptions` shim removed (unreleased API).
+- **`LWDiD` review-round fixes** (staggered contract and inference tightenings):
+  - Staggered classical/HC SEs now come from the joint influence function
+    across cohort-time cells (the LW 2026 eq. 7.19 pooled-regression basis),
+    accounting for correlation among cohort effects that share controls
+    instead of assuming independence.
+  - On unbalanced panels the overall ATT point estimate is unified so a
+    variance selection never moves it (gated to `rolling` in
+    `'demean'`/`'detrend'` with `control_group='never_treated'`,
+    `estimation_method='reg'`, and no covariates). Superseded in detail by
+    the maintainer fix wave below: the composite `tau_omega` is now
+    complete-case with fixed cohort weights, reported as `.att` only when
+    no unit is dropped, and the quarterly variants now aggregate SEASONAL
+    cohort ATTs on every variance route.
+  - t-test degrees of freedom are computed from one design-based rule across
+    common-timing and staggered paths instead of two inconsistent ones.
+  - All-eventually-treated panels under `control_group='not_yet_treated'`
+    raise `ValueError` instead of silently truncating the sample; staggered
+    `covariates` must be unit-constant, time-varying columns raise
+    `ValueError`.
+  - Randomization inference uses the inclusive Phipson-Smyth rule
+    p = (c+1)/(B+1) and counts ties as extreme (`>=`), so p is never 0 and
+    an all-tie permutation distribution yields p = 1.0.
+  - `estimation_method='dr'` without covariates warns (`UserWarning`) that it
+    reduces to regression adjustment instead of silently doing so.
+  - `sensitivity_analysis` gains a `not_estimable` robustness level (with a
+    warning) when the ratio cannot be computed — including the zero-baseline
+    case — instead of mislabeling it.
+  - `to_dict()` output is fully JSON-native, including datetime/Period
+    cohort and time labels (ISO-8601 / period strings, NaT -> None).
+  - Staggered fits accept datetime64 and Period time scales, and panels
+    mixing the two time families are rejected in both directions with a
+    clear `ValueError`; cluster variable equal to the unit column no longer
+    raises a spurious column-lookup error.
 
 ## [3.9.1] - 2026-08-17
 

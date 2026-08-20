@@ -238,6 +238,7 @@ Modern estimators for designs the basic toolkit cannot handle.
       Sharp and fuzzy RD from plot to estimate, when a naive cutoff
       comparison overstates the effect fivefold.
 
+
 .. toctree::
    :maxdepth: 1
    :caption: Advanced Methods

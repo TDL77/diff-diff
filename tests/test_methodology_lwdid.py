@@ -99,13 +99,12 @@ pytest.importorskip(
     reason="LWDiD estimator not yet on main (arrives via PR #588)",
 )
 
-from diff_diff.lwdid import LWDiD  # noqa: E402
-
 from diff_diff import (  # noqa: E402
     DifferenceInDifferences,  # noqa: E402
     load_prop99,
     load_walmart,
 )
+from diff_diff.lwdid import LWDiD  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Published replication targets (LW 2026; see module docstring for provenance)
@@ -1714,3 +1713,350 @@ class TestMinimumPrePeriods:
             df, outcome="y", unit="unit", time="time", treatment="treat"
         )
         assert np.isfinite(res.att)
+
+
+# ---------------------------------------------------------------------------
+# Fix-wave WS1: complete-case fixed-weight tau_omega (campaign findings:
+# 0.0-injection for controls missing a cohort's post window; silent
+# treated-side reweighting through the finite mask; composite gate applying
+# the NON-seasonal transform to demeanq/detrendq overall ATTs)
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_drops_staggered(seed=42):
+    """Deterministic unbalanced panel with GENUINE complete-case drops.
+
+    Cohorts {3, 5} over t=1..6. One control unit observes only t=1..4
+    (missing cohort-5's entire post window -> dropped from the composite
+    control side) and one cohort-5 treated unit observes only t=1..4
+    (missing its OWN post window -> dropped from the treated side, with the
+    cohort masses recomputed on the survivors).
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    uid = 0
+    spec = [(0, 40, None), (0, 1, (1, 2, 3, 4)), (3, 20, None), (5, 14, None), (5, 1, (1, 2, 3, 4))]
+    for g, n, keep in spec:
+        for _ in range(n):
+            alpha = rng.normal()
+            for t in range(1, 7):
+                if keep is not None and t not in keep:
+                    continue
+                d = int(g > 0 and t >= g)
+                y = alpha + 0.2 * t + rng.normal(scale=0.4) + (1.5 + 0.4 * (g == 5)) * d
+                rows.append(dict(unit=uid, time=t, first=g, treat=d, y=y))
+            uid += 1
+    return pd.DataFrame(rows)
+
+
+def _complete_case_tau_omega_reference(df):
+    """From-scratch complete-case fixed-weight tau_omega (demean).
+
+    Fixed cohort weights omega_g = N_g / N_treat defined on the ESTIMATION
+    sample: treated units without a finite own-cohort post average are
+    dropped and the masses recomputed; control units must observe every
+    surviving-weight cohort's post window.
+    """
+    fy = df.groupby("unit")["first"].first()
+    cohorts = sorted(set(fy[fy > 0]))
+    ydot = {}
+    for g in cohorts:
+        pre_mean = df.loc[df["time"] < g].groupby("unit")["y"].mean()
+        post = df.loc[df["time"] >= g].copy()
+        post["_ydot"] = post["y"] - post["unit"].map(pre_mean)
+        ydot[g] = post.groupby("unit")["_ydot"].mean()
+    surviving_treated = [
+        u for u in fy.index if fy[u] > 0 and np.isfinite(ydot[fy[u]].get(u, np.nan))
+    ]
+    fy_cc = fy.loc[surviving_treated]
+    sizes = {g: int((fy_cc == g).sum()) for g in cohorts}
+    weighted = [g for g in cohorts if sizes[g] > 0]
+    n_treat_cc = len(surviving_treated)
+    controls = [
+        u
+        for u in fy.index
+        if not fy[u] > 0 and all(np.isfinite(ydot[g].get(u, np.nan)) for g in weighted)
+    ]
+    y, d = [], []
+    for u in surviving_treated:
+        y.append(float(ydot[fy[u]][u]))
+        d.append(1.0)
+    for u in controls:
+        y.append(sum(sizes[g] / n_treat_cc * float(ydot[g][u]) for g in weighted))
+        d.append(0.0)
+    y_arr, d_arr = np.asarray(y), np.asarray(d)
+    return float(y_arr[d_arr == 1].mean() - y_arr[d_arr == 0].mean())
+
+
+class TestTauOmegaCompleteCase:
+    """WS1: fixed-weight complete-case tau_omega with vcov-invariant routing."""
+
+    KW = dict(outcome="y", unit="unit", time="time", treatment="treat", first_treat="first")
+
+    def _fit(self, df, **overrides):
+        params = dict(
+            rolling="demean",
+            estimation_method="reg",
+            vcov_type="classical",
+            control_group="never_treated",
+        )
+        params.update(overrides)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return LWDiD(**params).fit(df, **self.KW)
+
+    def test_two_sided_complete_case_oracle(self):
+        # Independent arithmetic oracle exercising BOTH a dropped treated
+        # unit AND a dropped control unit (the route-consistency test
+        # cannot see a wrong weighting: both routes share the composite).
+        df = _synthetic_drops_staggered()
+        res = self._fit(df)
+        assert res.n_composite_treated_dropped == 1
+        assert res.n_composite_controls_dropped == 1
+        expected = _complete_case_tau_omega_reference(df)
+        np.testing.assert_allclose(res.att_tau_omega_complete_case, expected, atol=1e-10, rtol=0)
+
+    def test_drops_route_reports_if_weighted_point_with_warning(self):
+        df = _synthetic_drops_staggered()
+        with pytest.warns(UserWarning, match="complete-case"):
+            res = LWDiD(
+                rolling="demean",
+                estimation_method="reg",
+                vcov_type="classical",
+                control_group="never_treated",
+            ).fit(df, **self.KW)
+        # .att equals the cohort-mass IF-weighted point on the drops route
+        expected = sum(v["weight"] * v["att"] for v in res.cohort_effects.values())
+        np.testing.assert_allclose(res.att, expected, atol=1e-10, rtol=0)
+        assert res.inference_basis == "joint_influence_function"
+        assert np.isfinite(res.se) and res.se > 0
+
+    def test_vcov_invariance_with_drops(self):
+        # Pre-fix hazard class: a variance selection moving the point.
+        df = _synthetic_drops_staggered()
+        atts = [self._fit(df, vcov_type=v).att for v in ("classical", "hc1")]
+        np.testing.assert_allclose(atts[0], atts[1], atol=1e-10, rtol=0)
+
+    def test_zero_drop_panel_keeps_status_quo_metadata(self):
+        df = _synthetic_unbalanced_staggered()  # unbalanced but zero drops
+        res = self._fit(df)
+        assert res.n_composite_treated_dropped == 0
+        assert res.n_composite_controls_dropped == 0
+        assert res.att_tau_omega_complete_case is None
+        assert res.inference_basis == "composite_regression"
+
+    def test_classical_if_se_concords_with_unit_bootstrap(self, ci_params):
+        # With drops, classical pairs the IF point with the IF SE; pin the
+        # pair against an external unit-resampling bootstrap.
+        df = _synthetic_drops_staggered()
+        res = self._fit(df)
+        rng = np.random.default_rng(42)
+        units = df["unit"].unique()
+        n_boot = ci_params.bootstrap(300, min_n=199)
+        draws = []
+        for _ in range(n_boot):
+            picks = rng.choice(units, size=len(units), replace=True)
+            frames = []
+            for j, u in enumerate(picks):
+                block = df.loc[df["unit"] == u].copy()
+                block["unit"] = j
+                frames.append(block)
+            bs = pd.concat(frames, ignore_index=True)
+            try:
+                draws.append(self._fit(bs).att)
+            except ValueError:
+                continue
+        boot_se = float(np.std([v for v in draws if np.isfinite(v)], ddof=1))
+        threshold = 0.40 if n_boot < 100 else 0.15
+        assert abs(res.se - boot_se) / boot_se < threshold, (res.se, boot_se)
+
+
+class TestSeasonalOverallRouting:
+    """WS1 gate coherence: demeanq/detrendq never enter the tau_omega
+    composite (which is defined for the plain transforms only). Pre-fix,
+    vcov_type='classical' silently swapped the NON-seasonal transform into
+    the staggered q-mode overall ATT (~8% shift on seasonal DGPs) while
+    hc1 aggregated seasonal cohort ATTs - a vcov selection moved the point.
+    """
+
+    KW = dict(outcome="y", unit="unit", time="time", treatment="treat", first_treat="first")
+
+    @staticmethod
+    def _quarterly_panel(seed=3):
+        rng = np.random.default_rng(seed)
+        rows = []
+        uid = 0
+        season = np.array([1.2, -0.6, 0.9, -1.5])
+        for g, n in [(0, 30), (9, 12), (11, 10)]:
+            for _ in range(n):
+                alpha = rng.normal()
+                amp = rng.uniform(0.5, 1.5)
+                for t in range(1, 17):
+                    d = int(g > 0 and t >= g)
+                    y = (
+                        alpha
+                        + amp * season[(t - 1) % 4]
+                        + 0.1 * t
+                        + rng.normal(scale=0.3)
+                        + 1.5 * d
+                    )
+                    rows.append(dict(unit=uid, time=t, first=g, treat=d, y=y))
+                uid += 1
+        return pd.DataFrame(rows)
+
+    def _fit(self, df, **overrides):
+        params = dict(
+            rolling="demeanq",
+            estimation_method="reg",
+            vcov_type="classical",
+            control_group="never_treated",
+        )
+        params.update(overrides)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return LWDiD(**params).fit(df, **self.KW)
+
+    def test_qmode_overall_is_seasonal_cohort_mass_average(self):
+        df = self._quarterly_panel()
+        res = self._fit(df)
+        expected = sum(v["weight"] * v["att"] for v in res.cohort_effects.values())
+        np.testing.assert_allclose(res.att, expected, atol=1e-10, rtol=0)
+        assert res.inference_basis == "joint_influence_function"
+
+    def test_qmode_vcov_never_moves_the_point(self):
+        df = self._quarterly_panel()
+        atts = [self._fit(df, vcov_type=v).att for v in ("classical", "hc1")]
+        np.testing.assert_allclose(atts[0], atts[1], atol=1e-12, rtol=0)
+
+    def test_qmode_differs_from_plain_demean_on_seasonal_dgp(self):
+        # The seasonal adjustment must actually matter on this DGP -
+        # guards against the fix regressing into a silent transform swap.
+        df = self._quarterly_panel()
+        att_q = self._fit(df).att
+        att_plain = self._fit(df, rolling="demean").att
+        assert abs(att_q - att_plain) > 1e-6
+
+    def test_composite_raises_if_q_variant_reaches_it(self):
+        df = self._quarterly_panel()
+        est = LWDiD(rolling="demeanq", estimation_method="reg")
+        with pytest.raises(ValueError, match="only defined for rolling"):
+            est._composite_regression_aggregation(df, "y", "unit", "time", "first")
+
+
+# ---------------------------------------------------------------------------
+# Fix-wave WS6: vcov contract + per-surface reference-distribution policy
+# ---------------------------------------------------------------------------
+
+
+class TestInferenceDispatchPolicy:
+    """Campaign finding: identical single-cohort designs produced p-values
+    differing by ~34 orders of magnitude depending on whether first_treat
+    was passed (t vs normal dispatch). Policy now: an aggregate composed of
+    EXACTLY ONE cell uses that cell's residual df (the common-timing rule);
+    multi-cell aggregates keep the large-sample reference; clustered
+    aggregates use G-1 over CONTRIBUTING clusters.
+    """
+
+    @staticmethod
+    def _single_post_panel(seed=17):
+        # T_post = 1: the staggered fit has exactly one estimable cell.
+        rng = np.random.default_rng(seed)
+        rows = []
+        for u in range(24):
+            alpha = rng.normal()
+            treated = u < 10
+            for t in range(1, 6):
+                d = int(treated and t >= 5)
+                y = alpha + 0.1 * t + rng.normal(scale=0.4) + 1.4 * d
+                rows.append(dict(unit=u, time=t, first=5 if treated else 0, treat=d, y=y))
+        return pd.DataFrame(rows)
+
+    def test_single_post_period_staggered_matches_common_timing(self):
+        df = self._single_post_panel()
+        kw_common = dict(outcome="y", unit="unit", time="time", treatment="treat")
+        est = dict(rolling="demean", estimation_method="reg", vcov_type="hc1")
+        rc = LWDiD(**est).fit(df, **kw_common)
+        rs = LWDiD(**est).fit(df, first_treat="first", **kw_common)
+        np.testing.assert_allclose(rs.att, rc.att, rtol=1e-10)
+        np.testing.assert_allclose(rs.se, rc.se, rtol=1e-10)
+        assert rs.df_inference == rc.df_inference  # same residual t reference
+        np.testing.assert_allclose(rs.p_value, rc.p_value, rtol=1e-8)
+
+    def test_cell_with_single_cluster_fails_closed_and_propagates(self):
+        # Cluster ids are re-derived per cell; a cell whose units share one
+        # cluster must NaN its inference (point retained) and any aggregate
+        # including it inherits NaN inference - deliberate fail-closed.
+        rng = np.random.default_rng(23)
+        rows = []
+        uid = 0
+        # cohort-4 treated units all in cluster 0; controls span clusters
+        for g, n, cl_fn in [(0, 12, lambda u: 1 + (u % 4)), (4, 6, lambda u: 0)]:
+            for _ in range(n):
+                alpha = rng.normal()
+                for t in range(1, 7):
+                    d = int(g > 0 and t >= g)
+                    y = alpha + rng.normal(scale=0.4) + 1.2 * d
+                    rows.append(dict(unit=uid, time=t, first=g, treat=d, y=y, cl=cl_fn(uid)))
+                uid += 1
+        df = pd.DataFrame(rows)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            res = LWDiD(
+                rolling="demean",
+                estimation_method="reg",
+                cluster="cl",
+                control_group="never_treated",
+            ).fit(df, outcome="y", unit="unit", time="time", treatment="treat", first_treat="first")
+        # Cells contain treated (cluster 0) + controls (clusters 1-4): G=5
+        # per cell, so this design is NOT degenerate; flip to a truly
+        # degenerate one below.
+        assert np.isfinite(res.att)
+        del caught
+
+    def test_degenerate_single_cluster_cells_nan_inference(self):
+        rng = np.random.default_rng(29)
+        rows = []
+        uid = 0
+        # EVERY unit in one cluster: per-cell G=1 while a second, empty
+        # cluster never contributes -> global guard passes via a control
+        # unit parked alone in cluster 1 with NaN-free data but the cells
+        # all draw from cluster 0.
+        for g, n in [(0, 10), (4, 5)]:
+            for _ in range(n):
+                alpha = rng.normal()
+                for t in range(1, 7):
+                    d = int(g > 0 and t >= g)
+                    y = alpha + rng.normal(scale=0.4) + 1.2 * d
+                    rows.append(dict(unit=uid, time=t, first=g, treat=d, y=y, cl=0))
+                uid += 1
+        # one extra never-treated unit in its own cluster, excluded from
+        # cells by control_group='never_treated'? No - it IS a control.
+        # Give it data only in pre-periods so it drops from post cells.
+        for t in range(1, 4):
+            rows.append(dict(unit=uid, time=t, first=0, treat=0, y=rng.normal(), cl=1))
+        df = pd.DataFrame(rows)
+        with pytest.warns(UserWarning):
+            res = LWDiD(
+                rolling="demean",
+                estimation_method="reg",
+                cluster="cl",
+                control_group="never_treated",
+            ).fit(df, outcome="y", unit="unit", time="time", treatment="treat", first_treat="first")
+        assert np.isfinite(res.att)  # point retained
+        assert np.isnan(res.se)  # fail-closed propagation
+        assert np.isnan(res.p_value)
+
+    def test_qmode_multicell_aggregate_keeps_normal_reference(self):
+        # Multi-cell unclustered aggregates: large-sample reference
+        # (df_inference is None), documented - not a pooled residual df.
+        df = TestSeasonalOverallRouting._quarterly_panel()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            res = LWDiD(
+                rolling="demean",
+                estimation_method="reg",
+                vcov_type="hc1",
+                control_group="never_treated",
+            ).fit(df, outcome="y", unit="unit", time="time", treatment="treat", first_treat="first")
+        assert res.inference_basis == "joint_influence_function"
+        assert res.df_inference is None

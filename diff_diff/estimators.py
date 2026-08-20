@@ -101,7 +101,7 @@ class DifferenceInDifferences(BaseEstimator):
         ``vcov_type``: with ``"hc1"`` dispatches to CR1 (Liang-Zeger); with
         ``"hc2_bm"`` dispatches to CR2 Bell-McCaffrey (Pustejovsky-Tipton 2018
         symmetric-sqrt + Satterthwaite DOF).
-    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, optional
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "hc3", "conley"}, optional
         Variance-covariance family. Defaults to the ``robust`` alias.
 
         - ``"classical"``: non-robust OLS SEs, ``sigma_hat^2 * (X'X)^{-1}``.
@@ -116,6 +116,12 @@ class DifferenceInDifferences(BaseEstimator):
           post-period-average ATT (see ``_compute_cr2_bm_contrast_dof`` in
           ``linalg.py`` and the REGISTRY.md note). Weighted CR2-BM
           (``survey_design=`` paths) is a separate gate.
+        - ``"hc3"``: jackknife-style leverage correction, meat
+          ``e_i^2 / (1 - h_ii)^2`` (one-way only; errors with ``cluster=``).
+          A leverage-one observation has no defined HC3 variance and the
+          vcov fails closed (warning + NaN inference) rather than flooring
+          ``1 - h_ii``. With ``absorb=``, routes through the full-dummy
+          design like hc2.
         - ``"conley"``: Conley 1999 spatial-HAC sandwich. Pass
           ``conley_coords=(lat_col, lon_col)``, ``conley_cutoff_km=<float>``,
           and ``conley_lag_cutoff=<int>`` on the constructor; pass
@@ -519,7 +525,7 @@ class DifferenceInDifferences(BaseEstimator):
         # explicit hc2 request would still change the result surface
         # (full-dummy coefficients vs absorbed reduced fit) despite the
         # "has no effect" warning.
-        if absorb and not _replicate_vcov_remap and self.vcov_type in ("hc2", "hc2_bm"):
+        if absorb and not _replicate_vcov_remap and self.vcov_type in ("hc2", "hc2_bm", "hc3"):
             fixed_effects = list(fixed_effects or []) + list(absorb)
             absorb = None
             absorbed_vars = []
@@ -1669,7 +1675,7 @@ class DifferenceInDifferences(BaseEstimator):
         # fixed_effects: the fixed_effects= path builds the full-dummy
         # design and solves WLS directly, with no within-transform step.
         # Route on the EFFECTIVE vcov family (see DifferenceInDifferences).
-        if absorb and not _replicate_vcov_remap_mp and self.vcov_type in ("hc2", "hc2_bm"):
+        if absorb and not _replicate_vcov_remap_mp and self.vcov_type in ("hc2", "hc2_bm", "hc3"):
             fixed_effects = list(fixed_effects or []) + list(absorb)
             absorb = None
             n_absorbed_effects = 0
@@ -2499,7 +2505,7 @@ class MultiPeriodDiD(DifferenceInDifferences):
         ``linalg.py``; matches clubSandwich's
         ``Wald_test(test="HTZ")$df_denom`` at atol=1e-10). Weighted CR2-BM
         (``survey_design=``) is a separate, still-gated path.
-    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "conley"}, optional
+    vcov_type : {"classical", "hc1", "hc2", "hc2_bm", "hc3", "conley"}, optional
         Variance-covariance family. Defaults to the ``robust`` alias.
 
         - ``"classical"``: non-robust OLS SEs, ``sigma_hat^2 * (X'X)^{-1}``.
@@ -2513,6 +2519,12 @@ class MultiPeriodDiD(DifferenceInDifferences):
           CR2 cluster-robust with a Bell-McCaffrey Satterthwaite contrast DOF
           on the post-period average (see ``cluster`` above for parity
           details). Weighted CR2-BM (``survey_design=``) is still gated.
+        - ``"hc3"``: jackknife-style leverage correction, meat
+          ``e_i^2 / (1 - h_ii)^2`` (one-way only; errors with ``cluster=``).
+          A leverage-one observation has no defined HC3 variance and the
+          vcov fails closed (warning + NaN inference) rather than flooring
+          ``1 - h_ii``. With ``absorb=``, routes through the full-dummy
+          design like hc2.
         - ``"conley"``: Conley 1999 spatial-HAC sandwich via the panel
           block-decomposed form (matches R ``conleyreg`` with
           ``lag_cutoff > 0``). Pass ``conley_coords=(lat_col, lon_col)``,

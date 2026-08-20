@@ -520,6 +520,19 @@ staggered approaches, Local Projections DiD, Stacked DiD, Efficient DiD,
 Triple Difference, TROP, Changes-in-Changes for distributional/quantile effects, and more.
 The six scenarios above cover the most common business use cases.
 
+- **Want rolling-transformation approach?** → :class:`~diff_diff.LWDiD` (Lee & Wooldridge 2025, 2026)
+
+  Converts panel data into cross-sectional estimation via unit-specific demeaning
+  or detrending of pre-treatment outcomes (``rolling='detrend'`` for
+  heterogeneous linear trends). Supports RA (``vcov_type`` in
+  ``classical``/``hc1``/``hc2``/``hc3``), IPW, and IPWRA estimators
+  (influence-function variance, ``hc1``) with cluster-robust inference
+  via ``cluster=`` on those paths; PSM provides point estimates only
+  (inference is NaN pending an Abadie-Imbens matching variance, and
+  ``cluster=`` is rejected). Works for both common
+  timing and staggered adoption designs. Compare ``rolling='demean'`` vs
+  ``rolling='detrend'`` as a built-in specification robustness check.
+
 For the full academic decision tree with all estimators, see :doc:`choosing_estimator`.
 
 
