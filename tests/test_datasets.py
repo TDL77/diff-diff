@@ -1427,3 +1427,71 @@ class TestDatasetIntegration:
 
         assert hasattr(results, "group_time_effects")
         assert len(results.group_time_effects) > 0
+
+
+class TestStataGeneratorPinSync:
+    """The lwdid Stata golden generator downloads the SAME SSC files the
+    loaders pin, and its fail-closed warm-up + emitted provenance carry
+    their own copies of those checksums. An upstream re-pin applied only
+    to the loader (PR #784 review finding) leaves the regeneration recipe
+    permanently failing - or, bypassed, writing stale metadata into new
+    goldens. This ties every CURRENT-INPUT pin to the loader's. The
+    committed golden's provenance block is deliberately NOT tied: it
+    records the capture-time hash of the file the golden was generated
+    from.
+    """
+
+    _HEX = r"[0-9a-f]{64}"
+
+    def _loader_pins(self):
+        import re
+
+        src = (Path(__file__).resolve().parents[1] / "diff_diff" / "datasets.py").read_text()
+        pins = {}
+        for name, fname in [("prop99", "lw_smoking.dta"), ("walmart", "lw_walmart.dta")]:
+            m = re.search(
+                rf'{re.escape(fname)}"\s*\n(?:\s*#.*\n)*\s*sha256 = "({self._HEX})"',
+                src,
+            )
+            assert m, f"loader pin for {fname} not found"
+            pins[name] = m.group(1)
+        return pins
+
+    def _read(self, relpath):
+        path = Path(__file__).resolve().parents[1] / relpath
+        if not path.exists():
+            pytest.skip(f"{relpath} not present in this checkout")
+        return path.read_text()
+
+    def test_generator_warmup_and_emitted_pins_match_loaders(self):
+        """The .do file carries TWO independent copies per dataset - the
+        fail-closed warm-up dict and the provenance metadata it EMITS into
+        new goldens. Each is asserted separately, exactly once, so deleting
+        either copy fails (review finding: a set union passed on either)."""
+        import re
+
+        text = self._read("benchmarks/stata/generate_lwdid_golden.do")
+        pins = self._loader_pins()
+        for name, fname in [("prop99", "lw_smoking"), ("walmart", "lw_walmart")]:
+            warmup = re.findall(rf"'{name}':\s*'({self._HEX})'", text)
+            assert warmup == [pins[name]], (
+                f"generator warm-up pin for {name}: {warmup} != "
+                f"exactly one loader pin {pins[name]}"
+            )
+            emitted = re.findall(rf"{fname}\.dta[^\n]*?({self._HEX})", text)
+            assert emitted == [pins[name]], (
+                f"generator emitted-provenance pin for {name}: {emitted} != "
+                f"exactly one loader pin {pins[name]}"
+            )
+
+    def test_readme_warmup_pins_match_loaders(self):
+        import re
+
+        text = self._read("benchmarks/stata/README.md")
+        pins = self._loader_pins()
+        for name in ("prop99", "walmart"):
+            warmup = re.findall(rf"'{name}':\s*'({self._HEX})'", text)
+            assert warmup == [pins[name]], (
+                f"README warm-up pin for {name}: {warmup} != "
+                f"exactly one loader pin {pins[name]}"
+            )
