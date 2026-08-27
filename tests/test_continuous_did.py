@@ -3,6 +3,8 @@ Unit and integration tests for ContinuousDiD estimator.
 """
 
 import warnings
+from decimal import Decimal
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -1665,6 +1667,75 @@ class TestCovariateAPI:
             ContinuousDiD(pscore_trim=-0.1)
         with pytest.raises(ValueError, match="epv_threshold"):
             ContinuousDiD(epv_threshold=0.0)
+
+    def test_pscore_trim_zero_rejected(self):
+        """trim=0 disables the np.clip overlap guard - now rejected, matching
+        the TripleDifference tightening (row M-142) via the shared helper."""
+        with pytest.raises(ValueError, match=r"pscore_trim must be in \(0, 0.5\)"):
+            ContinuousDiD(pscore_trim=0)
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            None,
+            "0.01",
+            True,
+            np.array([0.01]),
+            Decimal("0.01"),
+            Fraction(1, 100),
+        ],
+    )
+    def test_pscore_trim_type_guard(self, bad):
+        """Non-real-scalar inputs raise ValueError, closing the old
+        np.isfinite(...) TypeError hole (and 1-element-array acceptance)."""
+        with pytest.raises(ValueError, match="pscore_trim must be"):
+            ContinuousDiD(pscore_trim=bad)
+
+    def test_pscore_trim_numpy_float_coerced(self):
+        assert type(ContinuousDiD(pscore_trim=np.float32(0.01)).pscore_trim) is float
+
+    def test_pscore_trim_never_stores_zero_after_coercion(self):
+        """Coercion-underflow guard (CI review): an extended-precision
+        np.longdouble positive in its own precision can underflow to 0.0 as
+        binary64, which would silently disable the overlap clip. The helper
+        validates the COERCED value, so it either raises or returns a
+        strictly positive float - on every longdouble width."""
+        from diff_diff.utils import validate_pscore_trim
+
+        for x in (
+            np.longdouble(np.finfo(np.longdouble).smallest_subnormal),
+            np.longdouble(np.finfo(np.longdouble).tiny),
+        ):
+            try:
+                r = validate_pscore_trim(x)
+            except ValueError:
+                continue  # underflowed / sub-ulp and was rejected - correct
+            assert type(r) is float and 0.0 < r < 0.5
+            # The derived upper clip bound must remain strictly below 1.
+            assert 1.0 - r < 1.0
+
+    def test_pscore_trim_sub_ulp_rejected(self):
+        """Binary64 cancellation guard (CI review): a positive trim below
+        half an ulp of 1.0 makes 1 - trim round to exactly 1.0, so np.clip
+        would retain pscore == 1 - reject it like trim=0."""
+        from diff_diff.utils import validate_pscore_trim
+
+        assert 1.0 - 1e-20 == 1.0  # the failure mode being guarded
+        for bad in (1e-20, 5e-17, 2.0**-54):
+            with pytest.raises(ValueError, match="pscore_trim must be in"):
+                validate_pscore_trim(bad)
+        r = validate_pscore_trim(2.0**-52)  # representable: 1 - 2**-52 < 1
+        assert 1.0 - r < 1.0
+
+    def test_pscore_trim_huge_int_raises_valueerror(self):
+        """An out-of-float-range Python int raises the documented ValueError,
+        not a raw OverflowError/TypeError from float()/np.isfinite."""
+        from diff_diff.utils import validate_pscore_trim
+
+        with pytest.raises(ValueError, match=r"pscore_trim must be in \(0, 0.5\)"):
+            validate_pscore_trim(10**400)
+        with pytest.raises(ValueError, match=r"pscore_trim must be in \(0, 0.5\)"):
+            validate_pscore_trim(10**20)
 
     def test_covariate_metadata_on_results(self):
         data = _cov_data()

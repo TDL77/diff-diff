@@ -49,6 +49,7 @@ from diff_diff.utils import (
     safe_inference_batch,
     validate_anticipation,
     validate_n_bootstrap,
+    validate_pscore_trim,
 )
 
 if TYPE_CHECKING:
@@ -449,7 +450,9 @@ class CallawaySantAnna(
     pscore_trim : float, default=0.01
         Trimming bound for propensity scores. Scores are clipped to
         ``[pscore_trim, 1 - pscore_trim]`` before weight computation
-        in IPW and DR estimation. Must be in ``(0, 0.5)``.
+        in IPW and DR estimation. Must be in ``(0, 0.5)`` and large
+        enough that ``1 - pscore_trim < 1`` in float64 (a sub-ulp trim
+        would disable the upper clip).
     panel : bool, default=True
         Whether the data is a balanced/unbalanced panel (units observed
         across multiple time periods). Set to ``False`` for stationary
@@ -612,8 +615,7 @@ class CallawaySantAnna(
             raise ValueError(
                 f"estimation_method must be 'dr', 'ipw', or 'reg', " f"got '{estimation_method}'"
             )
-        if not (0 < pscore_trim < 0.5):
-            raise ValueError(f"pscore_trim must be in (0, 0.5), got {pscore_trim}")
+        pscore_trim = validate_pscore_trim(pscore_trim)
         if epv_threshold <= 0:
             raise ValueError(f"epv_threshold must be > 0, got {epv_threshold}")
         if pscore_fallback not in ["error", "unconditional"]:
@@ -1968,9 +1970,9 @@ class CallawaySantAnna(
         if isinstance(balance_e, _DeprecatedFitArg):
             balance_e = None
 
-        # Validate pscore_trim (may have been changed via set_params)
-        if not (0 < self.pscore_trim < 0.5):
-            raise ValueError(f"pscore_trim must be in (0, 0.5), got {self.pscore_trim}")
+        # Validate pscore_trim (may have been changed by direct mutation).
+        # Return discarded: fit() must not mutate constructor config.
+        validate_pscore_trim(self.pscore_trim)
 
         # NB: the event-study VCV and its df provenance used to be reset here,
         # because ``_aggregate_event_study`` stashed them on ``self`` and a

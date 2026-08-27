@@ -503,6 +503,50 @@ def validate_n_bootstrap(n_bootstrap: Any) -> None:
         raise ValueError(f"n_bootstrap must be a non-negative integer, got '{n_bootstrap}'")
 
 
+def validate_pscore_trim(value: Any) -> float:
+    """Validate ``pscore_trim`` and return it coerced to ``float``.
+
+    Shared by every estimator whose ``pscore_trim`` feeds
+    ``np.clip(pscore, trim, 1 - trim)`` (TripleDifference, DMLDiD,
+    ContinuousDiD, LWDiD, CallawaySantAnna): ``trim=0`` disables the
+    overlap guard that keeps the ``1/(1-p)`` IPW/DR weights finite, and
+    ``trim >= 0.5`` inverts the clip bounds. The TYPE guard precedes the
+    range check (validate_n_bootstrap shape): a bare ``0 < x < 0.5``
+    raises an incidental TypeError on None/str/complex, an
+    ambiguous-truth error on a multi-element array, and ACCEPTS a
+    1-element array. Accepted values must additionally satisfy
+    ``1 - trim < 1`` in binary64: a sub-ulp positive trim would round the
+    upper clip bound to exactly 1.0, disabling the guard like ``trim=0``.
+    StaggeredTripleDifference deliberately keeps its bare range check
+    (construction-permissive dying class, ledger M-013/M-144).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(
+            f"pscore_trim must be a real number in (0, 0.5), got {value!r} "
+            f"(type {type(value).__name__})"
+        )
+    # Coerce BEFORE the range check: an extended-precision np.longdouble can
+    # be positive in its own precision yet underflow to 0.0 as binary64,
+    # which would silently disable the overlap clip; an out-of-range Python
+    # int would raise a raw TypeError/OverflowError from np.isfinite/float.
+    try:
+        coerced = float(value)
+    except OverflowError:
+        raise ValueError(f"pscore_trim must be in (0, 0.5), got {value}") from None
+    if not np.isfinite(coerced) or not 0 < coerced < 0.5:
+        raise ValueError(f"pscore_trim must be in (0, 0.5), got {value}")
+    # A trim below half an ulp of 1.0 makes the upper clip bound
+    # 1 - trim round to exactly 1.0 in binary64, so np.clip would retain
+    # pscore == 1 and 1/(1-p) weights could divide by zero - the same
+    # disabled-overlap-guard failure trim=0 is rejected for.
+    if 1.0 - coerced == 1.0:
+        raise ValueError(
+            f"pscore_trim must be in (0, 0.5) and large enough that "
+            f"1 - pscore_trim < 1 in float64, got {value}"
+        )
+    return coerced
+
+
 # The staggered-only TripleDifference constructor params that genuinely select
 # staggered behavior (row M-013). Lives here because TWO independent consumers
 # need the same boundary and must not drift apart: TripleDifference.fit(), which

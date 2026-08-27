@@ -2147,3 +2147,313 @@ class TestDMLDiDContainerAdmission:
         es = dml_universal.aggregate("event_study")
         power = compute_pretrends_power(es, M=0.1)
         assert power is not None
+
+
+class TestHonestRawRouteZeroSE:
+    """plot_honest_event_study's raw (non-container) routes mirror the
+    container _retained semantics: zero/non-finite-SE rows are excluded
+    (they carry no honest interval), the reference row is kept as a
+    normalization-only anchor, and there is deliberately NO -1 reference
+    fallback on marker-less surfaces."""
+
+    @pytest.fixture(autouse=True)
+    def _agg_backend(self):
+        matplotlib = pytest.importorskip("matplotlib")
+        matplotlib.use("Agg")
+        yield
+        import matplotlib.pyplot as plt
+
+        plt.close("all")
+
+    @staticmethod
+    def _honest(original, bounds=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            original_results=original,
+            alpha=0.05,
+            event_study_bounds=bounds,
+            ci_lb=-1.0,
+            ci_ub=1.0,
+            M=0.5,
+        )
+
+    @staticmethod
+    def _ticks(ax):
+        return [t.get_text() for t in ax.get_xticklabels()]
+
+    def test_cs_dict_route_filters_and_keeps_signature_reference(self):
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        nan = float("nan")
+        original = SimpleNamespace(
+            event_study_effects={
+                -1: {"effect": 0.0, "se": nan, "n_groups": 0},
+                0: {"effect": 1.0, "se": 0.5, "n_groups": 3},
+                1: {"effect": 1.2, "se": 0.0, "n_groups": 3},
+            }
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ax = plot_honest_event_study(self._honest(original), show=False)
+        ticks = self._ticks(ax)
+        assert "-1" in ticks and "0" in ticks and "1" not in ticks
+
+        with pytest.raises(ValueError, match="undefined inference"):
+            plot_honest_event_study(self._honest(original), periods=[-1, 0, 1], show=False)
+
+    def test_mpd_route_filters_zero_se(self):
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        original = SimpleNamespace(
+            period_effects={
+                1: SimpleNamespace(effect=1.0, se=0.5),
+                2: SimpleNamespace(effect=1.2, se=0.0),
+            }
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ax = plot_honest_event_study(self._honest(original), show=False)
+        ticks = self._ticks(ax)
+        assert "1" in ticks and "2" not in ticks
+
+    def test_markerless_surface_has_no_minus_one_fallback(self):
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        # A genuinely ESTIMATED zero-SE e=-1 row on a marker-less surface:
+        # no signature row, no reference_period attribute -> NO inferred
+        # reference, so the row is excluded rather than promoted to a
+        # hollow normalization anchor.
+        original = SimpleNamespace(
+            event_study_effects={
+                -1: {"effect": 0.7, "se": 0.0, "n_groups": 3},
+                0: {"effect": 1.0, "se": 0.5, "n_groups": 3},
+            }
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ax = plot_honest_event_study(self._honest(original), show=False)
+        ticks = self._ticks(ax)
+        assert "-1" not in ticks and "0" in ticks
+
+    def test_reference_only_surface_raises_not_anchor_figure(self):
+        # CI review P1: a retained reference row must not satisfy the
+        # empty-result guard on its own - a surface whose every ESTIMATED
+        # row has undefined inference raises rather than rendering an
+        # anchor-only figure (REGISTRY all-undefined rejection).
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        nan = float("nan")
+        original = SimpleNamespace(
+            event_study_effects={
+                -1: {"effect": 0.0, "se": nan, "n_groups": 0},
+                0: {"effect": 1.0, "se": 0.0, "n_groups": 3},
+                1: {"effect": 1.2, "se": nan, "n_groups": 3},
+            }
+        )
+        with pytest.raises(ValueError, match="No valid data to plot"):
+            plot_honest_event_study(self._honest(original), show=False)
+
+    def test_explicit_reference_only_selection_raises(self):
+        # CI review round-3 P1: periods=[reference] on an all-undefined
+        # surface must not bypass the defined-estimate guard via the
+        # explicit branch.
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        nan = float("nan")
+        original = SimpleNamespace(
+            event_study_effects={
+                -1: {"effect": 0.0, "se": nan, "n_groups": 0},
+                0: {"effect": 1.0, "se": 0.0, "n_groups": 3},
+                1: {"effect": 1.2, "se": nan, "n_groups": 3},
+            }
+        )
+        with pytest.raises(ValueError, match="No valid data to plot"):
+            plot_honest_event_study(self._honest(original), periods=[-1], show=False)
+
+    def test_explicit_reference_label_cannot_promote_estimated_zero_se_row(self):
+        # CI review round-5 P0: reference_period= is a caller label, not a
+        # verified anchor - pointing it at an ESTIMATED zero-SE row (effect
+        # != 0.0) must not retain the row (which would draw a zero-width CI
+        # at a nonzero effect and suppress its honest interval). The
+        # exemption requires the anchor signature: effect exactly 0.0.
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        original = SimpleNamespace(
+            event_study_effects={
+                0: {"effect": 1.0, "se": 0.5, "n_groups": 3},
+                1: {"effect": 1.2, "se": 0.0, "n_groups": 3},
+            }
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ax = plot_honest_event_study(self._honest(original), reference_period=1, show=False)
+        ticks = self._ticks(ax)
+        assert "0" in ticks and "1" not in ticks
+
+        with pytest.raises(ValueError, match="undefined inference"):
+            plot_honest_event_study(
+                self._honest(original), reference_period=1, periods=[0, 1], show=False
+            )
+
+    def test_explicit_reference_label_mpd_route_zero_se_row_excluded(self):
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        original = SimpleNamespace(
+            period_effects={
+                1: SimpleNamespace(effect=1.0, se=0.5),
+                2: SimpleNamespace(effect=1.2, se=0.0),
+            }
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ax = plot_honest_event_study(self._honest(original), reference_period=2, show=False)
+        ticks = self._ticks(ax)
+        assert "1" in ticks and "2" not in ticks
+
+        with pytest.raises(ValueError, match="undefined inference"):
+            plot_honest_event_study(
+                self._honest(original), reference_period=2, periods=[1, 2], show=False
+            )
+
+    def test_explicit_reference_label_zero_effect_estimated_row_not_promoted(self):
+        # CI review round-6 P0: effect == 0.0 alone is not the anchor
+        # signature - an ESTIMATED row with effect exactly 0.0, se 0.0 and
+        # POSITIVE n_groups labeled via reference_period= must still be
+        # excluded (implicit) / rejected (explicit periods=), not promoted
+        # to a constraint with a [0, 0] CI and a suppressed honest
+        # interval. Anchor verification requires zero count.
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        original = SimpleNamespace(
+            event_study_effects={
+                0: {"effect": 1.0, "se": 0.5, "n_groups": 3},
+                1: {"effect": 0.0, "se": 0.0, "n_groups": 3},
+            }
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ax = plot_honest_event_study(self._honest(original), reference_period=1, show=False)
+        ticks = self._ticks(ax)
+        assert "0" in ticks and "1" not in ticks
+
+        with pytest.raises(ValueError, match="undefined inference"):
+            plot_honest_event_study(
+                self._honest(original), reference_period=1, periods=[0, 1], show=False
+            )
+
+    def test_explicit_reference_label_zero_effect_mpd_row_not_promoted(self):
+        # MPD twin of the round-6 case: period_effects rows carry no
+        # constraint signature, so a caller label never verifies unless it
+        # matches the result's own reference_period metadata.
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        original = SimpleNamespace(
+            period_effects={
+                1: SimpleNamespace(effect=1.0, se=0.5),
+                2: SimpleNamespace(effect=0.0, se=0.0),
+            }
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ax = plot_honest_event_study(self._honest(original), reference_period=2, show=False)
+        ticks = self._ticks(ax)
+        assert "1" in ticks and "2" not in ticks
+
+        with pytest.raises(ValueError, match="undefined inference"):
+            plot_honest_event_study(
+                self._honest(original), reference_period=2, periods=[1, 2], show=False
+            )
+
+    def test_explicit_reference_with_anchor_signature_still_retained(self):
+        # The tightened exemption must not break the legitimate case: an
+        # explicit reference_period naming a true anchor row (effect 0.0).
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        nan = float("nan")
+        original = SimpleNamespace(
+            event_study_effects={
+                -1: {"effect": 0.0, "se": nan, "n_groups": 0},
+                0: {"effect": 1.0, "se": 0.5, "n_groups": 3},
+            }
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ax = plot_honest_event_study(self._honest(original), reference_period=-1, show=False)
+        ticks = self._ticks(ax)
+        assert "-1" in ticks and "0" in ticks
+
+    def test_all_rows_undefined_raises_not_blank_figure(self):
+        from types import SimpleNamespace
+
+        from diff_diff.visualization import plot_honest_event_study
+
+        original = SimpleNamespace(
+            event_study_effects={
+                0: {"effect": 1.0, "se": 0.0, "n_groups": 3},
+                1: {"effect": 1.2, "se": float("nan"), "n_groups": 3},
+            }
+        )
+        with pytest.raises(ValueError, match="No valid data to plot"):
+            plot_honest_event_study(self._honest(original), show=False)
+
+
+class TestContainerExplicitReferenceZeroSE:
+    """plot_event_study on an EventStudyResults container with an explicit
+    reference_period= discards both override channels, so rows fall to the
+    reconstruction gate: a zero-SE non-reference row must not resurface as
+    a finite zero-width interval (round-5 review finding)."""
+
+    @pytest.fixture(autouse=True)
+    def _agg_backend(self):
+        matplotlib = pytest.importorskip("matplotlib")
+        matplotlib.use("Agg")
+        yield
+        import matplotlib.pyplot as plt
+
+        plt.close("all")
+
+    def test_zero_se_row_nan_gated_after_explicit_normalization(self):
+        from diff_diff.visualization import plot_event_study
+
+        surface = _tiny_container(
+            se=np.array([0.1, np.nan, 0.12, 0.0]),
+            t_stat=np.array([1.0, np.nan, 15.8, np.nan]),
+            p_value=np.array([0.3, np.nan, 0.0, np.nan]),
+            conf_int_lower=np.array([-0.1, np.nan, 1.66, np.nan]),
+            conf_int_upper=np.array([0.3, np.nan, 2.14, np.nan]),
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            ax = plot_event_study(surface, reference_period=-1, show=False)
+        # event_time 1 (the zero-SE row) sits at ordinal x position 3.
+        effect_at_1 = float(surface.att[3])
+        for coll in ax.collections:
+            if not hasattr(coll, "get_segments"):
+                continue
+            for seg in coll.get_segments():
+                if len(seg) == 2 and abs(float(seg[0][0]) - 3.0) < 1e-9:
+                    lo_y, hi_y = float(seg[0][1]), float(seg[1][1])
+                    assert not (
+                        abs(lo_y - effect_at_1) < 1e-12 and abs(hi_y - effect_at_1) < 1e-12
+                    ), "zero-SE container row drew a zero-width CI after explicit normalization"
