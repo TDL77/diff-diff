@@ -150,12 +150,39 @@ def describe_target_parameter(results: Any) -> Dict[str, Any]:
         }
 
     if name == "DMLDiDResults":
+        # Survey/cluster fits switch the aggregation weight source to cohort
+        # masses (survey masses on declared designs; all-ones cohort masses
+        # on bare cluster=). survey_metadata is the declared-survey marker;
+        # bare cluster= keeps it None and carries its df on df_inference
+        # instead. getattr-defaulted reads only: this function is exercised
+        # on attribute-less stubs by the exhaustiveness guard.
+        _is_survey = getattr(results, "survey_metadata", None) is not None
+        _is_clustered = getattr(results, "df_inference", None) is not None
         if getattr(results, "panel", True) is False:
+            if _is_survey:
+                weight_name = "survey-cohort-mass-weighted"
+                weight_clause = (
+                    "cell weights are SURVEY cohort masses (per-observation "
+                    "design weights summed by cohort; the per-cell "
+                    "complete-case ``n_treated`` is display-only; REGISTRY "
+                    "DMLDiD survey Note)"
+                )
+            else:
+                # Plain AND bare-cluster RCS: a bare cluster='s synthesized
+                # all-ones weights reduce exactly to the fixed row masses.
+                weight_name = "cohort-mass-weighted"
+                weight_clause = (
+                    "cell weights are FIXED cohort row masses (the CS-RCS "
+                    "convention, WIF-consistent; the per-cell complete-case "
+                    "``n_treated`` is display-only; REGISTRY DMLDiD RCS Note)"
+                )
+        elif _is_survey or _is_clustered:
             weight_name = "cohort-mass-weighted"
             weight_clause = (
-                "cell weights are FIXED cohort row masses (the CS-RCS "
-                "convention, WIF-consistent; the per-cell complete-case "
-                "``n_treated`` is display-only; REGISTRY DMLDiD RCS Note)"
+                "cell weights are cohort masses (survey masses on declared "
+                "designs; full-cohort counts on bare ``cluster=`` fits — "
+                "NOT the no-design per-cell complete-case ``n_treated``; "
+                "REGISTRY DMLDiD survey Note)"
             )
         else:
             weight_name = "valid-treated-count-weighted"

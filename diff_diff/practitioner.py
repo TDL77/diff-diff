@@ -539,12 +539,29 @@ def _handle_dml_did(results: Any):
                 "default linear specification."
             ),
             code=(
-                "# Refit with alternative nuisance learners:\n"
+                "# Refit with alternative nuisance learners (carry the fit's\n"
+                "# design forward so the comparison isolates the learner):\n"
                 "alt = DMLDiD(outcome_learner='sieve', seed=0"
                 + (", panel=False" if getattr(results, "panel", True) is False else "")
+                + (
+                    # cluster_name covers bare cluster=, a design-injected
+                    # cluster (survey_design without PSU + cluster=), and a
+                    # design-owned PSU (where re-passing the same column is a
+                    # silent no-op) — conservative so the refit never drops
+                    # PSU-cohesive folds or clustered inference.
+                    f", cluster={getattr(results, 'cluster_name', None)!r}"
+                    if getattr(results, "cluster_name", None) is not None
+                    else ""
+                )
                 + ").fit(\n"
                 "    df, outcome=..., unit=..., time=..., first_treat=...,\n"
-                "    covariates=[...])\n"
+                "    covariates=[...]"
+                + (
+                    ",\n    survey_design=...  # the original fit's SurveyDesign"
+                    if getattr(results, "survey_metadata", None) is not None
+                    else ""
+                )
+                + ")\n"
                 "print(alt.att, results.att)  # should be close"
             ),
             step_name="learner_sensitivity",
