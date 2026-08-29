@@ -313,7 +313,7 @@ def _resolve_survey_for_wooldridge(survey_design, sample, cluster_ids, cluster_n
             if resolved.psu is not None and survey_metadata is not None:
                 raw_w = (
                     sample[survey_design.weights].values.astype(np.float64)
-                    if survey_design.weights
+                    if survey_design.weights is not None
                     else np.ones(len(sample), dtype=np.float64)
                 )
                 survey_metadata = compute_survey_metadata(resolved, raw_w)
@@ -1418,7 +1418,9 @@ class WooldridgeDiD(BaseEstimator):
                 warnings.simplefilter("ignore")
                 survey_design.resolve(sample)
 
-            if getattr(survey_design, "weights", None):
+            # `is not None`, not truthiness: resolve() treats any non-None
+            # string — an empty-string column name included — as a column.
+            if getattr(survey_design, "weights", None) is not None:
                 _cell_w = sample[survey_design.weights].to_numpy(dtype=float)
                 # The weighted within-transform's 0/0 constraint, checked before
                 # exclusion can delete the offending rows. OLS only: logit and

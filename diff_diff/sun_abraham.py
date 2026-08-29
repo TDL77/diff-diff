@@ -1053,7 +1053,7 @@ class SunAbraham(BaseEstimator):
                 assert survey_design is not None
                 raw_w = (
                     data[survey_design.weights].values.astype(np.float64)
-                    if survey_design.weights
+                    if survey_design.weights is not None
                     else np.ones(len(data), dtype=np.float64)
                 )
                 survey_metadata = compute_survey_metadata(resolved_survey, raw_w)
@@ -1147,12 +1147,12 @@ class SunAbraham(BaseEstimator):
                     results.append(es_r[e]["effect"] if e in es_r else np.nan)
                 return np.array(results)
 
-        # Resolve survey weight column name for cohort aggregation
+        # Resolve survey weight column name for cohort aggregation.
+        # `is not None`, not truthiness: resolve() treats any non-None
+        # string — an empty-string column name included — as a column.
         survey_weight_col = (
             survey_design.weights
-            if survey_design is not None
-            and hasattr(survey_design, "weights")
-            and survey_design.weights
+            if survey_design is not None and getattr(survey_design, "weights", None) is not None
             else None
         )
 
